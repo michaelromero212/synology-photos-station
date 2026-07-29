@@ -248,25 +248,63 @@ pinned conservatively; bump them if you want a newer toolchain.
 
 ## Deploying to the NAS
 
-1. Create the shared folder `framestation` on a **Btrfs** volume (snapshots and
-   checksums matter here — this becomes the only copy of your photos).
-2. Copy `docker-compose.yml` and `.env` (from `.env.example`) to the NAS.
-   Generate the password with `openssl rand -base64 32`.
-3. `docker compose up -d` in Container Manager or over SSH.
-4. Confirm it came up:
-   ```bash
-   curl -s http://127.0.0.1:8080/health
-   ```
-5. Expose it through **DSM reverse proxy** (Control Panel → Login Portal →
-   Advanced → Reverse Proxy): source `yourhost.synology.me:8443` → destination
-   `localhost:8080`, with your existing Let's Encrypt certificate assigned. Add
-   the matching router port forward. The container binds to `127.0.0.1` only, so
-   the proxy is the sole entry point.
-6. Set up **split-horizon DNS** so `yourhost.synology.me` resolves to the NAS's
-   LAN IP from inside the house. One hostname, valid TLS everywhere, full LAN
-   speed at home, and no plain-HTTP path anywhere in the app. This is a
-   prerequisite for M5 — background `URLSession` uploads run out-of-process and
-   cannot reliably negotiate a custom trust override.
+CI publishes a `linux/amd64` image to GHCR on every push to `main`. The NAS
+needs only `docker-compose.yml` and `.env` — no source checkout, no build.
+
+### 1. Authenticate to GHCR
+
+The package inherits the repository's visibility, and this repo is private, so
+the NAS needs a pull credential. Create a GitHub personal access token
+(classic) with **`read:packages`** scope, then over SSH on the NAS:
+
+```bash
+echo "<TOKEN>" | docker login ghcr.io -u michaelromero212 --password-stdin
+```
+
+### 2. Create the shared folder
+
+Control Panel → Shared Folder → Create, named `framestation`, on a **Btrfs**
+volume. Btrfs matters here: once this replaces Synology Photos it holds the
+family's only copy, and snapshots plus checksums are the difference between a
+bad day and a lost decade.
+
+### 3. Configure and start
+
+Copy `docker-compose.yml` and `.env` (from `.env.example`) to the NAS. Generate
+the Postgres password with `openssl rand -base64 32`, then:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+Expect `{"status":"ok","database":"up",...}`. Migrations apply automatically on
+first boot.
+
+### 4. Expose it through the DSM reverse proxy
+
+Control Panel → Login Portal → Advanced → Reverse Proxy. Source
+`yourhost.synology.me:8443` → destination `localhost:8080`, with your existing
+Let's Encrypt certificate assigned. Add the matching router port forward.
+
+The container binds to `127.0.0.1` only, so the proxy is the sole entry point.
+Leave DSM auto-block and the firewall on.
+
+### 5. Split-horizon DNS
+
+Resolve `yourhost.synology.me` to the NAS's **LAN IP** from inside the house —
+DSM's DNS Server package, or a router DNS override. One hostname everywhere:
+valid TLS, full LAN speed at home, no NAT hairpin, no second certificate.
+
+This is a prerequisite for M5, not a nicety. Background `URLSession` uploads
+run out-of-process in `nsurlsessiond`, where custom server-trust overrides are
+unreliable — the app may not even be running to answer the challenge. Without a
+publicly-valid certificate the backup engine fails intermittently and opaquely.
+
+### 6. Create invites
 
 Create an invite for each family member:
 

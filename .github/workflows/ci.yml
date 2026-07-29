@@ -35,11 +35,15 @@ jobs:
           key: spm-linux-${{ hashFiles('Server/Package.resolved') }}
           restore-keys: spm-linux-
 
-      - name: Build (debug)
+      # Debug only. The `image` job's Dockerfile already does a release build,
+      # so doing one here too roughly doubled the job for no extra signal —
+      # a debug build catches Linux compile errors just as well, and failing
+      # here short-circuits before the far more expensive image build starts.
+      #
+      # Tradeoff: pull requests skip the image job, so they get no release-mode
+      # compile. Accepted — main always gets one.
+      - name: Build
         run: swift build --package-path Server
-
-      - name: Build (release)
-        run: swift build --package-path Server -c release
 
   # FrameStationKit is Apple-only (Keychain, ImageIO), so its tests need macOS.
   # This also covers FrameStationAPI, including the ThumbHash round trips.
