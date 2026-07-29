@@ -47,3 +47,15 @@ extension FrameStationClient {
         currentToken.map { "Bearer \($0)" }
     }
 }
+
+extension FrameStationClient {
+    /// Per-user favourite. Idempotent in both directions.
+    public func setFavorite(
+        spaceID: UUID, assetID: UUID, _ favorite: Bool
+    ) async throws {
+        try await sendEmpty(
+            favorite ? .put : .delete,
+            "v1/spaces/\(spaceID)/assets/\(assetID)/favorite"
+        )
+    }
+}

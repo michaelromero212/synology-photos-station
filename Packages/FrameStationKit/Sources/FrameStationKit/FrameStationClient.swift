@@ -41,6 +41,13 @@ public actor FrameStationClient {
         try await send(.get, path)
     }
 
+    /// Authenticated request with no body either way (favourite toggles).
+    func sendEmpty(_ method: Method, _ path: String) async throws {
+        let request = try makeRequest(method, path)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+    }
+
     // MARK: - Endpoints
 
     public func health() async throws -> HealthResponse {
@@ -104,7 +111,7 @@ public actor FrameStationClient {
 
     // MARK: - Transport
 
-    private enum Method: String {
+    enum Method: String {
         case get = "GET", post = "POST", put = "PUT", delete = "DELETE"
     }
 

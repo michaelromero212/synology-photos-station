@@ -87,7 +87,12 @@ struct TimelineView: View {
                                     }
                                 } else {
                                     ForEach(items) { item in
-                                        PhotoCell(item: item, loader: session.loader, side: side)
+                                        NavigationLink {
+                                            AssetDetailView(item: item, space: space, session: session)
+                                        } label: {
+                                            PhotoCell(item: item, loader: session.loader, side: side)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
                                 }
                             }

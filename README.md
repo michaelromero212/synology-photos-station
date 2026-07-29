@@ -9,8 +9,8 @@ running and deploying what exists today.
 **Status: M2 + M3 (in progress).** Everything through the media pipeline,
 plus the timeline manifest, delta sync, asset detail, and a working sectioned
 grid on iOS with ThumbHash placeholders and a two-tier thumbnail cache.
-Remaining in M3: the Information panel, a `UICollectionView` grid for 100k
-scale, and offline reverse geocoding.
+Remaining in M3: a `UICollectionView` grid for 100k scale, and offline reverse
+geocoding.
 
 ---
 
@@ -152,6 +152,7 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
 | GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
 | GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
+| PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favourite, not a shared boolean |
 
 ### Importing an existing library
 
