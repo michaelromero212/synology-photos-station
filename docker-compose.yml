@@ -17,12 +17,16 @@ services:
       retries: 10
 
   server:
+    # Built by CI for linux/amd64 and pulled on the NAS:
+    #   docker compose pull && docker compose up -d
+    # The NAS then needs only this file and .env — no source checkout, no
+    # 20–45 minute Swift build on a J4125.
+    image: ${FRAMESTATION_IMAGE:-ghcr.io/michaelromero212/synology-photos-station:latest}
     build:
-      # Repo root: the server depends on ../Packages/FrameStationAPI by path,
-      # so that sibling has to be inside the build context.
+      # Only used by `docker compose build` from a source checkout. Repo root,
+      # because the server depends on ../Packages/FrameStationAPI by path.
       context: .
       dockerfile: Server/Dockerfile
-    image: framestation-server:latest
     restart: unless-stopped
     depends_on:
       db:

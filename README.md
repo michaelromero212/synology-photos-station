@@ -214,17 +214,32 @@ no invite code. Capture with `xcrun simctl io <udid> screenshot out.png`.
 
 The DS920+ is x86-64, so the image must be **linux/amd64**.
 
-**Do not build on the NAS unless it has upgraded RAM.** A Swift release build of
-Vapor wants several GB, and a stock 4 GB DS920+ also running DSM will thrash or
-OOM. Three options, best first:
+**CI builds and publishes it.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+builds for `linux/amd64` on an amd64 runner and pushes to GHCR. On the NAS:
 
-1. **CI builds it.** GitHub Actions on an amd64 runner, push to GHCR, NAS pulls.
-   No Docker on your Mac, no heavy build on the NAS, reproducible.
-2. **Build on the Mac** with Docker Desktop or colima and
-   `docker buildx build --platform linux/amd64`. Works, but Swift compiling
-   under qemu emulation is slow — expect 20–40 minutes.
-3. **Build on the NAS** with `docker compose build`. Only viable with upgraded
-   RAM.
+```bash
+docker compose pull && docker compose up -d
+```
+
+That needs only `docker-compose.yml` and `.env` on the NAS — no source
+checkout, no Docker on your Mac.
+
+CI also does something local development cannot: **it compiles the server on
+Linux.** Everything else is built on macOS, and Foundation is a different
+implementation on Linux — `Process`, `FileHandle` callbacks, and `FileManager`
+attributes all diverge. A green Mac build is not evidence the container will
+compile.
+
+**Building on the NAS works** (8 GB RAM, ~2–4 GB peak for a Swift release
+build) but is slow — a cold build of the Vapor/PostgresKit/NIO graph on a
+J4125 is 20–45 minutes:
+
+```bash
+docker compose build
+```
+
+Cross-building on an Apple-silicon Mac under qemu is the slowest option and
+isn't recommended.
 
 The `swift:6.0-jammy` base tags in [Server/Dockerfile](Server/Dockerfile) are
 pinned conservatively; bump them if you want a newer toolchain.

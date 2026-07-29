@@ -13,7 +13,7 @@ Replaces Synology Photos entirely. Not a wrapper around it.
 |---|---|
 | Users | 3–4 family members; 2 heavy contributors |
 | Library | 500–800 GB → est. **~100,000 photos + ~3,000 videos** |
-| NAS | Synology DS920+ (Celeron J4125, 4 cores, QuickSync), DSM 7.2+ |
+| NAS | Synology DS920+ (Celeron J4125, 4 cores, QuickSync), **8 GB RAM**, DSM 7.2+ |
 | Deployment | Private. One NAS, one household. Not distributed to other people. |
 | Clients | iOS + iPadOS (full), macOS (view-only), tvOS (view-only) |
 | Remote access | Existing DDNS + port forward + Let's Encrypt cert, via DSM reverse proxy |
@@ -79,6 +79,12 @@ Derived from ~103,000 assets:
 ~175 MB/s ≈ 75 minutes. Eager 256/512 thumbnails across 4 cores add roughly
 1–2 hours. Deferring `preview-2048` is what keeps this an overnight job rather
 than a multi-day one.
+
+**Memory during import.** Four vips lanes thumbnailing 24 MP HEICs can reach
+~400 MB each, plus Postgres and the Vapor process. The 8 GB in this machine
+makes that comfortable; on the stock 4 GB it would have been a real OOM risk
+and the lane count would have needed capping via
+`FRAMESTATION_DERIVATION_LANES`.
 
 ---
 

@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # The server has only ever been compiled on macOS. It ships on Linux, where
+  # Foundation is a different implementation — Process, FileHandle callbacks,
+  # and FileManager attributes all diverge. This job is the only thing standing
+  # between a green local build and a container that won't compile.
+  server-linux:
+    name: Server (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: Server/.build
+          key: spm-linux-${{ hashFiles('Server/Package.resolved') }}
+          restore-keys: spm-linux-
+
+      - name: Build (debug)
+        run: swift build --package-path Server
+
+      - name: Build (release)
+        run: swift build --package-path Server -c release
+
+  # FrameStationKit is Apple-only (Keychain, ImageIO), so its tests need macOS.
+  # This also covers FrameStationAPI, including the ThumbHash round trips.
+  kit-tests:
+    name: FrameStationKit tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: swift test --package-path Packages/FrameStationKit
+
+  apps:
+    name: App targets
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build iOS / macOS / tvOS
+        run: |
+          set -euo pipefail
+          # Signing is skipped: CI proves it compiles, not that it ships.
+          for entry in "FrameStation-iOS|generic/platform=iOS Simulator" \
+                       "FrameStation-macOS|platform=macOS" \
+                       "FrameStation-tvOS|generic/platform=tvOS Simulator"; do
+            scheme="${entry%%|*}"
+            destination="${entry##*|}"
+            echo "::group::$scheme"
+            xcodebuild build \
+              -project FrameStation.xcodeproj \
+              -scheme "$scheme" \
+              -destination "$destination" \
+              CODE_SIGNING_ALLOWED=NO \
+              -quiet
+            echo "::endgroup::"
+          done
+
+  image:
+    name: Container image
+    needs: [server-linux, kit-tests]
+    # Only publish from main and tags; PRs just prove the build.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Repository root: the server depends on ../Packages/FrameStationAPI
+          # by path, so that sibling has to be inside the build context.
+          context: .
+          file: Server/Dockerfile
+          # The DS920+ is an Intel Celeron J4125.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
