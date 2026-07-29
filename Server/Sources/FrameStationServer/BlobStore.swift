@@ -180,9 +180,9 @@ struct BlobStore: Sendable {
 
             // Same content already linked here — nothing to do.
             if fm.fileExists(atPath: target.path) {
-                let existing = try? fm.attributesOfItem(atPath: target.path)[.systemFileNumber] as? Int
-                let incoming = try? fm.attributesOfItem(atPath: blob.path)[.systemFileNumber] as? Int
-                if existing != nil, existing == incoming { return }
+                let existing = Self.inode(of: target, using: fm)
+                let incoming = Self.inode(of: blob, using: fm)
+                if let existing, existing == incoming { return }
 
                 let base = target.deletingPathExtension().lastPathComponent
                 let ext = target.pathExtension
@@ -198,6 +198,23 @@ struct BlobStore: Sendable {
         } catch {
             logger.warning("browse tree link failed for \(filename): \(error)")
         }
+    }
+
+    /// Inode number, read defensively.
+    ///
+    /// `attributesOfItem` returns `[FileAttributeKey: Any]`, and the numeric
+    /// values arrive as `NSNumber` on Darwin but not always with the same
+    /// bridging behaviour under swift-corelibs-foundation. Casting straight to
+    /// `Int` works on macOS and can silently return nil on Linux — which here
+    /// would mean every hardlink comparison failing and the browse tree
+    /// accumulating `-2`, `-3` duplicates of files it already had.
+    private static func inode(of url: URL, using fm: FileManager) -> UInt64? {
+        guard let attributes = try? fm.attributesOfItem(atPath: url.path),
+              let raw = attributes[.systemFileNumber] else { return nil }
+        if let number = raw as? NSNumber { return number.uint64Value }
+        if let value = raw as? UInt64 { return value }
+        if let value = raw as? Int { return UInt64(value) }
+        return nil
     }
 
     /// Filesystem-safe directory name for a display name.
