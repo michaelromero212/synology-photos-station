@@ -50,6 +50,22 @@ actor DerivationWorker {
         }
 
         app.logger.info("derivation worker starting (\(concurrency) lanes)")
+
+        // Nothing can genuinely be running at startup, so anything left in that
+        // state is from a process that died mid-job. Requeue immediately rather
+        // than waiting out the 15-minute stale window.
+        Task { [app] in
+            do {
+                try await app.sql.raw("""
+                    UPDATE derivation_jobs
+                    SET state = 'pending', attempts = GREATEST(attempts - 1, 0)
+                    WHERE state = 'running'
+                    """).run()
+            } catch {
+                app.logger.error("could not requeue abandoned jobs: \(error)")
+            }
+        }
+
         for lane in 0..<concurrency {
             Task.detached(priority: .utility) { [app] in
                 await Self.runLane(lane: lane, app: app, idleDelay: self.idleDelay)
@@ -80,21 +96,34 @@ actor DerivationWorker {
     }
 
     /// Atomically takes the oldest claimable job.
+    ///
+    /// Deliberately NOT on a pinned connection. This is a single
+    /// `UPDATE … RETURNING` — atomic on its own, with no BEGIN/COMMIT to
+    /// bracket — so pinning bought nothing and leaked a pooled connection per
+    /// call. Four jobs would succeed and the fifth would block forever on its
+    /// first query, with no error and no subprocess running.
     private static func claim(app: Application) async throws -> Job? {
-        try await app.withPinnedConnection { sql in
-            try await sql.raw("""
+        try await app.sql.raw("""
                 UPDATE derivation_jobs
                 SET state = 'running', started_at = now(), attempts = attempts + 1
                 WHERE id = (
                     SELECT id FROM derivation_jobs
-                    WHERE state = 'pending' OR (state = 'failed' AND attempts < 3)
+                    WHERE state = 'pending'
+                       OR (state = 'failed' AND attempts < 3)
+                       -- Reclaim jobs abandoned mid-flight. Without this a
+                       -- worker that dies while processing leaves the row in
+                       -- 'running' forever and nothing ever picks it up again.
+                       -- 15 minutes is comfortably longer than the longest
+                       -- subprocess timeout.
+                       OR (state = 'running'
+                           AND started_at < now() - interval '15 minutes'
+                           AND attempts < 3)
                     ORDER BY created_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
-                RETURNING id, asset_id AS "assetID", kind
-                """).first(decoding: Job.self)
-        }
+            RETURNING id, asset_id AS "assetID", kind
+            """).first(decoding: Job.self)
     }
 
     private static func process(job: Job, app: Application) async {
@@ -116,6 +145,8 @@ actor DerivationWorker {
                 try await finish(job: job, app: app, error: "blob missing at \(blob.path)")
                 return
             }
+
+            app.logger.info("derivation start \(job.kind) \(asset.sha256.prefix(8)) (\(asset.mediaType))")
 
             switch job.kind {
             case "metadata":
@@ -144,6 +175,7 @@ actor DerivationWorker {
                 return
             }
 
+            app.logger.info("derivation done \(job.kind) \(asset.sha256.prefix(8))")
             try await finish(job: job, app: app, error: nil)
         } catch {
             app.logger.error("derivation \(job.kind) failed for \(job.assetID): \(error)")

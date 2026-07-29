@@ -64,7 +64,39 @@ struct MediaProbe {
         else {
             return Metadata()
         }
+        return metadata(from: fields)
+    }
 
+    /// Probes many photos in a single `exiftool` invocation.
+    ///
+    /// Process spawn dominates per-file probing: at ~40 ms of startup for ~10 ms
+    /// of actual work, importing 100,000 photos one at a time is over an hour of
+    /// pure `fork`/`exec`. One process per batch turns that into minutes.
+    /// Returns metadata keyed by absolute path; missing entries mean exiftool
+    /// had nothing to say about that file.
+    static func probePhotoBatch(_ urls: [URL]) async throws -> [String: Metadata] {
+        guard !urls.isEmpty else { return [:] }
+
+        let result = try await Shell.runChecked(
+            "exiftool",
+            ["-json", "-q"] + exifTags + urls.map(\.path),
+            timeout: 300
+        )
+        guard let array = try JSONSerialization.jsonObject(with: result.stdout) as? [[String: Any]] else {
+            return [:]
+        }
+
+        // exiftool echoes SourceFile exactly as passed, so map back by path
+        // rather than trusting output order.
+        var byPath: [String: Metadata] = [:]
+        for fields in array {
+            guard let source = fields["SourceFile"] as? String else { continue }
+            byPath[source] = metadata(from: fields)
+        }
+        return byPath
+    }
+
+    private static func metadata(from fields: [String: Any]) -> Metadata {
         var metadata = Metadata()
         metadata.width = fields.int("ImageWidth")
         metadata.height = fields.int("ImageHeight")

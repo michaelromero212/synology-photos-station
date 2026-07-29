@@ -26,43 +26,55 @@ enum Shell {
             throw ShellError.notFound(executable)
         }
 
+        // Output goes to temporary FILES, not pipes.
+        //
+        // Pipes are the obvious choice and they deadlocked in production: the
+        // parent retains the write descriptor, so the read end may never see
+        // EOF, and a reader blocks forever after the child has already exited.
+        // Closing the parent's copy and draining on background threads made it
+        // rarer without eliminating it — worker lanes still hung permanently
+        // with no subprocess alive and no error to show for it.
+        //
+        // Files have none of those semantics: no 64 KB buffer to fill, no EOF
+        // handshake, no possible deadlock. Every consumer here (exiftool JSON,
+        // ffprobe JSON, vips diagnostics) produces small output, and vips
+        // writes its real output to disk anyway.
+        let scratch = FileManager.default.temporaryDirectory
+        let token = UUID().uuidString
+        let outURL = scratch.appendingPathComponent("framestation-\(token).out")
+        let errURL = scratch.appendingPathComponent("framestation-\(token).err")
+        FileManager.default.createFile(atPath: outURL.path, contents: nil)
+        FileManager.default.createFile(atPath: errURL.path, contents: nil)
+
+        let outHandle = try FileHandle(forWritingTo: outURL)
+        let errHandle = try FileHandle(forWritingTo: errURL)
+
+        func cleanUp() {
+            try? outHandle.close()
+            try? errHandle.close()
+            try? FileManager.default.removeItem(at: outURL)
+            try? FileManager.default.removeItem(at: errURL)
+        }
+
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executableURL
             process.arguments = arguments
-
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = errPipe
-
-            // Drain continuously rather than after exit: a process that fills
-            // the 64 KB pipe buffer would otherwise deadlock waiting for us.
-            // The buffers live in a locked box because the readability handlers
-            // run on arbitrary threads.
-            let output = OutputBox()
-
-            outPipe.fileHandleForReading.readabilityHandler = { handle in
-                output.appendStdout(handle.availableData)
-            }
-            errPipe.fileHandleForReading.readabilityHandler = { handle in
-                output.appendStderr(handle.availableData)
-            }
+            process.standardOutput = outHandle
+            process.standardError = errHandle
 
             let resumed = ManagedAtomicFlag()
 
             process.terminationHandler = { finished in
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                // Sweep anything buffered between the last read and exit.
-                output.appendStdout(outPipe.fileHandleForReading.availableData)
-                output.appendStderr(errPipe.fileHandleForReading.availableData)
-                let snapshot = output.snapshot()
+                try? outHandle.close()
+                try? errHandle.close()
+                let stdout = (try? Data(contentsOf: outURL)) ?? Data()
+                let stderr = (try? Data(contentsOf: errURL)) ?? Data()
+                try? FileManager.default.removeItem(at: outURL)
+                try? FileManager.default.removeItem(at: errURL)
                 if resumed.testAndSet() {
                     continuation.resume(returning: Result(
-                        status: finished.terminationStatus,
-                        stdout: snapshot.stdout,
-                        stderr: snapshot.stderr
+                        status: finished.terminationStatus, stdout: stdout, stderr: stderr
                     ))
                 }
             }
@@ -70,14 +82,20 @@ enum Shell {
             do {
                 try process.run()
             } catch {
+                cleanUp()
                 if resumed.testAndSet() { continuation.resume(throwing: error) }
                 return
             }
 
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                guard process.isRunning else { return }
-                process.terminate()
+                // Deliberately unconditional. A previous version bailed out when
+                // the process had already exited, which meant that if anything
+                // else went wrong the continuation was simply never resumed and
+                // the caller hung forever. Resuming twice is impossible; not
+                // resuming at all is fatal.
+                if process.isRunning { process.terminate() }
                 if resumed.testAndSet() {
+                    cleanUp()
                     continuation.resume(throwing: ShellError.timedOut(executable, timeout))
                 }
             }
@@ -121,28 +139,6 @@ enum Shell {
             }
         }
         return nil
-    }
-}
-
-/// Pipe buffers, guarded — `readabilityHandler` fires on arbitrary threads.
-private final class OutputBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stdout = Data()
-    private var stderr = Data()
-
-    func appendStdout(_ chunk: Data) {
-        guard !chunk.isEmpty else { return }
-        lock.lock(); stdout.append(chunk); lock.unlock()
-    }
-
-    func appendStderr(_ chunk: Data) {
-        guard !chunk.isEmpty else { return }
-        lock.lock(); stderr.append(chunk); lock.unlock()
-    }
-
-    func snapshot() -> (stdout: Data, stderr: Data) {
-        lock.lock(); defer { lock.unlock() }
-        return (stdout, stderr)
     }
 }
 

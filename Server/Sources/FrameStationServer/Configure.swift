@@ -5,7 +5,7 @@ import Vapor
 enum Build {
     /// Bumped by hand per milestone. Surfaced by /health so you can tell at a
     /// glance which image the NAS is actually running.
-    static let version = "0.3.0-M1b"
+    static let version = "0.4.0-M2"
 }
 
 func configure(_ app: Application) async throws {
@@ -43,6 +43,8 @@ func configure(_ app: Application) async throws {
     app.logger.info("schema at \(applied) migration(s)")
 
     app.asyncCommands.use(InviteCommand(), as: "invite")
+    app.asyncCommands.use(SpacesCommand(), as: "spaces")
+    app.asyncCommands.use(ImportCommand(), as: "import")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())
@@ -51,13 +53,23 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: AssetController())
     try app.grouped("v1").register(collection: TimelineController())
 
-    // One lane per core, capped: the J4125 has four, and thumbnailing is
-    // CPU-bound, so oversubscribing just adds context switching.
-    let lanes = Environment.get("FRAMESTATION_DERIVATION_LANES").flatMap(Int.init)
-        ?? min(4, ProcessInfo.processInfo.activeProcessorCount)
-    let worker = DerivationWorker(app: app, concurrency: lanes)
-    app.storage[DerivationWorkerKey.self] = worker
-    await worker.start()
+    // Only the long-running server drains the queue.
+    //
+    // configure() runs before command dispatch, so without this check every
+    // CLI invocation — `import`, `invite`, `spaces` — also spins up worker
+    // lanes. Those processes claim jobs and then exit seconds later, leaving
+    // the rows stranded in 'running' with no error and no process behind them.
+    // A single `docker compose exec server ./FrameStationServer invite` is
+    // enough to strand a job on a live system.
+    if isServeCommand(app) {
+        // One lane per core, capped: the J4125 has four, and thumbnailing is
+        // CPU-bound, so oversubscribing just adds context switching.
+        let lanes = Environment.get("FRAMESTATION_DERIVATION_LANES").flatMap(Int.init)
+            ?? min(4, ProcessInfo.processInfo.activeProcessorCount)
+        let worker = DerivationWorker(app: app, concurrency: lanes)
+        app.storage[DerivationWorkerKey.self] = worker
+        await worker.start()
+    }
 
     app.logger.info("framestation \(Build.version) configured")
 }
@@ -74,4 +86,14 @@ enum ConfigurationError: Error, CustomStringConvertible {
             return "FRAMESTATION_BLOB_ROOT '\(path)' is missing or not a directory."
         }
     }
+}
+
+/// True when this process is running the HTTP server rather than a one-shot
+/// CLI command. `serve` is also Vapor's default when no command is given.
+func isServeCommand(_ app: Application) -> Bool {
+    let arguments = app.environment.arguments
+    guard arguments.count > 1 else { return true }
+    let command = arguments[1]
+    if command.hasPrefix("-") { return true }
+    return command == "serve"
 }

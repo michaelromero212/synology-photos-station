@@ -50,6 +50,7 @@ enum Derivatives {
         var output = Output()
 
         for size in eagerSizes {
+            logger.debug("derive \(sha256.prefix(8)): thumb-\(size)")
             let destination = directory.appendingPathComponent("thumb-\(size).jpg")
             try await Shell.runChecked(
                 "vips",
@@ -61,6 +62,7 @@ enum Derivatives {
 
         // A ≤100 px render is both the ThumbHash input and a cheap way to learn
         // the post-rotation aspect ratio, which the timeline layout needs.
+        logger.debug("derive \(sha256.prefix(8)): thumbhash render")
         let placeholder = directory.appendingPathComponent("thumbhash.ppm")
         defer { try? FileManager.default.removeItem(at: placeholder) }
         try await Shell.runChecked(
@@ -69,6 +71,7 @@ enum Derivatives {
             timeout: 120
         )
 
+        logger.debug("derive \(sha256.prefix(8)): encoding thumbhash")
         if let image = try? PPM.read(placeholder) {
             output.thumbHash = ThumbHash.encode(
                 width: image.width, height: image.height, rgba: image.rgba

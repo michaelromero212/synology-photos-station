@@ -6,7 +6,7 @@ with native clients for iOS, iPadOS, macOS, and tvOS. Replaces Synology Photos.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. This file covers
 running and deploying what exists today.
 
-**Status: M3 (in progress) — timeline.** Everything through the media pipeline,
+**Status: M2 + M3 (in progress).** Everything through the media pipeline,
 plus the timeline manifest, delta sync, asset detail, and a working sectioned
 grid on iOS with ThumbHash placeholders and a two-tier thumbnail cache.
 Remaining in M3: the Information panel, a `UICollectionView` grid for 100k
@@ -145,6 +145,22 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | PUT | `/v1/uploads/:id/chunk/:n` | Bearer | Upload one 16 MB chunk |
 | POST | `/v1/uploads/:id/commit` | Bearer | Verify hash, store blob, create asset + placement |
 | POST | `/v1/spaces/:id/assets/:assetID` | Bearer | Link an existing blob into a space (no copy) |
+
+### Importing an existing library
+
+```bash
+docker compose exec server ./FrameStationServer spaces
+```
+
+```bash
+docker compose exec server ./FrameStationServer import --path /data/photo --space <space-id> --dry-run
+```
+
+Drop `--dry-run` to run it. Resumable — re-running skips anything already
+imported and retries failures. `--mode hardlink` places blobs as hardlinks to
+the source instead of copies: instant and zero extra space, but the blob then
+shares an inode with the original, so editing the source in place would
+silently change the stored asset. Requires both on the same volume.
 | GET | `/v1/assets/:id/thumb?size=256\|512` | Bearer | Pre-generated thumbnail; `202` while still queued |
 | GET | `/v1/assets/:id/preview` | Bearer | 2048 px, rendered on first request and cached |
 | GET | `/v1/assets/:id/original` | Bearer | Byte-exact original, Range-capable |
