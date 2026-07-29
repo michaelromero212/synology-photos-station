@@ -274,7 +274,15 @@ the NAS needs a pull credential. Create a GitHub personal access token
 (classic) with **`read:packages`** scope, then over SSH on the NAS:
 
 ```bash
-echo "<TOKEN>" | docker login ghcr.io -u michaelromero212 --password-stdin
+echo "<TOKEN>" | sudo docker login ghcr.io -u michaelromero212 --password-stdin
+```
+
+Docker on DSM requires `sudo`, and `docker` is not on the default PATH — use
+`/usr/local/bin/docker` or add it to PATH. Note also that modern `scp` relies on
+the SFTP subsystem, which DSM does not enable by default; pipe files instead:
+
+```bash
+cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
 ```
 
 ### 2. Create the shared folder
@@ -284,7 +292,24 @@ volume. Btrfs matters here: once this replaces Synology Photos it holds the
 family's only copy, and snapshots plus checksums are the difference between a
 bad day and a lost decade.
 
-### 3. Configure and start
+### 3. Create the bind-mount directories
+
+**Synology's Docker will not auto-create missing bind-mount sources** the way
+standard Docker does — it fails the container with
+`Bind mount failed: '…/pgdata' does not exist`. Make them first:
+
+```bash
+mkdir -p /volume1/FrameStation/{pgdata,blobs,derivatives,incoming,browse}
+```
+
+Postgres chowns `pgdata` to its own user on first boot, so no permissions work
+is needed.
+
+Note the path is case-sensitive and must match `FRAMESTATION_ROOT` in `.env`
+exactly. A mismatch does not error — Docker silently creates a second directory
+at the other spelling and writes there instead.
+
+### 4. Configure and start
 
 Copy `docker-compose.yml` and `.env` (from `.env.example`) to the NAS. Generate
 the Postgres password with `openssl rand -base64 32`, then:
@@ -300,7 +325,7 @@ curl -s http://127.0.0.1:8080/health
 Expect `{"status":"ok","database":"up",...}`. Migrations apply automatically on
 first boot.
 
-### 4. Expose it through the DSM reverse proxy
+### 5. Expose it through the DSM reverse proxy
 
 Control Panel → Login Portal → Advanced → Reverse Proxy. Source
 `yourhost.synology.me:8443` → destination `localhost:8080`, with your existing
@@ -309,7 +334,7 @@ Let's Encrypt certificate assigned. Add the matching router port forward.
 The container binds to `127.0.0.1` only, so the proxy is the sole entry point.
 Leave DSM auto-block and the firewall on.
 
-### 5. Split-horizon DNS
+### 6. Split-horizon DNS
 
 Resolve `yourhost.synology.me` to the NAS's **LAN IP** from inside the house —
 DSM's DNS Server package, or a router DNS override. One hostname everywhere:
@@ -320,7 +345,7 @@ run out-of-process in `nsurlsessiond`, where custom server-trust overrides are
 unreliable — the app may not even be running to answer the challenge. Without a
 publicly-valid certificate the backup engine fails intermittently and opaquely.
 
-### 6. Create invites
+### 7. Create invites
 
 Create an invite for each family member:
 
