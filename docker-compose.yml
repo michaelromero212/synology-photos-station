@@ -1,0 +1,39 @@
+name: framestation
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: framestation
+      POSTGRES_DB: framestation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ${FRAMESTATION_ROOT:-/volume1/framestation}/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U framestation -d framestation"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      # Repo root: the server depends on ../Packages/FrameStationAPI by path,
+      # so that sibling has to be inside the build context.
+      context: .
+      dockerfile: Server/Dockerfile
+    image: framestation-server:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FRAMESTATION_DATABASE_URL: postgres://framestation:${POSTGRES_PASSWORD}@db:5432/framestation?sslmode=disable
+      FRAMESTATION_BLOB_ROOT: /data
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ${FRAMESTATION_ROOT:-/volume1/framestation}:/data
+    ports:
+      # Loopback only. DSM's reverse proxy is the sole entry point, so the
+      # container is never directly reachable from the LAN or the internet.
+      - "127.0.0.1:8080:8080"

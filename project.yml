@@ -1,0 +1,155 @@
+name: FrameStation
+options:
+  bundleIdPrefix: com.michaelromero
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+    tvOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  # Local paths, not versioned URLs — these live in this repo alongside the
+  # server, which is the point: the server imports FrameStationAPI too, so an
+  # API change breaks both builds at once instead of at runtime.
+  FrameStationAPI:
+    path: Packages/FrameStationAPI
+  FrameStationKit:
+    path: Packages/FrameStationKit
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  configs:
+    Debug:
+      # XcodeGen does NOT add this the way Xcode's own project template does,
+      # so without it `#if DEBUG` is false in every configuration — debug-only
+      # code silently compiles out and print guards silently stay in.
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      GCC_PREPROCESSOR_DEFINITIONS: "DEBUG=1 $(inherited)"
+  base:
+    SWIFT_VERSION: "5.9"
+    # SOURCE OF TRUTH for version + build. XcodeGen overwrites Xcode's General
+    # tab on every `xcodegen generate`, so ALWAYS set these here, not in Xcode.
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "47453G7Q89"
+    CODE_SIGN_STYLE: Automatic
+    STRING_CATALOG_GENERATE_SYMBOLS: "YES"
+    DEAD_CODE_STRIPPING: "YES"
+    ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+    SWIFT_EMIT_LOC_STRINGS: "YES"
+
+targets:
+  # ---------------------------------------------------------------------------
+  # iOS — the only target that backs up. iPhone + iPad from one binary.
+  # ---------------------------------------------------------------------------
+  FrameStation-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+        excludes:
+          - "Resources/macOS/**"
+          - "Resources/tvOS/**"
+    info:
+      path: App/Resources/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: FrameStation
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        # Full library access. Limited access silently breaks backup — the app
+        # detects it and says so rather than backing up twelve photos.
+        NSPhotoLibraryUsageDescription: FrameStation backs up your photos and videos to your family's NAS, and shows the ones already stored there.
+        NSPhotoLibraryAddUsageDescription: FrameStation saves photos from your family library back to this device.
+        NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network for full-speed backup and browsing.
+        NSBonjourServices:
+          - _framestation._tcp
+        # M5: background uploads survive termination only via a background
+        # URLSession; BGTaskScheduler drives the catch-up scans.
+        UIBackgroundModes:
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.michaelromero.FrameStation.backup
+          - com.michaelromero.FrameStation.refresh
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation
+        # iPhone + iPad.
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - package: FrameStationKit
+        product: FrameStationKit
+
+  # ---------------------------------------------------------------------------
+  # macOS — view-only. No Photos backup path at all.
+  # ---------------------------------------------------------------------------
+  FrameStation-macOS:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App
+        excludes:
+          - "Resources/iOS/**"
+          - "Resources/tvOS/**"
+    info:
+      path: App/Resources/macOS/Info.plist
+      properties:
+        CFBundleDisplayName: FrameStation
+        LSMinimumSystemVersion: "14.0"
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network to browse your family library.
+        NSBonjourServices:
+          - _framestation._tcp
+    entitlements:
+      path: App/Resources/macOS/FrameStation.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - package: FrameStationKit
+        product: FrameStationKit
+
+  # ---------------------------------------------------------------------------
+  # tvOS — view-only, 10-foot layout, slideshow.
+  # ---------------------------------------------------------------------------
+  FrameStation-tvOS:
+    type: application
+    platform: tvOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+        excludes:
+          - "Resources/iOS/**"
+          - "Resources/macOS/**"
+    info:
+      path: App/Resources/tvOS/Info.plist
+      properties:
+        CFBundleDisplayName: FrameStation
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network to browse your family library.
+        NSBonjourServices:
+          - _framestation._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation
+        TARGETED_DEVICE_FAMILY: "3"
+        ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
+    dependencies:
+      - package: FrameStationKit
+        product: FrameStationKit

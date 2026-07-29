@@ -1,0 +1,28 @@
+# Secrets — Postgres password, APNs key id/team id
+.env
+Server/*.p8
+*.p8
+
+# Swift / SPM
+.build/
+.swiftpm/
+Package.pins
+
+# Xcode (project is XcodeGen-generated from project.yml)
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+xcuserdata/
+*.xcuserdatad
+
+# Generated icon output — regenerate with `swift Scripts/GenerateIcon.swift`.
+# The asset catalogs under App/Resources are committed; this directory is just
+# the intermediate render (and 5.5 MB of the repo if left in).
+Design/Icon/
+
+# macOS
+.DS_Store
+
+# Local dev artifacts
+*.log
+/tmp/

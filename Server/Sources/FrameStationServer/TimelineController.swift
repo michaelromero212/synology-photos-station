@@ -1,0 +1,375 @@
+import FrameStationAPI
+import Foundation
+import SQLKit
+import Vapor
+
+extension TimelineManifest: @retroactive Content {}
+extension TimelineBucketPage: @retroactive Content {}
+extension SpaceChanges: @retroactive Content {}
+extension AssetDetail: @retroactive Content {}
+
+/// The timeline: bucket manifest, per-bucket items, delta sync, and asset detail.
+struct TimelineController: RouteCollection {
+    func boot(routes: any RoutesBuilder) throws {
+        let protected = routes
+            .grouped(DeviceTokenAuthenticator())
+            .grouped(AuthenticatedDevice.guardMiddleware())
+
+        protected.get("spaces", ":spaceID", "timeline", use: manifest)
+        protected.get("spaces", ":spaceID", "timeline", ":bucket", use: bucket)
+        protected.get("spaces", ":spaceID", "changes", use: changes)
+        protected.get("spaces", ":spaceID", "assets", ":assetID", "detail", use: detail)
+    }
+
+    /// Local wall-clock capture time, falling back to when we first saw the file.
+    private static let localTime = "COALESCE(a.local_captured_at, a.created_at AT TIME ZONE 'UTC')"
+
+    private static func format(for zoom: TimelineZoom) -> String {
+        switch zoom {
+        case .year: return "YYYY"
+        case .month: return "YYYY-MM"
+        case .day: return "YYYY-MM-DD"
+        }
+    }
+
+    // MARK: - Manifest
+
+    private struct BucketRow: Decodable {
+        let key: String
+        let count: Int
+        let place: String?
+    }
+
+    @Sendable
+    func manifest(req: Request) async throws -> TimelineManifest {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let zoom = TimelineZoom(rawValue: req.query[String.self, at: "zoom"] ?? "day") ?? .day
+
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        // Allowlisted, never interpolated from the request.
+        let pattern = Self.format(for: zoom)
+
+        let rows = try await req.sql.raw("""
+            SELECT to_char(\(unsafeRaw: Self.localTime), \(bind: pattern)) AS key,
+                   count(*)::int AS count,
+                   mode() WITHIN GROUP (ORDER BY a.place_name) AS place
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+            GROUP BY 1
+            ORDER BY 1 DESC
+            """).all(decoding: BucketRow.self)
+
+        return TimelineManifest(
+            spaceID: spaceID,
+            zoom: zoom,
+            total: rows.reduce(0) { $0 + $1.count },
+            cursor: try await currentCursor(spaceID: spaceID, on: req.sql),
+            buckets: rows.map { TimelineBucket(key: $0.key, count: $0.count, place: $0.place) }
+        )
+    }
+
+    // MARK: - Bucket items
+
+    private struct ItemRow: Decodable {
+        let id: UUID
+        let assetID: UUID
+        let capturedAt: Date
+        let width: Int?
+        let height: Int?
+        let mediaType: String
+        let durationMs: Int?
+        let thumbHash: Data?
+        let isFavorite: Bool
+        let uploadedBy: UUID
+        let isDerived: Bool
+
+        func toItem() -> TimelineItem {
+            // Square is the safest fallback: an item whose dimensions never
+            // arrived should not distort the row it lands in.
+            let ratio: Double
+            if let width, let height, width > 0, height > 0 {
+                ratio = Double(width) / Double(height)
+            } else {
+                ratio = 1
+            }
+            return TimelineItem(
+                id: id,
+                assetID: assetID,
+                capturedAt: capturedAt,
+                aspectRatio: ratio,
+                mediaType: MediaType(rawValue: mediaType) ?? .photo,
+                durationMs: durationMs,
+                thumbHash: thumbHash?.base64EncodedString(),
+                isFavorite: isFavorite,
+                uploadedBy: uploadedBy,
+                isDerived: isDerived
+            )
+        }
+    }
+
+    @Sendable
+    func bucket(req: Request) async throws -> TimelineBucketPage {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let key = try req.parameters.require("bucket")
+        let zoom = TimelineZoom(rawValue: req.query[String.self, at: "zoom"] ?? "day") ?? .day
+
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        let pattern = Self.format(for: zoom)
+        let rows = try await req.sql.raw("""
+            SELECT sa.id,
+                   a.id          AS "assetID",
+                   \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+                   a.width, a.height,
+                   a.media_type  AS "mediaType",
+                   a.duration_ms AS "durationMs",
+                   a.thumbhash   AS "thumbHash",
+                   EXISTS (
+                       SELECT 1 FROM space_asset_favorites f
+                       WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
+                   ) AS "isFavorite",
+                   sa.uploaded_by_user_id AS "uploadedBy",
+                   (a.derived_at IS NOT NULL) AS "isDerived"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND to_char(\(unsafeRaw: Self.localTime), \(bind: pattern)) = \(bind: key)
+            ORDER BY \(unsafeRaw: Self.localTime) DESC, sa.id
+            """).all(decoding: ItemRow.self)
+
+        return TimelineBucketPage(key: key, zoom: zoom, items: rows.map { $0.toItem() })
+    }
+
+    // MARK: - Delta sync
+
+    private struct ChangeRow: Decodable {
+        let seq: Int64
+        let op: String
+        let entityID: UUID
+    }
+
+    @Sendable
+    func changes(req: Request) async throws -> SpaceChanges {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let since = req.query[Int64.self, at: "since"] ?? 0
+        let limit = min(max(req.query[Int.self, at: "limit"] ?? 500, 1), 1000)
+
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        let rows = try await req.sql.raw("""
+            SELECT seq, op, entity_id AS "entityID"
+            FROM change_log
+            WHERE space_id = \(bind: spaceID)
+              AND seq > \(bind: since)
+              AND entity = 'space_asset'
+            ORDER BY seq
+            LIMIT \(bind: limit + 1)
+            """).all(decoding: ChangeRow.self)
+
+        let hasMore = rows.count > limit
+        let page = hasMore ? Array(rows.prefix(limit)) : rows
+
+        // Hydrate inserts and updates in one query rather than N round trips —
+        // a client catching up after a week of uploads would otherwise make
+        // hundreds of requests to fill in a single delta.
+        let needsItem = page.filter { $0.op != "delete" }.map(\.entityID)
+        var itemsByID: [UUID: TimelineItem] = [:]
+        if !needsItem.isEmpty {
+            let hydrated = try await req.sql.raw("""
+                SELECT sa.id,
+                       a.id          AS "assetID",
+                       \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+                       a.width, a.height,
+                       a.media_type  AS "mediaType",
+                       a.duration_ms AS "durationMs",
+                       a.thumbhash   AS "thumbHash",
+                       EXISTS (
+                           SELECT 1 FROM space_asset_favorites f
+                           WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
+                       ) AS "isFavorite",
+                       sa.uploaded_by_user_id AS "uploadedBy",
+                       (a.derived_at IS NOT NULL) AS "isDerived"
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.id = ANY(\(bind: needsItem)) AND sa.deleted_at IS NULL
+                """).all(decoding: ItemRow.self)
+            for row in hydrated { itemsByID[row.id] = row.toItem() }
+        }
+
+        let changes = page.map { row in
+            SpaceChange(
+                seq: row.seq,
+                op: ChangeOperation(rawValue: row.op) ?? .update,
+                entityID: row.entityID,
+                item: itemsByID[row.entityID]
+            )
+        }
+
+        return SpaceChanges(
+            cursor: changes.last?.seq ?? since,
+            hasMore: hasMore,
+            changes: changes
+        )
+    }
+
+    // MARK: - Detail
+
+    private struct DetailRow: Decodable {
+        let id: UUID
+        let assetID: UUID
+        let spaceID: UUID
+        let mediaType: String
+        let mime: String
+        let byteSize: Int64
+        let width: Int?
+        let height: Int?
+        let durationMs: Int?
+        let capturedAt: Date?
+        let capturedTZOffset: Int?
+        let cameraMake: String?
+        let cameraModel: String?
+        let lens: String?
+        let iso: Int?
+        let aperture: Double?
+        let shutter: String?
+        let focalLength: Double?
+        let exposureBias: Double?
+        let dynamicRange: String?
+        let isRaw: Bool
+        let latitude: Double?
+        let longitude: Double?
+        let placeName: String?
+        let uploadedByID: UUID
+        let uploadedByName: String
+        let uploadedAt: Date
+        let spaceKind: String
+        let description: String?
+        let rating: Int?
+        let isFavorite: Bool
+        let onDevice: Bool
+    }
+
+    @Sendable
+    func detail(req: Request) async throws -> AssetDetail {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let assetID = try req.parameters.require("assetID", as: UUID.self)
+
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        guard let row = try await req.sql.raw("""
+            SELECT sa.id,
+                   a.id AS "assetID",
+                   sa.space_id AS "spaceID",
+                   a.media_type AS "mediaType",
+                   a.mime,
+                   a.byte_size AS "byteSize",
+                   a.width, a.height,
+                   a.duration_ms AS "durationMs",
+                   a.captured_at AS "capturedAt",
+                   a.captured_tz_off AS "capturedTZOffset",
+                   a.camera_make AS "cameraMake",
+                   a.camera_model AS "cameraModel",
+                   a.lens,
+                   a.iso,
+                   a.aperture,
+                   a.shutter,
+                   a.focal_len AS "focalLength",
+                   a.exposure_bias AS "exposureBias",
+                   a.dynamic_range AS "dynamicRange",
+                   a.is_raw AS "isRaw",
+                   a.lat AS latitude,
+                   a.lon AS longitude,
+                   a.place_name AS "placeName",
+                   u.id AS "uploadedByID",
+                   u.display_name AS "uploadedByName",
+                   sa.uploaded_at AS "uploadedAt",
+                   s.kind AS "spaceKind",
+                   sa.description,
+                   sa.rating::int AS rating,
+                   EXISTS (
+                       SELECT 1 FROM space_asset_favorites f
+                       WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
+                   ) AS "isFavorite",
+                   sa.on_device AS "onDevice"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN users u ON u.id = sa.uploaded_by_user_id
+            JOIN spaces s ON s.id = sa.space_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.asset_id = \(bind: assetID)
+              AND sa.deleted_at IS NULL
+            """).first(decoding: DetailRow.self) else {
+            throw Abort(.notFound, reason: "No such asset in this space.")
+        }
+
+        struct TagRow: Decodable { let name: String }
+        let tags = try await req.sql.raw("""
+            SELECT t.name FROM tags t
+            JOIN space_asset_tags st ON st.tag_id = t.id
+            WHERE st.space_asset_id = \(bind: row.id)
+            ORDER BY t.name
+            """).all(decoding: TagRow.self).map(\.name)
+
+        return AssetDetail(
+            id: row.id,
+            assetID: row.assetID,
+            spaceID: row.spaceID,
+            mediaType: MediaType(rawValue: row.mediaType) ?? .photo,
+            mime: row.mime,
+            byteSize: row.byteSize,
+            width: row.width,
+            height: row.height,
+            durationMs: row.durationMs,
+            capturedAt: row.capturedAt,
+            capturedTZOffset: row.capturedTZOffset,
+            filename: nil,
+            cameraMake: row.cameraMake,
+            cameraModel: row.cameraModel,
+            lens: row.lens,
+            iso: row.iso,
+            aperture: row.aperture,
+            shutter: row.shutter,
+            focalLength: row.focalLength,
+            exposureBias: row.exposureBias,
+            dynamicRange: row.dynamicRange,
+            isRaw: row.isRaw,
+            latitude: row.latitude,
+            longitude: row.longitude,
+            placeName: row.placeName,
+            uploadedBy: UserDTO(id: row.uploadedByID, displayName: row.uploadedByName),
+            uploadedAt: row.uploadedAt,
+            isSharedSpace: row.spaceKind == "shared",
+            description: row.description,
+            rating: row.rating,
+            tags: tags,
+            isFavorite: row.isFavorite,
+            onDevice: row.onDevice
+        )
+    }
+
+    // MARK: - Helpers
+
+    private struct CursorRow: Decodable { let seq: Int64? }
+
+    private func currentCursor(spaceID: UUID, on sql: any SQLDatabase) async throws -> Int64 {
+        let row = try await sql.raw("""
+            SELECT max(seq) AS seq FROM change_log WHERE space_id = \(bind: spaceID)
+            """).first(decoding: CursorRow.self)
+        return row?.seq ?? 0
+    }
+}
