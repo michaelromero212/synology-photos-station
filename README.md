@@ -146,6 +146,14 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | POST | `/v1/uploads/:id/commit` | Bearer | Verify hash, store blob, create asset + placement |
 | POST | `/v1/spaces/:id/assets/:assetID` | Bearer | Link an existing blob into a space (no copy) |
 
+| GET | `/v1/assets/:id/thumb?size=256\|512` | Bearer | Pre-generated thumbnail; `202` while still queued |
+| GET | `/v1/assets/:id/preview` | Bearer | 2048 px, rendered on first request and cached |
+| GET | `/v1/assets/:id/original` | Bearer | Byte-exact original, Range-capable |
+| GET | `/v1/spaces/:id/timeline?zoom=` | Bearer | Bucket list + counts + places at year/month/day |
+| GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
+| GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
+| GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
+
 ### Importing an existing library
 
 ```bash
@@ -161,13 +169,6 @@ imported and retries failures. `--mode hardlink` places blobs as hardlinks to
 the source instead of copies: instant and zero extra space, but the blob then
 shares an inode with the original, so editing the source in place would
 silently change the stored asset. Requires both on the same volume.
-| GET | `/v1/assets/:id/thumb?size=256\|512` | Bearer | Pre-generated thumbnail; `202` while still queued |
-| GET | `/v1/assets/:id/preview` | Bearer | 2048 px, rendered on first request and cached |
-| GET | `/v1/assets/:id/original` | Bearer | Byte-exact original, Range-capable |
-| GET | `/v1/spaces/:id/timeline?zoom=` | Bearer | Bucket list + counts + places at year/month/day |
-| GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
-| GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
-| GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
 
 ### Media tools
 
