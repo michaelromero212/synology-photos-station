@@ -42,9 +42,16 @@ func configure(_ app: Application) async throws {
     }
     app.logger.info("schema at \(applied) migration(s)")
 
+    // Optional: absent dataset just means place_name stays null, which the
+    // clients already handle by showing raw coordinates.
+    let geonames = Environment.get("FRAMESTATION_GEONAMES_DIR") ?? "/opt/geonames"
+    let geocoder = Geocoder(logger: app.logger)
+    if geocoder.load(directory: geonames) { app.geocoder = geocoder }
+
     app.asyncCommands.use(InviteCommand(), as: "invite")
     app.asyncCommands.use(SpacesCommand(), as: "spaces")
     app.asyncCommands.use(ImportCommand(), as: "import")
+    app.asyncCommands.use(GeocodeCommand(), as: "geocode")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())

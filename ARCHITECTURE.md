@@ -40,6 +40,7 @@ end-to-end encryption, sharing outside the household, web client.
 | Device deletions | NAS copy is **kept** | The NAS is the archive of record; that's the point |
 | Push | APNs direct from container | Household deployment — the `.p8` key never leaves your NAS |
 | Search v1 | Metadata only: date, place, camera, media type, uploader | Face/semantic search deferred; no ML runtime in the container |
+| Reverse geocoding | Offline, GeoNames cities1000 baked into the image | The alternative is 100,000 API requests carrying the family's complete location history to a third party |
 
 ### Backend language
 
@@ -639,7 +640,7 @@ of watching progress bars before anything is evaluable.
 | **M1a** ✅ | Upload protocol | Content-addressed blob store, hash-first idempotent probe, resumable 16 MB chunking, hash-verified commit, dedup, browse-tree hardlinks, advisory-locked `change_log`, activity rollup. 33 end-to-end assertions green. |
 | **M1b** ✅ | Media pipeline | EXIF (exiftool), video probe + poster frames (ffmpeg/ffprobe), thumbnails (libvips), ThumbHash, resumable derivation queue, thumb/preview/original serving. 33 end-to-end assertions green. **Offline reverse geocode deferred** — `place_name` is still null. |
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
-| **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). **Remaining:** `UICollectionView` swap for 100k scale, offline reverse geocode. |
+| **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** | Spaces | Personal + Family Shared, membership, "Added by Morgan" attribution |
 | **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings |
 | **M6** | Push | Activity batching, APNs from container |

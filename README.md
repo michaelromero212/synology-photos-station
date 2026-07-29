@@ -9,8 +9,7 @@ running and deploying what exists today.
 **Status: M2 + M3 (in progress).** Everything through the media pipeline,
 plus the timeline manifest, delta sync, asset detail, and a working sectioned
 grid on iOS with ThumbHash placeholders and a two-tier thumbnail cache.
-Remaining in M3: a `UICollectionView` grid for 100k scale, and offline reverse
-geocoding.
+Remaining in M3: a `UICollectionView` grid for 100k scale.
 
 ---
 
@@ -183,6 +182,28 @@ The container installs `libvips-tools`, `libheif1`, `exiftool`, and `ffmpeg`,
 and the build **fails** if vips lacks a HEIF loader — most of an iPhone library
 is HEIC, and that is not a thing to discover in production.
 
+### Reverse geocoding
+
+Day headers and the Information panel map show `Culpeper, Virginia` rather than
+raw coordinates. Fully offline — the container bundles a trimmed GeoNames
+dataset, so no coordinate ever leaves the NAS and lookups cost nothing.
+
+For local development, build the dataset once:
+
+```bash
+./Scripts/fetch-geonames.sh
+```
+
+Then point the server at it with `FRAMESTATION_GEONAMES_DIR=./Data/geonames`.
+Absent dataset is not an error — `place_name` stays null and clients fall back
+to coordinates.
+
+Backfill assets that predate geocoding, or re-run after a dataset update:
+
+```bash
+docker compose exec server ./FrameStationServer geocode
+```
+
 ### Smoke test
 
 With the server running against a **freshly migrated, empty** database:
@@ -207,6 +228,10 @@ access control.
 against `OffsetTimeOriginal`, video duration and rotation-corrected dimensions,
 queue drain, thumbnails and poster frames on disk, ThumbHash size, lazy preview
 generation, byte-exact originals, and access control.
+
+`smoke-geocode.sh` — 13 assertions: real coordinates across five continents
+resolving to real place names, mid-ocean correctly staying unnamed, day headers,
+asset detail, and the backfill command.
 
 `smoke-m3.sh` — 34 assertions: bucket counts at all three zooms, local-timezone
 bucketing, aspect ratios, ThumbHash delivery, delta sync cursors, asset detail,

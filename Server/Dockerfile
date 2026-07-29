@@ -62,6 +62,25 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q install -y libvips-tools libheif1 libexif12 exiftool ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Offline reverse-geocoding dataset, baked in so the container is
+# self-contained — no volume to mount, no network at runtime, and the family's
+# coordinates never leave the NAS. GeoNames cities1000, CC BY 4.0. Trimmed from
+# 19 columns to the 5 the geocoder reads, ~30 MB of text down to ~6 MB.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get -q update && apt-get -q install -y --no-install-recommends curl unzip \
+    && mkdir -p /opt/geonames /tmp/gn \
+    && curl -fsSL -o /tmp/gn/cities.zip https://download.geonames.org/export/dump/cities1000.zip \
+    && curl -fsSL -o /tmp/gn/admin1.txt https://download.geonames.org/export/dump/admin1CodesASCII.txt \
+    && unzip -qo /tmp/gn/cities.zip -d /tmp/gn \
+    && awk -F'\t' 'NF>=11 && $5 != "" && $6 != "" { printf "%s\t%s\t%s\t%s\t%s\n", $3, $5, $6, $9, $11 }' \
+         /tmp/gn/cities1000.txt > /opt/geonames/cities.tsv \
+    && awk -F'\t' 'NF>=2 { printf "%s\t%s\n", $1, $2 }' /tmp/gn/admin1.txt > /opt/geonames/admin1.tsv \
+    && printf 'GeoNames (https://www.geonames.org/) - CC BY 4.0\n' > /opt/geonames/ATTRIBUTION.txt \
+    && rm -rf /tmp/gn \
+    && apt-get -q purge -y unzip && apt-get -q autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && wc -l /opt/geonames/cities.tsv
+
 # Fail the build rather than ship an image that cannot thumbnail an iPhone
 # photo. Ubuntu's libvips is normally built against libheif, but "normally" is
 # not something to discover in production at 2am.

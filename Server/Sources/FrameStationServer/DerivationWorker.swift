@@ -151,7 +151,9 @@ actor DerivationWorker {
             switch job.kind {
             case "metadata":
                 let metadata = try await MediaProbe.probe(url: blob, mediaType: mediaType)
-                try await applyMetadata(metadata, assetID: asset.id, on: app.sql)
+                try await applyMetadata(
+                    metadata, assetID: asset.id, on: app.sql, geocoder: app.geocoder
+                )
 
             case "thumbnails":
                 let output = try await Derivatives.generate(
@@ -202,8 +204,13 @@ actor DerivationWorker {
     static func applyMetadata(
         _ metadata: MediaProbe.Metadata,
         assetID: UUID,
-        on sql: any SQLDatabase
+        on sql: any SQLDatabase,
+        geocoder: Geocoder? = nil
     ) async throws {
+        var placeName: String?
+        if let latitude = metadata.latitude, let longitude = metadata.longitude {
+            placeName = geocoder?.label(latitude: latitude, longitude: longitude)
+        }
         try await sql.raw("""
             UPDATE assets SET
                 width           = COALESCE(width, \(bind: metadata.width)),
@@ -222,7 +229,8 @@ actor DerivationWorker {
                 focal_len       = COALESCE(\(bind: metadata.focalLength), focal_len),
                 exposure_bias   = COALESCE(\(bind: metadata.exposureBias), exposure_bias),
                 dynamic_range   = COALESCE(\(bind: metadata.dynamicRange), dynamic_range),
-                orientation     = COALESCE(\(bind: metadata.orientation), orientation)
+                orientation     = COALESCE(\(bind: metadata.orientation), orientation),
+                place_name      = COALESCE(\(bind: placeName), place_name)
             WHERE id = \(bind: assetID)
             """).run()
 

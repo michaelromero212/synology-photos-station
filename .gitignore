@@ -26,3 +26,6 @@ Design/Icon/
 # Local dev artifacts
 *.log
 /tmp/
+
+# Generated reverse-geocoding dataset — rebuild with Scripts/fetch-geonames.sh
+Data/geonames/

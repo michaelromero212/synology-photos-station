@@ -301,7 +301,8 @@ struct UploadController: RouteCollection {
             do {
                 let metadata = try await MediaProbe.probe(url: blob, mediaType: input.mediaType)
                 try await DerivationWorker.applyMetadata(
-                    metadata, assetID: result.assetID, on: req.sql
+                    metadata, assetID: result.assetID, on: req.sql,
+                    geocoder: req.application.geocoder
                 )
             } catch {
                 req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
