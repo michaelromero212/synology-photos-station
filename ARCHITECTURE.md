@@ -36,11 +36,30 @@ end-to-end encryption, sharing outside the household, web client.
 | Metadata authority | Device wins on capture time and dimensions; server fills the rest | `PHAsset.creationDate` is reliable where EXIF is often absent, wrong, or timezone-naive |
 | Video | Own ffmpeg build in container | DSM's HEVC licensing removal doesn't apply; QuickSync via `/dev/dri` when needed |
 | Transcoding | Lazy, on first remote playback, cached | Most videos are never watched away from home |
-| Auth | Server-issued opaque device tokens in Keychain | Family scale — no OAuth, no Sign in with Apple |
+| Auth | **DSM credentials exchanged server-side for a device token** | One password per person, managed in DSM. The app sends them once over TLS; the server validates against DSM on localhost and returns its own token. The Keychain stores the token, never the password — so a stolen phone is not a compromised NAS account, and DSM's API is never exposed |
+| Per-user data | One database, one library per user, plus a browsable per-user folder tree | Separate databases per user would make Family Shared impossible — you cannot join across databases, so shared spaces, attribution, and cross-user dedup all break |
+| Video playback | Direct play of the original over HTTP Range | AVPlayer streams and seeks natively at 1080p and 4K with no transcode and no quality loss. HLS ladders deferred until 4K-over-cellular actually hurts |
 | Device deletions | NAS copy is **kept** | The NAS is the archive of record; that's the point |
 | Push | APNs direct from container | Household deployment — the `.p8` key never leaves your NAS |
 | Search v1 | Metadata only: date, place, camera, media type, uploader | Face/semantic search deferred; no ML runtime in the container |
 | Reverse geocoding | Offline, GeoNames cities1000 baked into the image | The alternative is 100,000 API requests carrying the family's complete location history to a third party |
+
+### DSM as the identity provider
+
+The app collects a DSM username and password **once**, at sign-in, and posts
+them to FrameStation over TLS. The server calls `SYNO.API.Auth` on
+`127.0.0.1:5000` — never over the network — and on success creates or matches a
+FrameStation user and returns a device token.
+
+What this buys: family members use the password they already have, accounts are
+managed in DSM's user list, and there is exactly one place to revoke access.
+
+What it deliberately avoids: DSM credentials stored on the device, DSM's API
+reachable from the internet, and a lost phone escalating into NAS access. The
+Keychain holds only the FrameStation token, which is scoped to this app and
+revocable server-side without touching the DSM account.
+
+The invite-code flow stays for accounts that have no DSM user.
 
 ### Backend language
 
@@ -642,8 +661,12 @@ of watching progress bars before anything is evaluable.
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
 | **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
-| **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings |
-| **M6** | Push | Activity batching, APNs from container |
+| **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings. **Next.** |
+| **M5b** | DSM login | Replace invite codes with DSM credential exchange (see §2). Existing invite flow stays as the fallback for accounts without DSM users |
+| **M5c** | Picker + share | Pick recent photos, multi-select, upload straight into Family Shared |
+| **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
+| **M8** | Fast scroller | Apple Photos-style scrubber with a month/year pill while dragging, resting indicator that tracks scroll position |
+| **M6** | Push | Activity batching, APNs from container. "Morgan just shared 1 photo and 2 videos to Family Shared" |
 | **M7** | Free Up Space | Verified-then-delete, gated on NAS backup existing |
 | **M8** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 
