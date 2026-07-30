@@ -126,9 +126,29 @@ One DSM shared folder, one service account. No per-user folders.
   pgdata/
 ```
 
-`browse/` is a convenience tree of **hardlinks** to the same inodes, so the
-library stays inspectable in File Station and Finder without duplicating a byte.
-Rebuildable from the DB at any time; safe to delete.
+### Browsable trees
+
+Each person sees their own library in DSM, and shared spaces separately:
+
+```
+/volume1/homes/<DSM user>/FrameStation/MobileBackup/<device>/2026/07/…   ← private
+/volume1/FrameStation/Shared/<Space Name>/2026/07/…                      ← shared
+```
+
+These are **reflinks** (`cp --reflink`), not hardlinks. Measured on the DS920+:
+`/volume1/FrameStation` and `/volume1/homes` report different device numbers
+(49 vs 40) because Synology makes every shared folder its own Btrfs subvolume,
+and **hardlinks cannot cross subvolumes** — `ln` fails with `Invalid cross-device
+link`. Reflinks can, and were verified working there.
+
+Reflinks are the better primitive anyway: they share extents so the space cost
+is near zero, but they diverge on write. With a hardlink, editing the copy in
+File Station would silently corrupt the canonical blob.
+
+Privacy comes from DSM itself — `homes/<user>` is private to that user and to
+administrators, the same mechanism Synology Photos uses for its personal space.
+The trees are a view, not the source of truth: deleting a file in File Station
+does not remove it from FrameStation.
 
 **Originals are stored byte-for-byte.** Re-encoding destroys HDR gain maps,
 ProRAW, depth data, and Live Photo pairing. There is no case where the server
@@ -662,7 +682,7 @@ of watching progress bars before anything is evaluable.
 | **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
 | **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings. **Next.** |
-| **M5b** | DSM login | Replace invite codes with DSM credential exchange (see §2). Existing invite flow stays as the fallback for accounts without DSM users |
+| **M5b** ✅ | DSM login | Server-side credential exchange against `SYNO.API.Auth`, account + personal space created on first sign-in, `dsm_uid` recorded for home-directory placement. Invite flow retained as fallback. |
 | **M5c** | Picker + share | Pick recent photos, multi-select, upload straight into Family Shared |
 | **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
 | **M8** | Fast scroller | Apple Photos-style scrubber with a month/year pill while dragging, resting indicator that tracks scroll position |

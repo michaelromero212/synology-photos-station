@@ -34,9 +34,24 @@ services:
     environment:
       FRAMESTATION_DATABASE_URL: postgres://framestation:${POSTGRES_PASSWORD}@db:5432/framestation?sslmode=disable
       FRAMESTATION_BLOB_ROOT: /data
+      # DSM's own auth API, for signing in with a Synology account. Reached on
+      # the host, never over the internet. Uses plain HTTP on 5000 deliberately:
+      # the request never leaves the NAS, and DSM's 5001 certificate is
+      # self-signed for the LAN address.
+      FRAMESTATION_DSM_URL: ${FRAMESTATION_DSM_URL:-http://host.docker.internal:5000}
+      FRAMESTATION_HOMES_ROOT: /homes
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts:
+      # Lets the container resolve the NAS itself. If your DSM version doesn't
+      # support host-gateway, set FRAMESTATION_DSM_URL to the NAS's LAN IP.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${FRAMESTATION_ROOT:-/volume1/framestation}:/data
+      # User home directories, so each person's photos land in their own
+      # DSM-private tree. Reflinked from the blob store, so near-zero extra
+      # space — hardlinks can't be used because Synology makes every shared
+      # folder its own Btrfs subvolume.
+      - ${FRAMESTATION_HOMES:-/volume1/homes}:/homes
     ports:
       # Loopback only. DSM's reverse proxy is the sole entry point, so the
       # container is never directly reachable from the LAN or the internet.

@@ -41,8 +41,10 @@ public actor FrameStationClient {
         try await send(.get, path)
     }
 
-    func post<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {
-        try await send(.post, path, body: body)
+    func post<Body: Encodable, Response: Decodable>(
+        _ path: String, body: Body, authenticated: Bool = true
+    ) async throws -> Response {
+        try await send(.post, path, body: body, authenticated: authenticated)
     }
 
     func patch<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {

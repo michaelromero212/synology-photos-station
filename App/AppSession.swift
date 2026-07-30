@@ -21,6 +21,11 @@ final class AppSession {
     var inviteCode: String = ""
     /// Shown in every "Added by" row, so it must be a person, not a device.
     var displayName: String = ""
+    /// DSM credentials. Held only long enough to post them; never persisted —
+    /// the Keychain stores the returned token instead.
+    var dsmUsername: String = ""
+    var dsmPassword: String = ""
+    var useDSMLogin: Bool = true
     private(set) var phase: Phase = .disconnected
 
     private(set) var user: UserDTO?
@@ -103,6 +108,45 @@ final class AppSession {
         self.spaces = me.spaces
         self.selectedSpace = me.spaces.first { $0.kind == .personal } ?? me.spaces.first
         self.phase = .connected
+    }
+
+    /// Signs in with a DSM account. The password is sent once and then cleared
+    /// from memory; only the returned token is kept.
+    func signInWithDSM() async {
+        guard let url = URL(string: serverURL.trimmingCharacters(in: .whitespaces)) else {
+            phase = .failed("That doesn't look like a valid URL.")
+            return
+        }
+        let username = dsmUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !username.isEmpty, !dsmPassword.isEmpty else {
+            phase = .failed("Enter your DSM username and password.")
+            return
+        }
+
+        phase = .connecting
+        let client = FrameStationClient(configuration: .init(baseURL: url))
+        do {
+            let response = try await client.signInWithDSM(
+                DSMLoginRequest(
+                    username: username,
+                    password: dsmPassword,
+                    deviceName: deviceName,
+                    platform: currentPlatform
+                )
+            )
+            dsmPassword = ""
+            try? credentials.save(.init(serverURL: url, token: response.token))
+
+            self.client = client
+            self.loader = ThumbnailLoader(client: client)
+            self.user = response.user
+            self.spaces = response.spaces
+            self.selectedSpace = response.spaces.first { $0.kind == .personal } ?? response.spaces.first
+            self.phase = .connected
+        } catch {
+            dsmPassword = ""
+            phase = .failed(error.localizedDescription)
+        }
     }
 
     func connect() async {

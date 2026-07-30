@@ -92,3 +92,15 @@ extension FrameStationClient {
         try await sendEmpty(.delete, "v1/spaces/\(spaceID)/members/\(userID)")
     }
 }
+
+// MARK: - DSM sign-in
+
+extension FrameStationClient {
+    /// Signs in with a Synology DSM account. The password goes to the server
+    /// once and is never stored; the returned token is what the app keeps.
+    public func signInWithDSM(_ body: DSMLoginRequest) async throws -> DSMLoginResponse {
+        let response: DSMLoginResponse = try await post("v1/auth/dsm", body: body, authenticated: false)
+        setToken(response.token)
+        return response
+    }
+}

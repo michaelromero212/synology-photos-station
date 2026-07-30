@@ -30,24 +30,50 @@ struct ConnectionView: View {
                     .keyboardType(.URL)
                     #endif
 
-                TextField("Your name", text: $session.displayName)
-                    .textFieldStyle(.roundedBorder)
-                    #if os(iOS)
-                    .textContentType(.name)
-                    #endif
+                Picker("", selection: $session.useDSMLogin) {
+                    Text("DSM Account").tag(true)
+                    Text("Invite Code").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
 
-                TextField("Invite code (first time only)", text: $session.inviteCode)
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.characters)
-                    #endif
+                if session.useDSMLogin {
+                    TextField("DSM username", text: $session.dsmUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .textContentType(.username)
+                        #endif
+
+                    SecureField("DSM password", text: $session.dsmPassword)
+                        .textFieldStyle(.roundedBorder)
+                        #if os(iOS)
+                        .textContentType(.password)
+                        #endif
+                } else {
+                    TextField("Your name", text: $session.displayName)
+                        .textFieldStyle(.roundedBorder)
+                        #if os(iOS)
+                        .textContentType(.name)
+                        #endif
+
+                    TextField("Invite code", text: $session.inviteCode)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.characters)
+                        #endif
+                }
             }
             .frame(maxWidth: 420)
             #endif
 
-            Button("Connect") {
-                Task { await session.connect() }
+            Button(session.useDSMLogin ? "Sign In" : "Connect") {
+                Task {
+                    if session.useDSMLogin { await session.signInWithDSM() }
+                    else { await session.connect() }
+                }
             }
             .buttonStyle(.borderedProminent)
             .disabled(session.phase == .connecting)
