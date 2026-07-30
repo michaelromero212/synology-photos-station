@@ -18,6 +18,7 @@ struct TimelineView: View {
 
     @State private var store: TimelineStore?
     @State private var columns = 3
+    @State private var showSpaces = false
 
     private let spacing: CGFloat = 2
 
@@ -34,6 +35,9 @@ struct TimelineView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
+        .sheet(isPresented: $showSpaces) {
+            SpacesView(session: session) { showSpaces = false }
+        }
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
             store = newStore
@@ -169,6 +173,12 @@ struct TimelineView: View {
                 }
                 Picker("Columns", selection: $columns) {
                     ForEach([2, 3, 4, 5], id: \.self) { Text("\($0) across").tag($0) }
+                }
+                Divider()
+                Button {
+                    showSpaces = true
+                } label: {
+                    Label("Manage Spaces…", systemImage: "person.2.badge.gearshape")
                 }
             } label: {
                 Image(systemName: "square.grid.2x2")

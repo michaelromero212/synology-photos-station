@@ -41,6 +41,19 @@ public actor FrameStationClient {
         try await send(.get, path)
     }
 
+    func post<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {
+        try await send(.post, path, body: body)
+    }
+
+    func patch<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {
+        try await send(.patch, path, body: body)
+    }
+
+    /// Request with a JSON body and no response body.
+    func sendBodyNoContent<Body: Encodable>(_ method: Method, _ path: String, body: Body) async throws {
+        try await sendNoContent(method, path, body: body)
+    }
+
     /// Authenticated request with no body either way (favourite toggles).
     func sendEmpty(_ method: Method, _ path: String) async throws {
         let request = try makeRequest(method, path)
@@ -112,7 +125,7 @@ public actor FrameStationClient {
     // MARK: - Transport
 
     enum Method: String {
-        case get = "GET", post = "POST", put = "PUT", delete = "DELETE"
+        case get = "GET", post = "POST", put = "PUT", patch = "PATCH", delete = "DELETE"
     }
 
     private func makeRequest(

@@ -6,10 +6,12 @@ with native clients for iOS, iPadOS, macOS, and tvOS. Replaces Synology Photos.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. This file covers
 running and deploying what exists today.
 
-**Status: M2 + M3 (in progress).** Everything through the media pipeline,
+**Status: M4.** Everything through the media pipeline,
 plus the timeline manifest, delta sync, asset detail, and a working sectioned
 grid on iOS with ThumbHash placeholders and a two-tier thumbnail cache.
-Remaining in M3: a `UICollectionView` grid for 100k scale.
+Shared spaces with membership and attribution are working. Remaining: a
+`UICollectionView` grid for 100k scale, then M5 (the iOS backup engine) and
+M6 (push).
 
 ---
 
@@ -152,6 +154,11 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
 | GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
 | PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favourite, not a shared boolean |
+| GET | `/v1/household` | Bearer | Everyone with an account, for picking space members |
+| POST | `/v1/spaces` | Bearer | Create a shared space; creator becomes owner |
+| PATCH | `/v1/spaces/:id` | Bearer | Rename (owner only) |
+| GET | `/v1/spaces/:id/members` | Bearer | Members, roles, and per-member contribution counts |
+| PUT/DELETE | `/v1/spaces/:id/members/:userID` | Bearer | Add/remove (owner), or leave (self) |
 
 ### Importing an existing library
 
@@ -228,6 +235,11 @@ access control.
 against `OffsetTimeOriginal`, video duration and rotation-corrected dimensions,
 queue drain, thumbnails and poster frames on disk, ThumbHash size, lazy preview
 generation, byte-exact originals, and access control.
+
+`smoke-m4.sh` — 34 assertions: creating shared spaces, household directory,
+role enforcement (non-owners can't add, owners can't be removed, members can
+leave), rename rules, personal spaces refusing to be shared, cross-space linking
+without duplicating bytes, attribution, and non-members being locked out.
 
 `smoke-geocode.sh` — 13 assertions: real coordinates across five continents
 resolving to real place names, mid-ocean correctly staying unnamed, day headers,

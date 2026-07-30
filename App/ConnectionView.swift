@@ -30,6 +30,12 @@ struct ConnectionView: View {
                     .keyboardType(.URL)
                     #endif
 
+                TextField("Your name", text: $session.displayName)
+                    .textFieldStyle(.roundedBorder)
+                    #if os(iOS)
+                    .textContentType(.name)
+                    #endif
+
                 TextField("Invite code (first time only)", text: $session.inviteCode)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()

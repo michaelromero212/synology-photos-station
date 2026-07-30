@@ -59,3 +59,36 @@ extension FrameStationClient {
         )
     }
 }
+
+// MARK: - Spaces
+
+extension FrameStationClient {
+    /// Everyone with an account on this NAS, for picking members.
+    public func household() async throws -> HouseholdResponse {
+        try await get("v1/household")
+    }
+
+    public func createSpace(_ body: CreateSpaceRequest) async throws -> SpaceDTO {
+        try await post("v1/spaces", body: body)
+    }
+
+    public func renameSpace(_ spaceID: UUID, to name: String) async throws -> SpaceDTO {
+        try await patch("v1/spaces/\(spaceID)", body: RenameSpaceRequest(name: name))
+    }
+
+    public func members(spaceID: UUID) async throws -> SpaceMembersResponse {
+        try await get("v1/spaces/\(spaceID)/members")
+    }
+
+    public func addMember(
+        spaceID: UUID, userID: UUID, role: SpaceRole = .contributor
+    ) async throws {
+        try await sendBodyNoContent(
+            .put, "v1/spaces/\(spaceID)/members/\(userID)", body: AddMemberRequest(role: role)
+        )
+    }
+
+    public func removeMember(spaceID: UUID, userID: UUID) async throws {
+        try await sendEmpty(.delete, "v1/spaces/\(spaceID)/members/\(userID)")
+    }
+}

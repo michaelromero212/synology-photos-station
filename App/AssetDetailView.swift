@@ -21,6 +21,10 @@ final class AssetDetailModel {
     var detailError: String?
     var imageError: String?
     var isFavorite: Bool
+    /// Names of shared spaces this photo has been added to in this session, so
+    /// the action can confirm rather than silently succeeding.
+    var addedTo: [String] = []
+    var addError: String?
 
     private let item: TimelineItem
     private let spaceID: UUID
@@ -62,6 +66,19 @@ final class AssetDetailModel {
             detailError = nil
         } catch {
             detailError = error.localizedDescription
+        }
+    }
+
+    /// Links the existing blob into another space. Costs no storage — the file
+    /// is content-addressed and already on the NAS, so this is one row.
+    func addTo(_ space: SpaceDTO, client: FrameStationClient?) async {
+        guard let client else { return }
+        do {
+            _ = try await client.linkAsset(spaceID: space.id, assetID: item.assetID)
+            if !addedTo.contains(space.name) { addedTo.append(space.name) }
+            addError = nil
+        } catch {
+            addError = error.localizedDescription
         }
     }
 
@@ -107,6 +124,19 @@ struct AssetDetailView: View {
                 imageView(placeholder).blur(radius: 14, opaque: true)
             } else {
                 ProgressView().tint(.white)
+            }
+
+            if !model.addedTo.isEmpty || model.addError != nil {
+                VStack {
+                    Spacer()
+                    Text(model.addError ?? "Added to \(model.addedTo.joined(separator: ", "))")
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .background(.black.opacity(0.75), in: Capsule())
+                        .foregroundStyle(model.addError == nil ? .white : .orange)
+                        .padding(.bottom, 80)
+                }
+                .transition(.opacity)
             }
 
             if let imageError = model.imageError {
@@ -162,6 +192,24 @@ struct AssetDetailView: View {
 
             Button { showInfo = true } label: {
                 Image(systemName: "info.circle")
+            }
+
+            // The action neither reference app has: put this photo in a shared
+            // space. A row, not a copy — the bytes are already on the NAS.
+            if !session.sharedSpaces.isEmpty {
+                Menu {
+                    ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
+                        Button {
+                            Task { await model.addTo(target, client: session.client) }
+                        } label: {
+                            Label(target.name, systemImage: "person.2")
+                        }
+                    }
+                } label: {
+                    Image(systemName: model.addedTo.isEmpty
+                          ? "rectangle.stack.badge.plus"
+                          : "rectangle.stack.badge.person.crop.fill")
+                }
             }
         }
         .font(.title3)

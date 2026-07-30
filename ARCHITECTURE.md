@@ -641,7 +641,7 @@ of watching progress bars before anything is evaluable.
 | **M1b** ✅ | Media pipeline | EXIF (exiftool), video probe + poster frames (ffmpeg/ffprobe), thumbnails (libvips), ThumbHash, resumable derivation queue, thumb/preview/original serving. 33 end-to-end assertions green. **Offline reverse geocode deferred** — `place_name` is still null. |
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
 | **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
-| **M4** | Spaces | Personal + Family Shared, membership, "Added by Morgan" attribution |
+| **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
 | **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings |
 | **M6** | Push | Activity batching, APNs from container |
 | **M7** | Free Up Space | Verified-then-delete, gated on NAS backup existing |

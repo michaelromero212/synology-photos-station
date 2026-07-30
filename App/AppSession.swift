@@ -19,6 +19,8 @@ final class AppSession {
 
     var serverURL: String = "http://127.0.0.1:8099"
     var inviteCode: String = ""
+    /// Shown in every "Added by" row, so it must be a person, not a device.
+    var displayName: String = ""
     private(set) var phase: Phase = .disconnected
 
     private(set) var user: UserDTO?
@@ -42,15 +44,25 @@ final class AppSession {
         let defaults = UserDefaults.standard
         if let url = defaults.string(forKey: "FSServerURL") { serverURL = url }
         if let code = defaults.string(forKey: "FSInviteCode") { inviteCode = code }
+        displayName = defaults.string(forKey: "FSDisplayName") ?? Self.suggestedName
     }
 
     var shouldAutoConnect: Bool {
         UserDefaults.standard.bool(forKey: "FSAutoConnect")
     }
     #else
-    init() {}
+    init() { displayName = Self.suggestedName }
     var shouldAutoConnect: Bool { false }
     #endif
+
+    /// A guess, not a default — the user is expected to correct it.
+    private static var suggestedName: String {
+        #if os(macOS)
+        return NSFullUserName()
+        #else
+        return ""
+        #endif
+    }
 
     /// Reconnects from stored credentials so a relaunch doesn't need a new
     /// invite. Returns false when there's nothing saved.
@@ -105,10 +117,15 @@ final class AppSession {
         do {
             let code = inviteCode.trimmingCharacters(in: .whitespaces).uppercased()
             if !code.isEmpty {
+                let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else {
+                    phase = .failed("Enter your name — it's what your family sees on photos you share.")
+                    return
+                }
                 _ = try await client.redeemInvite(
                     RedeemInviteRequest(
                         code: code,
-                        displayName: deviceOwnerName,
+                        displayName: name,
                         deviceName: deviceName,
                         platform: currentPlatform
                     )
@@ -124,6 +141,23 @@ final class AppSession {
             phase = .failed(error.localizedDescription)
         }
     }
+
+    /// Re-reads /me so a newly created space appears in the switcher.
+    func refreshSpaces(selecting space: SpaceDTO? = nil) async {
+        guard let client else { return }
+        do {
+            let me = try await client.me()
+            spaces = me.spaces
+            if let space, let match = me.spaces.first(where: { $0.id == space.id }) {
+                selectedSpace = match
+            }
+        } catch {
+            // Leave the existing list alone — a transient failure shouldn't
+            // empty the switcher.
+        }
+    }
+
+    var sharedSpaces: [SpaceDTO] { spaces.filter { $0.kind == .shared } }
 
     func timelineStore(for space: SpaceDTO) -> TimelineStore? {
         guard let client else { return nil }
@@ -150,13 +184,6 @@ final class AppSession {
         #endif
     }
 
-    private var deviceOwnerName: String {
-        #if os(macOS)
-        return NSFullUserName()
-        #else
-        return deviceName
-        #endif
-    }
 }
 
 #if os(iOS) || os(tvOS)
