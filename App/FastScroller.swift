@@ -38,15 +38,7 @@ struct FastScroller: View {
                 Color.clear
 
                 if isDragging, let label {
-                    // Sits to the *left* of the thumb: on the right edge a pill
-                    // outside the thumb would be under the thumb holding it.
-                    Text(label)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .fixedSize()
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(.black.opacity(0.75), in: Capsule())
+                    ScrubberPill(text: label)
                         .offset(x: -trackWidth, y: y + (thumbHeight - 32) / 2)
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         .allowsHitTesting(false)
@@ -90,6 +82,29 @@ struct FastScroller: View {
             .animation(.easeOut(duration: 0.15), value: isDragging)
         }
         .frame(width: trackWidth)
+    }
+
+    /// Extracted rather than inlined.
+    ///
+    /// Not style: the enclosing `body` builds a ZStack whose contents depend on
+    /// drag state, with offsets computed from a GeometryReader, and older
+    /// Swift versions give up type-checking it and report the failure against
+    /// whichever modifier they reached last — a misleading "ambiguous use of
+    /// 'font'" on a line that is nothing of the sort. Small views keep each
+    /// expression inside what the type checker will actually solve.
+    private struct ScrubberPill: View {
+        let text: String
+
+        var body: some View {
+            Text(text)
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .fixedSize()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.75), in: Capsule())
+        }
     }
 
     private var thumb: some View {
