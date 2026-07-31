@@ -277,6 +277,24 @@ primitive.
 Non-membership answers 404, not 403, so a refused request can't be used to
 confirm that a space or asset exists.
 
+
+### Albums borrow their permissions rather than owning any
+
+An album belongs to a *space*, not to a user, and `album_assets` references a
+`space_asset` — the placement — rather than the bare asset. Both choices are
+about not creating a second source of truth for who can see what.
+
+Because a placement only exists inside one space, an album physically cannot
+contain a photo that the space's members couldn't already see. Adding a
+placement from another space isn't rejected with an error; the insert simply
+matches no row and nothing happens. There is no album-level ACL to drift out of
+step with `space_members`, and removing someone from a shared space removes
+their access to its albums in the same statement.
+
+Deleting an album deletes the collection, never the photos. Covers must be a
+photo the album actually contains, or the cover field becomes a way to display
+an arbitrary asset.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the

@@ -152,3 +152,65 @@ public struct PlaybackURLResponse: Codable, Sendable, Hashable {
         self.kind = kind
     }
 }
+
+// MARK: - Albums
+
+public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
+    public let id: UUID
+    public let spaceID: UUID
+    public let spaceName: String
+    public let name: String
+    public let itemCount: Int
+    /// For the cover thumbnail. Nil while the album is empty.
+    public let coverAssetID: UUID?
+    public let createdAt: Date
+    public let updatedAt: Date
+
+    public init(
+        id: UUID, spaceID: UUID, spaceName: String, name: String, itemCount: Int,
+        coverAssetID: UUID?, createdAt: Date, updatedAt: Date
+    ) {
+        self.id = id
+        self.spaceID = spaceID
+        self.spaceName = spaceName
+        self.name = name
+        self.itemCount = itemCount
+        self.coverAssetID = coverAssetID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct AlbumListResponse: Codable, Sendable {
+    public let albums: [AlbumDTO]
+    public init(albums: [AlbumDTO]) { self.albums = albums }
+}
+
+public struct CreateAlbumRequest: Codable, Sendable {
+    public let spaceID: UUID
+    public let name: String
+    /// Optional first contents, so "select photos → new album" is one call.
+    public let spaceAssetIDs: [UUID]
+
+    public init(spaceID: UUID, name: String, spaceAssetIDs: [UUID] = []) {
+        self.spaceID = spaceID
+        self.name = name
+        self.spaceAssetIDs = spaceAssetIDs
+    }
+}
+
+public struct UpdateAlbumRequest: Codable, Sendable {
+    public let name: String?
+    public let coverAssetID: UUID?
+    public init(name: String? = nil, coverAssetID: UUID? = nil) {
+        self.name = name
+        self.coverAssetID = coverAssetID
+    }
+}
+
+/// Placements to add — not bare asset ids, so an album can only ever contain
+/// photos already placed in its own space.
+public struct AlbumAssetsRequest: Codable, Sendable {
+    public let spaceAssetIDs: [UUID]
+    public init(spaceAssetIDs: [UUID]) { self.spaceAssetIDs = spaceAssetIDs }
+}

@@ -5,7 +5,7 @@ import Vapor
 enum Build {
     /// Bumped by hand per milestone. Surfaced by /health so you can tell at a
     /// glance which image the NAS is actually running.
-    static let version = "1.0.0-M7"
+    static let version = "1.1.0-M9"
 }
 
 func configure(_ app: Application) async throws {
@@ -64,6 +64,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: SpaceController())
     try app.grouped("v1").register(collection: PushController())
     try app.grouped("v1").register(collection: ActivityController())
+    try app.grouped("v1").register(collection: AlbumController())
 
     // Only the long-running server drains the queue.
     //
