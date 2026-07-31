@@ -20,7 +20,8 @@ struct TimelineView: View {
     #if os(iOS)
     @Environment(\.backupContainer) private var modelContainer
     #endif
-    @State private var columns = 3
+    /// Follows the zoom — see TimelineZoom.columns.
+    private var columns: Int { (store?.zoom ?? .day).columns }
     @State private var activity: ActivityStore?
     @State private var showActivity = false
     @State private var showSpaces = false
@@ -43,7 +44,7 @@ struct TimelineView: View {
                 ProgressView()
             }
         }
-        .navigationTitle("Photos")
+        .navigationTitle(space.name)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -281,6 +282,15 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollFractionReporter { scrollFraction = $0 })
+            .safeAreaInset(edge: .bottom) {
+                ZoomBar(zoom: Binding(
+                    get: { store.zoom },
+                    set: { _ in }
+                )) { newZoom in
+                    Task { await store.setZoom(newZoom) }
+                }
+                .padding(.bottom, 6)
+            }
             .refreshable {
                 await store.refresh()
                 #if os(iOS)
@@ -373,32 +383,6 @@ struct TimelineView: View {
             )
         }
 
-        // The space switcher, matching Synology's nav-title chevron: this is
-        // where Personal ↔ Family Shared happens.
-        ToolbarItem(placement: .principal) {
-            Menu {
-                ForEach(session.spaces) { candidate in
-                    Button {
-                        session.selectedSpace = candidate
-                    } label: {
-                        Label(
-                            candidate.name,
-                            systemImage: candidate.kind == .personal ? "person.crop.square" : "person.2"
-                        )
-                    }
-                }
-            } label: {
-                VStack(spacing: 0) {
-                    Text("Photos").font(.headline)
-                    HStack(spacing: 3) {
-                        Text(space.name).font(.caption)
-                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                    }
-                    .foregroundStyle(.secondary)
-                }
-            }
-        }
-
         #if os(iOS)
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -411,37 +395,6 @@ struct TimelineView: View {
             }
         }
         #endif
-
-        ToolbarItem(placement: .primaryAction) {
-            Menu {
-                Picker("Zoom", selection: Binding(
-                    get: { store?.zoom ?? .day },
-                    set: { newZoom in Task { await store?.setZoom(newZoom) } }
-                )) {
-                    Text("Year").tag(TimelineZoom.year)
-                    Text("Month").tag(TimelineZoom.month)
-                    Text("Day").tag(TimelineZoom.day)
-                }
-                Picker("Columns", selection: $columns) {
-                    ForEach([2, 3, 4, 5], id: \.self) { Text("\($0) across").tag($0) }
-                }
-                Divider()
-                Button {
-                    showSpaces = true
-                } label: {
-                    Label("Manage Spaces…", systemImage: "person.2.badge.gearshape")
-                }
-                #if os(iOS)
-                Button {
-                    showBackup = true
-                } label: {
-                    Label("Backup…", systemImage: "icloud.and.arrow.up")
-                }
-                #endif
-            } label: {
-                Image(systemName: "square.grid.2x2")
-            }
-        }
     }
 
     static var leadingPlacement: ToolbarItemPlacement {

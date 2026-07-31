@@ -84,10 +84,8 @@ struct RootView: View {
     @Bindable var session: AppSession
 
     var body: some View {
-        if session.phase == .connected, let space = session.selectedSpace {
-            NavigationStack {
-                TimelineView(session: session, space: space)
-            }
+        if session.phase == .connected {
+            RootTabView(session: session)
             #if os(iOS)
             .task {
                 let registrar = PushRegistrar.shared

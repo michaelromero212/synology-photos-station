@@ -31,6 +31,11 @@ final class AppSession {
     private(set) var user: UserDTO?
     private(set) var spaces: [SpaceDTO] = []
     private(set) var client: FrameStationClient?
+
+    /// The tab structure asks for these by name rather than digging through
+    /// `spaces` at each call site.
+    var personalSpace: SpaceDTO? { spaces.first { $0.kind == .personal } }
+    var serverHost: String? { URL(string: serverURL)?.host() }
     private(set) var loader: ThumbnailLoader?
     private let credentials = CredentialStore()
 
@@ -105,6 +110,9 @@ final class AppSession {
         self.client = client
         self.loader = ThumbnailLoader(client: client)
         self.user = me.user
+        // The server is the authority on who you are; a restored session had
+        // only whatever name was typed at onboarding, or none at all.
+        self.displayName = me.user.displayName
         self.spaces = me.spaces
         self.selectedSpace = me.spaces.first { $0.kind == .personal } ?? me.spaces.first
         self.phase = .connected
