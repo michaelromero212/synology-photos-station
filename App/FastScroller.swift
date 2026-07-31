@@ -32,14 +32,19 @@ struct FastScroller: View {
             // the scroll view. Using the finger position during a drag matters —
             // deriving it from scroll offset makes the thumb lag its own gesture.
             let fraction = isDragging ? dragFraction : scrollFraction
-            let y = track * fraction.clamped(to: 0...1)
+            // Explicit CGFloat: `track` is CGFloat and `fraction` is Double, and
+            // on a 64-bit platform those are the same type by typealias but not
+            // to the type checker. Left implicit it cannot decide, and reports
+            // the failure against whatever arithmetic it reaches next.
+            let y: CGFloat = track * CGFloat(fraction.clamped(to: 0...1))
+            let pillOffset: CGFloat = y + (thumbHeight - 32) / 2
 
             ZStack(alignment: .topTrailing) {
                 Color.clear
 
                 if isDragging, let label {
                     ScrubberPill(text: label)
-                        .offset(x: -trackWidth, y: y + (thumbHeight - 32) / 2)
+                        .offset(x: -trackWidth, y: pillOffset)
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         .allowsHitTesting(false)
                 }
@@ -61,7 +66,8 @@ struct FastScroller: View {
                         // Centre the thumb on the finger rather than pinning its
                         // top there, or the grid sits half a thumb off from
                         // where you're pointing.
-                        let raw = (value.location.y - thumbHeight / 2) / max(track, 1)
+                        let raw = Double(value.location.y - thumbHeight / 2)
+                            / Double(max(track, 1))
                         dragFraction = raw.clamped(to: 0...1)
                         if let bucket = bucket(at: dragFraction) {
                             if label != Self.label(for: bucket) {
