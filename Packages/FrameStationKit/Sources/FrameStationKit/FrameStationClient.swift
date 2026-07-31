@@ -82,7 +82,7 @@ public actor FrameStationClient {
     }
 
     public func registerPushToken(_ body: RegisterPushTokenRequest) async throws {
-        try await sendNoContent(.post, "v1/devices/push-token", body: body)
+        try await sendNoContent(.put, "v1/devices/push-token", body: body)
     }
 
     public func probeUpload(_ body: UploadProbeRequest) async throws -> UploadProbeResponse {

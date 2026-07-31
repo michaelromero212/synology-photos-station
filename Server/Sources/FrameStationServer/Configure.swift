@@ -5,7 +5,7 @@ import Vapor
 enum Build {
     /// Bumped by hand per milestone. Surfaced by /health so you can tell at a
     /// glance which image the NAS is actually running.
-    static let version = "0.8.1-M5c"
+    static let version = "0.9.0-M6"
 }
 
 func configure(_ app: Application) async throws {
@@ -62,6 +62,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: TimelineController())
     try app.grouped("v1").register(collection: FavoriteController())
     try app.grouped("v1").register(collection: SpaceController())
+    try app.grouped("v1").register(collection: PushController())
 
     // Only the long-running server drains the queue.
     //
@@ -79,6 +80,23 @@ func configure(_ app: Application) async throws {
         let worker = DerivationWorker(app: app, concurrency: lanes)
         app.storage[DerivationWorkerKey.self] = worker
         await worker.start()
+
+        // APNs speaks HTTP/2 only; without this the client offers 1.1 and the
+        // connection is refused before any push is attempted.
+        app.http.client.configuration.httpVersion = .automatic
+
+        let apnsConfiguration = try APNsClient.Configuration.fromEnvironment()
+        if apnsConfiguration == nil {
+            app.logger.notice(
+                "push disabled — set FRAMESTATION_APNS_KEY_PATH, _KEY_ID, _TEAM_ID, _TOPIC"
+            )
+        }
+        let apns = APNsClient(
+            configuration: apnsConfiguration, client: app.client, logger: app.logger
+        )
+        let sweeper = ActivitySweeper(app: app, apns: apns)
+        app.storage[ActivitySweeperKey.self] = sweeper
+        await sweeper.start()
     }
 
     app.logger.info("framestation \(Build.version) configured")

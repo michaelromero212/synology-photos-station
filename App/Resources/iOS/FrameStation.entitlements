@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Remote notifications. Xcode rewrites this to "production" when it
+	     builds for distribution; a development build must talk to the APNs
+	     sandbox host, which is what PushRegistrar.environment mirrors. -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

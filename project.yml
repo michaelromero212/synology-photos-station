@@ -72,6 +72,9 @@ targets:
         UIBackgroundModes:
           - fetch
           - processing
+          # M6: lets a silent push wake the app; alert pushes don't need it,
+          # but the activity payload may carry a badge refresh later.
+          - remote-notification
         BGTaskSchedulerPermittedIdentifiers:
           - com.michaelromero.FrameStation.backup
           - com.michaelromero.FrameStation.refresh
@@ -86,6 +89,7 @@ targets:
         # iPhone + iPad.
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: App/Resources/iOS/FrameStation.entitlements
     dependencies:
       - package: FrameStationKit
         product: FrameStationKit

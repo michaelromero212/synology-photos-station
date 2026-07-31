@@ -56,6 +56,7 @@ struct BackupSettingsView: View {
     let onDone: () -> Void
 
     @State private var access = PhotoLibraryScanner.access
+    private var registrar: PushRegistrar { .shared }
 
     var body: some View {
         NavigationStack {
@@ -82,6 +83,8 @@ struct BackupSettingsView: View {
                     Toggle("Include Videos", isOn: $settings.includeVideos)
                 }
 
+                notificationSection
+
                 statusSection
             }
             .navigationTitle("Backup")
@@ -97,6 +100,7 @@ struct BackupSettingsView: View {
             }
             .task {
                 access = PhotoLibraryScanner.access
+                await registrar.refreshAuthorization()
                 // Resolve the implicit default into the binding so the picker
                 // shows the space that backup will actually use, instead of
                 // rendering blank because nil matches no tag.
@@ -144,6 +148,31 @@ struct BackupSettingsView: View {
             } footer: {
                 Text("Backup can't run without access to your photo library.")
             }
+        }
+    }
+
+    // MARK: - Notifications
+
+    @ViewBuilder
+    private var notificationSection: some View {
+        Section {
+            switch registrar.authorization {
+            case .authorized, .provisional, .ephemeral:
+                Label("On", systemImage: "bell.fill").foregroundStyle(.green)
+            case .notDetermined:
+                Button("Turn On Notifications") {
+                    Task { await registrar.requestAuthorization() }
+                }
+            case .denied:
+                Label("Off", systemImage: "bell.slash").foregroundStyle(.secondary)
+                Button("Open Settings") { openSettings() }
+            @unknown default:
+                EmptyView()
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Get told when someone adds photos or videos to a shared space.")
         }
     }
 

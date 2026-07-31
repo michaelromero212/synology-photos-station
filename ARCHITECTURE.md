@@ -176,6 +176,32 @@ earlier build sent the phone's current offset as if it were fact, which overwrot
 real EXIF metadata: a Tokyo photo taken at 08:00 on May 20 landed under May 19
 19:00 — the wrong day, not merely the wrong hour.
 
+
+### Push: batching is the feature
+
+Forty photos finishing their evening backup would be forty notifications, and a
+family turns those off permanently after one night of it. `activity_sessions`
+accumulates counts per (space, user) while uploads keep arriving; the sweeper
+closes a session once it has been idle (default five minutes, `FRAMESTATION_ACTIVITY_IDLE_SECONDS`)
+and sends exactly one summary. Past 200 items `is_bulk` trips and the message
+collapses to "Morgan backed up 8,240 items" so a first-run device backup doesn't
+announce itself photo by photo.
+
+Closing and notifying are separate steps: the claiming `UPDATE` sets `closed_at`
+so a second sweeper can't pick the session up, and `notified_at` records that the
+push actually went out.
+
+Push degrades rather than fails. With no `.p8` configured the client logs what it
+would have sent and reports success, which is what lets the smoke tests verify
+wording and fan-out without Apple credentials — and means a misconfigured NAS
+drops notifications instead of wedging the sweeper.
+
+Two things that are easy to get wrong and are handled explicitly: ES256 wants the
+raw `r||s` signature (`rawRepresentation`), not the DER form Apple rejects; and a
+sandbox token sent to the production host comes back `BadDeviceToken`, so the
+environment travels with the token and the client reports it per build
+configuration.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the
@@ -706,7 +732,7 @@ of watching progress bars before anything is evaluable.
 | **M5c** ✅ | Picker + share | Multi-select grid of recent library items with numbered badges and video durations, uploading straight into the current space. Shares the M5 upload path (`AssetUploader`) rather than duplicating it, so both routes commit identical metadata. Verified end to end: 3 items into Family Shared with attribution, place names, and the timeline refreshing behind the sheet. |
 | **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
 | **M8** | Fast scroller | Apple Photos-style scrubber with a month/year pill while dragging, resting indicator that tracks scroll position |
-| **M6** | Push | Activity batching, APNs from container. "Morgan just shared 1 photo and 2 videos to Family Shared" |
+| **M6** 🟡 | Push | **Built and verified without Apple credentials.** Token registration on the device row, ES256 JWT signing via swift-crypto (no new dependency), a sweeper that closes idle `activity_sessions` and sends one summary per burst, uploader excluded, personal spaces silent, dead tokens dropped on 410. Notification delivery, copy, and tap-to-open-space verified in the simulator with `simctl push`. 28 assertions green. **Remaining:** a real `.p8` key and an actual APNs round-trip, which needs an Apple Developer account and a physical device. |
 | **M7** | Free Up Space | Verified-then-delete, gated on NAS backup existing |
 | **M8** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 
