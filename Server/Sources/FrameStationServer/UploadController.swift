@@ -62,10 +62,25 @@ struct UploadController: RouteCollection {
             spaceID: input.spaceID, userID: device.userID, on: req.sql
         )
 
-        // Already stored — skip the transfer entirely. This is what makes
-        // duplicate family photos and interrupted retries nearly free.
+        // Already stored *and already visible to this user* — skip the transfer.
+        // This is what makes re-uploads and interrupted retries nearly free.
+        //
+        // Scoped to the caller's own spaces deliberately. A global lookup is a
+        // "does this exact file exist on this NAS?" oracle: anyone holding a
+        // copy of a photo could confirm a family member also has it, and the
+        // returned asset id was enough to link it into their own library.
+        // Storage dedup is unaffected — commit's ON CONFLICT (sha256) still
+        // collapses identical bytes onto one asset row and one blob. Only the
+        // transfer saving is lost, and only across users.
         if let existing = try await req.sql.raw("""
-            SELECT id FROM assets WHERE sha256 = \(bind: sha)
+            SELECT a.id FROM assets a
+            WHERE a.sha256 = \(bind: sha)
+              AND EXISTS (
+                  SELECT 1 FROM space_assets sa
+                  JOIN space_members m ON m.space_id = sa.space_id
+                  WHERE sa.asset_id = a.id AND sa.deleted_at IS NULL
+                    AND m.user_id = \(bind: device.userID)
+              )
             """).first(decoding: IDRow.self) {
             return UploadProbeResponse(
                 status: .have,
@@ -338,9 +353,22 @@ struct UploadController: RouteCollection {
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
 
+        // Linking is a read of the source as much as a write to the target: you
+        // may only place an asset you can already see. Without this, holding an
+        // asset id is enough to pull any file in the household into your own
+        // library — and ids leak far more easily than blobs do.
+        //
+        // 404 rather than 403, so this doesn't confirm the asset exists.
         struct MediaRow: Decodable { let mediaType: String }
         guard let media = try await req.sql.raw("""
-            SELECT media_type AS "mediaType" FROM assets WHERE id = \(bind: assetID)
+            SELECT a.media_type AS "mediaType" FROM assets a
+            WHERE a.id = \(bind: assetID)
+              AND EXISTS (
+                  SELECT 1 FROM space_assets sa
+                  JOIN space_members m ON m.space_id = sa.space_id
+                  WHERE sa.asset_id = a.id AND sa.deleted_at IS NULL
+                    AND m.user_id = \(bind: device.userID)
+              )
             """).first(decoding: MediaRow.self) else {
             throw Abort(.notFound, reason: "No such asset.")
         }

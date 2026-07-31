@@ -249,6 +249,34 @@ charge. The next window is requested at the end of each run, since only one
 request can be pending at a time, and scheduling is torn down when backup is
 switched off so the app isn't woken to do nothing.
 
+
+### Isolation: an asset id is not a capability
+
+Two related holes, found by review and fixed together.
+
+`probeUpload` used to answer `.have` for any matching SHA-256 anywhere on the
+server. That is an existence oracle — anyone holding a copy of a photo could
+confirm a family member also had it — and the response carried the asset id,
+which `link` would then place into the caller's own space with no check that
+they could already see it. Chained: 404 on the original, probe for the id, link
+it, 200. Reproduced before fixing.
+
+Both now scope to the caller. `probe` only reports `.have` for an asset already
+placed in one of their spaces; `link` requires the same. Storage dedup is
+untouched, because commit's `ON CONFLICT (sha256)` still collapses identical
+bytes onto one asset row and one blob — only the *transfer* saving is lost, and
+only when two people upload the same file. Correct isolation is worth more than
+one skipped upload on a home network.
+
+The general rule this establishes: **holding an identifier must never be
+sufficient to read the thing it names.** Every read path re-derives access from
+`space_members`. That matters most for features not built yet — an album API or
+a share link that surfaces asset ids would otherwise have quietly become a read
+primitive.
+
+Non-membership answers 404, not 403, so a refused request can't be used to
+confirm that a space or asset exists.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the

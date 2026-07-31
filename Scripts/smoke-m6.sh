@@ -126,6 +126,13 @@ check "uploader has no token registered anyway" "0" \
 check "exactly one push logged for the burst" "1" \
   "$(echo "$TAIL" | grep -c 'would have sent')"
 
+# Let the shared-space burst finish notifying first: its push can otherwise
+# land after this marker and be counted against the personal-space check.
+for i in $(seq 20); do
+  [ "$(q "select count(*) from activity_sessions where closed_at is not null and notified_at is null;")" = "0" ] && break
+  sleep 1
+done
+sleep 2
 MARK2=$(mark)
 put p "$P1" "$A1" photo
 for i in $(seq 25); do
