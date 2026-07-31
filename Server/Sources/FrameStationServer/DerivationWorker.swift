@@ -217,7 +217,9 @@ actor DerivationWorker {
                 height          = COALESCE(height, \(bind: metadata.height)),
                 duration_ms     = COALESCE(duration_ms, \(bind: metadata.durationMs)),
                 captured_at     = COALESCE(captured_at, \(bind: metadata.capturedAt)),
-                captured_tz_off = COALESCE(captured_tz_off, \(bind: metadata.capturedTZOffset)),
+                captured_tz_off = COALESCE(
+                    captured_tz_off, \(bind: metadata.capturedTZOffset), tz_off_fallback
+                ),
                 lat             = COALESCE(lat, \(bind: metadata.latitude)),
                 lon             = COALESCE(lon, \(bind: metadata.longitude)),
                 camera_make     = COALESCE(\(bind: metadata.cameraMake), camera_make),

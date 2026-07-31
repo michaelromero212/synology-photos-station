@@ -17,8 +17,16 @@ struct TimelineView: View {
     let space: SpaceDTO
 
     @State private var store: TimelineStore?
+    #if os(iOS)
+    @Environment(\.backupContainer) private var modelContainer
+    #endif
     @State private var columns = 3
     @State private var showSpaces = false
+    #if os(iOS)
+    @State private var showBackup = false
+    @State private var backupSettings = BackupSettings.load()
+    @State private var engine: BackupEngine?
+    #endif
 
     private let spacing: CGFloat = 2
 
@@ -38,11 +46,29 @@ struct TimelineView: View {
         .sheet(isPresented: $showSpaces) {
             SpacesView(session: session) { showSpaces = false }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showBackup) {
+            if let engine {
+                BackupSettingsView(
+                    session: session, engine: engine,
+                    settings: $backupSettings
+                ) { showBackup = false }
+            }
+        }
+        #endif
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
             store = newStore
             await newStore?.load()
         }
+        #if os(iOS)
+        .task {
+            guard engine == nil, let container = modelContainer else { return }
+            engine = BackupEngine(
+                container: container, session: session, settings: backupSettings
+            )
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -62,7 +88,16 @@ struct TimelineView: View {
             )
 
         case .loaded:
+            #if os(iOS)
+            VStack(spacing: 0) {
+                if let engine, backupSettings.enabled, engine.progress.total > 0 {
+                    backupBanner(engine)
+                }
+                grid(store)
+            }
+            #else
             grid(store)
+            #endif
         }
     }
 
@@ -110,6 +145,26 @@ struct TimelineView: View {
             .refreshable { await store.refresh() }
         }
     }
+
+    #if os(iOS)
+    /// Pinned above the grid, matching Synology's "Photo Backup Complete" row —
+    /// but this one stays put and reports failures instead of vanishing.
+    private func backupBanner(_ engine: BackupEngine) -> some View {
+        Button { showBackup = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: engine.progress.isComplete
+                      ? "checkmark.icloud.fill" : "icloud.and.arrow.up")
+                    .foregroundStyle(engine.progress.isComplete ? Color.green : Color.accentColor)
+                Text(engine.progress.summary).font(.subheadline)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .background(.quaternary.opacity(0.35))
+    }
+    #endif
 
     private func header(_ bucket: TimelineBucket) -> some View {
         HStack(spacing: 6) {
@@ -180,6 +235,13 @@ struct TimelineView: View {
                 } label: {
                     Label("Manage Spaces…", systemImage: "person.2.badge.gearshape")
                 }
+                #if os(iOS)
+                Button {
+                    showBackup = true
+                } label: {
+                    Label("Backup…", systemImage: "icloud.and.arrow.up")
+                }
+                #endif
             } label: {
                 Image(systemName: "square.grid.2x2")
             }

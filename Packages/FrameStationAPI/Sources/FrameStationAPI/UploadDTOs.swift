@@ -87,7 +87,11 @@ public struct CommitUploadRequest: Codable, Sendable {
     public let height: Int?
     public let durationMs: Int?
     public let capturedAt: Date?
+    /// The photographer's UTC offset, when the file actually records one.
     public let capturedTZOffset: Int?
+    /// The uploading device's offset. Used only if the file records none — see
+    /// migration 0007. Never overrides `capturedTZOffset`.
+    public let capturedTZOffsetFallback: Int?
     public let latitude: Double?
     public let longitude: Double?
     public let isRaw: Bool
@@ -109,6 +113,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         durationMs: Int? = nil,
         capturedAt: Date? = nil,
         capturedTZOffset: Int? = nil,
+        capturedTZOffsetFallback: Int? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil,
         isRaw: Bool = false,
@@ -125,6 +130,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         self.durationMs = durationMs
         self.capturedAt = capturedAt
         self.capturedTZOffset = capturedTZOffset
+        self.capturedTZOffsetFallback = capturedTZOffsetFallback
         self.latitude = latitude
         self.longitude = longitude
         self.isRaw = isRaw

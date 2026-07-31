@@ -1,12 +1,25 @@
+import SwiftData
 import SwiftUI
 
 @main
 struct FrameStationApp: App {
     @State private var session = AppSession()
+    #if os(iOS)
+    /// Durable backup queue. On-disk because the engine must survive being
+    /// killed mid-run — see BackupQueue.
+    private let backupContainer: ModelContainer = {
+        do { return try ModelContainer(for: BackupItem.self) }
+        catch { fatalError("Could not open the backup queue: \(error)") }
+    }()
+    #endif
 
     var body: some Scene {
         WindowGroup {
             RootView(session: session)
+            #if os(iOS)
+                .modelContainer(backupContainer)
+                .environment(\.backupContainer, backupContainer)
+            #endif
             #if os(macOS)
                 .frame(minWidth: 640, minHeight: 480)
             #endif

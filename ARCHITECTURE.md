@@ -156,6 +156,26 @@ rewrites an original.
 
 ---
 
+
+### Capture timezone: EXIF first, device offset only as a fallback
+
+`PHAsset.creationDate` is an absolute instant, not a wall clock. Photos builds it
+by reading the file: when EXIF carries `OffsetTimeOriginal` that offset is
+authoritative, and when it does not, Photos interprets the naive timestamp in the
+*device's* timezone. So neither value alone is right for every asset.
+
+The client therefore sends two fields. `capturedTZOffset` is the offset the file
+itself records; `capturedTZOffsetFallback` is the uploading device's offset for
+that date (`secondsFromGMT(for:)`, so DST is handled — a March 2011 photo resolves
+to EST, not EDT). Derivation resolves them as
+`COALESCE(captured_tz_off, <exif>, tz_off_fallback)` and recomputes
+`local_captured_at` afterwards.
+
+This matters because `local_captured_at` is what the timeline buckets on. An
+earlier build sent the phone's current offset as if it were fact, which overwrote
+real EXIF metadata: a Tokyo photo taken at 08:00 on May 20 landed under May 19
+19:00 — the wrong day, not merely the wrong hour.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the
@@ -681,7 +701,7 @@ of watching progress bars before anything is evaluable.
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
 | **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
-| **M5** | iOS backup engine | Photos scan, persistent change tokens, durable queue, background uploads, settings. **Next.** |
+| **M5** 🟡 | iOS backup engine | **Foreground pass done** — Photos authorisation (including an explicit limited-access warning), full library scan, durable SwiftData queue that survives termination, export → streamed SHA-256 → probe → chunked send → commit, dedup via content hash, retry cap, settings screen and grid status banner. Verified in the simulator: 11 library items → 10 blobs (a duplicate linked rather than re-sent), EXIF/GPS/place names/ThumbHashes/attribution all intact. **Remaining:** background `URLSession` + `BGTaskScheduler`, `PHPersistentChangeToken` incremental rescan, Live Photo pairing, and server-side reflink placement into `/volume1/homes/<user>/…` (needs the container running as root). |
 | **M5b** ✅ | DSM login | Server-side credential exchange against `SYNO.API.Auth`, account + personal space created on first sign-in, `dsm_uid` recorded for home-directory placement. Invite flow retained as fallback. |
 | **M5c** | Picker + share | Pick recent photos, multi-select, upload straight into Family Shared |
 | **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
