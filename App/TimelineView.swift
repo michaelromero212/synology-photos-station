@@ -33,6 +33,7 @@ struct TimelineView: View {
     #endif
 
     private let spacing: CGFloat = 2
+    @State private var scrollFraction: Double = 0
 
     var body: some View {
         Group {
@@ -143,6 +144,7 @@ struct TimelineView: View {
     private func grid(_ store: TimelineStore) -> some View {
         GeometryReader { proxy in
             let side = (proxy.size.width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+            ScrollViewReader { scroller in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
                     ForEach(store.buckets) { bucket in
@@ -178,12 +180,37 @@ struct TimelineView: View {
                             header(bucket)
                         }
                         .task { await store.loadBucket(bucket.key) }
+                        .id(bucket.key)
                     }
                 }
             }
+            // Reads the scroll view's own offset rather than inferring it from
+            // content geometry: a LazyVStack only measures realised rows, so a
+            // background GeometryReader reports a height that grows as you
+            // scroll and a fraction that never leaves zero.
+            .modifier(ScrollFractionReporter { scrollFraction = $0 })
             .refreshable { await store.refresh() }
+            #if !os(tvOS)
+            .overlay(alignment: .trailing) {
+                if store.buckets.count > 1 {
+                    FastScroller(
+                        buckets: store.buckets,
+                        scrollFraction: scrollFraction
+                    ) { bucket in
+                        // No animation: an animated scroll per drag update
+                        // queues up and the grid slides on after your finger
+                        // has already stopped.
+                        scroller.scrollTo(bucket.key, anchor: .top)
+                        Task { await store.loadBucket(bucket.key) }
+                    } onScrubEnd: {}
+                    .padding(.vertical, 6)
+                }
+            }
+            #endif
+            }
         }
     }
+
 
     #if os(iOS)
     /// Pinned above the grid, matching Synology's "Photo Backup Complete" row —
