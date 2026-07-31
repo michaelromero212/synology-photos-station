@@ -90,7 +90,13 @@ struct VideoPlayerView: View {
                 VideoPlayer(player: player)
             }
             if model.isLoading {
+                // `controlSize` doesn't exist on tvOS, where the system sizes
+                // controls for the 10-foot layout itself.
+                #if os(tvOS)
+                ProgressView()
+                #else
                 ProgressView().controlSize(.large)
+                #endif
             }
             if let error = model.lastError {
                 ContentUnavailableView(
