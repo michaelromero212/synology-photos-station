@@ -96,6 +96,12 @@ func configure(_ app: Application) async throws {
         let apns = APNsClient(
             configuration: apnsConfiguration, client: app.client, logger: app.logger
         )
+        let browse = BrowseTreeWorker(
+            app: app, configuration: BrowseTree.Configuration.fromEnvironment()
+        )
+        app.storage[BrowseTreeWorkerKey.self] = browse
+        await browse.start()
+
         let sweeper = ActivitySweeper(app: app, apns: apns)
         app.storage[ActivitySweeperKey.self] = sweeper
         await sweeper.start()

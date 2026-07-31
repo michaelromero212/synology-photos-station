@@ -297,6 +297,37 @@ Deleting an album deletes the collection, never the photos. Covers must be a
 photo the album actually contains, or the cover field becomes a way to display
 an arbitrary asset.
 
+
+### The File Station tree
+
+Blobs are named by hash — right for storage, meaningless to someone opening a
+folder. A second, human-readable tree mirrors every placement:
+
+    /volume1/homes/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
+    /volume1/FrameStation/Shared/<Space>/YYYY/MM/IMG_9001.jpg
+
+Entries are **reflinks**. Hardlinks cannot cross Synology's per-shared-folder
+Btrfs subvolumes at all (§4), reflinks cost nothing until written, and they
+diverge on write — someone editing a photo in File Station gets their own copy
+instead of silently corrupting the canonical blob every other member reads.
+
+The fallback chain is reflink → hardlink → copy, and it *logs* when it degrades:
+a silent fall back to a full copy would quietly double disk usage.
+
+Built after derivation, not at commit, because the YYYY/MM folder comes from the
+capture date and that only exists once the media probe has read the EXIF.
+
+Two things it needs that nothing else does. The container must run as **root**
+to write into `/volume1/homes` and to `chown` each file to its DSM owner —
+without the chown the tree appears but belongs to root and nobody can edit it.
+And it is **off by default** (`FRAMESTATION_BROWSE_TREE=1`), because running as
+root is a real escalation and should be a decision, not a side effect of
+upgrading.
+
+An account created by invite rather than DSM login has no home directory to
+write into. That is recorded as `browse_error` on the placement rather than
+retried forever.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the

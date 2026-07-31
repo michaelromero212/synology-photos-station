@@ -255,10 +255,12 @@ struct UploadController: RouteCollection {
 
                 guard let placement = try await sql.raw("""
                     INSERT INTO space_assets
-                        (space_id, asset_id, uploaded_by_user_id, source_device_id, source_local_id)
+                        (space_id, asset_id, uploaded_by_user_id, source_device_id,
+                         source_local_id, filename)
                     VALUES
                         (\(bind: input.spaceID), \(bind: asset.id), \(bind: device.userID),
-                         \(bind: device.deviceID), \(bind: input.sourceLocalID))
+                         \(bind: device.deviceID), \(bind: input.sourceLocalID),
+                         \(bind: session.filename))
                     ON CONFLICT (space_id, asset_id)
                     DO UPDATE SET deleted_at = NULL
                     RETURNING id
