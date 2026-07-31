@@ -46,6 +46,9 @@ final class BackupItem {
     var lastError: String?
     /// Server-side upload session, so a resumed item continues rather than
     /// restarting a 350 MB video from zero.
+    /// The server asset this became, once committed. Drives the "backed up"
+    /// badge on the timeline tile.
+    var assetID: UUID?
     var uploadID: UUID?
     var chunkCount: Int
     var queuedAt: Date

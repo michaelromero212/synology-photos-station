@@ -96,6 +96,13 @@ struct TimelineView: View {
             activity = store
             await store.refresh()
         }
+        #if os(iOS)
+        // A finished backup should show up without the user having to think
+        // about it; the cloud badges survive until they pull to refresh.
+        .onChange(of: engine?.completedRuns) { _, _ in
+            Task { await store?.refresh() }
+        }
+        #endif
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
             store = newStore
@@ -120,7 +127,10 @@ struct TimelineView: View {
         case .failed(let reason):
             ContentUnavailableView("Couldn't load", systemImage: "exclamationmark.triangle", description: Text(reason))
 
-        case .loaded where store.buckets.isEmpty:
+        // Queued-but-not-yet-uploaded photos still count as content: on a fresh
+        // library the whole camera roll is pending, and "No photos yet" while
+        // the backup is visibly running is just wrong.
+        case .loaded where store.buckets.isEmpty && !hasQueuedItems:
             ContentUnavailableView(
                 "No photos yet",
                 systemImage: "square.on.square",
@@ -141,13 +151,75 @@ struct TimelineView: View {
         }
     }
 
+
+    #if os(iOS)
+    /// Queued local items grouped by the same day key the server buckets use.
+    private var queuedByDay: [String: [(localIdentifier: String, state: UploadState)]] {
+        guard let engine, backupSettings.enabled else { return [:] }
+        var grouped: [String: [(localIdentifier: String, state: UploadState)]] = [:]
+        for entry in engine.queued {
+            let key = Self.dayKey(entry.capturedAt, zoom: store?.zoom ?? .day)
+            grouped[key, default: []].append((entry.localIdentifier, entry.state))
+        }
+        return grouped
+    }
+
+    /// The photo's own wall clock, matching how the server buckets it.
+    static func dayKey(_ date: Date, zoom: TimelineZoom) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        switch zoom {
+        case .year: formatter.dateFormat = "yyyy"
+        case .month: formatter.dateFormat = "yyyy-MM"
+        case .day: formatter.dateFormat = "yyyy-MM-dd"
+        }
+        return formatter.string(from: date)
+    }
+    #endif
+
+    private var hasQueuedItems: Bool {
+        #if os(iOS)
+        return !queuedByDay.isEmpty
+        #else
+        return false
+        #endif
+    }
+
+    /// The sections to draw. Only iOS has a local backup queue to merge in.
+    private func sections(_ store: TimelineStore) -> [TimelineBucket] {
+        #if os(iOS)
+        return Self.mergedBuckets(store, queued: queuedByDay)
+        #else
+        return store.buckets
+        #endif
+    }
+
+    #if os(iOS)
+    /// Server buckets plus any day that so far exists only on this phone.
+    ///
+    /// A photo taken this morning has no bucket yet — without this it would be
+    /// invisible until its upload finished, which is the opposite of what a
+    /// backup indicator is for.
+    static func mergedBuckets(
+        _ store: TimelineStore,
+        queued: [String: [(localIdentifier: String, state: UploadState)]]
+    ) -> [TimelineBucket] {
+        var buckets = store.buckets
+        let known = Set(buckets.map(\.key))
+        let extra = queued.keys.filter { !known.contains($0) }
+        guard !extra.isEmpty else { return buckets }
+        buckets.append(contentsOf: extra.map { TimelineBucket(key: $0, count: 0, place: nil) })
+        return buckets.sorted { $0.key > $1.key }
+    }
+    #endif
+
     private func grid(_ store: TimelineStore) -> some View {
         GeometryReader { proxy in
             let side = (proxy.size.width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
             ScrollViewReader { scroller in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
-                    ForEach(store.buckets) { bucket in
+                    ForEach(sections(store)) { bucket in
                         Section {
                             LazyVGrid(
                                 columns: Array(
@@ -156,12 +228,25 @@ struct TimelineView: View {
                                 ),
                                 spacing: spacing
                             ) {
+                                // Not-yet-uploaded photos lead their day: they
+                                // are the newest thing that happened, and
+                                // burying them under already-safe photos hides
+                                // exactly what the user is waiting on.
+                                #if os(iOS)
+                                ForEach(queuedByDay[bucket.key] ?? [], id: \.localIdentifier) { entry in
+                                    PendingTile(
+                                        localIdentifier: entry.localIdentifier,
+                                        state: entry.state,
+                                        side: side
+                                    )
+                                }
+                                #endif
                                 let items = store.items[bucket.key] ?? []
                                 if items.isEmpty {
                                     // Placeholder tiles keep the section the
                                     // right height so the scrollbar doesn't jump
                                     // when the bucket lands.
-                                    ForEach(0..<bucket.count, id: \.self) { _ in
+                                    ForEach(0..<max(bucket.count, 0), id: \.self) { _ in
                                         Rectangle().fill(.quaternary)
                                             .frame(width: side, height: side)
                                     }
@@ -171,6 +256,13 @@ struct TimelineView: View {
                                             AssetDetailView(item: item, space: space, session: session)
                                         } label: {
                                             PhotoCell(item: item, loader: session.loader, side: side)
+                                            #if os(iOS)
+                                                .overlay(alignment: .bottomTrailing) {
+                                                    if engine?.recentlyUploaded.contains(item.assetID) == true {
+                                                        UploadStateBadge(state: .uploaded).padding(5)
+                                                    }
+                                                }
+                                            #endif
                                         }
                                         .buttonStyle(.plain)
                                     }
@@ -189,7 +281,14 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollFractionReporter { scrollFraction = $0 })
-            .refreshable { await store.refresh() }
+            .refreshable {
+                await store.refresh()
+                #if os(iOS)
+                // The cloud means "this just went up". After a deliberate
+                // refresh it isn't news any more, so it retires.
+                engine?.clearUploadBadges()
+                #endif
+            }
             #if !os(tvOS)
             .overlay(alignment: .trailing) {
                 if store.buckets.count > 1 {

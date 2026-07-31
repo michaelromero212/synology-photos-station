@@ -21,6 +21,20 @@ final class BackupEngine {
     private(set) var statusText = "Idle"
     private(set) var lastError: String?
 
+    /// Local items still to go, newest first, grouped for the grid.
+    private(set) var queued: [(localIdentifier: String, capturedAt: Date, state: UploadState)] = []
+    /// Assets this device uploaded since the badges were last cleared. Shown as
+    /// a cloud on the tile until the user pulls to refresh, at which point the
+    /// upload stops being news and becomes just another photo.
+    private(set) var recentlyUploaded: Set<UUID> = []
+
+    func clearUploadBadges() { recentlyUploaded.removeAll() }
+
+    /// Bumped when a run finishes, so the timeline knows to re-read itself.
+    /// The photos it just sent are on the NAS now but not yet in the manifest
+    /// the grid is drawing from.
+    private(set) var completedRuns = 0
+
     private let container: ModelContainer
     private var session: AppSession
     private var settings: BackupSettings
@@ -142,6 +156,7 @@ final class BackupEngine {
         }
 
         statusText = progress.summary
+        completedRuns += 1
     }
 
     func stop() { cancelled = true }
@@ -187,6 +202,8 @@ final class BackupEngine {
             )
             item.sha256 = result.sha256
             item.byteSize = result.byteSize
+            item.assetID = result.assetID
+            if let assetID = result.assetID { recentlyUploaded.insert(assetID) }
             item.state = .done
             item.completedAt = Date()
             item.lastError = nil
@@ -207,6 +224,13 @@ final class BackupEngine {
 
     private func refreshProgress(_ context: ModelContext) {
         let all = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
+        queued = all
+            .filter { $0.state == .pending || $0.state == .uploading }
+            .sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) }
+            .map {
+                ($0.localIdentifier, $0.capturedAt ?? Date(),
+                 $0.state == .uploading ? .uploading : .pending)
+            }
         var next = BackupProgress()
         for item in all {
             switch item.state {
