@@ -34,3 +34,52 @@ public enum ActivityMessage {
         return "\(name) added \(parts.joined(separator: " and "))"
     }
 }
+
+// MARK: - In-app activity feed
+
+/// One "someone added photos" entry.
+public struct ActivityItemDTO: Codable, Sendable, Identifiable, Hashable {
+    public let id: UUID
+    public let spaceID: UUID
+    public let spaceName: String
+    public let user: UserDTO
+    public let photoCount: Int
+    public let videoCount: Int
+    public let isBulk: Bool
+    /// When they last added something. Not the moment the server closed the
+    /// batch — after downtime that would report a backlog as "just now".
+    public let at: Date
+    public let isUnread: Bool
+    /// Sent on the wire rather than computed per client, so the inbox and the
+    /// push banner provably read the same and a non-Swift client can't invent
+    /// its own phrasing.
+    public let summary: String
+
+    public init(
+        id: UUID, spaceID: UUID, spaceName: String, user: UserDTO,
+        photoCount: Int, videoCount: Int, isBulk: Bool, at: Date, isUnread: Bool
+    ) {
+        self.id = id
+        self.spaceID = spaceID
+        self.spaceName = spaceName
+        self.user = user
+        self.photoCount = photoCount
+        self.videoCount = videoCount
+        self.isBulk = isBulk
+        self.at = at
+        self.isUnread = isUnread
+        self.summary = ActivityMessage.body(
+            name: user.displayName, photos: photoCount, videos: videoCount, isBulk: isBulk
+        )
+    }
+}
+
+public struct ActivityFeedResponse: Codable, Sendable {
+    public let items: [ActivityItemDTO]
+    public let unreadCount: Int
+
+    public init(items: [ActivityItemDTO], unreadCount: Int) {
+        self.items = items
+        self.unreadCount = unreadCount
+    }
+}

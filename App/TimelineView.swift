@@ -21,6 +21,8 @@ struct TimelineView: View {
     @Environment(\.backupContainer) private var modelContainer
     #endif
     @State private var columns = 3
+    @State private var activity: ActivityStore?
+    @State private var showActivity = false
     @State private var showSpaces = false
     #if os(iOS)
     @State private var showBackup = false
@@ -75,6 +77,24 @@ struct TimelineView: View {
             }
         }
         #endif
+        .sheet(isPresented: $showActivity) {
+            if let activity {
+                ActivityInboxView(session: session, store: activity) { item in
+                    showActivity = false
+                    // Jump to where it happened.
+                    if let match = session.spaces.first(where: { $0.id == item.spaceID }) {
+                        session.selectedSpace = match
+                    }
+                } onDone: {
+                    showActivity = false
+                }
+            }
+        }
+        .task {
+            let store = activity ?? ActivityStore(session: session)
+            activity = store
+            await store.refresh()
+        }
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
             store = newStore
@@ -209,6 +229,24 @@ struct TimelineView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        // Top left, mirroring where Photos and Synology both put activity.
+        // `.topBarLeading` doesn't exist on macOS; `.navigation` is the
+        // equivalent leading slot there.
+        ToolbarItem(placement: Self.leadingPlacement) {
+            Button {
+                showActivity = true
+            } label: {
+                Image(systemName: (activity?.unreadCount ?? 0) > 0
+                      ? "bell.badge.fill" : "bell")
+                    .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+            }
+            .accessibilityLabel(
+                (activity?.unreadCount ?? 0) > 0
+                    ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                    : "Recent activity"
+            )
+        }
+
         // The space switcher, matching Synology's nav-title chevron: this is
         // where Personal ↔ Family Shared happens.
         ToolbarItem(placement: .principal) {
@@ -278,6 +316,14 @@ struct TimelineView: View {
                 Image(systemName: "square.grid.2x2")
             }
         }
+    }
+
+    static var leadingPlacement: ToolbarItemPlacement {
+        #if os(macOS)
+        return .navigation
+        #else
+        return .topBarLeading
+        #endif
     }
 
     /// `2026-07-18` → `Jul 18`, `2026-07` → `July 2026`, `2026` → `2026`.

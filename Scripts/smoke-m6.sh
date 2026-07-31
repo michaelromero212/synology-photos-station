@@ -179,6 +179,48 @@ has "delivered to the other member" "michael-" "$B"
 case "$B" in *"morgan-t"*) bad "uploader not notified" "no 'morgan-t'" "$B";; *) ok "uploader not notified";; esac
 
 echo
+echo "=== 7. in-app activity feed ==="
+# Morgan is a member of Family Shared; Michael did most of the uploading.
+F=$(curl -s "$API/v1/activity" -H "$A2")
+check "feed lists Michael's bursts" "3" "$(echo "$F" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
+check "all unread at first" "3" "$(echo "$F" | jq '["unreadCount"]')"
+has "same wording as the push" "Michael added 3 photos and 2 videos" \
+  "$(echo "$F" | python3 -c 'import sys,json;print(" | ".join(i["summary"] for i in json.load(sys.stdin)["items"]))')"
+check "newest first" "Michael added 1 video" \
+  "$(echo "$F" | python3 -c 'import sys,json;print(json.load(sys.stdin)["items"][0]["summary"])')"
+check "names the space" "Family Shared" "$(echo "$F" | jq '["items"][0]["spaceName"]')"
+
+# Morgan's own bulk session must not appear in Morgan's own inbox.
+case "$(echo "$F" | python3 -c 'import sys,json;print(" ".join(i["user"]["displayName"] for i in json.load(sys.stdin)["items"]))')" in
+  *Morgan*) bad "own uploads excluded" "no 'Morgan'" "present";;
+  *) ok "own uploads excluded";;
+esac
+
+# Michael sees Morgan's bulk burst, and not his own.
+FM=$(curl -s "$API/v1/activity" -H "$A1")
+check "Michael sees only Morgan's" "1" "$(echo "$FM" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
+has "bulk wording carries through" "backed up 8,240 items" "$(echo "$FM" | jq '["items"][0]["summary"]')"
+
+# Casey is in no shared space.
+check "non-member sees nothing" "0" \
+  "$(curl -s "$API/v1/activity" -H "$A3" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
+
+echo
+echo "=== 8. clear all ==="
+check "mark-read returns 204" "204" "$(code -X POST "$API/v1/activity/read" -H "$A2")"
+F2=$(curl -s "$API/v1/activity" -H "$A2")
+check "badge clears" "0" "$(echo "$F2" | jq '["unreadCount"]')"
+check "items stay, only the dots go" "3" \
+  "$(echo "$F2" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
+check "other users unaffected" "1" "$(curl -s "$API/v1/activity" -H "$A1" | jq '["unreadCount"]')"
+check "unauthenticated feed rejected" "401" "$(code "$API/v1/activity")"
+
+# Anything arriving after the watermark is unread again.
+q "insert into activity_sessions (space_id, user_id, photo_count, video_count, closed_at, notified_at)
+   values ('$FAM','$U1',2,0, now(), now());" >/dev/null
+check "new activity is unread again" "1" "$(curl -s "$API/v1/activity" -H "$A2" | jq '["unreadCount"]')"
+
+echo
 echo "════════════════════════════════════"
 echo "  passed: $PASS   failed: $FAIL"
 echo "════════════════════════════════════"

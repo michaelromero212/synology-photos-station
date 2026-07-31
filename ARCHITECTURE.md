@@ -733,6 +733,7 @@ of watching progress bars before anything is evaluable.
 | **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
 | **M8** | Fast scroller | Apple Photos-style scrubber with a month/year pill while dragging, resting indicator that tracks scroll position |
 | **M6** 🟡 | Push | **Built and verified without Apple credentials.** Token registration on the device row, ES256 JWT signing via swift-crypto (no new dependency), a sweeper that closes idle `activity_sessions` and sends one summary per burst, uploader excluded, personal spaces silent, dead tokens dropped on 410. Notification delivery, copy, and tap-to-open-space verified in the simulator with `simctl push`. 28 assertions green. **Remaining:** a real `.p8` key and an actual APNs round-trip, which needs an Apple Developer account and a physical device. |
+| **M6b** ✅ | Activity inbox | Bell in the top-left with an unread badge, recent shared-space contributions with relative times, tap-to-open the space, and Clear All. Reads the same `activity_sessions` rows the sweeper closes, so the inbox works even when push is unconfigured or declined. Per-user read watermark on `users.activity_read_at`. 15 further assertions. |
 | **M7** | Free Up Space | Verified-then-delete, gated on NAS backup existing |
 | **M8** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 

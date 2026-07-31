@@ -85,6 +85,19 @@ public actor FrameStationClient {
         try await sendNoContent(.put, "v1/devices/push-token", body: body)
     }
 
+    /// The read endpoint takes no arguments, but the no-content helper is
+    /// body-shaped; an empty object is a valid, forward-compatible payload.
+    private struct ActivityReadBody: Encodable {}
+
+    public func activityFeed(limit: Int = 50) async throws -> ActivityFeedResponse {
+        try await send(.get, "v1/activity?limit=\(limit)")
+    }
+
+    /// Marks everything up to now as seen.
+    public func markActivityRead() async throws {
+        try await sendNoContent(.post, "v1/activity/read", body: ActivityReadBody())
+    }
+
     public func probeUpload(_ body: UploadProbeRequest) async throws -> UploadProbeResponse {
         try await send(.post, "v1/uploads/probe", body: body)
     }
