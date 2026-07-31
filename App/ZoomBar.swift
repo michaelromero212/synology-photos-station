@@ -20,7 +20,8 @@ struct ZoomBar: View {
                     onChange(option)
                 } label: {
                     Text(option.title)
-                        .font(.subheadline.weight(zoom == option ? .semibold : .regular))
+                        .font(.subheadline)
+                        .fontWeight(zoom == option ? .semibold : .regular)
                         .foregroundStyle(zoom == option ? .primary : .secondary)
                         .padding(.horizontal, 18).padding(.vertical, 7)
                         .background {

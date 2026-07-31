@@ -41,8 +41,8 @@ struct FastScroller: View {
                     // Sits to the *left* of the thumb: on the right edge a pill
                     // outside the thumb would be under the thumb holding it.
                     Text(label)
-                        .font(.subheadline.weight(.semibold))
-                        .monospacedDigit()
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
                         .fixedSize()
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12).padding(.vertical, 7)
