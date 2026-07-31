@@ -5,7 +5,7 @@ import Vapor
 enum Build {
     /// Bumped by hand per milestone. Surfaced by /health so you can tell at a
     /// glance which image the NAS is actually running.
-    static let version = "0.9.1-M6b"
+    static let version = "1.0.0-M7"
 }
 
 func configure(_ app: Application) async throws {

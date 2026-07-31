@@ -118,7 +118,15 @@ struct AssetDetailView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if let image = model.image {
+            if item.mediaType == .video {
+                // Direct play, Range-served. The poster sits behind it so the
+                // frame doesn't flash black while the signed URL is fetched.
+                VideoPlayerView(
+                    assetID: item.assetID,
+                    client: session.client,
+                    poster: model.image ?? model.placeholder
+                )
+            } else if let image = model.image {
                 imageView(image).transition(.opacity)
             } else if let placeholder = model.placeholder {
                 imageView(placeholder).blur(radius: 14, opaque: true)

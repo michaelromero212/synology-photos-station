@@ -202,6 +202,32 @@ sandbox token sent to the production host comes back `BadDeviceToken`, so the
 environment travels with the token and the client reports it per build
 configuration.
 
+
+### Why playback URLs are signed rather than bearer-authenticated
+
+AVPlayer fetches media itself, outside the `URLSession` the rest of the API uses,
+so it cannot carry the bearer token. The documented alternative is an
+`AVAssetResourceLoaderDelegate`, but a hand-written one has to reimplement byte
+ranges correctly — and it still wouldn't help AirPlay, where an Apple TV fetches
+the URL on its own and never sees a header we set. Since tvOS is a target and
+AirPlay is the obvious way to watch these on a television, the URL has to stand
+on its own.
+
+So `GET /v1/assets/:id/playback` mints a URL carrying `u`, `exp` and an
+HMAC-SHA256 `sig` over all three. The user is inside the signed message, so
+substituting another id invalidates the signature rather than granting access,
+and membership is re-checked when the URL is redeemed — revoking someone takes
+effect immediately rather than at expiry.
+
+The tradeoff, stated plainly: a signed URL appears in the server's access log. It
+is scoped to one asset, expires in five minutes, and the log lives on the same
+NAS as the blobs it points at.
+
+Direct play only. `ffmpeg` transcoding 4K on a J4125 is not on the table, and on
+a home network it isn't needed — the file streams as-is and a seek fetches only
+the bytes being watched. HLS would slot in as a different `kind` in
+`PlaybackURLResponse` without changing the call site.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the
@@ -730,7 +756,7 @@ of watching progress bars before anything is evaluable.
 | **M5** 🟡 | iOS backup engine | **Foreground pass done** — Photos authorisation (including an explicit limited-access warning), full library scan, durable SwiftData queue that survives termination, export → streamed SHA-256 → probe → chunked send → commit, dedup via content hash, retry cap, settings screen and grid status banner. Verified in the simulator: 11 library items → 10 blobs (a duplicate linked rather than re-sent), EXIF/GPS/place names/ThumbHashes/attribution all intact. **Remaining:** background `URLSession` + `BGTaskScheduler`, `PHPersistentChangeToken` incremental rescan, Live Photo pairing, and server-side reflink placement into `/volume1/homes/<user>/…` (needs the container running as root). |
 | **M5b** ✅ | DSM login | Server-side credential exchange against `SYNO.API.Auth`, account + personal space created on first sign-in, `dsm_uid` recorded for home-directory placement. Invite flow retained as fallback. |
 | **M5c** ✅ | Picker + share | Multi-select grid of recent library items with numbered badges and video durations, uploading straight into the current space. Shares the M5 upload path (`AssetUploader`) rather than duplicating it, so both routes commit identical metadata. Verified end to end: 3 items into Family Shared with attribution, place names, and the timeline refreshing behind the sheet. |
-| **M7** | Video playback | Direct play via Range-served originals; AVPlayer on iOS/macOS/tvOS |
+| **M7** ✅ | Video playback | Direct play of the stored file over HTTP Range — no transcode, so a J4125 serves 4K without breaking a sweat. Signed short-lived playback URLs (HMAC-SHA256), because AVPlayer fetches media outside our URLSession and an AirPlay receiver fetches it from another device entirely. `Accept-Ranges` now advertised. AVKit `VideoPlayer` on all three platforms, autoplaying like Photos. 26 assertions. |
 | **M8** | Fast scroller | Apple Photos-style scrubber with a month/year pill while dragging, resting indicator that tracks scroll position |
 | **M6** 🟡 | Push | **Built and verified without Apple credentials.** Token registration on the device row, ES256 JWT signing via swift-crypto (no new dependency), a sweeper that closes idle `activity_sessions` and sends one summary per burst, uploader excluded, personal spaces silent, dead tokens dropped on 410. Notification delivery, copy, and tap-to-open-space verified in the simulator with `simctl push`. 28 assertions green. **Remaining:** a real `.p8` key and an actual APNs round-trip, which needs an Apple Developer account and a physical device. |
 | **M6b** ✅ | Activity inbox | Bell in the top-left with an unread badge, recent shared-space contributions with relative times, tap-to-open the space, and Clear All. Reads the same `activity_sessions` rows the sweeper closes, so the inbox works even when push is unconfigured or declined. Per-user read watermark on `users.activity_read_at`. 15 further assertions. |

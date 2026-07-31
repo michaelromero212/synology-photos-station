@@ -98,6 +98,11 @@ public actor FrameStationClient {
         try await sendNoContent(.post, "v1/activity/read", body: ActivityReadBody())
     }
 
+    /// A signed, short-lived URL a player can fetch directly.
+    public func playbackURL(assetID: UUID) async throws -> PlaybackURLResponse {
+        try await send(.get, "v1/assets/\(assetID.uuidString)/playback")
+    }
+
     public func probeUpload(_ body: UploadProbeRequest) async throws -> UploadProbeResponse {
         try await send(.post, "v1/uploads/probe", body: body)
     }

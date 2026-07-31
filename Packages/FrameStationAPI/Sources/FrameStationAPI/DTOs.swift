@@ -134,3 +134,21 @@ public struct APIErrorResponse: Codable, Sendable, Error {
         self.reason = reason
     }
 }
+
+/// A ready-to-play URL for a video, signed and short-lived.
+///
+/// Returned rather than constructed client-side so the signing scheme stays a
+/// server concern and can change without shipping a new app.
+public struct PlaybackURLResponse: Codable, Sendable, Hashable {
+    public let url: URL
+    public let expiresAt: Date
+    /// Direct play of the stored file — no transcode. HLS would land here later
+    /// as a different value without changing the call site.
+    public let kind: String
+
+    public init(url: URL, expiresAt: Date, kind: String = "direct") {
+        self.url = url
+        self.expiresAt = expiresAt
+        self.kind = kind
+    }
+}
