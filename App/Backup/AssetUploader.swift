@@ -167,7 +167,20 @@ enum AssetUploader {
             try data.write(to: part, options: .atomic)
             defer { try? FileManager.default.removeItem(at: part) }
 
-            _ = try await client.uploadChunk(uploadID: uploadID, index: index, fileURL: part)
+            // Through the background session, so a chunk in flight when iOS
+            // suspends us still lands. The file has to outlive the call, which
+            // it does — the defer runs after the await.
+            let request = try await client.chunkUploadRequest(uploadID: uploadID, index: index)
+            let (_, response) = try await BackgroundTransfers.shared.upload(
+                request, fromFile: part
+            )
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode)
+            else {
+                throw UploadError.chunkRejected(
+                    (response as? HTTPURLResponse)?.statusCode ?? -1, index
+                )
+            }
         }
     }
 
@@ -189,6 +202,7 @@ enum UploadError: LocalizedError {
     case noExportableResource
     case emptyExport
     case noUploadSession
+    case chunkRejected(Int, Int)
 
     var errorDescription: String? {
         switch self {
@@ -198,6 +212,8 @@ enum UploadError: LocalizedError {
             return "The photo exported as an empty file — it may still be downloading from iCloud."
         case .noUploadSession:
             return "The server didn't return an upload session."
+        case .chunkRejected(let status, let index):
+            return "The server rejected part \(index + 1) of this file (HTTP \(status))."
         }
     }
 }

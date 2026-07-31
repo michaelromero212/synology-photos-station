@@ -125,6 +125,17 @@ public actor FrameStationClient {
         return try FrameStationCoding.decoder.decode(ChunkAcceptedResponse.self, from: data)
     }
 
+    /// The request a background `URLSession` needs to send one chunk itself.
+    ///
+    /// Exposed because a background session builds and owns its own tasks — it
+    /// can't borrow this client's `URLSession`, but it must borrow its auth and
+    /// URL construction or the two would drift.
+    public func chunkUploadRequest(uploadID: UUID, index: Int) throws -> URLRequest {
+        var request = try makeRequest(.put, "v1/uploads/\(uploadID)/chunk/\(index)")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
     public func commitUpload(
         uploadID: UUID,
         _ body: CommitUploadRequest

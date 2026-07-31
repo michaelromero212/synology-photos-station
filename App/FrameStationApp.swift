@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftData
 import SwiftUI
 #if os(iOS)
@@ -8,6 +9,29 @@ import UIKit
 /// Exists only to receive the APNs token: `didRegisterForRemoteNotifications`
 /// has no SwiftUI equivalent.
 final class PushAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // Both have to happen before launch finishes: BGTaskScheduler throws if
+        // an identifier is registered later, and the background session has to
+        // exist for iOS to hand back transfers that finished while we were gone.
+        BackgroundTransfers.shared.reconnect()
+        BackupScheduler.register {
+            await MainActor.run { BackupEngine.backgroundRunner?() }
+        }
+        return true
+    }
+
+    /// iOS relaunched us purely to say background uploads finished.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        BackgroundTransfers.shared.systemCompletionHandler = completionHandler
+    }
+
     func application(
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data

@@ -228,6 +228,27 @@ a home network it isn't needed — the file streams as-is and a seek fetches onl
 the bytes being watched. HLS would slot in as a different `kind` in
 `PlaybackURLResponse` without changing the call site.
 
+
+### Background backup leans on the resumable protocol, not on bookkeeping
+
+Chunks go out through a background `URLSession`, so a transfer in flight when
+iOS suspends or kills the app still completes. The useful property falls out of
+the upload protocol rather than from any state the client keeps: a chunk that
+lands after we're gone is recorded server-side, so the next run's `probeUpload`
+returns `.partial` with exactly the chunks still missing. Nothing is replayed,
+nothing is lost, and there is no durable per-chunk ledger to keep in sync.
+
+That's why the upload can `await` a background task: if the continuation dies
+with the process, the work still finishes. The `await` is a convenience for the
+common case, not the correctness mechanism.
+
+Wake-ups use `BGProcessingTask`, not `BGAppRefreshTask` — refresh tasks get
+seconds, processing tasks get minutes and can require external power, which is
+what backing up a phone actually needs. iOS decides when, typically overnight on
+charge. The next window is requested at the end of each run, since only one
+request can be pending at a time, and scheduling is torn down when backup is
+switched off so the app isn't woken to do nothing.
+
 ## 5. Database
 
 One Postgres instance, one schema, all users. The core idea is separating the
@@ -753,7 +774,7 @@ of watching progress bars before anything is evaluable.
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
 | **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
-| **M5** 🟡 | iOS backup engine | **Foreground pass done** — Photos authorisation (including an explicit limited-access warning), full library scan, durable SwiftData queue that survives termination, export → streamed SHA-256 → probe → chunked send → commit, dedup via content hash, retry cap, settings screen and grid status banner. Verified in the simulator: 11 library items → 10 blobs (a duplicate linked rather than re-sent), EXIF/GPS/place names/ThumbHashes/attribution all intact. **Remaining:** background `URLSession` + `BGTaskScheduler`, `PHPersistentChangeToken` incremental rescan, Live Photo pairing, and server-side reflink placement into `/volume1/homes/<user>/…` (needs the container running as root). |
+| **M5** 🟡 | iOS backup engine | **Foreground pass done** — Photos authorisation (including an explicit limited-access warning), full library scan, durable SwiftData queue that survives termination, export → streamed SHA-256 → probe → chunked send → commit, dedup via content hash, retry cap, settings screen and grid status banner. Verified in the simulator: 11 library items → 10 blobs (a duplicate linked rather than re-sent), EXIF/GPS/place names/ThumbHashes/attribution all intact. **Background transfers done** — every chunk goes through a background `URLSession`, and a `BGProcessingTask` wakes the app to keep going. **Remaining:** `PHPersistentChangeToken` incremental rescan, Live Photo pairing, and server-side reflink placement into `/volume1/homes/<user>/…` (needs the container running as root). |
 | **M5b** ✅ | DSM login | Server-side credential exchange against `SYNO.API.Auth`, account + personal space created on first sign-in, `dsm_uid` recorded for home-directory placement. Invite flow retained as fallback. |
 | **M5c** ✅ | Picker + share | Multi-select grid of recent library items with numbered badges and video durations, uploading straight into the current space. Shares the M5 upload path (`AssetUploader`) rather than duplicating it, so both routes commit identical metadata. Verified end to end: 3 items into Family Shared with attribution, place names, and the timeline refreshing behind the sheet. |
 | **M7** ✅ | Video playback | Direct play of the stored file over HTTP Range — no transcode, so a J4125 serves 4K without breaking a sweat. Signed short-lived playback URLs (HMAC-SHA256), because AVPlayer fetches media outside our URLSession and an AirPlay receiver fetches it from another device entirely. `Accept-Ranges` now advertised. AVKit `VideoPlayer` on all three platforms, autoplaying like Photos. 26 assertions. |

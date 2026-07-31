@@ -34,6 +34,34 @@ final class BackupEngine {
 
     func update(settings: BackupSettings) { self.settings = settings }
 
+    /// How the background task reaches whichever engine the app built.
+    ///
+    /// A closure rather than a shared instance: the engine needs the session and
+    /// model container that only the view tree has, and iOS may launch us
+    /// straight into a background task before any of that exists — in which case
+    /// this is nil and the wake-up is a no-op rather than a crash.
+    nonisolated(unsafe) static var backgroundRunner: (() -> Void)?
+
+    /// Installs `backgroundRunner` and asks for the first window.
+    func enableBackgroundRuns() {
+        Self.backgroundRunner = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.scanLibrary()
+                await self.start()
+                // Chain the next window from the end of this one; iOS only ever
+                // honours one pending request at a time.
+                BackupScheduler.schedule(requiresPower: self.settings.chargingOnly)
+            }
+        }
+        BackupScheduler.schedule(requiresPower: settings.chargingOnly)
+    }
+
+    func disableBackgroundRuns() {
+        Self.backgroundRunner = nil
+        BackupScheduler.cancel()
+    }
+
     // MARK: - Scanning
 
     /// Adds anything not already queued. Safe to call repeatedly — the unique

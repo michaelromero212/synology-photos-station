@@ -97,6 +97,14 @@ struct BackupSettingsView: View {
             .onChange(of: settings) { _, new in
                 new.save()
                 engine.update(settings: new)
+                // Asking iOS for background time only makes sense while backup
+                // is actually on; leaving a request pending after it's switched
+                // off wakes the app to do nothing.
+                if new.enabled {
+                    engine.enableBackgroundRuns()
+                } else {
+                    engine.disableBackgroundRuns()
+                }
             }
             .task {
                 access = PhotoLibraryScanner.access
