@@ -1,4 +1,5 @@
 #if os(iOS)
+import FrameStationAPI
 import Foundation
 import SwiftData
 
@@ -127,6 +128,34 @@ struct BackupProgress: Equatable {
         if pending > 0 { return "Backing up \(done + 1) of \(total)" }
         if failed > 0 { return "\(failed) item\(failed == 1 ? "" : "s") need retrying" }
         return "Backup complete"
+    }
+}
+#endif
+
+#if os(iOS)
+extension BackupItem {
+    /// What the queue row commits. Metadata is taken from the row rather than
+    /// re-read from the asset, so an item uploads with the values it was
+    /// scanned with even if the library changed underneath.
+    var descriptor: UploadDescriptor {
+        UploadDescriptor(
+            filename: filename,
+            mime: mime,
+            mediaType: MediaType(rawValue: mediaTypeRaw) ?? .photo,
+            width: width,
+            height: height,
+            durationMs: durationMs,
+            capturedAt: capturedAt,
+            capturedTZOffset: capturedTZOffset,
+            capturedTZOffsetFallback: capturedTZOffsetFallback,
+            latitude: latitude,
+            longitude: longitude,
+            isRaw: isRaw,
+            liveGroupID: liveGroupID,
+            burstID: burstID,
+            burstPick: burstPick,
+            sourceLocalID: localIdentifier
+        )
     }
 }
 #endif

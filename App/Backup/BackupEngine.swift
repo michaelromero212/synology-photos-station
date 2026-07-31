@@ -1,5 +1,4 @@
 #if os(iOS)
-import CryptoKit
 import FrameStationAPI
 import FrameStationKit
 import Foundation
@@ -143,93 +142,30 @@ final class BackupEngine {
         try? context.save()
         statusText = "Backing up \(item.filename)"
 
-        let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fs-upload-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: scratch) }
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [item.localIdentifier], options: nil
+        ).firstObject else {
+            // Deleted from the library since the scan. Not an error, and not
+            // retryable.
+            item.state = .skipped
+            item.lastError = "No longer in the photo library"
+            try? context.save()
+            return
+        }
 
         do {
-            guard let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [item.localIdentifier], options: nil
-            ).firstObject else {
-                // Deleted from the library since the scan. Not an error, and not
-                // retryable.
-                item.state = .skipped
-                item.lastError = "No longer in the photo library"
-                try? context.save()
-                return
-            }
-            guard let resource = PhotoLibraryScanner.primaryResource(for: asset) else {
-                item.state = .skipped
-                item.lastError = "No exportable resource"
-                try? context.save()
-                return
-            }
-
-            try await PhotoLibraryScanner.export(resource, to: scratch)
-
-            let attributes = try FileManager.default.attributesOfItem(atPath: scratch.path)
-            let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-            guard size > 0 else { throw BackupError.emptyExport }
-            item.byteSize = size
-
-            let digest = try Self.hashFile(at: scratch)
-            item.sha256 = digest
-
-            let probe = try await client.probeUpload(
-                UploadProbeRequest(
-                    spaceID: spaceID, sha256: digest, byteSize: size, filename: item.filename
-                )
+            let result = try await AssetUploader.send(
+                asset, descriptor: item.descriptor, to: spaceID, client: client
             )
-
-            switch probe.status {
-            case .have:
-                // Already on the NAS — someone else's copy, or a previous run.
-                // Link it rather than sending the bytes again.
-                if let assetID = probe.assetID {
-                    _ = try await client.linkAsset(
-                        spaceID: spaceID, assetID: assetID,
-                        LinkAssetRequest(sourceLocalID: item.localIdentifier)
-                    )
-                }
-                item.state = .done
-                item.completedAt = Date()
-
-            case .need, .partial:
-                guard let uploadID = probe.uploadID else { throw BackupError.noUploadSession }
-                item.uploadID = uploadID
-                item.chunkCount = probe.chunkCount
-                try? context.save()
-
-                try await sendChunks(
-                    probe: probe, uploadID: uploadID, file: scratch, client: client
-                )
-
-                _ = try await client.commitUpload(
-                    uploadID: uploadID,
-                    CommitUploadRequest(
-                        spaceID: spaceID,
-                        mediaType: MediaType(rawValue: item.mediaTypeRaw) ?? .photo,
-                        mime: item.mime,
-                        width: item.width,
-                        height: item.height,
-                        durationMs: item.durationMs,
-                        capturedAt: item.capturedAt,
-                        capturedTZOffset: item.capturedTZOffset,
-                        capturedTZOffsetFallback: item.capturedTZOffsetFallback,
-                        latitude: item.latitude,
-                        longitude: item.longitude,
-                        isRaw: item.isRaw,
-                        liveGroupID: item.liveGroupID,
-                        burstID: item.burstID,
-                        burstPick: item.burstPick,
-                        sourceLocalID: item.localIdentifier
-                    )
-                )
-                item.state = .done
-                item.completedAt = Date()
-            }
-
+            item.sha256 = result.sha256
+            item.byteSize = result.byteSize
+            item.state = .done
+            item.completedAt = Date()
             item.lastError = nil
+            try? context.save()
+        } catch UploadError.noExportableResource {
+            item.state = .skipped
+            item.lastError = "No exportable resource"
             try? context.save()
         } catch {
             item.state = .failed
@@ -239,45 +175,7 @@ final class BackupEngine {
         }
     }
 
-    /// Sends only the chunks the server says are missing, so a resumed upload
-    /// continues instead of restarting a large video from zero.
-    private func sendChunks(
-        probe: UploadProbeResponse,
-        uploadID: UUID,
-        file: URL,
-        client: FrameStationClient
-    ) async throws {
-        let handle = try FileHandle(forReadingFrom: file)
-        defer { try? handle.close() }
-
-        for index in probe.missingChunks {
-            try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
-            let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
-            guard !data.isEmpty else { continue }
-
-            let part = file.deletingLastPathComponent()
-                .appendingPathComponent("\(file.lastPathComponent).\(index)")
-            try data.write(to: part, options: .atomic)
-            defer { try? FileManager.default.removeItem(at: part) }
-
-            _ = try await client.uploadChunk(uploadID: uploadID, index: index, fileURL: part)
-        }
-    }
-
     // MARK: - Helpers
-
-    /// Streamed — a 4 GB video must not be read into memory to be hashed.
-    nonisolated static func hashFile(at url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            let chunk = try handle.read(upToCount: 4 * 1024 * 1024) ?? Data()
-            if chunk.isEmpty { break }
-            hasher.update(data: chunk)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
 
     private func refreshProgress(_ context: ModelContext) {
         let all = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
@@ -304,20 +202,6 @@ final class BackupEngine {
         }
         try? context.save()
         refreshProgress(context)
-    }
-}
-
-enum BackupError: LocalizedError {
-    case emptyExport
-    case noUploadSession
-
-    var errorDescription: String? {
-        switch self {
-        case .emptyExport:
-            return "The photo exported as an empty file — it may still be downloading from iCloud."
-        case .noUploadSession:
-            return "The server didn't return an upload session."
-        }
     }
 }
 #endif

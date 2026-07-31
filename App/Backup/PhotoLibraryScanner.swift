@@ -60,22 +60,25 @@ enum PhotoLibraryScanner {
             guard asset.mediaType == .image || (asset.mediaType == .video && includeVideos) else {
                 return
             }
-            guard let primary = primaryResource(for: asset) else { return }
-
-            let filename = primary.originalFilename
-            let ext = (filename as NSString).pathExtension.lowercased()
-            candidates.append(
-                Candidate(
-                    asset: asset,
-                    filename: filename,
-                    byteSize: byteSize(of: primary),
-                    mediaType: asset.mediaType == .video ? .video : .photo,
-                    mime: mimeType(for: ext, uti: primary.uniformTypeIdentifier),
-                    isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext)
-                )
-            )
+            if let candidate = describe(asset) { candidates.append(candidate) }
         }
         return candidates
+    }
+
+    /// One asset's file facts. Shared with the share picker so a photo carries
+    /// the same filename, MIME and RAW flag whichever way it reaches the NAS.
+    static func describe(_ asset: PHAsset) -> Candidate? {
+        guard let primary = primaryResource(for: asset) else { return nil }
+        let filename = primary.originalFilename
+        let ext = (filename as NSString).pathExtension.lowercased()
+        return Candidate(
+            asset: asset,
+            filename: filename,
+            byteSize: byteSize(of: primary),
+            mediaType: asset.mediaType == .video ? .video : .photo,
+            mime: mimeType(for: ext, uti: primary.uniformTypeIdentifier),
+            isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext)
+        )
     }
 
     /// The resource holding the bytes we actually want to archive.

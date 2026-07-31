@@ -26,6 +26,8 @@ struct TimelineView: View {
     @State private var showBackup = false
     @State private var backupSettings = BackupSettings.load()
     @State private var engine: BackupEngine?
+    @State private var showPicker = false
+    @State private var shareResult: Int?
     #endif
 
     private let spacing: CGFloat = 2
@@ -47,6 +49,23 @@ struct TimelineView: View {
             SpacesView(session: session) { showSpaces = false }
         }
         #if os(iOS)
+        .sheet(isPresented: $showPicker) {
+            LibraryPickerView(session: session, space: space) { count in
+                showPicker = false
+                shareResult = count
+                Task { await store?.refresh() }
+            } onCancel: {
+                showPicker = false
+            }
+        }
+        .alert(
+            "Added to \(space.name)",
+            isPresented: Binding(get: { shareResult != nil }, set: { if !$0 { shareResult = nil } })
+        ) {
+            Button("OK") { shareResult = nil }
+        } message: {
+            Text(shareResult.map { "\($0) item\($0 == 1 ? "" : "s") shared." } ?? "")
+        }
         .sheet(isPresented: $showBackup) {
             if let engine {
                 BackupSettingsView(
@@ -215,6 +234,19 @@ struct TimelineView: View {
                 }
             }
         }
+
+        #if os(iOS)
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showPicker = true
+            } label: {
+                Label(
+                    space.kind == .shared ? "Add to \(space.name)" : "Add Photos",
+                    systemImage: "plus"
+                )
+            }
+        }
+        #endif
 
         ToolbarItem(placement: .primaryAction) {
             Menu {
