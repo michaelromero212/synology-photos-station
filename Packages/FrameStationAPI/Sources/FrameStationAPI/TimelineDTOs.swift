@@ -51,6 +51,9 @@ public struct TimelineManifest: Codable, Sendable, Hashable {
 public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// `space_assets.id` — the placement. Use for favourites, delete, attribution.
     public let id: UUID
+    /// Which library this placement lives in. Constant across a timeline, but
+    /// an album may draw from several.
+    public let spaceID: UUID
     /// `assets.id` — the file. Use for thumbnail, preview, and original URLs.
     public let assetID: UUID
     public let capturedAt: Date
@@ -69,11 +72,12 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     public let isDerived: Bool
 
     public init(
-        id: UUID, assetID: UUID, capturedAt: Date, aspectRatio: Double,
+        id: UUID, spaceID: UUID, assetID: UUID, capturedAt: Date, aspectRatio: Double,
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
         isFavorite: Bool, uploadedBy: UUID, isDerived: Bool
     ) {
         self.id = id
+        self.spaceID = spaceID
         self.assetID = assetID
         self.capturedAt = capturedAt
         self.aspectRatio = aspectRatio

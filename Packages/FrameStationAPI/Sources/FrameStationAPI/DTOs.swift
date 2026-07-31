@@ -157,8 +157,6 @@ public struct PlaybackURLResponse: Codable, Sendable, Hashable {
 
 public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let id: UUID
-    public let spaceID: UUID
-    public let spaceName: String
     public let name: String
     public let itemCount: Int
     /// For the cover thumbnail. Nil while the album is empty.
@@ -167,12 +165,10 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let updatedAt: Date
 
     public init(
-        id: UUID, spaceID: UUID, spaceName: String, name: String, itemCount: Int,
+        id: UUID, name: String, itemCount: Int,
         coverAssetID: UUID?, createdAt: Date, updatedAt: Date
     ) {
         self.id = id
-        self.spaceID = spaceID
-        self.spaceName = spaceName
         self.name = name
         self.itemCount = itemCount
         self.coverAssetID = coverAssetID
@@ -187,13 +183,11 @@ public struct AlbumListResponse: Codable, Sendable {
 }
 
 public struct CreateAlbumRequest: Codable, Sendable {
-    public let spaceID: UUID
     public let name: String
     /// Optional first contents, so "select photos → new album" is one call.
     public let spaceAssetIDs: [UUID]
 
-    public init(spaceID: UUID, name: String, spaceAssetIDs: [UUID] = []) {
-        self.spaceID = spaceID
+    public init(name: String, spaceAssetIDs: [UUID] = []) {
         self.name = name
         self.spaceAssetIDs = spaceAssetIDs
     }
@@ -209,7 +203,7 @@ public struct UpdateAlbumRequest: Codable, Sendable {
 }
 
 /// Placements to add — not bare asset ids, so an album can only ever contain
-/// photos already placed in its own space.
+/// photos the owner can already see.
 public struct AlbumAssetsRequest: Codable, Sendable {
     public let spaceAssetIDs: [UUID]
     public init(spaceAssetIDs: [UUID]) { self.spaceAssetIDs = spaceAssetIDs }

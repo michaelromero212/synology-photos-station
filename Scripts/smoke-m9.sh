@@ -45,18 +45,14 @@ S1=$(upload "$T1" "$FAM" shared-1)
 
 echo "=== 1. create ==="
 R=$(curl -s -X POST "$API/v1/albums" -H "$A1" -H 'Content-Type: application/json' \
-  -d "{\"spaceID\":\"$P1\",\"name\":\"  Iceland 2012  \",\"spaceAssetIDs\":[\"$M1\",\"$M2\"]}")
+  -d "{\"name\":\"  Iceland 2012  \",\"spaceAssetIDs\":[\"$M1\",\"$M2\"]}")
 ALB=$(echo "$R" | jq '["id"]')
-check "name is trimmed"   "Iceland 2012"  "$(echo "$R" | jq '["name"]')"
-check "counts its photos" "2"             "$(echo "$R" | jq '["itemCount"]')"
-check "knows its space"   "Personal Space" "$(echo "$R" | jq '["spaceName"]')"
-check "picks a cover"     "True"          "$(python3 -c "import json;print(json.load(open('/dev/stdin'))['coverAssetID'] is not None)" <<< "$R")"
+check "name is trimmed"   "Iceland 2012" "$(echo "$R" | jq '["name"]')"
+check "counts its photos" "2"            "$(echo "$R" | jq '["itemCount"]')"
+check "picks a cover"     "True"         "$(python3 -c "import json,sys;print(json.load(sys.stdin)['coverAssetID'] is not None)" <<< "$R")"
 check "blank name refused" "400" \
   "$(code -X POST "$API/v1/albums" -H "$A1" -H 'Content-Type: application/json' \
-      -d "{\"spaceID\":\"$P1\",\"name\":\"   \",\"spaceAssetIDs\":[]}")"
-denied "cannot create in a space you're not in" \
-  "$(code -X POST "$API/v1/albums" -H "$A3" -H 'Content-Type: application/json' \
-      -d "{\"spaceID\":\"$P1\",\"name\":\"Theirs\",\"spaceAssetIDs\":[]}")"
+      -d '{"name":"   ","spaceAssetIDs":[]}')"
 
 echo
 echo "=== 2. add and remove ==="
@@ -66,56 +62,68 @@ check "adding grows it" "3" \
 check "adding twice is idempotent" "3" \
   "$(curl -s -X POST "$API/v1/albums/$ALB/assets" -H "$A1" -H 'Content-Type: application/json' \
       -d "{\"spaceAssetIDs\":[\"$M3\"]}" | jq '["itemCount"]')"
-check "removing shrinks it" "204" \
-  "$(code -X DELETE "$API/v1/albums/$ALB/assets/$M3" -H "$A1")"
+check "removing shrinks it" "204" "$(code -X DELETE "$API/v1/albums/$ALB/assets/$M3" -H "$A1")"
 check "count reflects removal" "2" "$(curl -s "$API/v1/albums/$ALB" -H "$A1" | jq '["itemCount"]')"
 
 echo
-echo "=== 3. an album cannot cross a space boundary ==="
-# S1 lives in Family Shared; this album lives in Michael's personal space.
-check "a photo from another space is ignored" "2" \
+echo "=== 3. an album is private to its owner ==="
+check "nobody else can read it"   "404" "$(code "$API/v1/albums/$ALB" -H "$A2")"
+check "nor list it"               "0" \
+  "$(curl -s "$API/v1/albums" -H "$A2" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["albums"]))')"
+check "nor see its photos"        "404" "$(code "$API/v1/albums/$ALB/items" -H "$A2")"
+check "nor add to it"             "404" \
+  "$(code -X POST "$API/v1/albums/$ALB/assets" -H "$A2" -H 'Content-Type: application/json' \
+      -d '{"spaceAssetIDs":[]}')"
+check "nor rename it"             "404" \
+  "$(code -X PATCH "$API/v1/albums/$ALB" -H "$A2" -H 'Content-Type: application/json' -d '{"name":"Mine now"}')"
+check "nor delete it"             "404" "$(code -X DELETE "$API/v1/albums/$ALB" -H "$A2")"
+check "unauthenticated is rejected" "401" "$(code "$API/v1/albums")"
+
+echo
+echo "=== 4. you can only collect what you can see ==="
+# S1 is Morgan's photo in a space Michael isn't in.
+S1=$(upload "$T2" "$P2" morgans-private)
+check "a stranger's photo is ignored" "2" \
   "$(curl -s -X POST "$API/v1/albums/$ALB/assets" -H "$A1" -H 'Content-Type: application/json' \
       -d "{\"spaceAssetIDs\":[\"$S1\"]}" | jq '["itemCount"]')"
 check "and is not recorded" "0" \
   "$(q "select count(*) from album_assets where album_id='$ALB' and space_asset_id='$S1';")"
-# Morgan is in Family Shared but not Michael's personal space.
-check "a member of one space can't see the other's album" "404" \
-  "$(code "$API/v1/albums/$ALB" -H "$A2")"
-check "nor add to it" "404" \
-  "$(code -X POST "$API/v1/albums/$ALB/assets" -H "$A2" -H 'Content-Type: application/json' \
-      -d "{\"spaceAssetIDs\":[\"$S1\"]}")"
-check "nor delete it" "404" "$(code -X DELETE "$API/v1/albums/$ALB" -H "$A2")"
+check "a made-up id is ignored too" "2" \
+  "$(curl -s -X POST "$API/v1/albums/$ALB/assets" -H "$A1" -H 'Content-Type: application/json' \
+      -d '{"spaceAssetIDs":["00000000-0000-0000-0000-000000000000"]}' | jq '["itemCount"]')"
 
 echo
-echo "=== 4. shared albums follow shared membership ==="
-SALB=$(curl -s -X POST "$API/v1/albums" -H "$A1" -H 'Content-Type: application/json' \
-  -d "{\"spaceID\":\"$FAM\",\"name\":\"Birthday\",\"spaceAssetIDs\":[\"$S1\"]}" | jq '["id"]')
-check "a fellow member sees it" "Birthday" "$(curl -s "$API/v1/albums/$SALB" -H "$A2" | jq '["name"]')"
-check "a fellow member can add to it" "200" \
-  "$(code -X POST "$API/v1/albums/$SALB/assets" -H "$A2" -H 'Content-Type: application/json' \
-      -d "{\"spaceAssetIDs\":[\"$S1\"]}")"
-check "a non-member cannot see it" "404" "$(code "$API/v1/albums/$SALB" -H "$A3")"
-curl -s -X DELETE "$API/v1/spaces/$FAM/members/$U2" -H "$A1" >/dev/null
-check "removal from the space removes the album too" "404" \
-  "$(code "$API/v1/albums/$SALB" -H "$A2")"
+echo "=== 5. a shared photo may go in a private album ==="
+FAM=$(curl -s -X POST "$API/v1/spaces" -H "$A1" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Family Shared\",\"memberIDs\":[\"$U2\"]}" | jq '["id"]')
+SH=$(upload "$T1" "$FAM" shared-one)
+check "adding a shared photo works" "3" \
+  "$(curl -s -X POST "$API/v1/albums/$ALB/assets" -H "$A1" -H 'Content-Type: application/json' \
+      -d "{\"spaceAssetIDs\":[\"$SH\"]}" | jq '["itemCount"]')"
+# Morgan can see that photo in the shared space, but must not see the album.
+check "the photo is visible to the other member" "200" \
+  "$(code -H "$A2" "$API/v1/assets/$(q "select asset_id from space_assets where id='$SH';")/original")"
+check "but the album still isn't" "404" "$(code "$API/v1/albums/$ALB" -H "$A2")"
 
 echo
-echo "=== 5. listing ==="
-check "lists only your albums" "2" \
-  "$(curl -s "$API/v1/albums" -H "$A1" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["albums"]))')"
-check "a stranger sees none" "0" \
-  "$(curl -s "$API/v1/albums" -H "$A3" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["albums"]))')"
-check "unauthenticated is rejected" "401" "$(code "$API/v1/albums")"
+echo "=== 6. leaving a library takes its photos out of your albums ==="
+# Michael is removed from his own shared space by... make Morgan own one instead.
+FAM2=$(curl -s -X POST "$API/v1/spaces" -H "$A2" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Morgan Shared\",\"memberIDs\":[\"$U1\"]}" | jq '["id"]')
+SH2=$(upload "$T2" "$FAM2" morgan-shared)
+curl -s -X POST "$API/v1/albums/$ALB/assets" -H "$A1" -H 'Content-Type: application/json' \
+  -d "{\"spaceAssetIDs\":[\"$SH2\"]}" >/dev/null
+check "it joins the album" "4" "$(curl -s "$API/v1/albums/$ALB" -H "$A1" | jq '["itemCount"]')"
+curl -s -X DELETE "$API/v1/spaces/$FAM2/members/$U1" -H "$A2" >/dev/null
+check "removal drops it from the count" "3" "$(curl -s "$API/v1/albums/$ALB" -H "$A1" | jq '["itemCount"]')"
+check "and from the photos" "3" \
+  "$(curl -s "$API/v1/albums/$ALB/items" -H "$A1" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
 
 echo
-echo "=== 6. rename, cover, delete ==="
+echo "=== 7. rename, cover, delete ==="
 check "rename" "Iceland" \
   "$(curl -s -X PATCH "$API/v1/albums/$ALB" -H "$A1" -H 'Content-Type: application/json' \
       -d '{"name":"Iceland"}' | jq '["name"]')"
-COVER=$(q "select sa.asset_id from album_assets aa join space_assets sa on sa.id=aa.space_asset_id where aa.album_id='$ALB' order by aa.position desc limit 1;")
-check "cover can be set to a photo in the album" "$COVER" \
-  "$(curl -s -X PATCH "$API/v1/albums/$ALB" -H "$A1" -H 'Content-Type: application/json' \
-      -d "{\"coverAssetID\":\"$COVER\"}" | jq '["coverAssetID"]' | tr 'A-Z' 'a-z')"
 OUTSIDE=$(q "select asset_id from space_assets where id='$S1';")
 check "cover cannot be a photo outside the album" "400" \
   "$(code -X PATCH "$API/v1/albums/$ALB" -H "$A1" -H 'Content-Type: application/json' \

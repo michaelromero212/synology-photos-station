@@ -22,7 +22,7 @@ struct TimelineController: RouteCollection {
     }
 
     /// Local wall-clock capture time, falling back to when we first saw the file.
-    private static let localTime = "COALESCE(a.local_captured_at, a.created_at AT TIME ZONE 'UTC')"
+    static let localTime = "COALESCE(a.local_captured_at, a.created_at AT TIME ZONE 'UTC')"
 
     private static func format(for zoom: TimelineZoom) -> String {
         switch zoom {
@@ -75,8 +75,9 @@ struct TimelineController: RouteCollection {
 
     // MARK: - Bucket items
 
-    private struct ItemRow: Decodable {
+    struct ItemRow: Decodable {
         let id: UUID
+        let spaceID: UUID
         let assetID: UUID
         let capturedAt: Date
         let width: Int?
@@ -99,6 +100,7 @@ struct TimelineController: RouteCollection {
             }
             return TimelineItem(
                 id: id,
+                spaceID: spaceID,
                 assetID: assetID,
                 capturedAt: capturedAt,
                 aspectRatio: ratio,
@@ -126,6 +128,7 @@ struct TimelineController: RouteCollection {
         let pattern = Self.format(for: zoom)
         let rows = try await req.sql.raw("""
             SELECT sa.id,
+                   sa.space_id   AS "spaceID",
                    a.id          AS "assetID",
                    \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
                    a.width, a.height,
@@ -189,6 +192,7 @@ struct TimelineController: RouteCollection {
         if !needsItem.isEmpty {
             let hydrated = try await req.sql.raw("""
                 SELECT sa.id,
+                    sa.space_id AS "spaceID",
                        a.id          AS "assetID",
                        \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
                        a.width, a.height,
@@ -273,8 +277,8 @@ struct TimelineController: RouteCollection {
 
         guard let row = try await req.sql.raw("""
             SELECT sa.id,
+                sa.space_id AS "spaceID",
                    a.id AS "assetID",
-                   sa.space_id AS "spaceID",
                    a.media_type AS "mediaType",
                    a.mime,
                    a.byte_size AS "byteSize",

@@ -103,6 +103,41 @@ public actor FrameStationClient {
         try await send(.get, "v1/assets/\(assetID.uuidString)/playback")
     }
 
+    // MARK: - Albums
+
+    public func albums() async throws -> AlbumListResponse {
+        try await send(.get, "v1/albums")
+    }
+
+    public func createAlbum(_ body: CreateAlbumRequest) async throws -> AlbumDTO {
+        try await send(.post, "v1/albums", body: body)
+    }
+
+    public func albumItems(_ albumID: UUID) async throws -> TimelineBucketPage {
+        try await send(.get, "v1/albums/\(albumID.uuidString)/items")
+    }
+
+    public func updateAlbum(_ albumID: UUID, _ body: UpdateAlbumRequest) async throws -> AlbumDTO {
+        try await send(.patch, "v1/albums/\(albumID.uuidString)", body: body)
+    }
+
+    public func deleteAlbum(_ albumID: UUID) async throws {
+        try await sendNoContent(.delete, "v1/albums/\(albumID.uuidString)", body: EmptyAlbumBody())
+    }
+
+    public func addToAlbum(_ albumID: UUID, _ body: AlbumAssetsRequest) async throws -> AlbumDTO {
+        try await send(.post, "v1/albums/\(albumID.uuidString)/assets", body: body)
+    }
+
+    public func removeFromAlbum(_ albumID: UUID, placementID: UUID) async throws {
+        try await sendNoContent(
+            .delete, "v1/albums/\(albumID.uuidString)/assets/\(placementID.uuidString)",
+            body: EmptyAlbumBody()
+        )
+    }
+
+    private struct EmptyAlbumBody: Encodable {}
+
     public func probeUpload(_ body: UploadProbeRequest) async throws -> UploadProbeResponse {
         try await send(.post, "v1/uploads/probe", body: body)
     }

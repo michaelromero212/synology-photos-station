@@ -278,18 +278,20 @@ Non-membership answers 404, not 403, so a refused request can't be used to
 confirm that a space or asset exists.
 
 
-### Albums borrow their permissions rather than owning any
+### Albums are private, and borrow their permissions rather than owning any
 
-An album belongs to a *space*, not to a user, and `album_assets` references a
-`space_asset` — the placement — rather than the bare asset. Both choices are
-about not creating a second source of truth for who can see what.
+An album belongs to a *person*, not to a library. Nobody else can read one,
+list one, or learn that it exists — including members of a shared library whose
+photos it contains. That is the whole point: an album is how you organise, not
+something you publish.
 
-Because a placement only exists inside one space, an album physically cannot
-contain a photo that the space's members couldn't already see. Adding a
-placement from another space isn't rejected with an error; the insert simply
-matches no row and nothing happens. There is no album-level ACL to drift out of
-step with `space_members`, and removing someone from a shared space removes
-their access to its albums in the same statement.
+`album_assets` references a `space_asset` — the placement — rather than the bare
+asset, and every read re-checks that the owner is still a member of each
+placement's space. So an album may draw from a shared library, and leaving that
+library takes those photos back out of the album rather than leaving a private
+window into a space you were removed from. Adding a placement you can't see
+isn't an error; the insert matches no row and nothing happens, which also means
+it can't be used to probe whether an id exists.
 
 Deleting an album deletes the collection, never the photos. Covers must be a
 photo the album actually contains, or the cover field becomes a way to display

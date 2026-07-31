@@ -11,9 +11,14 @@ extension AlbumAssetsRequest: @retroactive Content {}
 
 /// Albums: collections you build by hand, cutting across dates.
 ///
-/// Access is derived entirely from the album's space. There is no album-level
-/// permission to keep in step with space membership — the one that would
-/// inevitably drift and become the hole.
+/// Private to their owner. Nobody else can see one, list one, or learn that it
+/// exists — including members of a library whose photos it contains.
+///
+/// Contents are `space_assets` placements rather than bare assets, and every
+/// read re-checks that the owner is still a member of each placement's space.
+/// So an album may draw from a shared library, but leaving that library takes
+/// those photos out of the album rather than leaving a private window into a
+/// space you were removed from.
 struct AlbumController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
         let protected = routes
@@ -25,6 +30,7 @@ struct AlbumController: RouteCollection {
         protected.get("albums", ":albumID", use: detail)
         protected.patch("albums", ":albumID", use: update)
         protected.delete("albums", ":albumID", use: delete)
+        protected.get("albums", ":albumID", "items", use: items)
         protected.post("albums", ":albumID", "assets", use: addAssets)
         protected.delete("albums", ":albumID", "assets", ":spaceAssetID", use: removeAsset)
     }
@@ -33,8 +39,6 @@ struct AlbumController: RouteCollection {
 
     private struct AlbumRow: Decodable {
         let id: UUID
-        let spaceID: UUID
-        let spaceName: String
         let name: String
         let itemCount: Int
         let coverAssetID: UUID?
@@ -44,7 +48,7 @@ struct AlbumController: RouteCollection {
 
     private func dto(_ row: AlbumRow) -> AlbumDTO {
         AlbumDTO(
-            id: row.id, spaceID: row.spaceID, spaceName: row.spaceName, name: row.name,
+            id: row.id, name: row.name,
             itemCount: row.itemCount, coverAssetID: row.coverAssetID,
             createdAt: row.createdAt, updatedAt: row.updatedAt
         )
@@ -57,10 +61,7 @@ struct AlbumController: RouteCollection {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let rows = try await req.sql.raw("""
             \(raw: Self.albumSelect)
-            WHERE EXISTS (
-                SELECT 1 FROM space_members m
-                WHERE m.space_id = a.space_id AND m.user_id = \(bind: device.userID)
-            )
+            WHERE a.owner_user_id = \(bind: device.userID)
             ORDER BY a.updated_at DESC
             """).all(decoding: AlbumRow.self)
         return AlbumListResponse(albums: rows.map(dto))
@@ -70,6 +71,44 @@ struct AlbumController: RouteCollection {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let albumID = try req.parameters.require("albumID", as: UUID.self)
         return dto(try await requireReadable(albumID, device: device, on: req.sql))
+    }
+
+    /// The album's photos, in album order — the one thing that differs from the
+    /// timeline, which is always chronological.
+    private func items(_ req: Request) async throws -> TimelineBucketPage {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let albumID = try req.parameters.require("albumID", as: UUID.self)
+        _ = try await requireReadable(albumID, device: device, on: req.sql)
+
+        let rows = try await req.sql.raw("""
+            SELECT sa.id,
+                   sa.space_id   AS "spaceID",
+                   a.id          AS "assetID",
+                   \(unsafeRaw: TimelineController.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+                   a.width, a.height,
+                   a.media_type  AS "mediaType",
+                   a.duration_ms AS "durationMs",
+                   a.thumbhash   AS "thumbHash",
+                   EXISTS (
+                       SELECT 1 FROM space_asset_favorites f
+                       WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
+                   ) AS "isFavorite",
+                   sa.uploaded_by_user_id AS "uploadedBy",
+                   (a.derived_at IS NOT NULL) AS "isDerived"
+            FROM album_assets aa
+            JOIN space_assets sa ON sa.id = aa.space_asset_id
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN space_members m ON m.space_id = sa.space_id
+                                AND m.user_id = \(bind: device.userID)
+            WHERE aa.album_id = \(bind: albumID) AND sa.deleted_at IS NULL
+            ORDER BY aa.position, aa.added_at
+            """).all(decoding: TimelineController.ItemRow.self)
+
+        // Reuses the timeline's page shape so the client renders albums with
+        // the same grid, cells and thumbnail cache. `key` is the album id.
+        return TimelineBucketPage(
+            key: albumID.uuidString, zoom: .day, items: rows.map { $0.toItem() }
+        )
     }
 
     // MARK: - Writing
@@ -82,25 +121,16 @@ struct AlbumController: RouteCollection {
         guard !name.isEmpty, name.count <= 120 else {
             throw Abort(.badRequest, reason: "An album needs a name.")
         }
-        // Contributor, not merely member: a viewer can look at a shared space
-        // but must not reorganise it.
-        try await SpaceAccess.requireContributor(
-            spaceID: input.spaceID, userID: device.userID, on: req.sql
-        )
-
         guard let created = try await req.sql.raw("""
-            INSERT INTO albums (space_id, name, created_by)
-            VALUES (\(bind: input.spaceID), \(bind: name), \(bind: device.userID))
+            INSERT INTO albums (owner_user_id, name, created_by)
+            VALUES (\(bind: device.userID), \(bind: name), \(bind: device.userID))
             RETURNING id
             """).first(decoding: IDRow.self) else {
             throw Abort(.internalServerError, reason: "Could not create the album.")
         }
 
         if !input.spaceAssetIDs.isEmpty {
-            try await attach(
-                input.spaceAssetIDs, to: created.id, spaceID: input.spaceID,
-                by: device.userID, on: req.sql
-            )
+            try await attach(input.spaceAssetIDs, to: created.id, by: device.userID, on: req.sql)
         }
         return dto(try await requireReadable(created.id, device: device, on: req.sql))
     }
@@ -158,11 +188,8 @@ struct AlbumController: RouteCollection {
         let albumID = try req.parameters.require("albumID", as: UUID.self)
         let input = try req.content.decode(AlbumAssetsRequest.self)
 
-        let album = try await requireWritable(albumID, device: device, on: req.sql)
-        try await attach(
-            input.spaceAssetIDs, to: albumID, spaceID: album.spaceID,
-            by: device.userID, on: req.sql
-        )
+        _ = try await requireWritable(albumID, device: device, on: req.sql)
+        try await attach(input.spaceAssetIDs, to: albumID, by: device.userID, on: req.sql)
         return dto(try await requireReadable(albumID, device: device, on: req.sql))
     }
 
@@ -182,14 +209,14 @@ struct AlbumController: RouteCollection {
 
     // MARK: - Helpers
 
-    /// Adds placements, ignoring any that don't belong to this album's space.
+    /// Adds placements, silently ignoring any the owner can't see.
     ///
-    /// That filter is the whole security story for albums: because
-    /// `album_assets` points at a placement, and a placement is only ever
-    /// visible to members of its space, an album physically cannot contain a
-    /// photo the space's members couldn't already see.
+    /// The membership join is the whole security story: you may only collect
+    /// photos already visible to you, and an unknown or forbidden id adds
+    /// nothing rather than erroring — which also means this can't be used to
+    /// probe whether an id exists.
     private func attach(
-        _ placementIDs: [UUID], to albumID: UUID, spaceID: UUID,
+        _ placementIDs: [UUID], to albumID: UUID,
         by userID: UUID, on sql: any SQLDatabase
     ) async throws {
         guard !placementIDs.isEmpty else { return }
@@ -206,9 +233,10 @@ struct AlbumController: RouteCollection {
                            0
                        )
                 FROM space_assets sa
+                JOIN space_members m ON m.space_id = sa.space_id
                 WHERE sa.id = \(bind: placementID)
-                  AND sa.space_id = \(bind: spaceID)
                   AND sa.deleted_at IS NULL
+                  AND m.user_id = \(bind: userID)
                 ON CONFLICT (album_id, space_asset_id) DO NOTHING
                 """).run()
         }
@@ -249,35 +277,32 @@ struct AlbumController: RouteCollection {
     ) async throws -> AlbumRow {
         guard let row = try await sql.raw("""
             \(raw: Self.albumSelect)
-            WHERE a.id = \(bind: albumID)
-              AND EXISTS (
-                  SELECT 1 FROM space_members m
-                  WHERE m.space_id = a.space_id AND m.user_id = \(bind: device.userID)
-              )
+            WHERE a.id = \(bind: albumID) AND a.owner_user_id = \(bind: device.userID)
             """).first(decoding: AlbumRow.self) else {
             throw Abort(.notFound, reason: "No such album.")
         }
         return row
     }
 
+    /// Same as readable: you own it or it doesn't exist as far as you're
+    /// concerned.
     private func requireWritable(
         _ albumID: UUID, device: AuthenticatedDevice, on sql: any SQLDatabase
     ) async throws -> AlbumRow {
-        let album = try await requireReadable(albumID, device: device, on: sql)
-        try await SpaceAccess.requireContributor(
-            spaceID: album.spaceID, userID: device.userID, on: sql
-        )
-        return album
+        try await requireReadable(albumID, device: device, on: sql)
     }
 
+    /// The count re-checks membership too, so an album's badge never promises
+    /// photos the owner can no longer reach.
     private static let albumSelect = """
-        SELECT a.id, a.space_id AS "spaceID", s.name AS "spaceName", a.name,
+        SELECT a.id, a.name,
                a.cover_asset_id AS "coverAssetID",
                a.created_at AS "createdAt", a.updated_at AS "updatedAt",
                (SELECT count(*) FROM album_assets aa
                 JOIN space_assets sa ON sa.id = aa.space_asset_id
+                JOIN space_members m2 ON m2.space_id = sa.space_id
+                                     AND m2.user_id = a.owner_user_id
                 WHERE aa.album_id = a.id AND sa.deleted_at IS NULL)::int AS "itemCount"
         FROM albums a
-        JOIN spaces s ON s.id = a.space_id
         """
 }
