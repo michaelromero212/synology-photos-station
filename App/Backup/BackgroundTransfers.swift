@@ -20,6 +20,10 @@ final class BackgroundTransfers: NSObject {
     private let lock = NSLock()
     private var waiters: [Int: CheckedContinuation<(Data, URLResponse), any Error>] = [:]
     private var bodies: [Int: Data] = [:]
+    /// Byte-progress reporters, keyed by task. iOS reports upload progress on
+    /// the delegate, which is the only place it exists — there is no polling
+    /// equivalent.
+    private var reporters: [Int: @Sendable (Int64) -> Void] = [:]
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(
@@ -44,11 +48,16 @@ final class BackgroundTransfers: NSObject {
     /// If we're killed mid-flight the continuation dies with us and the upload
     /// still completes — the next probe reconciles. That's why this is safe to
     /// await rather than needing durable per-chunk bookkeeping.
-    func upload(_ request: URLRequest, fromFile fileURL: URL) async throws -> (Data, URLResponse) {
+    func upload(
+        _ request: URLRequest,
+        fromFile fileURL: URL,
+        onProgress: (@Sendable (Int64) -> Void)? = nil
+    ) async throws -> (Data, URLResponse) {
         let task = session.uploadTask(with: request, fromFile: fileURL)
         return try await withCheckedThrowingContinuation { continuation in
             lock.lock()
             waiters[task.taskIdentifier] = continuation
+            reporters[task.taskIdentifier] = onProgress
             lock.unlock()
             task.resume()
         }
@@ -63,11 +72,25 @@ extension BackgroundTransfers: URLSessionDataDelegate {
     }
 
     func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        lock.lock()
+        let reporter = reporters[task.taskIdentifier]
+        lock.unlock()
+        reporter?(totalBytesSent)
+    }
+
+    func urlSession(
         _ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?
     ) {
         lock.lock()
         let waiter = waiters.removeValue(forKey: task.taskIdentifier)
         let body = bodies.removeValue(forKey: task.taskIdentifier) ?? Data()
+        reporters.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
 
         // No waiter means we were relaunched after this finished. Nothing to do:

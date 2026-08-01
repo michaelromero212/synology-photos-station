@@ -15,11 +15,13 @@ import SwiftUI
 struct TimelineView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
+    #if os(iOS)
+    /// Owned by RootTabView so every tab reads the same backup state.
+    let engine: BackupEngine?
+    @Binding var backupSettings: BackupSettings
+    #endif
 
     @State private var store: TimelineStore?
-    #if os(iOS)
-    @Environment(\.backupContainer) private var modelContainer
-    #endif
     /// Follows the zoom — see TimelineZoom.columns.
     private var columns: Int { (store?.zoom ?? .day).columns }
     @State private var activity: ActivityStore?
@@ -27,8 +29,6 @@ struct TimelineView: View {
     @State private var showSpaces = false
     #if os(iOS)
     @State private var showBackup = false
-    @State private var backupSettings = BackupSettings.load()
-    @State private var engine: BackupEngine?
     @State private var showPicker = false
     @State private var shareResult: Int?
     #endif
@@ -37,12 +37,24 @@ struct TimelineView: View {
     @State private var scrollFraction: Double = 0
 
     var body: some View {
-        Group {
-            if let store {
-                content(store)
-            } else {
-                ProgressView()
+        VStack(spacing: 0) {
+            // Above the content rather than inside it: the answer to "is my
+            // phone backed up?" must not depend on whether the library
+            // happens to have photos in it yet.
+            #if os(iOS)
+            if let engine {
+                backupBanner(engine)
             }
+            #endif
+
+            Group {
+                if let store {
+                    content(store)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxHeight: .infinity)
         }
         .navigationTitle(space.name)
         #if os(iOS)
@@ -72,9 +84,8 @@ struct TimelineView: View {
         }
         .sheet(isPresented: $showBackup) {
             if let engine {
-                BackupSettingsView(
-                    session: session, engine: engine,
-                    settings: $backupSettings
+                BackupHubView(
+                    session: session, engine: engine, settings: $backupSettings
                 ) { showBackup = false }
             }
         }
@@ -109,14 +120,6 @@ struct TimelineView: View {
             store = newStore
             await newStore?.load()
         }
-        #if os(iOS)
-        .task {
-            guard engine == nil, let container = modelContainer else { return }
-            engine = BackupEngine(
-                container: container, session: session, settings: backupSettings
-            )
-        }
-        #endif
     }
 
     @ViewBuilder
@@ -139,16 +142,7 @@ struct TimelineView: View {
             )
 
         case .loaded:
-            #if os(iOS)
-            VStack(spacing: 0) {
-                if let engine, backupSettings.enabled, engine.progress.total > 0 {
-                    backupBanner(engine)
-                }
-                grid(store)
-            }
-            #else
             grid(store)
-            #endif
         }
     }
 
@@ -322,22 +316,65 @@ struct TimelineView: View {
 
 
     #if os(iOS)
-    /// Pinned above the grid, matching Synology's "Photo Backup Complete" row —
-    /// but this one stays put and reports failures instead of vanishing.
+    /// Pinned above the grid: always present while backup is on, because
+    /// "is my phone backed up" is a question people ask constantly and a
+    /// banner that only appears during work can't answer it.
     private func backupBanner(_ engine: BackupEngine) -> some View {
         Button { showBackup = true } label: {
-            HStack(spacing: 10) {
-                Image(systemName: engine.progress.isComplete
-                      ? "checkmark.icloud.fill" : "icloud.and.arrow.up")
-                    .foregroundStyle(engine.progress.isComplete ? Color.green : Color.accentColor)
-                Text(engine.progress.summary).font(.subheadline)
+            HStack(spacing: 12) {
+                Image(systemName: bannerIcon(engine))
+                    .font(.title3)
+                    .foregroundStyle(bannerTint(engine))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(bannerTitle(engine))
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                    if let detail = bannerDetail(engine) {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
         .buttonStyle(.plain)
-        .background(.quaternary.opacity(0.35))
+    }
+
+    /// Off is a status too — hiding the bar when backup is disabled leaves the
+    /// question "is my phone backed up?" unanswered, which is the one thing
+    /// this bar exists to answer.
+    private func bannerTitle(_ engine: BackupEngine) -> String {
+        guard backupSettings.enabled else { return "Photo Backup Off" }
+        return engine.progress.pending > 0 ? "Backing Up" : "Photo Backup Complete"
+    }
+
+    private func bannerDetail(_ engine: BackupEngine) -> String? {
+        guard backupSettings.enabled else { return "Tap to turn on" }
+        guard engine.progress.pending > 0 else { return nil }
+        let count = engine.progress.pending
+        return "\(count) item\(count == 1 ? "" : "s") left"
+    }
+
+    private func bannerIcon(_ engine: BackupEngine) -> String {
+        guard backupSettings.enabled else { return "icloud.slash" }
+        return engine.progress.pending > 0 ? "icloud.and.arrow.up" : "checkmark.icloud.fill"
+    }
+
+    private func bannerTint(_ engine: BackupEngine) -> Color {
+        guard backupSettings.enabled else { return .secondary }
+        return engine.progress.pending > 0 ? Color.accentColor : Color.green
     }
     #endif
 

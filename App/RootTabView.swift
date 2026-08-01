@@ -11,13 +11,24 @@ import SwiftUI
 struct RootTabView: View {
     @Bindable var session: AppSession
 
+    #if os(iOS)
+    /// One engine for the whole app.
+    ///
+    /// Built here rather than per-tab: two instances over the same queue would
+    /// each claim work and each schedule background runs, so a photo could be
+    /// uploaded twice and the tabs would disagree about progress.
+    @Environment(\.backupContainer) private var modelContainer
+    @State private var engine: BackupEngine?
+    @State private var backupSettings = BackupSettings.load()
+    #endif
+
     var body: some View {
         // `.tabItem` rather than the iOS 18 `Tab` builder: the deployment
         // target is 17, and this form behaves identically on both.
         TabView {
             NavigationStack {
                 if let personal = session.personalSpace {
-                    TimelineView(session: session, space: personal)
+                    photosTimeline(personal)
                 } else {
                     ProgressView()
                 }
@@ -27,13 +38,57 @@ struct RootTabView: View {
             NavigationStack { AlbumsView(session: session) }
                 .tabItem { Label("Albums", systemImage: "rectangle.stack") }
 
-            NavigationStack { SharedTab(session: session) }
+            NavigationStack { sharedTab }
                 .tabItem { Label("Shared", systemImage: "person.2") }
 
-            NavigationStack { MoreView(session: session) }
-                .tabItem { Label("More", systemImage: "ellipsis") }
+            NavigationStack { moreTab }
+            .tabItem { Label("More", systemImage: "ellipsis") }
         }
+        #if os(iOS)
+        .task {
+            guard engine == nil, let container = modelContainer else { return }
+            let created = BackupEngine(
+                container: container, session: session, settings: backupSettings
+            )
+            engine = created
+            if backupSettings.enabled { created.enableBackgroundRuns() }
+        }
+        #endif
     }
+
+    @ViewBuilder
+    private var moreTab: some View {
+        #if os(iOS)
+        MoreView(session: session, engine: engine, settings: $backupSettings)
+        #else
+        MoreView(session: session)
+        #endif
+    }
+
+    @ViewBuilder
+    private var sharedTab: some View {
+        #if os(iOS)
+        SharedTab(session: session, engine: engine, backupSettings: $backupSettings)
+        #else
+        SharedTab(session: session)
+        #endif
+    }
+
+    @ViewBuilder
+    private func photosTimeline(_ space: SpaceDTO) -> some View {
+        #if os(iOS)
+        TimelineView(
+            session: session, space: space,
+            engine: engine, backupSettings: $backupSettings
+        )
+        #else
+        TimelineView(session: session, space: space)
+        #endif
+    }
+
+    #if os(iOS)
+    private var engineIfReady: BackupEngine? { engine }
+    #endif
 }
 
 /// The family's shared spaces, no longer buried in a dropdown.
@@ -42,6 +97,10 @@ struct RootTabView: View {
 /// Several get a list, because at that point the choice is real.
 struct SharedTab: View {
     @Bindable var session: AppSession
+    #if os(iOS)
+    let engine: BackupEngine?
+    @Binding var backupSettings: BackupSettings
+    #endif
 
     var body: some View {
         Group {
@@ -58,11 +117,11 @@ struct SharedTab: View {
                     .buttonStyle(.borderedProminent)
                 }
             } else if shared.count == 1, let only = shared.first {
-                TimelineView(session: session, space: only)
+                timeline(for: only)
             } else {
                 List(shared) { space in
                     NavigationLink {
-                        TimelineView(session: session, space: space)
+                        timeline(for: space)
                     } label: {
                         Label(space.name, systemImage: "person.2")
                     }
@@ -72,17 +131,28 @@ struct SharedTab: View {
         }
         .task { await session.refreshSpaces() }
     }
+
+    /// The backup bar's state is iOS-only; other platforms get the plain grid.
+    @ViewBuilder
+    private func timeline(for space: SpaceDTO) -> some View {
+        #if os(iOS)
+        TimelineView(
+            session: session, space: space,
+            engine: engine, backupSettings: $backupSettings
+        )
+        #else
+        TimelineView(session: session, space: space)
+        #endif
+    }
 }
 
 /// Settings and everything that isn't a photo.
 struct MoreView: View {
     @Bindable var session: AppSession
-
     #if os(iOS)
+    let engine: BackupEngine?
+    @Binding var settings: BackupSettings
     @State private var showBackup = false
-    @State private var backupSettings = BackupSettings.load()
-    @Environment(\.backupContainer) private var modelContainer
-    @State private var engine: BackupEngine?
     #endif
 
     var body: some View {
@@ -132,16 +202,14 @@ struct MoreView: View {
         #if os(iOS)
         .sheet(isPresented: $showBackup) {
             if let engine {
-                BackupSettingsView(
-                    session: session, engine: engine, settings: $backupSettings
+                BackupHubView(
+                    session: session, engine: engine, settings: $settings
                 ) { showBackup = false }
+            } else {
+                // Never present an empty sheet: if the queue hasn't opened yet,
+                // say so rather than showing a blank card.
+                ProgressView("Opening backup…")
             }
-        }
-        .task {
-            guard engine == nil, let container = modelContainer else { return }
-            engine = BackupEngine(
-                container: container, session: session, settings: backupSettings
-            )
         }
         #endif
     }
@@ -150,7 +218,7 @@ struct MoreView: View {
     /// Mirrors the wording on Synology's own row, because "Photo Backup
     /// Complete" tells you the thing you actually want to know at a glance.
     private var backupStatus: String {
-        guard backupSettings.enabled else { return "Photo Backup Off" }
+        guard settings.enabled else { return "Photo Backup Off" }
         guard let engine else { return "Photo Backup" }
         if engine.progress.pending > 0 {
             return "Backing Up — \(engine.progress.pending) left"
@@ -159,7 +227,7 @@ struct MoreView: View {
     }
 
     private var backupIcon: String {
-        guard backupSettings.enabled else { return "icloud.slash" }
+        guard settings.enabled else { return "icloud.slash" }
         return (engine?.progress.pending ?? 0) > 0
             ? "icloud.and.arrow.up" : "checkmark.icloud"
     }

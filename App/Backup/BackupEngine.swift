@@ -23,12 +23,33 @@ final class BackupEngine {
 
     /// Local items still to go, newest first, grouped for the grid.
     private(set) var queued: [(localIdentifier: String, capturedAt: Date, state: UploadState)] = []
+    /// The item on the wire right now, with byte progress. Only one at a time —
+    /// the engine uploads serially so a slow photo can't be lapped by a fast
+    /// one and confuse the queue.
+    private(set) var active: ActiveUpload?
     /// Assets this device uploaded since the badges were last cleared. Shown as
     /// a cloud on the tile until the user pulls to refresh, at which point the
     /// upload stops being news and becomes just another photo.
     private(set) var recentlyUploaded: Set<UUID> = []
 
     func clearUploadBadges() { recentlyUploaded.removeAll() }
+
+    /// What the Task Queue draws a progress bar from.
+    struct ActiveUpload: Equatable {
+        var localIdentifier: String
+        var filename: String
+        var byteSize: Int64
+        var sentBytes: Int64
+        /// Exporting from the photo library, before any bytes are on the wire.
+        var isPreparing: Bool
+
+        /// 0…1, or nil while preparing — a bar that sits at zero for a minute
+        /// reads as stuck, so the queue shows indeterminate progress instead.
+        var fraction: Double? {
+            guard !isPreparing, byteSize > 0 else { return nil }
+            return min(Double(sentBytes) / Double(byteSize), 1)
+        }
+    }
 
     /// Bumped when a run finishes, so the timeline knows to re-read itself.
     /// The photos it just sent are on the NAS now but not yet in the manifest
@@ -184,6 +205,11 @@ final class BackupEngine {
         item.attempts += 1
         try? context.save()
         statusText = "Backing up \(item.filename)"
+        active = ActiveUpload(
+            localIdentifier: item.localIdentifier, filename: item.filename,
+            byteSize: item.byteSize, sentBytes: 0, isPreparing: true
+        )
+        defer { active = nil }
 
         guard let asset = PHAsset.fetchAssets(
             withLocalIdentifiers: [item.localIdentifier], options: nil
@@ -197,9 +223,24 @@ final class BackupEngine {
         }
 
         do {
+            let localIdentifier = item.localIdentifier
             let result = try await AssetUploader.send(
                 asset, descriptor: item.descriptor, to: spaceID, client: client
-            )
+            ) { [weak self] phase in
+                Task { @MainActor in
+                    guard let self, self.active?.localIdentifier == localIdentifier else { return }
+                    switch phase {
+                    case .preparing:
+                        self.active?.isPreparing = true
+                    case .sending(let sent, let total):
+                        self.active?.isPreparing = false
+                        self.active?.sentBytes = sent
+                        // The exported size is authoritative; the scan's
+                        // estimate can be stale or zero.
+                        self.active?.byteSize = total
+                    }
+                }
+            }
             item.sha256 = result.sha256
             item.byteSize = result.byteSize
             item.assetID = result.assetID

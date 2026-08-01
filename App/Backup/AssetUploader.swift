@@ -91,12 +91,22 @@ enum AssetUploader {
         let sha256: String
     }
 
+    /// What the uploader is doing right now, so the queue can say so.
+    enum Phase {
+        /// Pulling the original out of the photo library and hashing it. For a
+        /// 4 GB video off iCloud this is not a brief moment.
+        case preparing
+        /// `sent` of `total` bytes on the wire.
+        case sending(sent: Int64, total: Int64)
+    }
+
     /// Exports, hashes, probes, sends only what's missing, and commits.
     static func send(
         _ asset: PHAsset,
         descriptor: UploadDescriptor,
         to spaceID: UUID,
-        client: FrameStationClient
+        client: FrameStationClient,
+        onPhase: (@Sendable (Phase) -> Void)? = nil
     ) async throws -> Result {
         guard let resource = PhotoLibraryScanner.primaryResource(for: asset) else {
             throw UploadError.noExportableResource
@@ -106,6 +116,7 @@ enum AssetUploader {
             .appendingPathComponent("fs-upload-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: scratch) }
 
+        onPhase?(.preparing)
         try await PhotoLibraryScanner.export(resource, to: scratch)
 
         let attributes = try FileManager.default.attributesOfItem(atPath: scratch.path)
@@ -136,7 +147,10 @@ enum AssetUploader {
 
         case .need, .partial:
             guard let uploadID = probe.uploadID else { throw UploadError.noUploadSession }
-            try await sendChunks(probe: probe, uploadID: uploadID, file: scratch, client: client)
+            try await sendChunks(
+                probe: probe, uploadID: uploadID, file: scratch, client: client,
+                total: size, onPhase: onPhase
+            )
             let committed = try await client.commitUpload(
                 uploadID: uploadID, descriptor.commitRequest(spaceID: spaceID)
             )
@@ -152,7 +166,9 @@ enum AssetUploader {
         probe: UploadProbeResponse,
         uploadID: UUID,
         file: URL,
-        client: FrameStationClient
+        client: FrameStationClient,
+        total: Int64,
+        onPhase: (@Sendable (Phase) -> Void)?
     ) async throws {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
@@ -171,9 +187,14 @@ enum AssetUploader {
             // suspends us still lands. The file has to outlive the call, which
             // it does — the defer runs after the await.
             let request = try await client.chunkUploadRequest(uploadID: uploadID, index: index)
+            // Chunks already on the server count as sent, or a resumed upload
+            // would appear to start from zero.
+            let baseline = Int64(index) * Int64(probe.chunkSize)
             let (_, response) = try await BackgroundTransfers.shared.upload(
                 request, fromFile: part
-            )
+            ) { sentInChunk in
+                onPhase?(.sending(sent: min(baseline + sentInChunk, total), total: total))
+            }
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode)
             else {
