@@ -150,6 +150,11 @@ struct AssetDetailView: View {
                     poster: model.image ?? model.placeholder,
                     showsControls: showChrome
                 )
+                // Measured against the full screen, not the safe area. Hiding
+                // the navigation bar reveals the status bar underneath it,
+                // which resizes the safe area and slid the video ~14pt — a
+                // still image doesn't move, and neither should this.
+                .ignoresSafeArea()
                 #else
                 VideoPlayerView(
                     assetID: item.assetID,

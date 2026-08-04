@@ -95,10 +95,9 @@ struct VideoPlayerView: View {
                 // A bare layer, so a tap anywhere reaches the viewer and
                 // toggles chrome instead of being eaten by AVKit.
                 PlayerLayerView(player: player)
-                    .overlay(alignment: .bottom) {
+                    .overlay {
                         if showsControls {
-                            VideoControls(player: player)
-                                .transition(.opacity)
+                            VideoControls(player: player).transition(.opacity)
                         }
                     }
                 #else
@@ -155,7 +154,9 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 }
 
-/// Play/pause and a scrubber, shown and hidden with the rest of the chrome.
+/// Playback controls, laid out the way Synology lays them out: play/pause as
+/// a ring centred on the video itself, and a single row underneath carrying
+/// elapsed time, the scrubber, time remaining, and mute.
 struct VideoControls: View {
     let player: AVPlayer
 
@@ -163,73 +164,98 @@ struct VideoControls: View {
     @State private var position: Double = 0
     @State private var duration: Double = 0
     @State private var isScrubbing = false
+    @State private var isMuted = false
     @State private var observer: Any?
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button {
-                if isPlaying { player.pause() } else { player.play() }
-                isPlaying.toggle()
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.title3)
-                    .frame(width: 30)
+        ZStack {
+            playPauseRing
+            VStack {
+                Spacer()
+                scrubBar
             }
-            .buttonStyle(.plain)
-
-            Text(Self.timecode(position))
-                .font(.caption.monospacedDigit())
-
-            Slider(
-                value: $position,
-                in: 0...max(duration, 0.1),
-                onEditingChanged: { editing in
-                    isScrubbing = editing
-                    if !editing {
-                        player.seek(
-                            to: CMTime(seconds: position, preferredTimescale: 600),
-                            toleranceBefore: .zero, toleranceAfter: .zero
-                        )
-                    }
-                }
-            )
-
-            Text("-" + Self.timecode(max(duration - position, 0)))
-                .font(.caption.monospacedDigit())
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.black.opacity(0.45), in: Capsule())
-        .padding(.horizontal, 16)
-        // Clear of the action bar, which floats at the very bottom.
-        .padding(.bottom, 96)
-        .task {
-            duration = player.currentItem?.duration.seconds ?? 0
-            if !duration.isFinite { duration = 0 }
-            // Tracks the clip without fighting a drag in progress.
-            observer = player.addPeriodicTimeObserver(
-                forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
-                queue: .main
-            ) { time in
-                guard !isScrubbing else { return }
-                position = time.seconds
-                if duration == 0, let known = player.currentItem?.duration.seconds,
-                   known.isFinite {
-                    duration = known
-                }
-            }
-        }
+        .task { await track() }
         .onDisappear {
             if let observer { player.removeTimeObserver(observer) }
             observer = nil
         }
     }
 
+    private var playPauseRing: some View {
+        Button {
+            if isPlaying { player.pause() } else { player.play() }
+            isPlaying.toggle()
+        } label: {
+            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 30, weight: .medium))
+                .frame(width: 78, height: 78)
+                .background(Circle().stroke(.white, lineWidth: 3))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .shadow(radius: 8)
+    }
+
+    private var scrubBar: some View {
+        HStack(spacing: 12) {
+            Text(Self.timecode(position))
+                .font(.footnote.monospacedDigit())
+
+            Slider(
+                value: $position,
+                in: 0...max(duration, 0.1),
+                onEditingChanged: { editing in
+                    isScrubbing = editing
+                    guard !editing else { return }
+                    player.seek(
+                        to: CMTime(seconds: position, preferredTimescale: 600),
+                        toleranceBefore: .zero, toleranceAfter: .zero
+                    )
+                }
+            )
+            .tint(.white)
+
+            Text("-" + Self.timecode(max(duration - position, 0)))
+                .font(.footnote.monospacedDigit())
+
+            Button {
+                isMuted.toggle()
+                player.isMuted = isMuted
+            } label: {
+                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.footnote)
+                    .frame(width: 22)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        // Clear of the action bar, which floats at the very bottom.
+        .padding(.bottom, 104)
+    }
+
+    /// Follows the clip without fighting a drag in progress.
+    private func track() async {
+        duration = player.currentItem?.duration.seconds ?? 0
+        if !duration.isFinite { duration = 0 }
+        isMuted = player.isMuted
+        observer = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main
+        ) { time in
+            guard !isScrubbing else { return }
+            position = time.seconds
+            if duration == 0, let known = player.currentItem?.duration.seconds,
+               known.isFinite {
+                duration = known
+            }
+        }
+    }
+
     private static func timecode(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 #endif
