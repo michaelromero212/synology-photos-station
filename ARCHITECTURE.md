@@ -108,6 +108,76 @@ and the lane count would have needed capping via
 
 ---
 
+
+## 3a. Decision: the files are canonical, the database is an index
+
+**Status:** accepted, supersedes the content-addressed model in §4.
+
+### What changed
+
+Photos are stored at a real, human path and *that file is the photo*:
+
+    /volume1/homes/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
+    /volume1/FrameStation/Shared/<Space>/YYYY/MM/IMG_9001.jpg
+
+The database is an index over those files, rebuildable by scanning them. It is
+no longer the only thing that knows what a file is.
+
+Previously the canonical store was content-addressed — `blobs/ab/cd/<sha256>.heic`
+— and the browsable tree was a derived view built from database rows. That
+inverted Synology Photos, where the files are the truth and the index is a
+cache that can be rebuilt.
+
+### Why
+
+The deciding argument was not familiarity, it was backups.
+
+Synology's own tooling — Hyper Backup, Snapshot Replication, Btrfs snapshots —
+operates on folders. When photos are real files in real folders, the household
+can protect them with software they already run and already trust, and the
+answer to "what happens if the database dies" stops being interesting. A
+rebuildable index cannot be a single point of failure.
+
+Under the old model, losing `pgdata` left 6 TB of hash-named files with no way
+to tell what any of them were. Every byte of every photo survived and the
+library was still gone. No amount of care in the application could fix a design
+where the only copy of "this file is a photo of your son's birthday" lived in
+one Postgres volume.
+
+### What it costs
+
+Cross-user storage deduplication. If two family members hold the same photo it
+is stored twice, once in each home directory. Synology has this same property —
+homes are independent — and at this household's scale it is a rounding error.
+Cross-user *transfer* dedup was already removed for a security reason (§ "an
+asset id is not a capability"), so this only affects disk.
+
+Within a single library, an identical file uploaded twice by the *backup engine*
+is still skipped: the local queue records that a `PHAsset` has been backed up.
+A photo backed up automatically and then shared manually will produce two
+copies, which is what Synology does, and is a deliberate match rather than an
+oversight.
+
+### Deletion must be remembered
+
+If someone removes a photo from their library in the app while it still exists
+in their iPhone, the next backup run must not upload it again. "Not on the
+server" is not the same as "never backed up", and conflating them makes deleted
+photos resurrect.
+
+The local queue answers this while it exists. It does not survive a reinstall,
+so the server keeps a tombstone: a soft-deleted placement records the source
+asset, and probe reports it so a freshly installed app does not re-upload
+something the user deliberately removed.
+
+### What survives from the old design
+
+The chunked resumable upload protocol, the probe/commit handshake, EXIF and
+media probing, derivation, ThumbHash, timeline bucketing, spaces, albums, and
+the security model are all unchanged. SHA-256 is still computed and stored —
+it is how a re-upload is recognised and how integrity can be checked — it just
+no longer decides where the file lives.
+
 ## 4. Storage layout
 
 One DSM shared folder, one service account. No per-user folders.
