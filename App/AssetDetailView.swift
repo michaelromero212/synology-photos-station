@@ -143,11 +143,20 @@ struct AssetDetailView: View {
             if item.mediaType == .video {
                 // Direct play, Range-served. The poster sits behind it so the
                 // frame doesn't flash black while the signed URL is fetched.
+                #if os(iOS)
+                VideoPlayerView(
+                    assetID: item.assetID,
+                    client: session.client,
+                    poster: model.image ?? model.placeholder,
+                    showsControls: showChrome
+                )
+                #else
                 VideoPlayerView(
                     assetID: item.assetID,
                     client: session.client,
                     poster: model.image ?? model.placeholder
                 )
+                #endif
             } else if let image = model.image {
                 imageView(image).transition(.opacity)
             } else if let placeholder = model.placeholder {
