@@ -33,6 +33,8 @@ actor DerivationWorker {
     struct AssetRow: Decodable {
         let id: UUID
         let sha256: String
+        /// Canonical file path, or nil for rows still in the blob store.
+        let storagePath: String?
         let mediaType: String
         let blobExt: String
     }
@@ -129,7 +131,8 @@ actor DerivationWorker {
     private static func process(job: Job, app: Application) async {
         do {
             guard let asset = try await app.sql.raw("""
-                SELECT id, sha256, media_type AS "mediaType", blob_ext AS "blobExt"
+                SELECT id, sha256, media_type AS "mediaType", blob_ext AS "blobExt",
+                       storage_path AS "storagePath"
                 FROM assets WHERE id = \(bind: job.assetID)
                 """).first(decoding: AssetRow.self) else {
                 try await finish(job: job, app: app, error: "asset no longer exists")
@@ -137,10 +140,17 @@ actor DerivationWorker {
             }
 
             let mediaType = MediaType(rawValue: asset.mediaType) ?? .photo
-            let blob = app.blobStore.blobPath(
+            // Prefer the library copy; fall back to the blob for rows that
+            // predate the library layout.
+            let blob: URL
+            if let path = asset.storagePath, FileManager.default.fileExists(atPath: path) {
+                blob = URL(fileURLWithPath: path)
+            } else {
+                blob = app.blobStore.blobPath(
                 sha256: asset.sha256,
                 fileExtension: asset.blobExt
-            )
+                )
+            }
             guard FileManager.default.fileExists(atPath: blob.path) else {
                 try await finish(job: job, app: app, error: "blob missing at \(blob.path)")
                 return

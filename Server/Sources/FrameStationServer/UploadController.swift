@@ -222,6 +222,14 @@ struct UploadController: RouteCollection {
             throw Abort(.unprocessableEntity, reason: String(describing: error))
         }
 
+        // Move the assembled file to where a person would look for it. Best
+        // effort by design: if the library layout is off, or this account has no
+        // DSM home, the file stays in the content-addressed store and
+        // storage_path stays NULL. Both models read the same way.
+        let storagePath = try await Self.placeInLibrary(
+            blob: blob, session: session, input: input, device: device, req: req
+        )
+
         let result = try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
             do {
@@ -234,7 +242,7 @@ struct UploadController: RouteCollection {
                         (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                          captured_at, captured_tz_off, tz_off_fallback,
                          local_captured_at, lat, lon, is_raw,
-                         live_group_id, burst_id, burst_pick)
+                         live_group_id, burst_id, burst_pick, storage_path)
                     VALUES
                         (\(bind: session.sha256), \(bind: session.byteSize),
                          \(bind: input.mediaType.rawValue), \(bind: input.mime),
@@ -246,7 +254,8 @@ struct UploadController: RouteCollection {
                             + COALESCE(\(bind: input.capturedTZOffset), 0) * interval '1 second')
                             AT TIME ZONE 'UTC',
                          \(bind: input.latitude), \(bind: input.longitude), \(bind: input.isRaw),
-                         \(bind: input.liveGroupID), \(bind: input.burstID), \(bind: input.burstPick))
+                         \(bind: input.liveGroupID), \(bind: input.burstID),
+                         \(bind: input.burstPick), \(bind: storagePath))
                     ON CONFLICT (sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
@@ -338,6 +347,69 @@ struct UploadController: RouteCollection {
             "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated))"
         )
         return result
+    }
+
+
+    /// Puts the committed file where File Station will show it, and returns the
+    /// path recorded on the asset.
+    ///
+    /// Returns nil rather than throwing when the layout can't place the file:
+    /// an upload must never fail because a folder couldn't be chosen.
+    private static func placeInLibrary(
+        blob: URL,
+        session: SessionRow,
+        input: CommitUploadRequest,
+        device: AuthenticatedDevice,
+        req: Request
+    ) async throws -> String? {
+        let configuration = BrowseTree.Configuration.fromEnvironment()
+        guard configuration.enabled else { return nil }
+
+        struct ContextRow: Decodable {
+            let spaceKind: String
+            let spaceName: String
+            let deviceName: String?
+            let dsmUsername: String?
+            let dsmUID: Int?
+        }
+        guard let context = try? await req.sql.raw("""
+            SELECT s.kind AS "spaceKind", s.name AS "spaceName",
+                   d.name AS "deviceName",
+                   u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
+            FROM spaces s
+            JOIN users u ON u.id = \(bind: device.userID)
+            LEFT JOIN devices d ON d.id = \(bind: device.deviceID)
+            WHERE s.id = \(bind: input.spaceID)
+            """).first(decoding: ContextRow.self) else { return nil }
+
+        let placement = BrowseTree.Placement(
+            id: UUID(), sha256: session.sha256,
+            blobExt: BlobStore.fileExtension(for: session.filename),
+            filename: session.filename, capturedAt: input.capturedAt,
+            spaceKind: context.spaceKind, spaceName: context.spaceName,
+            deviceName: context.deviceName, dsmUsername: context.dsmUsername,
+            dsmUID: context.dsmUID
+        )
+        guard let intended = BrowseTree.destination(
+            for: placement, configuration: configuration
+        ) else { return nil }
+
+        // Two photos can share a name -- every phone starts at IMG_0001 -- so a
+        // collision suffixes rather than overwrites.
+        let destination = BrowseTreeWorker.deduplicated(intended, sha256: session.sha256)
+        do {
+            let kind = try await BrowseTree.link(
+                from: blob.path, to: destination, logger: req.logger
+            )
+            if let uid = context.dsmUID {
+                await BrowseTree.chown(destination, uid: uid, logger: req.logger)
+            }
+            req.logger.debug("library: \(kind.rawValue) \(destination)")
+            return destination
+        } catch {
+            req.logger.warning("library placement failed, keeping blob: \(error)")
+            return nil
+        }
     }
 
     // MARK: - Link an existing blob into a space

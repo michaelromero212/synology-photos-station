@@ -20,6 +20,24 @@ import Vapor
 /// corrupting the canonical blob every other member is reading.
 enum BrowseTree {
 
+    /// Where a newly committed file should live, or nil when the library
+    /// layout can't place it — no DSM account linked, or the layout disabled.
+    ///
+    /// Called at commit time, so the date comes from what the client sent
+    /// rather than from EXIF, which is only read later during derivation. The
+    /// two agree for anything a phone uploads; a file whose EXIF later disputes
+    /// the folder stays where it was put, because moving a file after the fact
+    /// is worse than a month being off by one.
+    static func destination(
+        for placement: Placement, configuration: Configuration
+    ) -> String? {
+        guard configuration.enabled else { return nil }
+        guard let directory = directory(for: placement, configuration: configuration) else {
+            return nil
+        }
+        return "\(directory)/\(fileName(for: placement))"
+    }
+
     struct Configuration {
         /// Where DSM keeps user home directories.
         var homesRoot: String

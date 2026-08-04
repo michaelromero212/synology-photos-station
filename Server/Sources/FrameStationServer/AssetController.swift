@@ -33,6 +33,18 @@ struct AssetController: RouteCollection {
         let mediaType: String
         let blobExt: String
         let mime: String
+        /// Where the canonical file lives. NULL for rows predating the library
+        /// layout, which still read from the content-addressed store.
+        let storagePath: String?
+    }
+
+    /// The file to serve: the library copy when there is one, the blob
+    /// otherwise. See ARCHITECTURE.md §3a.
+    private func fileURL(for asset: AssetRow, _ req: Request) -> URL {
+        if let path = asset.storagePath, FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return req.blobStore.blobPath(sha256: asset.sha256, fileExtension: asset.blobExt)
     }
 
     // MARK: - Playback
@@ -91,7 +103,8 @@ struct AssetController: RouteCollection {
         // now, so revoking someone mid-lifetime takes effect immediately.
         guard let asset = try await req.sql.raw("""
             SELECT a.id, a.sha256, a.media_type AS "mediaType",
-                   a.blob_ext AS "blobExt", a.mime
+                   a.blob_ext AS "blobExt", a.mime,
+                   a.storage_path AS "storagePath"
             FROM assets a
             WHERE a.id = \(bind: assetID)
               AND EXISTS (
@@ -104,7 +117,7 @@ struct AssetController: RouteCollection {
             throw Abort(.notFound, reason: "No such asset.")
         }
 
-        let blob = req.blobStore.blobPath(sha256: asset.sha256, fileExtension: asset.blobExt)
+        let blob = fileURL(for: asset, req)
         return try await streamFile(req, at: blob, contentType: asset.mime, immutable: true)
     }
 
@@ -149,7 +162,7 @@ struct AssetController: RouteCollection {
     @Sendable
     func preview(req: Request) async throws -> Response {
         let asset = try await requireReadableAsset(req)
-        let blob = req.blobStore.blobPath(sha256: asset.sha256, fileExtension: asset.blobExt)
+        let blob = fileURL(for: asset, req)
         guard FileManager.default.fileExists(atPath: blob.path) else {
             throw Abort(.notFound, reason: "Original is missing from storage.")
         }
@@ -167,7 +180,7 @@ struct AssetController: RouteCollection {
     @Sendable
     func original(req: Request) async throws -> Response {
         let asset = try await requireReadableAsset(req)
-        let blob = req.blobStore.blobPath(sha256: asset.sha256, fileExtension: asset.blobExt)
+        let blob = fileURL(for: asset, req)
         guard FileManager.default.fileExists(atPath: blob.path) else {
             throw Abort(.notFound, reason: "Original is missing from storage.")
         }
@@ -187,7 +200,8 @@ struct AssetController: RouteCollection {
                    a.sha256,
                    a.media_type AS "mediaType",
                    a.blob_ext   AS "blobExt",
-                   a.mime
+                   a.mime,
+                   a.storage_path AS "storagePath"
             FROM assets a
             WHERE a.id = \(bind: assetID)
               AND EXISTS (
