@@ -52,14 +52,22 @@ FROM swift:6.0-jammy-slim
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
     && apt-get -q dist-upgrade -y \
-    && apt-get -q install -y ca-certificates tzdata libjemalloc2 \
+    && apt-get -q install -y --no-install-recommends ca-certificates tzdata libjemalloc2 \
     # Media pipeline. The server shells out to all three; without them the
     # derivation worker refuses to start and logs which are missing.
     #   libvips-tools  thumbnails and the ThumbHash source render
     #   libheif1       HEIC/HEIF decode — most of an iPhone library
     #   libexif / exiftool  EXIF, including lens and exposure
     #   ffmpeg         video probe and poster frames
-    && apt-get -q install -y libvips-tools libheif1 libexif12 exiftool ffmpeg \
+    #
+    # --no-install-recommends matters here more than anywhere else in the file.
+    # ffmpeg and exiftool each recommend a long tail of extra codecs, docs and
+    # Perl modules that nothing in this server calls; apt installs them by
+    # default. The HEIF check below is what keeps this from being reckless — if
+    # trimming ever costs vips its HEIC loader, the build fails rather than
+    # shipping an image that can't thumbnail an iPhone photo.
+    && apt-get -q install -y --no-install-recommends \
+         libvips-tools libheif1 libexif12 exiftool ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Offline reverse-geocoding dataset, baked in so the container is

@@ -133,3 +133,37 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Report what we just shipped. An image size that nobody measures only
+      # ever goes one direction, and reading it off the registry manifest needs
+      # no daemon, no pull, and no shell on the NAS.
+      - name: Image size
+        run: |
+          set -euo pipefail
+          ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"
+          docker buildx imagetools inspect "$ref" --raw > /tmp/manifest.json
+          python3 - "$ref" <<'PY'
+          import json, sys
+          manifest = json.load(open("/tmp/manifest.json"))
+          layers = manifest.get("layers", [])
+          total = sum(layer["size"] for layer in layers)
+          print(f"## Image: {sys.argv[1]}")
+          print(f"Compressed total: {total / 1e6:.0f} MB across {len(layers)} layers\n")
+          print("| # | Compressed | Digest |")
+          print("|---|-----------|--------|")
+          for index, layer in enumerate(sorted(layers, key=lambda l: -l["size"]), 1):
+              print(f"| {index} | {layer['size'] / 1e6:.1f} MB | `{layer['digest'][7:19]}` |")
+          PY
+          python3 - "$ref" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          manifest = json.load(open("/tmp/manifest.json"))
+          layers = manifest.get("layers", [])
+          total = sum(layer["size"] for layer in layers)
+          print(f"### Container image\n")
+          print(f"`{sys.argv[1]}`\n")
+          print(f"**{total / 1e6:.0f} MB compressed** across {len(layers)} layers.\n")
+          print("| Layer | Compressed |")
+          print("|-------|-----------|")
+          for index, layer in enumerate(sorted(layers, key=lambda l: -l["size"]), 1):
+              print(f"| {index} | {layer['size'] / 1e6:.1f} MB |")
+          PY
