@@ -106,6 +106,7 @@ enum AssetUploader {
         descriptor: UploadDescriptor,
         to spaceID: UUID,
         client: FrameStationClient,
+        isAutomaticBackup: Bool = false,
         onPhase: (@Sendable (Phase) -> Void)? = nil
     ) async throws -> Result {
         guard let resource = PhotoLibraryScanner.primaryResource(for: asset) else {
@@ -127,11 +128,17 @@ enum AssetUploader {
 
         let probe = try await client.probeUpload(
             UploadProbeRequest(
-                spaceID: spaceID, sha256: digest, byteSize: size, filename: descriptor.filename
+                spaceID: spaceID, sha256: digest, byteSize: size,
+                filename: descriptor.filename, isAutomaticBackup: isAutomaticBackup
             )
         )
 
         switch probe.status {
+        case .removed:
+            // Deleted from this library on purpose. Not an error, and not
+            // something to retry.
+            throw UploadError.removedByUser
+
         case .have:
             // Already on the NAS — another family member's copy, or an earlier
             // run. Link it rather than sending the bytes again.
@@ -224,6 +231,7 @@ enum UploadError: LocalizedError {
     case emptyExport
     case noUploadSession
     case chunkRejected(Int, Int)
+    case removedByUser
 
     var errorDescription: String? {
         switch self {
@@ -233,6 +241,8 @@ enum UploadError: LocalizedError {
             return "The photo exported as an empty file — it may still be downloading from iCloud."
         case .noUploadSession:
             return "The server didn't return an upload session."
+        case .removedByUser:
+            return "You removed this photo from this library."
         case .chunkRejected(let status, let index):
             return "The server rejected part \(index + 1) of this file (HTTP \(status))."
         }

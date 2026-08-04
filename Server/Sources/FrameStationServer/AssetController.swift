@@ -20,6 +20,7 @@ struct AssetController: RouteCollection {
         protected.get("assets", ":assetID", "preview", use: preview)
         protected.get("assets", ":assetID", "original", use: original)
         protected.get("assets", ":assetID", "playback", use: playbackURL)
+        protected.delete("spaces", ":spaceID", "assets", ":assetID", use: remove)
 
         // Signed rather than bearer-authenticated: AVPlayer fetches media
         // itself and an AirPlay receiver fetches it from another device
@@ -45,6 +46,85 @@ struct AssetController: RouteCollection {
             return URL(fileURLWithPath: path)
         }
         return req.blobStore.blobPath(sha256: asset.sha256, fileExtension: asset.blobExt)
+    }
+
+    // MARK: - Removal
+
+    /// Removes a photo from a library.
+    ///
+    /// Soft delete, and the file moves to `#recycle` beside it rather than
+    /// being unlinked — Synology's convention, and one `LibraryScanner` already
+    /// skips, so a later rescan won't quietly re-import what someone deleted.
+    ///
+    /// The row stays as the record that this was deliberate. Automatic backup
+    /// reads it and declines to upload the photo again; without it, deleting
+    /// something still on your camera roll would simply undo itself on the next
+    /// run.
+    @Sendable
+    func remove(req: Request) async throws -> HTTPStatus {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let assetID = try req.parameters.require("assetID", as: UUID.self)
+
+        try await SpaceAccess.requireContributor(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        struct PlacementRow: Decodable {
+            let id: UUID
+            let storagePath: String?
+        }
+        guard let placement = try await req.sql.raw("""
+            SELECT sa.id, a.storage_path AS "storagePath"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
+              AND sa.deleted_at IS NULL
+            """).first(decoding: PlacementRow.self) else {
+            throw Abort(.notFound, reason: "No such asset in this space.")
+        }
+
+        var recycled: String?
+        if let path = placement.storagePath, FileManager.default.fileExists(atPath: path) {
+            recycled = Self.moveToRecycleBin(path, logger: req.logger)
+        }
+
+        try await req.sql.raw("""
+            UPDATE space_assets
+            SET deleted_at = now(), deleted_by = \(bind: device.userID),
+                recycled_path = \(bind: recycled)
+            WHERE id = \(bind: placement.id)
+            """).run()
+
+        _ = try? await ChangeLog.append(
+            spaceID: spaceID, entity: "space_asset", entityID: placement.id,
+            op: "delete", on: req.sql
+        )
+        return .noContent
+    }
+
+    /// `…/2025/03/IMG_7001.jpg` → `…/2025/03/#recycle/IMG_7001.jpg`.
+    ///
+    /// Best effort: failing to move the file must not stop the removal being
+    /// recorded, or the app would show a photo the user already deleted.
+    static func moveToRecycleBin(_ path: String, logger: Logger) -> String? {
+        let directory = (path as NSString).deletingLastPathComponent
+        let name = (path as NSString).lastPathComponent
+        let bin = "\(directory)/#recycle"
+        let destination = "\(bin)/\(name)"
+        do {
+            try FileManager.default.createDirectory(
+                atPath: bin, withIntermediateDirectories: true
+            )
+            if FileManager.default.fileExists(atPath: destination) {
+                try FileManager.default.removeItem(atPath: destination)
+            }
+            try FileManager.default.moveItem(atPath: path, toPath: destination)
+            return destination
+        } catch {
+            logger.warning("could not recycle \(path): \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - Playback

@@ -225,7 +225,8 @@ final class BackupEngine {
         do {
             let localIdentifier = item.localIdentifier
             let result = try await AssetUploader.send(
-                asset, descriptor: item.descriptor, to: spaceID, client: client
+                asset, descriptor: item.descriptor, to: spaceID, client: client,
+                isAutomaticBackup: true
             ) { [weak self] phase in
                 Task { @MainActor in
                     guard let self, self.active?.localIdentifier == localIdentifier else { return }
@@ -248,6 +249,12 @@ final class BackupEngine {
             item.state = .done
             item.completedAt = Date()
             item.lastError = nil
+            try? context.save()
+        } catch UploadError.removedByUser {
+            // Deliberately deleted from the library. Skipped, not failed, so it
+            // never retries and never reappears.
+            item.state = .skipped
+            item.lastError = "Removed from this library"
             try? context.save()
         } catch UploadError.noExportableResource {
             item.state = .skipped

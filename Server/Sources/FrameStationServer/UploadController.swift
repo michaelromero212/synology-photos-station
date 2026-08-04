@@ -62,6 +62,31 @@ struct UploadController: RouteCollection {
             spaceID: input.spaceID, userID: device.userID, on: req.sql
         )
 
+        // Removed on purpose, and this is the backup engine sweeping rather than
+        // the user asking. Declining here is what stops a deleted photo coming
+        // straight back on the next run while it still sits in the camera roll.
+        //
+        // Only for automatic backup: a deliberate re-add is allowed to undo a
+        // deletion, which is what someone means when they pick the photo again.
+        if input.isAutomaticBackup {
+            struct RemovedRow: Decodable { let id: UUID }
+            let removed = try await req.sql.raw("""
+                SELECT sa.id FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: input.spaceID)
+                  AND sa.uploaded_by_user_id = \(bind: device.userID)
+                  AND sa.deleted_at IS NOT NULL
+                  AND a.sha256 = \(bind: sha)
+                LIMIT 1
+                """).first(decoding: RemovedRow.self)
+            if removed != nil {
+                return UploadProbeResponse(
+                    status: .removed, assetID: nil, uploadID: nil,
+                    chunkSize: Self.chunkSize, chunkCount: 0, missingChunks: []
+                )
+            }
+        }
+
         // Already stored *and already visible to this user* — skip the transfer.
         // This is what makes re-uploads and interrupted retries nearly free.
         //

@@ -17,6 +17,9 @@ public enum MediaType: String, Codable, Sendable {
 
 public enum UploadProbeStatus: String, Codable, Sendable {
     case have, need, partial
+    /// The uploader removed this photo from this library before. Automatic
+    /// backup must not put it back; a deliberate re-add still may.
+    case removed
 }
 
 public struct UploadProbeRequest: Codable, Sendable {
@@ -25,12 +28,40 @@ public struct UploadProbeRequest: Codable, Sendable {
     public let sha256: String
     public let byteSize: Int64
     public let filename: String
+    /// True when this is the backup engine sweeping the camera roll, false when
+    /// the user deliberately picked this photo.
+    ///
+    /// The distinction is the whole point of the removal record: a photo you
+    /// deleted should not come back on its own, but should come back if you ask
+    /// for it. Defaults to false so a deliberate action is never refused.
+    public let isAutomaticBackup: Bool
 
-    public init(spaceID: UUID, sha256: String, byteSize: Int64, filename: String) {
+    public init(
+        spaceID: UUID, sha256: String, byteSize: Int64, filename: String,
+        isAutomaticBackup: Bool = false
+    ) {
         self.spaceID = spaceID
         self.sha256 = sha256
         self.byteSize = byteSize
         self.filename = filename
+        self.isAutomaticBackup = isAutomaticBackup
+    }
+
+    /// Decoded with a default rather than as a required key.
+    ///
+    /// A client built before this field existed sends no such key, and a
+    /// synthesised decoder would reject the whole request. The app and the
+    /// server ship separately — someone will always be running last month's
+    /// build — so a new request field has to be optional on the wire even when
+    /// it isn't optional in Swift.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        spaceID = try container.decode(UUID.self, forKey: .spaceID)
+        sha256 = try container.decode(String.self, forKey: .sha256)
+        byteSize = try container.decode(Int64.self, forKey: .byteSize)
+        filename = try container.decode(String.self, forKey: .filename)
+        isAutomaticBackup =
+            try container.decodeIfPresent(Bool.self, forKey: .isAutomaticBackup) ?? false
     }
 }
 
