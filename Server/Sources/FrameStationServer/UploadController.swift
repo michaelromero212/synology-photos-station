@@ -256,7 +256,6 @@ struct UploadController: RouteCollection {
                          \(bind: input.latitude), \(bind: input.longitude), \(bind: input.isRaw),
                          \(bind: input.liveGroupID), \(bind: input.burstID),
                          \(bind: input.burstPick), \(bind: storagePath))
-                    ON CONFLICT (sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "Could not record asset.")
@@ -412,6 +411,101 @@ struct UploadController: RouteCollection {
         }
     }
 
+
+    /// Copies a photo into a space and returns the new asset row's id.
+    ///
+    /// Adding to a shared library copies the file, the way Synology Photos
+    /// copies into its Shared Space. A row pointing at someone else's file
+    /// would mean the shared library's contents live inside a personal home
+    /// directory — the folder would look right in File Station and be a lie.
+    ///
+    /// Metadata and `derived_at` are copied with it, and derivatives are keyed
+    /// by content hash, so the copy needs no re-probe and no new thumbnails.
+    ///
+    /// Returns nil when the library layout is off, in which case the caller
+    /// falls back to sharing the asset row — the pre-§3a behaviour.
+    private static func copyIntoSpace(
+        assetID: UUID, spaceID: UUID, device: AuthenticatedDevice, req: Request
+    ) async throws -> UUID? {
+        let configuration = BrowseTree.Configuration.fromEnvironment()
+        guard configuration.enabled else { return nil }
+
+        struct SourceRow: Decodable {
+            let sha256: String
+            let blobExt: String
+            let storagePath: String?
+            let capturedAt: Date?
+            let filename: String?
+        }
+        struct TargetRow: Decodable {
+            let spaceKind: String
+            let spaceName: String
+            let dsmUsername: String?
+            let dsmUID: Int?
+        }
+
+        guard let source = try await req.sql.raw("""
+            SELECT a.sha256, a.blob_ext AS "blobExt", a.storage_path AS "storagePath",
+                   a.captured_at AS "capturedAt",
+                   (SELECT sa.filename FROM space_assets sa
+                    WHERE sa.asset_id = a.id AND sa.filename IS NOT NULL LIMIT 1) AS filename
+            FROM assets a WHERE a.id = \(bind: assetID)
+            """).first(decoding: SourceRow.self),
+            let target = try await req.sql.raw("""
+            SELECT s.kind AS "spaceKind", s.name AS "spaceName",
+                   u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
+            FROM spaces s JOIN users u ON u.id = \(bind: device.userID)
+            WHERE s.id = \(bind: spaceID)
+            """).first(decoding: TargetRow.self)
+        else { return nil }
+
+        // Nothing to copy from: this row still lives in the blob store.
+        guard let sourcePath = source.storagePath,
+              FileManager.default.fileExists(atPath: sourcePath)
+        else { return nil }
+
+        let placement = BrowseTree.Placement(
+            id: UUID(), sha256: source.sha256, blobExt: source.blobExt,
+            filename: source.filename, capturedAt: source.capturedAt,
+            spaceKind: target.spaceKind, spaceName: target.spaceName,
+            deviceName: nil, dsmUsername: target.dsmUsername, dsmUID: target.dsmUID
+        )
+        guard let intended = BrowseTree.destination(
+            for: placement, configuration: configuration
+        ) else { return nil }
+
+        let destination = BrowseTreeWorker.deduplicated(intended, sha256: source.sha256)
+        _ = try await BrowseTree.link(
+            from: sourcePath, to: destination, logger: req.logger
+        )
+        if let uid = target.dsmUID {
+            await BrowseTree.chown(destination, uid: uid, logger: req.logger)
+        }
+
+        // A copy of the row to go with the copy of the file. derived_at comes
+        // along so the worker doesn't redo work whose output is already on disk
+        // under the shared content hash.
+        struct NewID: Decodable { let id: UUID }
+        guard let created = try await req.sql.raw("""
+            INSERT INTO assets
+                (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
+                 captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
+                 lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                 shutter, focal_len, exposure_bias, dynamic_range, orientation,
+                 is_raw, live_group_id, burst_id, burst_pick, thumbhash, exif,
+                 derived_at, storage_path)
+            SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
+                   captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
+                   lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                   shutter, focal_len, exposure_bias, dynamic_range, orientation,
+                   is_raw, live_group_id, burst_id, burst_pick, thumbhash, exif,
+                   derived_at, \(bind: destination)
+            FROM assets WHERE id = \(bind: assetID)
+            RETURNING id
+            """).first(decoding: NewID.self) else { return nil }
+        return created.id
+    }
+
     // MARK: - Link an existing blob into a space
 
     /// The `.have` path, and how a photo moves from Personal to Family Shared:
@@ -447,20 +541,34 @@ struct UploadController: RouteCollection {
             throw Abort(.notFound, reason: "No such asset.")
         }
 
+        // Already here: nothing to copy, nothing to insert.
+        let alreadyPlaced = try await req.sql.raw("""
+            SELECT id FROM space_assets
+            WHERE space_id = \(bind: spaceID) AND asset_id = \(bind: assetID)
+              AND deleted_at IS NULL
+            """).first(decoding: IDRow.self)
+
+        // Sharing copies the file. Falls back to sharing the row when the
+        // library layout is off, which is the pre-§3a behaviour.
+        let targetAssetID: UUID
+        if alreadyPlaced != nil {
+            targetAssetID = assetID
+        } else {
+            targetAssetID = try await Self.copyIntoSpace(
+                assetID: assetID, spaceID: spaceID, device: device, req: req
+            ) ?? assetID
+        }
+
         return try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
             do {
-                let existing = try await sql.raw("""
-                    SELECT id FROM space_assets
-                    WHERE space_id = \(bind: spaceID) AND asset_id = \(bind: assetID)
-                      AND deleted_at IS NULL
-                    """).first(decoding: IDRow.self)
+                let existing = alreadyPlaced
 
                 guard let placement = try await sql.raw("""
                     INSERT INTO space_assets
                         (space_id, asset_id, uploaded_by_user_id, source_device_id, source_local_id)
                     VALUES
-                        (\(bind: spaceID), \(bind: assetID), \(bind: device.userID),
+                        (\(bind: spaceID), \(bind: targetAssetID), \(bind: device.userID),
                          \(bind: device.deviceID), \(bind: input.sourceLocalID))
                     ON CONFLICT (space_id, asset_id)
                     DO UPDATE SET deleted_at = NULL
@@ -489,7 +597,7 @@ struct UploadController: RouteCollection {
                 try await sql.raw("COMMIT").run()
 
                 return CommitUploadResponse(
-                    assetID: assetID,
+                    assetID: targetAssetID,
                     spaceAssetID: placement.id,
                     deduplicated: true,
                     changeSeq: seq

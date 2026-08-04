@@ -331,7 +331,22 @@ struct ImportCommand: AsyncCommand {
         try await app.withPinnedConnection { sql in
             try await sql.raw("BEGIN").run()
             do {
-                guard let asset = try await sql.raw("""
+                // Dedup by lookup rather than ON CONFLICT: the unique index on
+                // sha256 is gone (§3a), because two placements can now own two
+                // files with identical bytes. Import still copies into the blob
+                // store, where identical bytes really are one file, so reusing
+                // the row is correct here. Safe without a constraint because
+                // import runs single-threaded over one directory walk.
+                struct ExistingRow: Decodable { let id: UUID }
+                let existingAsset = try await sql.raw("""
+                    SELECT id FROM assets WHERE sha256 = \(bind: sha) LIMIT 1
+                    """).first(decoding: ExistingRow.self)
+
+                let asset: IDRow
+                if let existingAsset {
+                    asset = IDRow(id: existingAsset.id)
+                } else {
+                guard let inserted = try await sql.raw("""
                     INSERT INTO assets
                         (sha256, byte_size, media_type, mime, blob_ext, width, height,
                          duration_ms, captured_at, captured_tz_off, local_captured_at,
@@ -352,10 +367,11 @@ struct ImportCommand: AsyncCommand {
                          \(bind: metadata.focalLength), \(bind: metadata.exposureBias),
                          \(bind: metadata.dynamicRange), \(bind: metadata.orientation),
                          \(bind: metadata.isRaw), \(bind: liveGroupID))
-                    ON CONFLICT (sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "asset insert returned nothing")
+                }
+                asset = inserted
                 }
 
                 guard let placement = try await sql.raw("""
