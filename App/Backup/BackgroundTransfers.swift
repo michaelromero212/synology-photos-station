@@ -1,14 +1,22 @@
 #if os(iOS)
 import Foundation
+import UIKit
 import os
 
-/// Chunk transfers that outlive the app being suspended or killed.
+/// Chunk transfers, routed to whichever session suits the moment.
 ///
 /// The important property falls out of the protocol rather than this class: a
 /// chunk that lands after iOS has terminated us is still recorded server-side,
 /// so the next run's `probeUpload` comes back `.partial` with exactly the
-/// chunks still missing. Nothing has to be replayed and nothing is lost — this
-/// only has to hand iOS the work and get out of the way.
+/// chunks still missing. Nothing has to be replayed and nothing is lost.
+///
+/// While the app is *active* the transfer goes over an ordinary session. The
+/// background session exists to survive suspension, and using it for work the
+/// user is watching costs more than it gives: it runs out of process in
+/// `nsurlsessiond`, is subject to system throttling, and — on the simulator
+/// against a loopback address — fails outright with `NSURLErrorUnknown`, which
+/// is how this was found. Foreground while you're looking, background when
+/// you're not.
 final class BackgroundTransfers: NSObject {
     static let shared = BackgroundTransfers()
 
@@ -25,6 +33,14 @@ final class BackgroundTransfers: NSObject {
     /// equivalent.
     private var reporters: [Int: @Sendable (Int64) -> Void] = [:]
 
+    /// Ordinary in-process session for foreground work.
+    private lazy var foregroundSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(
             withIdentifier: "com.michaelromero.FrameStation.upload"
@@ -39,9 +55,17 @@ final class BackgroundTransfers: NSObject {
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
 
-    /// Starts the session early so iOS can hand back any transfers that
-    /// completed while we weren't running.
+    /// Starts the background session early so iOS can hand back any transfers
+    /// that completed while we weren't running.
     func reconnect() { _ = session }
+
+    /// Which session to hand this transfer to.
+    private func transport() async -> URLSession {
+        let active = await MainActor.run {
+            UIApplication.shared.applicationState == .active
+        }
+        return active ? foregroundSession : session
+    }
 
     /// Sends one chunk, waiting for it while the app is alive.
     ///
@@ -53,7 +77,7 @@ final class BackgroundTransfers: NSObject {
         fromFile fileURL: URL,
         onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> (Data, URLResponse) {
-        let task = session.uploadTask(with: request, fromFile: fileURL)
+        let task = await transport().uploadTask(with: request, fromFile: fileURL)
         return try await withCheckedThrowingContinuation { continuation in
             lock.lock()
             waiters[task.taskIdentifier] = continuation

@@ -254,9 +254,13 @@ final class BackupEngine {
             item.lastError = "No exportable resource"
             try? context.save()
         } catch {
+            // Reflecting rather than localizing: a URLError or a bare Swift
+            // error localizes to "unknown error", which names nothing and
+            // sends you looking in the wrong place.
+            let detail = String(reflecting: error)
             item.state = .failed
-            item.lastError = error.localizedDescription
-            lastError = error.localizedDescription
+            item.lastError = detail
+            lastError = detail
             try? context.save()
         }
     }

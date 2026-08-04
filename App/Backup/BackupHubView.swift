@@ -12,6 +12,12 @@ struct BackupHubView: View {
     @Binding var settings: BackupSettings
     let onDone: () -> Void
 
+    /// Held in state rather than read inline: `PhotoLibraryScanner.access` is a
+    /// computed lookup, so SwiftUI has nothing to observe and the Start button
+    /// stays disabled after the user grants permission until something else
+    /// happens to redraw the view.
+    @State private var access = PhotoLibraryScanner.access
+
     var body: some View {
         NavigationStack {
             List {
@@ -22,7 +28,12 @@ struct BackupHubView: View {
                         Text("Uploads as fast as the network allows while FrameStation is open. Backup also runs on its own in the background.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        if engine.isRunning {
+                        if access != .authorized {
+                            Button("Allow Access to Photos") {
+                                Task { access = await PhotoLibraryScanner.requestAccess() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        } else if engine.isRunning {
                             Button("Pause") { engine.stop() }
                                 .buttonStyle(.bordered)
                         } else {
@@ -33,7 +44,7 @@ struct BackupHubView: View {
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(PhotoLibraryScanner.access != .authorized)
+                            .disabled(access != .authorized)
                         }
                     }
                     .padding(.vertical, 4)
@@ -71,6 +82,7 @@ struct BackupHubView: View {
                     }
                 }
             }
+            .onAppear { access = PhotoLibraryScanner.access }
             .navigationTitle("Photo Backup")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
