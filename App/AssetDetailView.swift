@@ -106,11 +106,33 @@ struct AssetDetailView: View {
 
     @State private var model: AssetDetailModel
     @State private var showInfo = false
+    #if os(iOS)
+    /// The other photos from the same day, for the slideshows and for knowing
+    /// what "all videos from that day" means.
+    var dayItems: [TimelineItem] = []
+    @State private var showChrome = true
+    @State private var confirmDelete = false
+    @State private var shareFiles: [URL] = []
+    @State private var showShare = false
+    @State private var slideshow: SlideshowMode?
+    @State private var isWorking = false
+    @Environment(\.dismiss) private var dismiss
+    #endif
 
-    init(item: TimelineItem, space: SpaceDTO, session: AppSession) {
+    init(
+        item: TimelineItem,
+        space: SpaceDTO,
+        session: AppSession,
+        dayItems: [TimelineItem] = []
+    ) {
         self.item = item
         self.space = space
         self.session = session
+        #if os(iOS)
+        // Everything from the same section, so a slideshow knows what "that
+        // day" contains without going back to the server for it.
+        self.dayItems = dayItems
+        #endif
         self._model = State(initialValue: AssetDetailModel(item: item, spaceID: space.id))
     }
 
@@ -157,10 +179,47 @@ struct AssetDetailView: View {
         // Navigation *bars* are iOS-only; macOS has no equivalent modifiers.
         #if os(iOS)
         .toolbar { toolbar }
+        .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(.black.opacity(0.6), for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        // iOS reveals its actions on tap (`viewerActions`); showing this one
+        // too stacked two bars on top of each other.
+        #if !os(iOS)
         .safeAreaInset(edge: .bottom) { actionBar }
+        #endif
+        #if os(iOS)
+        // One tap reveals the actions, matching Photos and Synology both.
+        .onTapGesture { withAnimation { showChrome.toggle() } }
+        .safeAreaInset(edge: .bottom) {
+            if showChrome { viewerActions }
+        }
+        .fullScreenCover(item: $slideshow) { mode in
+            SlideshowView(
+                session: session,
+                items: dayItems.isEmpty ? [item] : dayItems,
+                mode: mode,
+                startingAt: item
+            ) { slideshow = nil }
+        }
+        .sheet(isPresented: $showShare) { ShareSheet(items: shareFiles) }
+        .confirmationDialog(
+            "Remove this photo from \(space.name)?",
+            isPresented: $confirmDelete, titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                Task {
+                    try? await session.client?.removeAsset(
+                        spaceID: space.id, assetID: item.assetID
+                    )
+                    dismiss()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("It stays on this iPhone. On the NAS it moves to #recycle, and backup won't add it again.")
+        }
+        #endif
         .sheet(isPresented: $showInfo) {
             InformationSheet(model: model, session: session) { showInfo = false }
         }
@@ -176,6 +235,87 @@ struct AssetDetailView: View {
     }
 
     #if os(iOS)
+    #if os(iOS)
+    /// The overlay bar: share, favourite, information, delete, and the two
+    /// slideshows behind More.
+    private var viewerActions: some View {
+        HStack(spacing: 0) {
+            action("Share", "square.and.arrow.up") {
+                Task {
+                    isWorking = true
+                    defer { isWorking = false }
+                    guard let data = try? await session.client?.originalData(
+                        assetID: item.assetID
+                    ) else { return }
+                    let name = item.mediaType == .video
+                        ? "\(item.assetID.uuidString.prefix(8)).mov"
+                        : "\(item.assetID.uuidString.prefix(8)).jpg"
+                    let file = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(name)
+                    try? data.write(to: file)
+                    shareFiles = [file]
+                    showShare = true
+                }
+            }
+            action(
+                "Favorite", model.isFavorite ? "heart.fill" : "heart"
+            ) {
+                Task { await model.toggleFavorite(session.client) }
+            }
+            action("Info", "info.circle") { showInfo = true }
+            action("Delete", "trash") { confirmDelete = true }
+
+            Menu {
+                Button {
+                    slideshow = .everything
+                } label: {
+                    Label(SlideshowMode.everything.title, systemImage: SlideshowMode.everything.symbol)
+                }
+                Button {
+                    slideshow = .videosOnly
+                } label: {
+                    Label(SlideshowMode.videosOnly.title, systemImage: SlideshowMode.videosOnly.symbol)
+                }
+                .disabled(!dayItems.contains { $0.mediaType == .video })
+
+                if !session.sharedSpaces.filter({ $0.id != space.id }).isEmpty {
+                    Divider()
+                    Menu("Add to Shared Space") {
+                        ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
+                            Button(target.name) {
+                                Task { await model.addTo(target, client: session.client) }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: "ellipsis").font(.system(size: 20))
+                    Text("More").font(.caption2)
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+        .disabled(isWorking)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func action(
+        _ title: String, _ symbol: String, _ perform: @escaping () -> Void
+    ) -> some View {
+        Button(action: perform) {
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 20))
+                Text(title).font(.caption2)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+    #endif
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {

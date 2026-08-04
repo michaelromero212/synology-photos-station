@@ -179,7 +179,9 @@ struct TimelineView: View {
     /// cells, but the branch lives inside the builder rather than across a
     /// `#if` — braces have to balance within each conditional block.
     @ViewBuilder
-    private func gridCell(_ item: TimelineItem, side: CGFloat) -> some View {
+    private func gridCell(
+        _ item: TimelineItem, side: CGFloat, dayItems: [TimelineItem] = []
+    ) -> some View {
         #if os(iOS)
         if selection.isActive {
             PhotoCell(item: item, loader: session.loader, side: side)
@@ -195,7 +197,9 @@ struct TimelineView: View {
                 .onTapGesture { selection.toggle(item) }
         } else {
             NavigationLink {
-                AssetDetailView(item: item, space: space, session: session)
+                AssetDetailView(
+                    item: item, space: space, session: session, dayItems: dayItems
+                )
             } label: {
                 PhotoCell(item: item, loader: session.loader, side: side)
                     .overlay(alignment: .bottomTrailing) {
@@ -331,7 +335,7 @@ struct TimelineView: View {
                                     }
                                 } else {
                                     ForEach(items) { item in
-                                        gridCell(item, side: side)
+                                        gridCell(item, side: side, dayItems: items)
                                     }
                                 }
                             }

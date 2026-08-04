@@ -18,6 +18,8 @@ final class AppSession {
     }
 
     var serverURL: String = "http://127.0.0.1:8099"
+    /// Set when the Keychain refused the token; the session won't outlive the app.
+    var keychainWarning: String?
     var inviteCode: String = ""
     /// Shown in every "Added by" row, so it must be a person, not a device.
     var displayName: String = ""
@@ -77,6 +79,24 @@ final class AppSession {
     /// Reconnects from stored credentials so a relaunch doesn't need a new
     /// invite. Returns false when there's nothing saved.
     @discardableResult
+    /// Writes the credential and says so if it doesn't stick.
+    ///
+    /// Silently discarding this failure is how a signed-in session turns into a
+    /// sign-in screen on the next launch with nothing to explain it: the token
+    /// only ever lives in the Keychain, so a rejected write means the session
+    /// dies with the process.
+    private func persist(_ credentials: CredentialStore.Credentials) {
+        do {
+            try self.credentials.save(credentials)
+        } catch {
+            keychainWarning = "This device couldn't save your sign-in, so you'll "
+                + "have to sign in again next time you open FrameStation."
+            #if DEBUG
+            print("[FrameStation] keychain save failed: \(error)")
+            #endif
+        }
+    }
+
     func restore() async -> Bool {
         guard let saved = credentials.load() else { return false }
         serverURL = saved.serverURL.absoluteString
@@ -88,10 +108,24 @@ final class AppSession {
             adopt(client: client, me: me)
             return true
         } catch {
-            // A rejected token means the device was removed server-side; drop it
-            // rather than retrying a credential that will never work again.
-            credentials.clear()
-            phase = .disconnected
+            // Only a refusal destroys the credential. A rejected token means the
+            // device was removed server-side and will never work again — but an
+            // unreachable server means the NAS is asleep, the phone is on mobile
+            // data, or Wi-Fi hasn't come up yet, and none of those are a reason
+            // to sign someone out.
+            //
+            // Clearing on every error is why relaunching the app dumped the user
+            // back at the sign-in screen: one failed request at launch and the
+            // token was gone for good.
+            if case FrameStationClientError.http(let status, _) = error,
+               status == 401 || status == 403 {
+                credentials.clear()
+                phase = .disconnected
+            } else {
+                // Keep the credential and say what went wrong, so the next
+                // launch — or a tap on Retry — can pick up where this left off.
+                phase = .failed(error.localizedDescription)
+            }
             return false
         }
     }
@@ -143,7 +177,7 @@ final class AppSession {
                 )
             )
             dsmPassword = ""
-            try? credentials.save(.init(serverURL: url, token: response.token))
+            persist(.init(serverURL: url, token: response.token))
 
             self.client = client
             self.loader = ThumbnailLoader(client: client)
@@ -186,7 +220,7 @@ final class AppSession {
 
             let me = try await client.me()
             if let token = await client.currentToken {
-                try? credentials.save(.init(serverURL: url, token: token))
+                persist(.init(serverURL: url, token: token))
             }
             adopt(client: client, me: me)
         } catch {
