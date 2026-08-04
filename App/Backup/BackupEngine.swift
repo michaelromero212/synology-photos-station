@@ -108,12 +108,44 @@ final class BackupEngine {
         }
 
         statusText = "Scanning library…"
-        let candidates = PhotoLibraryScanner.scan(includeVideos: settings.includeVideos)
+        var candidates = PhotoLibraryScanner.scan(includeVideos: settings.includeVideos)
         let context = ModelContext(container)
 
-        let existing = Set(
-            (try? context.fetch(FetchDescriptor<BackupItem>()))?.map(\.localIdentifier) ?? []
-        )
+        let known = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
+
+        // What each rule actually means for a scan.
+        switch settings.rule {
+        case .resume:
+            break
+
+        case .scanAll:
+            // Sweep the library: anything that didn't make it stands again.
+            // Items already uploaded stay skipped — the server would dedupe
+            // them by hash anyway, so re-sending is pure cost. A failure or a
+            // permanent skip, though, is exactly what this rule is chosen to
+            // clear, and an item renamed or moved since is a different file to
+            // the server even where the bytes match.
+            if settings.rule.retriesPreviousFailures {
+                for item in known where item.state == .failed || item.state == .skipped {
+                    item.state = .pending
+                    item.attempts = 0
+                    item.lastError = nil
+                }
+            }
+
+        case .futureOnly:
+            // Only what was taken after the user drew the line. Without a
+            // cutoff there's no line to draw, so nothing is excluded.
+            candidates = candidates.filter {
+                settings.rule.queues(
+                    takenAt: $0.asset.creationDate, cutoff: settings.futureCutoff
+                )
+            }
+        }
+
+        // Already-uploaded items are never re-queued by identifier, whichever
+        // rule is in force.
+        let existing = Set(known.map(\.localIdentifier))
 
         var added = 0
         for candidate in candidates where !existing.contains(candidate.asset.localIdentifier) {

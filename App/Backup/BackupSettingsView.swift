@@ -1,46 +1,12 @@
 #if os(iOS)
 import FrameStationAPI
+import FrameStationKit
 import Foundation
 import Photos
 import SwiftUI
 
 /// Backup preferences. Mirrors Synology's screen, with the two options it
 /// lacks: charging-only, and choosing which space to back up into.
-/// What a backup run is asked to cover.
-///
-/// Synology's three, kept because they answer three questions people actually
-/// have: pick up where you left off, sweep the whole library, or draw a line
-/// under today and only take what comes next.
-enum BackupRule: String, CaseIterable, Identifiable, Equatable {
-    case resume
-    case scanAll
-    case futureOnly
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .resume: return "Resume tasks"
-        case .scanAll: return "Scan and back up all photos"
-        case .futureOnly: return "Back up future photos"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .resume:
-            return "Continue the last backup task. Changes to previous photos "
-                + "will be backed up as new files."
-        case .scanAll:
-            return "Backed-up items will be skipped, but items renamed, deleted, "
-                + "or moved to another space will be backed up again."
-        case .futureOnly:
-            return "Back up photos and videos taken from now on. Changes made to "
-                + "previous items will also be backed up as new files."
-        }
-    }
-}
-
 struct BackupSettings: Equatable {
     var enabled = false
     var rule: BackupRule = .resume
