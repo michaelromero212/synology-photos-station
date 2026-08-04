@@ -37,6 +37,25 @@ extension FrameStationClient {
         URL(string: "v1/assets/\(assetID)/preview", relativeTo: baseURL)
     }
 
+    /// The original bytes, for handing to the share sheet so a photo can go
+    /// back into the iPhone's own library.
+    public func originalData(assetID: UUID) async throws -> Data {
+        guard let url = originalURL(assetID: assetID) else {
+            throw FrameStationClientError.invalidURL("original")
+        }
+        var request = URLRequest(url: url)
+        if let header = await authorizationHeader() {
+            request.setValue(header, forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw FrameStationClientError.http(
+                status: (response as? HTTPURLResponse)?.statusCode ?? -1, reason: nil
+            )
+        }
+        return data
+    }
+
     public func originalURL(assetID: UUID) -> URL? {
         URL(string: "v1/assets/\(assetID)/original", relativeTo: baseURL)
     }

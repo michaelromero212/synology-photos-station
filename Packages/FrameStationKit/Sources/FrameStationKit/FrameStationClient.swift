@@ -103,6 +103,15 @@ public actor FrameStationClient {
         try await send(.get, "v1/assets/\(assetID.uuidString)/playback")
     }
 
+    /// Removes a photo from a library. The file moves to `#recycle`; the
+    /// record of the removal is what stops backup putting it back.
+    public func removeAsset(spaceID: UUID, assetID: UUID) async throws {
+        try await sendNoContent(
+            .delete, "v1/spaces/\(spaceID.uuidString)/assets/\(assetID.uuidString)",
+            body: EmptyAlbumBody()
+        )
+    }
+
     // MARK: - Albums
 
     public func albums() async throws -> AlbumListResponse {

@@ -31,6 +31,10 @@ struct TimelineView: View {
     @State private var showBackup = false
     @State private var showPicker = false
     @State private var shareResult: Int?
+    @State private var selection = GridSelection()
+    @State private var shareFiles: [URL] = []
+    @State private var showShare = false
+    @State private var confirmDelete = false
     #endif
 
     private let spacing: CGFloat = 2
@@ -65,6 +69,28 @@ struct TimelineView: View {
             SpacesView(session: session) { showSpaces = false }
         }
         #if os(iOS)
+        .sheet(isPresented: $showShare, onDismiss: { selection.clear() }) {
+            ShareSheet(items: shareFiles)
+        }
+        .confirmationDialog(
+            selection.count == 1
+                ? "Remove this photo from \(space.name)?"
+                : "Remove \(selection.count) photos from \(space.name)?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                Task {
+                    _ = await selection.remove(from: space, client: session.client)
+                    await store?.refresh()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // Say what removal actually does. It is not a deletion from the
+            // phone, and it is not permanent on the NAS either.
+            Text("They stay on this iPhone. On the NAS they move to #recycle, and backup won't add them again.")
+        }
         .sheet(isPresented: $showPicker) {
             LibraryPickerView(session: session, space: space) { count in
                 showPicker = false
@@ -146,6 +172,64 @@ struct TimelineView: View {
         }
     }
 
+
+    /// One tile.
+    ///
+    /// Selection and navigation are different enough that they'd read as two
+    /// cells, but the branch lives inside the builder rather than across a
+    /// `#if` — braces have to balance within each conditional block.
+    @ViewBuilder
+    private func gridCell(_ item: TimelineItem, side: CGFloat) -> some View {
+        #if os(iOS)
+        if selection.isActive {
+            PhotoCell(item: item, loader: session.loader, side: side)
+                .overlay(alignment: .topLeading) {
+                    SelectionMark(isPicked: selection.contains(item)).padding(5)
+                }
+                .overlay {
+                    if selection.contains(item) {
+                        Rectangle().fill(.black.opacity(0.25))
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { selection.toggle(item) }
+        } else {
+            NavigationLink {
+                AssetDetailView(item: item, space: space, session: session)
+            } label: {
+                PhotoCell(item: item, loader: session.loader, side: side)
+                    .overlay(alignment: .bottomTrailing) {
+                        if engine?.recentlyUploaded.contains(item.assetID) == true {
+                            UploadStateBadge(state: .uploaded).padding(5)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            // Long press starts selection, matching Photos: no mode to find
+            // first, and the photo you pressed is already picked.
+            .onLongPressGesture {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                selection.begin(with: item)
+            }
+        }
+        #else
+        NavigationLink {
+            AssetDetailView(item: item, space: space, session: session)
+        } label: {
+            PhotoCell(item: item, loader: session.loader, side: side)
+        }
+        .buttonStyle(.plain)
+        #endif
+    }
+
+    /// The density control. Hidden while selecting, where the contextual
+    /// actions take its place.
+    private func zoomBar(_ store: TimelineStore) -> some View {
+        ZoomBar(zoom: Binding(get: { store.zoom }, set: { _ in })) { newZoom in
+            Task { await store.setZoom(newZoom) }
+        }
+        .padding(.bottom, 6)
+    }
 
     #if os(iOS)
     /// Queued local items grouped by the same day key the server buckets use.
@@ -247,19 +331,7 @@ struct TimelineView: View {
                                     }
                                 } else {
                                     ForEach(items) { item in
-                                        NavigationLink {
-                                            AssetDetailView(item: item, space: space, session: session)
-                                        } label: {
-                                            PhotoCell(item: item, loader: session.loader, side: side)
-                                            #if os(iOS)
-                                                .overlay(alignment: .bottomTrailing) {
-                                                    if engine?.recentlyUploaded.contains(item.assetID) == true {
-                                                        UploadStateBadge(state: .uploaded).padding(5)
-                                                    }
-                                                }
-                                            #endif
-                                        }
-                                        .buttonStyle(.plain)
+                                        gridCell(item, side: side)
                                     }
                                 }
                             }
@@ -277,13 +349,27 @@ struct TimelineView: View {
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollFractionReporter { scrollFraction = $0 })
             .safeAreaInset(edge: .bottom) {
-                ZoomBar(zoom: Binding(
-                    get: { store.zoom },
-                    set: { _ in }
-                )) { newZoom in
-                    Task { await store.setZoom(newZoom) }
+                #if os(iOS)
+                if selection.isActive {
+                    SelectionBar(selection: selection) {
+                        Task {
+                            shareFiles = await selection.downloadOriginals(
+                                from: space, client: session.client
+                            )
+                            if !shareFiles.isEmpty { showShare = true }
+                        }
+                    } onAddToAlbum: {
+                        // Albums are the next piece; nothing half-wired here.
+                    } onDelete: {
+                        confirmDelete = true
+                    } onMore: {
+                    }
+                } else {
+                    zoomBar(store)
                 }
-                .padding(.bottom, 6)
+                #else
+                zoomBar(store)
+                #endif
             }
             .refreshable {
                 await store.refresh()
@@ -405,6 +491,22 @@ struct TimelineView: View {
         // Top left, mirroring where Photos and Synology both put activity.
         // `.topBarLeading` doesn't exist on macOS; `.navigation` is the
         // equivalent leading slot there.
+        #if os(iOS)
+        if selection.isActive {
+            ToolbarItem(placement: .principal) {
+                Text(selection.count == 1 ? "1 selected" : "\(selection.count) selected")
+                    .font(.headline)
+            }
+            ToolbarItem(placement: .cancellationAction) {
+                Button {
+                    selection.clear()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+            }
+        }
+        #endif
+
         ToolbarItem(placement: Self.leadingPlacement) {
             Button {
                 showActivity = true
