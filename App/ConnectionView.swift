@@ -6,6 +6,9 @@ import SwiftUI
 /// Keychain persistence, LAN/remote race) alongside the backup engine in M5.
 struct ConnectionView: View {
     @Bindable var session: AppSession
+    #if !os(tvOS)
+    @State private var showAdvanced = false
+    #endif
 
     var body: some View {
         VStack(spacing: 22) {
@@ -21,50 +24,28 @@ struct ConnectionView: View {
             }
 
             #if !os(tvOS)
-            VStack(spacing: 10) {
-                TextField("Server URL", text: $session.serverURL)
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    #endif
-
-                Picker("", selection: $session.useDSMLogin) {
-                    Text("DSM Account").tag(true)
-                    Text("Invite Code").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
+            // One grouped block of rows with hairlines between them, the way
+            // Synology's own sign-in reads, rather than a stack of separate
+            // bordered boxes.
+            VStack(spacing: 0) {
                 if session.useDSMLogin {
-                    TextField("DSM username", text: $session.dsmUsername)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        .textContentType(.username)
-                        #endif
-
-                    SecureField("DSM password", text: $session.dsmPassword)
-                        .textFieldStyle(.roundedBorder)
-                        #if os(iOS)
-                        .textContentType(.password)
-                        #endif
+                    field("Hostname or IP", text: $session.host, kind: .host)
+                    Divider().padding(.leading, 2)
+                    field("Username", text: $session.dsmUsername, kind: .username)
+                    Divider().padding(.leading, 2)
+                    secureField("Password", text: $session.dsmPassword)
                 } else {
-                    TextField("Your name", text: $session.displayName)
-                        .textFieldStyle(.roundedBorder)
-                        #if os(iOS)
-                        .textContentType(.name)
-                        #endif
-
-                    TextField("Invite code", text: $session.inviteCode)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.characters)
-                        #endif
+                    field("Hostname or IP", text: $session.host, kind: .host)
+                    Divider().padding(.leading, 2)
+                    field("Your name", text: $session.displayName, kind: .name)
+                    Divider().padding(.leading, 2)
+                    field("Invite code", text: $session.inviteCode, kind: .code)
                 }
+                Divider().padding(.leading, 2)
+
+                Toggle("HTTPS", isOn: $session.useHTTPS)
+                    .font(.body.weight(.semibold))
+                    .padding(.vertical, 12)
             }
             .frame(maxWidth: 420)
             #endif
@@ -75,14 +56,64 @@ struct ConnectionView: View {
                     else { await session.connect() }
                 }
             }
+            #if os(tvOS)
             .buttonStyle(.borderedProminent)
-            .disabled(session.phase == .connecting)
+            #else
+            .buttonStyle(SignInButtonStyle())
+            .frame(maxWidth: 420)
+            #endif
+            .disabled(session.phase == .connecting || session.host.trimmingCharacters(in: .whitespaces).isEmpty)
 
             status.frame(minHeight: 60)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #if !os(tvOS)
+        // Port and the invite-code path live behind the gear rather than on
+        // the front screen: almost nobody changes the port, and a family
+        // member redeeming an invite is the rarer of the two ways in.
+        .overlay(alignment: .bottomLeading) {
+            Button { showAdvanced = true } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(24)
+        }
+        .sheet(isPresented: $showAdvanced) {
+            AdvancedConnectionSheet(session: session) { showAdvanced = false }
+        }
+        #endif
     }
+
+    #if !os(tvOS)
+    private enum FieldKind { case host, username, name, code }
+
+    @ViewBuilder
+    private func field(
+        _ title: String, text: Binding<String>, kind: FieldKind
+    ) -> some View {
+        TextField(title, text: text)
+            .autocorrectionDisabled()
+            .padding(.vertical, 12)
+            #if os(iOS)
+            .textInputAutocapitalization(kind == .code ? .characters : (kind == .name ? .words : .never))
+            .keyboardType(kind == .host ? .URL : .default)
+            .textContentType(
+                kind == .username ? .username : (kind == .name ? .name : nil)
+            )
+            #endif
+    }
+
+    private func secureField(_ title: String, text: Binding<String>) -> some View {
+        SecureField(title, text: text)
+            .padding(.vertical, 12)
+            #if os(iOS)
+            .textContentType(.password)
+            #endif
+    }
+    #endif
 
     @ViewBuilder
     private var status: some View {
@@ -104,3 +135,65 @@ struct ConnectionView: View {
         }
     }
 }
+
+#if !os(tvOS)
+/// Full-width capsule, matching the Sign In button on Synology's screen.
+struct SignInButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 15)
+            .background(
+                isEnabled ? AnyShapeStyle(.tint) : AnyShapeStyle(.gray),
+                in: Capsule()
+            )
+            .opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
+
+/// Port, and the other way in.
+struct AdvancedConnectionSheet: View {
+    @Bindable var session: AppSession
+    let onDone: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Port") {
+                        TextField("Port", text: $session.port)
+                            .multilineTextAlignment(.trailing)
+                            #if os(iOS)
+                            .keyboardType(.numberPad)
+                            #endif
+                    }
+                } footer: {
+                    Text("FrameStation listens on port \(String(AppSession.defaultPort)) by default. This is its own port, not DSM's.")
+                }
+
+                Section {
+                    Picker("Sign in with", selection: $session.useDSMLogin) {
+                        Text("DSM Account").tag(true)
+                        Text("Invite Code").tag(false)
+                    }
+                } footer: {
+                    Text("Family members without a DSM account sign in with an invite code instead.")
+                }
+            }
+            .navigationTitle("Connection Settings")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onDone)
+                }
+            }
+        }
+    }
+}
+#endif

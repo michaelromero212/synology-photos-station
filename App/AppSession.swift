@@ -17,7 +17,47 @@ final class AppSession {
         case failed(String)
     }
 
-    var serverURL: String = "http://127.0.0.1:8099"
+    /// Address, split the way Synology's own app asks for it: a name or IP,
+    /// a port, and whether to speak TLS. A single URL field made people guess
+    /// at a scheme, and `192.168.4.83` on its own parses as a *path*, not a
+    /// host, which failed with nothing useful to say.
+    var host: String = ""
+    var port: String = String(AppSession.defaultPort)
+    var useHTTPS: Bool = true
+
+    /// The port FrameStation listens on. Not DSM's 5000/5001 — this is our own
+    /// service, and it lives beside DSM rather than in front of it.
+    static let defaultPort = 8443
+
+    /// The three fields as one address, or nil if there's nothing usable yet.
+    var composedURL: URL? {
+        var name = host.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+        // Tolerate a pasted URL: people paste what their browser shows them.
+        for prefix in ["https://", "http://"] where name.lowercased().hasPrefix(prefix) {
+            name = String(name.dropFirst(prefix.count))
+        }
+        if let slash = name.firstIndex(of: "/") { name = String(name[name.startIndex..<slash]) }
+        // A pasted host:port wins over the port field, since it is what the
+        // person just typed and they'd have to hunt for the other one.
+        var chosenPort = port.trimmingCharacters(in: .whitespaces)
+        if let colon = name.lastIndex(of: ":"), !name.contains("[") {
+            chosenPort = String(name[name.index(after: colon)...])
+            name = String(name[name.startIndex..<colon])
+        }
+        guard !name.isEmpty else { return nil }
+        var text = "\(useHTTPS ? "https" : "http")://\(name)"
+        if !chosenPort.isEmpty { text += ":\(chosenPort)" }
+        return URL(string: text)
+    }
+
+    /// Fills the three fields back in from a URL — a restored credential, or a
+    /// launch argument.
+    func applyAddress(_ url: URL) {
+        useHTTPS = url.scheme?.lowercased() == "https"
+        host = url.host() ?? ""
+        port = url.port.map(String.init) ?? ""
+    }
     /// Set when the Keychain refused the token; the session won't outlive the app.
     var keychainWarning: String?
     var inviteCode: String = ""
@@ -37,7 +77,7 @@ final class AppSession {
     /// The tab structure asks for these by name rather than digging through
     /// `spaces` at each call site.
     var personalSpace: SpaceDTO? { spaces.first { $0.kind == .personal } }
-    var serverHost: String? { URL(string: serverURL)?.host() }
+    var serverHost: String? { host.isEmpty ? nil : host }
     private(set) var loader: ThumbnailLoader?
     private let credentials = CredentialStore()
 
@@ -54,7 +94,9 @@ final class AppSession {
     /// must never be a path in a shipping build.
     init() {
         let defaults = UserDefaults.standard
-        if let url = defaults.string(forKey: "FSServerURL") { serverURL = url }
+        if let text = defaults.string(forKey: "FSServerURL"), let url = URL(string: text) {
+            applyAddress(url)
+        }
         if let code = defaults.string(forKey: "FSInviteCode") { inviteCode = code }
         displayName = defaults.string(forKey: "FSDisplayName") ?? Self.suggestedName
     }
@@ -99,7 +141,7 @@ final class AppSession {
 
     func restore() async -> Bool {
         guard let saved = credentials.load() else { return false }
-        serverURL = saved.serverURL.absoluteString
+        applyAddress(saved.serverURL)
         phase = .connecting
 
         let client = FrameStationClient(configuration: .init(baseURL: saved.serverURL, token: saved.token))
@@ -155,8 +197,8 @@ final class AppSession {
     /// Signs in with a DSM account. The password is sent once and then cleared
     /// from memory; only the returned token is kept.
     func signInWithDSM() async {
-        guard let url = URL(string: serverURL.trimmingCharacters(in: .whitespaces)) else {
-            phase = .failed("That doesn't look like a valid URL.")
+        guard let url = composedURL else {
+            phase = .failed("Enter the address of your NAS.")
             return
         }
         let username = dsmUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -192,8 +234,8 @@ final class AppSession {
     }
 
     func connect() async {
-        guard let url = URL(string: serverURL.trimmingCharacters(in: .whitespaces)) else {
-            phase = .failed("That doesn't look like a valid URL.")
+        guard let url = composedURL else {
+            phase = .failed("Enter the address of your NAS.")
             return
         }
 
