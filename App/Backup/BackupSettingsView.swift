@@ -6,8 +6,46 @@ import SwiftUI
 
 /// Backup preferences. Mirrors Synology's screen, with the two options it
 /// lacks: charging-only, and choosing which space to back up into.
+/// What a backup run is asked to cover.
+///
+/// Synology's three, kept because they answer three questions people actually
+/// have: pick up where you left off, sweep the whole library, or draw a line
+/// under today and only take what comes next.
+enum BackupRule: String, CaseIterable, Identifiable, Equatable {
+    case resume
+    case scanAll
+    case futureOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .resume: return "Resume tasks"
+        case .scanAll: return "Scan and back up all photos"
+        case .futureOnly: return "Back up future photos"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .resume:
+            return "Continue the last backup task. Changes to previous photos "
+                + "will be backed up as new files."
+        case .scanAll:
+            return "Backed-up items will be skipped, but items renamed, deleted, "
+                + "or moved to another space will be backed up again."
+        case .futureOnly:
+            return "Back up photos and videos taken from now on. Changes made to "
+                + "previous items will also be backed up as new files."
+        }
+    }
+}
+
 struct BackupSettings: Equatable {
     var enabled = false
+    var rule: BackupRule = .resume
+    /// When `futureOnly` started, so a run knows where the line was drawn.
+    var futureCutoff: Date?
     var wifiOnly = true
     var chargingOnly = false
     var includeVideos = true
@@ -26,6 +64,8 @@ struct BackupSettings: Equatable {
         static let chargingOnly = "backup.chargingOnly"
         static let includeVideos = "backup.includeVideos"
         static let target = "backup.targetSpaceID"
+        static let rule = "backup.rule"
+        static let cutoff = "backup.futureCutoff"
     }
 
     static func load() -> BackupSettings {
@@ -36,6 +76,9 @@ struct BackupSettings: Equatable {
         settings.chargingOnly = defaults.bool(forKey: Key.chargingOnly)
         settings.includeVideos = defaults.object(forKey: Key.includeVideos) as? Bool ?? true
         settings.targetSpaceID = defaults.string(forKey: Key.target).flatMap(UUID.init(uuidString:))
+        settings.rule = defaults.string(forKey: Key.rule)
+            .flatMap(BackupRule.init(rawValue:)) ?? .resume
+        settings.futureCutoff = defaults.object(forKey: Key.cutoff) as? Date
         return settings
     }
 
@@ -46,6 +89,8 @@ struct BackupSettings: Equatable {
         defaults.set(chargingOnly, forKey: Key.chargingOnly)
         defaults.set(includeVideos, forKey: Key.includeVideos)
         defaults.set(targetSpaceID?.uuidString, forKey: Key.target)
+        defaults.set(rule.rawValue, forKey: Key.rule)
+        defaults.set(futureCutoff, forKey: Key.cutoff)
     }
 }
 
@@ -58,6 +103,16 @@ struct BackupSettingsView: View {
     @State private var access = PhotoLibraryScanner.access
     private var registrar: PushRegistrar { .shared }
 
+    /// Says where the files land, in the terms the file tree uses — the same
+    /// promise Synology makes on this screen, and one this app can keep now
+    /// that uploads are written to human paths.
+    private var destinationExplanation: String {
+        let name = settings.targetSpace(in: session.spaces)?.name ?? "your personal space"
+        return "Photos and videos are backed up to folders created under "
+            + "/\(name)/MobileBackup/iPhone, named by the year and month they "
+            + "were taken."
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -69,18 +124,54 @@ struct BackupSettingsView: View {
                     Text("Photos and videos are copied to your NAS. Nothing is removed from this device.")
                 }
 
-                Section("Backup Destination") {
-                    Picker("Library", selection: $settings.targetSpaceID) {
+                Section("Backup Rule") {
+                    ForEach(BackupRule.allCases) { rule in
+                        Button {
+                            settings.rule = rule
+                            // Only meaningful for the rule that draws a line
+                            // under now; stale on the other two.
+                            settings.futureCutoff = rule == .futureOnly ? Date() : nil
+                        } label: {
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(rule.title).foregroundStyle(.primary)
+                                    Text(rule.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                if settings.rule == rule {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section {
+                    Picker("Backup Destination", selection: $settings.targetSpaceID) {
                         ForEach(session.spaces) { space in
                             Text(space.name).tag(Optional(space.id))
                         }
                     }
+                } header: {
+                    Text("Backup Path")
+                } footer: {
+                    Text(destinationExplanation)
                 }
 
                 Section("Upload Settings") {
                     Toggle("Wi-Fi Only", isOn: $settings.wifiOnly)
                     Toggle("Only While Charging", isOn: $settings.chargingOnly)
-                    Toggle("Include Videos", isOn: $settings.includeVideos)
+                    // Phrased as Synology phrases it. Stored the other way
+                    // round, so the toggle reads inverted.
+                    Toggle("Photos Only", isOn: Binding(
+                        get: { !settings.includeVideos },
+                        set: { settings.includeVideos = !$0 }
+                    ))
                 }
 
                 notificationSection

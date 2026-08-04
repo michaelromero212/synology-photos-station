@@ -29,6 +29,11 @@ struct TimelineView: View {
     @State private var showSpaces = false
     #if os(iOS)
     @State private var showBackup = false
+    /// Dismissing the "not enabled" card lasts for the session, not forever:
+    /// the next launch asks once more, because an un-backed-up library is
+    /// worth one reminder a day.
+    @State private var dismissedBackupPrompt = false
+    @State private var showBackupSettings = false
     @State private var showPicker = false
     @State private var shareResult: Int?
     @State private var selection = GridSelection()
@@ -130,6 +135,15 @@ struct TimelineView: View {
                 BackupHubView(
                     session: session, engine: engine, settings: $backupSettings
                 ) { showBackup = false }
+            }
+        }
+        // "Set Up Now" is a promise to set backup up, so it opens the settings
+        // rather than a hub the settings are one more tap inside.
+        .sheet(isPresented: $showBackupSettings) {
+            if let engine {
+                BackupSettingsView(
+                    session: session, engine: engine, settings: $backupSettings
+                ) { showBackupSettings = false }
             }
         }
         #endif
@@ -427,7 +441,53 @@ struct TimelineView: View {
     /// Pinned above the grid: always present while backup is on, because
     /// "is my phone backed up" is a question people ask constantly and a
     /// banner that only appears during work can't answer it.
+    @ViewBuilder
     private func backupBanner(_ engine: BackupEngine) -> some View {
+        if !backupSettings.enabled {
+            // Backup being off is worth interrupting for once, with the action
+            // attached — a status row you have to know to tap is how people end
+            // up months later with nothing backed up. Dismissible, because
+            // being nagged forever about a deliberate choice is worse.
+            if !dismissedBackupPrompt {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Photo Backup Not Enabled")
+                                .font(.headline)
+                            Text("Turn on to continue backing up photos.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Button {
+                            withAnimation { dismissedBackupPrompt = true }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button("Set Up Now") { showBackupSettings = true }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.primary.opacity(0.12))
+                        .foregroundStyle(.primary)
+                }
+                .padding(14)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        } else {
+            runningBanner(engine)
+        }
+    }
+
+    /// The status row, once backup is actually on.
+    private func runningBanner(_ engine: BackupEngine) -> some View {
         Button { showBackup = true } label: {
             HStack(spacing: 12) {
                 Image(systemName: bannerIcon(engine))
