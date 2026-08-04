@@ -141,29 +141,40 @@ jobs:
         run: |
           set -euo pipefail
           ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"
-          docker buildx imagetools inspect "$ref" --raw > /tmp/manifest.json
-          python3 - "$ref" <<'PY'
+          repo="${ref%:*}"
+
+          # buildx publishes an OCI *index* (the image plus provenance and SBOM
+          # attestations), so the top level has no layers — resolve to the real
+          # linux/amd64 manifest first.
+          docker buildx imagetools inspect "$ref" --raw > /tmp/index.json
+          digest=$(python3 -c '
+          import json
+          index = json.load(open("/tmp/index.json"))
+          if "layers" in index:
+              print("")
+          else:
+              for entry in index.get("manifests", []):
+                  platform = entry.get("platform", {})
+                  if platform.get("architecture") == "amd64" and platform.get("os") == "linux":
+                      print(entry["digest"]); break
+          ')
+
+          if [ -n "$digest" ]; then
+            docker buildx imagetools inspect "$repo@$digest" --raw > /tmp/manifest.json
+          else
+            cp /tmp/index.json /tmp/manifest.json
+          fi
+
+          python3 - "$ref" <<'REPORT' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, sys
           manifest = json.load(open("/tmp/manifest.json"))
           layers = manifest.get("layers", [])
           total = sum(layer["size"] for layer in layers)
-          print(f"## Image: {sys.argv[1]}")
-          print(f"Compressed total: {total / 1e6:.0f} MB across {len(layers)} layers\n")
-          print("| # | Compressed | Digest |")
-          print("|---|-----------|--------|")
-          for index, layer in enumerate(sorted(layers, key=lambda l: -l["size"]), 1):
-              print(f"| {index} | {layer['size'] / 1e6:.1f} MB | `{layer['digest'][7:19]}` |")
-          PY
-          python3 - "$ref" <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, sys
-          manifest = json.load(open("/tmp/manifest.json"))
-          layers = manifest.get("layers", [])
-          total = sum(layer["size"] for layer in layers)
-          print(f"### Container image\n")
+          print("### Container image\n")
           print(f"`{sys.argv[1]}`\n")
           print(f"**{total / 1e6:.0f} MB compressed** across {len(layers)} layers.\n")
           print("| Layer | Compressed |")
           print("|-------|-----------|")
           for index, layer in enumerate(sorted(layers, key=lambda l: -l["size"]), 1):
               print(f"| {index} | {layer['size'] / 1e6:.1f} MB |")
-          PY
+          REPORT
