@@ -180,6 +180,10 @@ struct AssetDetailView: View {
         #if os(iOS)
         .toolbar { toolbar }
         .toolbar(.hidden, for: .tabBar)
+        // A tap clears the screen down to the media and nothing else — the
+        // back chevron and date go with the action bar, and the next tap
+        // brings all of it back.
+        .toolbar(showChrome ? .visible : .hidden, for: .navigationBar)
         .toolbarBackground(.black.opacity(0.6), for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -191,7 +195,10 @@ struct AssetDetailView: View {
         #if os(iOS)
         // One tap reveals the actions, matching Photos and Synology both.
         .onTapGesture { withAnimation { showChrome.toggle() } }
-        .safeAreaInset(edge: .bottom) {
+        // An overlay, not a safe-area inset: an inset shrinks the layout, so
+        // the photo jumped up when the bar appeared and back down when it
+        // hid. Floating the bar over the media leaves it centred either way.
+        .overlay(alignment: .bottom) {
             if showChrome { viewerActions }
         }
         .fullScreenCover(item: $slideshow) { mode in

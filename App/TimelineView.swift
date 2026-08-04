@@ -39,6 +39,12 @@ struct TimelineView: View {
 
     private let spacing: CGFloat = 2
     @State private var scrollFraction: Double = 0
+    #if os(iOS)
+    /// The photo a tap opened, and the day it came from — the slideshows need
+    /// to know what "that day" contained.
+    @State private var openItem: TimelineItem?
+    @State private var openDayItems: [TimelineItem] = []
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +71,17 @@ struct TimelineView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
+        #if os(iOS)
+        .navigationDestination(item: $openItem) { opened in
+            AssetDetailView(
+                item: opened, space: space, session: session, dayItems: openDayItems
+            )
+        }
+        // Selecting photos reuses the tab bar's slot rather than stacking a
+        // second bar above it: the actions apply to what you picked, so the
+        // places you could navigate to are not the question being asked.
+        .toolbar(selection.isActive ? .hidden : .automatic, for: .tabBar)
+        #endif
         .sheet(isPresented: $showSpaces) {
             SpacesView(session: session) { showSpaces = false }
         }
@@ -196,25 +213,26 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { selection.toggle(item) }
         } else {
-            NavigationLink {
-                AssetDetailView(
-                    item: item, space: space, session: session, dayItems: dayItems
-                )
-            } label: {
-                PhotoCell(item: item, loader: session.loader, side: side)
-                    .overlay(alignment: .bottomTrailing) {
-                        if engine?.recentlyUploaded.contains(item.assetID) == true {
-                            UploadStateBadge(state: .uploaded).padding(5)
-                        }
+            // Not a NavigationLink: the link consumes the press and pushes the
+            // photo, so a long press could never start selection. Tap opens,
+            // long press selects, and navigation runs off `openItem`.
+            PhotoCell(item: item, loader: session.loader, side: side)
+                .overlay(alignment: .bottomTrailing) {
+                    if engine?.recentlyUploaded.contains(item.assetID) == true {
+                        UploadStateBadge(state: .uploaded).padding(5)
                     }
-            }
-            .buttonStyle(.plain)
-            // Long press starts selection, matching Photos: no mode to find
-            // first, and the photo you pressed is already picked.
-            .onLongPressGesture {
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                selection.begin(with: item)
-            }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    openDayItems = dayItems
+                    openItem = item
+                }
+                // Matches Photos: no mode to find first, and the photo you
+                // pressed is already picked.
+                .onLongPressGesture {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    selection.begin(with: item)
+                }
         }
         #else
         NavigationLink {
