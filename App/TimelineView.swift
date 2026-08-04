@@ -34,6 +34,8 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var dismissedBackupPrompt = false
     @State private var showBackupSettings = false
+    @State private var showAddToAlbum = false
+    @State private var albumResult: String?
     @State private var showPicker = false
     @State private var shareResult: Int?
     @State private var selection = GridSelection()
@@ -139,6 +141,10 @@ struct TimelineView: View {
         }
         // "Set Up Now" is a promise to set backup up, so it opens the settings
         // rather than a hub the settings are one more tap inside.
+        .modifier(AddToAlbumPresentation(
+            session: session, selection: selection,
+            isPresented: $showAddToAlbum, result: $albumResult
+        ))
         .sheet(isPresented: $showBackupSettings) {
             if let engine {
                 BackupSettingsView(
@@ -395,7 +401,7 @@ struct TimelineView: View {
                             if !shareFiles.isEmpty { showShare = true }
                         }
                     } onAddToAlbum: {
-                        // Albums are the next piece; nothing half-wired here.
+                        showAddToAlbum = true
                     } onDelete: {
                         confirmDelete = true
                     } onMore: {
