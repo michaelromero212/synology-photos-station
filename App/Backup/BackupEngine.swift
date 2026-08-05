@@ -150,6 +150,20 @@ final class BackupEngine {
         var added = 0
         for candidate in candidates where !existing.contains(candidate.asset.localIdentifier) {
             let asset = candidate.asset
+
+            // A Live Photo is one asset and two files, and only the pair is the
+            // Live Photo — the still alone arrives on the NAS as an ordinary
+            // photo with the motion silently gone. Both halves carry the same
+            // group id, which is how the server knows they belong together.
+            //
+            // Not under "Photos Only": that toggle is a deliberate choice to
+            // leave video on the phone, and three seconds of motion per photo is
+            // still video. The still goes up regardless, just without its pair.
+            let pairedVideo = settings.includeVideos
+                ? PhotoLibraryScanner.pairedVideoCandidate(for: asset)
+                : nil
+            let liveGroupID = pairedVideo.map { _ in UUID() }
+
             let item = BackupItem(
                 localIdentifier: asset.localIdentifier,
                 filename: candidate.filename,
@@ -176,15 +190,106 @@ final class BackupEngine {
                 isRaw: candidate.isRaw,
                 burstID: asset.burstIdentifier,
                 burstPick: asset.burstSelectionTypes.contains(.userPick)
-                    || asset.burstSelectionTypes.contains(.autoPick)
+                    || asset.burstSelectionTypes.contains(.autoPick),
+                liveGroupID: liveGroupID
             )
             context.insert(item)
             added += 1
+
+            if let pairedVideo, let liveGroupID {
+                // Width, height and duration are left at zero on purpose: the
+                // motion is a different size to the still, and `descriptor`
+                // reads zero as "ask the server" rather than as a measurement.
+                let video = BackupItem(
+                    localIdentifier: asset.localIdentifier
+                        + PhotoLibraryScanner.pairedVideoSuffix,
+                    filename: pairedVideo.filename,
+                    byteSize: pairedVideo.byteSize,
+                    mediaType: MediaType.video.rawValue,
+                    mime: pairedVideo.mime,
+                    width: 0,
+                    height: 0,
+                    // The same instant as the still, so the pair never lands in
+                    // two different days of the timeline.
+                    capturedAt: asset.creationDate,
+                    capturedTZOffset: nil,
+                    capturedTZOffsetFallback: asset.creationDate.map {
+                        TimeZone.current.secondsFromGMT(for: $0)
+                    },
+                    latitude: asset.location?.coordinate.latitude,
+                    longitude: asset.location?.coordinate.longitude,
+                    isRaw: false,
+                    liveGroupID: liveGroupID
+                )
+                context.insert(video)
+                added += 1
+            }
         }
+
+        added += backfillLivePhotos(candidates, known: known, context: context)
 
         try? context.save()
         refreshProgress(context)
         statusText = added > 0 ? "Queued \(added) new item\(added == 1 ? "" : "s")" : "Up to date"
+    }
+
+    /// Gives the motion back to Live Photos queued before pairing existed.
+    ///
+    /// The scan skips assets it has already seen, so without this a library
+    /// backed up before this change would keep every Live Photo's motion on the
+    /// phone forever — the still is known, so the asset is never looked at
+    /// again.
+    ///
+    /// Only where the still has not gone up yet. Once it has, its server row
+    /// carries no group id, and sending the video now would put a stray
+    /// three-second clip in the timeline next to the photo rather than inside
+    /// it — worse than the motion staying on the phone. Repairing those needs
+    /// a way to stamp an already-committed asset, which does not exist yet.
+    private func backfillLivePhotos(
+        _ candidates: [PhotoLibraryScanner.Candidate],
+        known: [BackupItem],
+        context: ModelContext
+    ) -> Int {
+        guard settings.includeVideos else { return 0 }
+
+        let rows = Dictionary(known.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { first, _ in first })
+        var added = 0
+
+        for candidate in candidates {
+            let asset = candidate.asset
+            let videoID = asset.localIdentifier + PhotoLibraryScanner.pairedVideoSuffix
+            guard let still = rows[asset.localIdentifier],
+                  still.state != .done,
+                  still.liveGroupID == nil,
+                  rows[videoID] == nil,
+                  let pairedVideo = PhotoLibraryScanner.pairedVideoCandidate(for: asset)
+            else { continue }
+
+            let liveGroupID = UUID()
+            still.liveGroupID = liveGroupID
+
+            let video = BackupItem(
+                localIdentifier: videoID,
+                filename: pairedVideo.filename,
+                byteSize: pairedVideo.byteSize,
+                mediaType: MediaType.video.rawValue,
+                mime: pairedVideo.mime,
+                width: 0,
+                height: 0,
+                capturedAt: asset.creationDate,
+                capturedTZOffset: nil,
+                capturedTZOffsetFallback: asset.creationDate.map {
+                    TimeZone.current.secondsFromGMT(for: $0)
+                },
+                latitude: asset.location?.coordinate.latitude,
+                longitude: asset.location?.coordinate.longitude,
+                isRaw: false,
+                liveGroupID: liveGroupID
+            )
+            context.insert(video)
+            added += 1
+        }
+        return added
     }
 
     // MARK: - Uploading
@@ -243,8 +348,14 @@ final class BackupEngine {
         )
         defer { active = nil }
 
+        // A Live Photo's video half is queued under a suffixed id, because the
+        // queue keys on a unique identifier and one asset holds both halves.
+        // Photos only knows the asset by its real id.
+        let isPairedVideo = PhotoLibraryScanner.isPairedVideo(item.localIdentifier)
+        let assetIdentifier = PhotoLibraryScanner.baseIdentifier(item.localIdentifier)
+
         guard let asset = PHAsset.fetchAssets(
-            withLocalIdentifiers: [item.localIdentifier], options: nil
+            withLocalIdentifiers: [assetIdentifier], options: nil
         ).firstObject else {
             // Deleted from the library since the scan. Not an error, and not
             // retryable.
@@ -256,9 +367,26 @@ final class BackupEngine {
 
         do {
             let localIdentifier = item.localIdentifier
+            // Resolved now rather than at scan time: a `PHAssetResource` is a
+            // handle into the library, not something a queue row can hold
+            // across a relaunch.
+            var resource: PHAssetResource?
+            if isPairedVideo {
+                guard let paired = PhotoLibraryScanner.livePhotoResource(for: asset) else {
+                    // The Live Photo lost its motion since the scan — usually
+                    // "Convert to Still" in Photos. Nothing to send, and never
+                    // will be.
+                    item.state = .skipped
+                    item.lastError = "No longer a Live Photo"
+                    try? context.save()
+                    return
+                }
+                resource = paired
+            }
+
             let result = try await AssetUploader.send(
                 asset, descriptor: item.descriptor, to: spaceID, client: client,
-                isAutomaticBackup: true
+                resource: resource, isAutomaticBackup: true
             ) { [weak self] phase in
                 Task { @MainActor in
                     guard let self, self.active?.localIdentifier == localIdentifier else { return }

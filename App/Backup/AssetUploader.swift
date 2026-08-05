@@ -13,8 +13,12 @@ struct UploadDescriptor {
     var filename: String
     var mime: String
     var mediaType: MediaType
-    var width: Int
-    var height: Int
+    /// Nil when the uploader genuinely doesn't know — a Live Photo's motion
+    /// half, whose size only the file itself records. The server fills what
+    /// arrives missing and leaves alone what arrives set, so a guess here is
+    /// permanent and a nil is corrected.
+    var width: Int?
+    var height: Int?
     var durationMs: Int?
     var capturedAt: Date?
     var capturedTZOffset: Int?
@@ -101,15 +105,19 @@ enum AssetUploader {
     }
 
     /// Exports, hashes, probes, sends only what's missing, and commits.
+    /// `resource` names which half of the asset to send. Defaults to the one
+    /// holding the photo or video itself; the Live Photo path passes the paired
+    /// video instead, which is the same asset and different bytes.
     static func send(
         _ asset: PHAsset,
         descriptor: UploadDescriptor,
         to spaceID: UUID,
         client: FrameStationClient,
+        resource: PHAssetResource? = nil,
         isAutomaticBackup: Bool = false,
         onPhase: (@Sendable (Phase) -> Void)? = nil
     ) async throws -> Result {
-        guard let resource = PhotoLibraryScanner.primaryResource(for: asset) else {
+        guard let resource = resource ?? PhotoLibraryScanner.primaryResource(for: asset) else {
             throw UploadError.noExportableResource
         }
 

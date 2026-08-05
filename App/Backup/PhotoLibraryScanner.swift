@@ -101,8 +101,55 @@ enum PhotoLibraryScanner {
     /// The paired video half of a Live Photo, if there is one.
     static func livePhotoResource(for asset: PHAsset) -> PHAssetResource? {
         guard asset.mediaSubtypes.contains(.photoLive) else { return nil }
-        return PHAssetResource.assetResources(for: asset)
-            .first { $0.type == .pairedVideo || $0.type == .fullSizePairedVideo }
+        // Full size first: `.pairedVideo` is the original, `.fullSizePairedVideo`
+        // the render that matches an edited still. Taking the wrong one pairs a
+        // cropped photo with uncropped motion.
+        let resources = PHAssetResource.assetResources(for: asset)
+        return resources.first { $0.type == .fullSizePairedVideo }
+            ?? resources.first { $0.type == .pairedVideo }
+    }
+
+    // MARK: - Live Photo identity
+
+    /// Marks the queue row holding a Live Photo's video half.
+    ///
+    /// One `PHAsset`, two resources, and a queue keyed on a unique local
+    /// identifier — so the second half needs an id of its own. A PHAsset
+    /// identifier is a UUID with a `/Lnn/nnn` suffix, so `#` cannot occur in one
+    /// and this cannot collide with a real asset.
+    static let pairedVideoSuffix = "#pairedVideo"
+
+    /// The `PHAsset` identifier behind a queue row, with any pairing mark
+    /// removed. Fetching by the suffixed id finds nothing.
+    static func baseIdentifier(_ identifier: String) -> String {
+        guard identifier.hasSuffix(pairedVideoSuffix) else { return identifier }
+        return String(identifier.dropLast(pairedVideoSuffix.count))
+    }
+
+    static func isPairedVideo(_ identifier: String) -> Bool {
+        identifier.hasSuffix(pairedVideoSuffix)
+    }
+
+    /// The file facts for a Live Photo's motion half.
+    ///
+    /// Dimensions and duration are deliberately absent rather than borrowed
+    /// from the still: the video is a different size to the photo it belongs to
+    /// — commonly 1440×1080 beside a 4032×3024 still — and sending the still's
+    /// numbers would write a wrong answer the server's own probe then refuses
+    /// to correct, because it only fills what is missing.
+    static func pairedVideoCandidate(for asset: PHAsset) -> Candidate? {
+        guard let resource = livePhotoResource(for: asset) else { return nil }
+        return Candidate(
+            asset: asset,
+            filename: resource.originalFilename,
+            byteSize: byteSize(of: resource),
+            mediaType: .video,
+            mime: mimeType(
+                for: (resource.originalFilename as NSString).pathExtension.lowercased(),
+                uti: resource.uniformTypeIdentifier
+            ),
+            isRaw: false
+        )
     }
 
     /// `PHAssetResource` exposes size only through a private-ish key. Missing

@@ -145,8 +145,12 @@ extension BackupItem {
             filename: filename,
             mime: mime,
             mediaType: MediaType(rawValue: mediaTypeRaw) ?? .photo,
-            width: width,
-            height: height,
+            // Zero means unknown, not zero pixels — a Live Photo's video half
+            // is queued without dimensions so the server's probe can supply the
+            // real ones. Stored as 0 rather than as an optional to keep the
+            // persisted queue's shape unchanged.
+            width: width > 0 ? width : nil,
+            height: height > 0 ? height : nil,
             durationMs: durationMs,
             capturedAt: capturedAt,
             capturedTZOffset: capturedTZOffset,
