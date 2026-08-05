@@ -260,11 +260,18 @@ struct RebuildCommand: AsyncCommand {
 
     // MARK: - Scanning
 
-    /// Walks `<homes>/*/Photos/MobileBackup`, and nothing else under a home.
+    /// Walks `<homes>/*/Photos`, and nothing else under a home.
     ///
-    /// Scoped deliberately. A home directory holds a person's documents and
-    /// downloads too, and a photo attached to an email is not a library file —
-    /// walking the whole home would claim it as one.
+    /// Scoped to `Photos` deliberately. A home directory holds a person's
+    /// documents and downloads too, and a photo attached to an email is not a
+    /// library file — walking the whole home would claim it as one.
+    ///
+    /// Scoped no *further* than `Photos`, equally deliberately. Synology put
+    /// phone backups in `MobileBackup/<device>/` and web uploads in
+    /// `PhotoLibrary/`, so a scan of only the former silently leaves the latter
+    /// behind — and someone whose photos all arrived through the browser would
+    /// have been skipped entirely. Everything under `Photos` is the library,
+    /// wherever a previous app chose to file it.
     private static func scanHomes(_ root: String, logger: Logger) throws -> [Found] {
         let manager = FileManager.default
         guard let people = try? manager.contentsOfDirectory(atPath: root) else {
@@ -275,22 +282,38 @@ struct RebuildCommand: AsyncCommand {
         var found: [Found] = []
         for person in people.sorted() {
             guard !person.hasPrefix("@"), !person.hasPrefix(".") else { continue }
-            let backup = "\(root)/\(person)/Photos/MobileBackup"
+            let photos = "\(root)/\(person)/Photos"
             var isDirectory: ObjCBool = false
-            guard manager.fileExists(atPath: backup, isDirectory: &isDirectory),
+            guard manager.fileExists(atPath: photos, isDirectory: &isDirectory),
                   isDirectory.boolValue else { continue }
 
             let candidates = try LibraryScanner.scan(
-                root: URL(fileURLWithPath: backup, isDirectory: true), logger: logger
+                root: URL(fileURLWithPath: photos, isDirectory: true), logger: logger
             )
             found += candidates.map {
                 Found(
                     candidate: $0,
-                    home: .personal(user: person, device: relative($0.url.path, to: backup).first)
+                    home: .personal(
+                        user: person,
+                        device: legacyDevice(of: $0.url.path, under: photos)
+                    )
                 )
             }
         }
         return found
+    }
+
+    /// The device a legacy `MobileBackup/<device>/…` path names, if any.
+    ///
+    /// Only meaningful for files Synology filed. Anything under `PhotoLibrary/`
+    /// came from a browser and names no device, and anything written since the
+    /// layout was flattened sits at `Photos/YYYY/MM/` and names none either —
+    /// which is correct. The device belongs in `space_assets.source_device_id`,
+    /// not in a path.
+    static func legacyDevice(of path: String, under photos: String) -> String? {
+        let parts = relative(path, to: photos)
+        guard parts.count >= 3, parts[0] == "MobileBackup" else { return nil }
+        return parts[1]
     }
 
     /// Walks `<shared>/<Space>`, one library per top-level folder.

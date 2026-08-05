@@ -499,10 +499,10 @@ server having quietly fallen back to the blob store. Back up one photo from the
 app, then:
 
 ```bash
-ls /volume1/homes/<dsm-user>/Photos/MobileBackup/
+ls -R /volume1/homes/<dsm-user>/Photos/
 ```
 
-A `<device>/YYYY/MM/IMG_*.heic` there is the whole decision working. Nothing
+A `YYYY/MM/IMG_*.heic` there is the whole decision working. Nothing
 there means the layout is off, the account has no DSM link, or the container is
 not root — in that order of likelihood.
 

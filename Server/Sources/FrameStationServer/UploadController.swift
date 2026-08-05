@@ -392,17 +392,14 @@ struct UploadController: RouteCollection {
         struct ContextRow: Decodable {
             let spaceKind: String
             let spaceName: String
-            let deviceName: String?
             let dsmUsername: String?
             let dsmUID: Int?
         }
         guard let context = try? await req.sql.raw("""
             SELECT s.kind AS "spaceKind", s.name AS "spaceName",
-                   d.name AS "deviceName",
                    u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
             FROM spaces s
             JOIN users u ON u.id = \(bind: device.userID)
-            LEFT JOIN devices d ON d.id = \(bind: device.deviceID)
             WHERE s.id = \(bind: input.spaceID)
             """).first(decoding: ContextRow.self) else { return nil }
 
@@ -411,8 +408,7 @@ struct UploadController: RouteCollection {
             blobExt: BlobStore.fileExtension(for: session.filename),
             filename: session.filename, capturedAt: input.capturedAt,
             spaceKind: context.spaceKind, spaceName: context.spaceName,
-            deviceName: context.deviceName, dsmUsername: context.dsmUsername,
-            dsmUID: context.dsmUID
+            dsmUsername: context.dsmUsername, dsmUID: context.dsmUID
         )
         guard let intended = BrowseTree.destination(
             for: placement, configuration: configuration
@@ -493,7 +489,7 @@ struct UploadController: RouteCollection {
             id: UUID(), sha256: source.sha256, blobExt: source.blobExt,
             filename: source.filename, capturedAt: source.capturedAt,
             spaceKind: target.spaceKind, spaceName: target.spaceName,
-            deviceName: nil, dsmUsername: target.dsmUsername, dsmUID: target.dsmUID
+            dsmUsername: target.dsmUsername, dsmUID: target.dsmUID
         )
         guard let intended = BrowseTree.destination(
             for: placement, configuration: configuration

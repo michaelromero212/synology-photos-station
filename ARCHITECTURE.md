@@ -117,8 +117,8 @@ and the lane count would have needed capping via
 
 Photos are stored at a real, human path and *that file is the photo*:
 
-    /volume1/homes/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
-    /volume1/FrameStation/Shared/<Space>/YYYY/MM/IMG_9001.jpg
+    /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic
+    /volume1/FrameStation/<Space>/YYYY/MM/IMG_9001.jpg
 
 The database is an index over those files, rebuildable by scanning them. It is
 no longer the only thing that knows what a file is.
@@ -175,9 +175,9 @@ something the user deliberately removed.
 "Rebuildable by scanning them" was a claim until it was executed. It is now a
 command:
 
-    FrameStationServer rebuild --homes /volume1/homes --shared /volume1/FrameStation/Shared
+    FrameStationServer rebuild --homes /volume1/homes --shared /volume1/FrameStation
 
-It walks `<user>/Photos/MobileBackup` in each home and each folder under the
+It walks `<user>/Photos` in each home and each folder under the
 shared root, and turns what it finds back into users, libraries, assets and
 placements. Nothing is copied: `storage_path` points at the file where it
 already lies. Accounts are recreated from the home directory names and keyed on
@@ -189,7 +189,7 @@ both resumable and a way to pick up files dropped into the library by hand.
 schema entirely, run the command, and check that the library comes back —
 right photos in the right libraries, EXIF dates and dimensions read off the
 files, SHA-256 matching the bytes on disk, and `@eaDir`, `#recycle` and
-everything outside `Photos/MobileBackup` correctly left out.
+everything outside `Photos` correctly left out.
 
 **What does not come back.** Favourites, ratings, tags, captions and albums are
 in the database and nowhere else; a folder has no place to keep them. Shared
@@ -234,8 +234,8 @@ One DSM shared folder, one service account. No per-user folders.
 Each person sees their own library in DSM, and shared spaces separately:
 
 ```
-/volume1/homes/<DSM user>/FrameStation/MobileBackup/<device>/2026/07/…   ← private
-/volume1/FrameStation/Shared/<Space Name>/2026/07/…                      ← shared
+/volume1/homes/<DSM user>/Photos/2026/07/…              ← private
+/volume1/FrameStation/<Space Name>/2026/07/…            ← shared
 ```
 
 These are **reflinks** (`cp --reflink`), not hardlinks. Measured on the DS920+:
@@ -406,8 +406,8 @@ an arbitrary asset.
 Blobs are named by hash — right for storage, meaningless to someone opening a
 folder. A second, human-readable tree mirrors every placement:
 
-    /volume1/homes/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
-    /volume1/FrameStation/Shared/<Space>/YYYY/MM/IMG_9001.jpg
+    /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic
+    /volume1/FrameStation/<Space>/YYYY/MM/IMG_9001.jpg
 
 Entries are **reflinks**. Hardlinks cannot cross Synology's per-shared-folder
 Btrfs subvolumes at all (§4), reflinks cost nothing until written, and they

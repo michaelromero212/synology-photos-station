@@ -71,7 +71,6 @@ enum BrowseTree {
         let capturedAt: Date?
         let spaceKind: String
         let spaceName: String
-        let deviceName: String?
         let dsmUsername: String?
         let dsmUID: Int?
     }
@@ -121,11 +120,17 @@ enum BrowseTree {
 
         // Personal photos land in that person's DSM home, which is the whole
         // point: they open File Station and see their own library.
+        //
+        // One tree, not `MobileBackup/<device>/`. Synology split phone backups
+        // from web uploads and then split again per device, so a person's
+        // photos arrived in two or three trees that had to be browsed
+        // separately — the thing this library exists to stop. Which device took
+        // a photo is recorded in space_assets.source_device_id, which is where
+        // that belongs: a folder tree is a bad database, and it cannot be
+        // re-filed when a phone is renamed.
         guard let user = placement.dsmUsername, !user.isEmpty else { return nil }
-        let device = sanitise(placement.deviceName ?? "Device")
         return [
-            configuration.homesRoot, sanitise(user), "Photos", "MobileBackup",
-            device, year, month,
+            configuration.homesRoot, sanitise(user), "Photos", year, month,
         ].joined(separator: "/")
     }
 
@@ -220,7 +225,6 @@ actor BrowseTreeWorker {
         let capturedAt: Date?
         let spaceKind: String
         let spaceName: String
-        let deviceName: String?
         let dsmUsername: String?
         let dsmUID: Int?
     }
@@ -232,13 +236,11 @@ actor BrowseTreeWorker {
                 SELECT sa.id, a.sha256, a.blob_ext AS "blobExt", sa.filename,
                        a.captured_at AS "capturedAt",
                        s.kind AS "spaceKind", s.name AS "spaceName",
-                       d.name AS "deviceName",
                        u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
                 JOIN spaces s ON s.id = sa.space_id
                 JOIN users u ON u.id = sa.uploaded_by_user_id
-                LEFT JOIN devices d ON d.id = sa.source_device_id
                 WHERE sa.browse_path IS NULL
                   AND sa.browse_error IS NULL
                   AND sa.deleted_at IS NULL
@@ -257,7 +259,7 @@ actor BrowseTreeWorker {
         let placement = BrowseTree.Placement(
             id: row.id, sha256: row.sha256, blobExt: row.blobExt, filename: row.filename,
             capturedAt: row.capturedAt, spaceKind: row.spaceKind, spaceName: row.spaceName,
-            deviceName: row.deviceName, dsmUsername: row.dsmUsername, dsmUID: row.dsmUID
+            dsmUsername: row.dsmUsername, dsmUID: row.dsmUID
         )
 
         guard let directory = BrowseTree.directory(
