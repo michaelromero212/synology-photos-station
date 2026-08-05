@@ -343,7 +343,7 @@ up *before* pulling, or you get the new code running under the old
 configuration — new server, none of the new behaviour, and nothing says so:
 
 ```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/framestation/docker-compose.yml'
+cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
 ```
 
 #### What to check, by what changed
@@ -390,7 +390,7 @@ Docker on DSM requires `sudo`, and `docker` is not on the default PATH — use
 the SFTP subsystem, which DSM does not enable by default; pipe files instead:
 
 ```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/framestation/docker-compose.yml'
+cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
 ```
 
 #### 2. Enable the user home service
@@ -404,15 +404,18 @@ missing, so with home service off the server will not start at all.
 
 #### 3. Create the shared folder
 
-Control Panel → Shared Folder → Create, named `framestation`, on a **Btrfs**
+Control Panel → Shared Folder → Create, named `FrameStation`, on a **Btrfs**
 volume. Btrfs matters here: once this replaces Synology Photos it holds the
 family's only copy, and snapshots plus checksums are the difference between a
 bad day and a lost decade.
 
-**Lowercase.** Every path below, and `FRAMESTATION_ROOT` in `.env`, spell it
-`framestation`. The path is case-sensitive and a mismatch does not error —
-Docker silently creates a second directory at the other spelling and writes
-there instead, which looks like a working deployment with an empty library.
+**Then set `FRAMESTATION_ROOT` in `.env` to match, exactly.** The path is
+case-sensitive, and `docker-compose.yml` defaults to lowercase
+`/volume1/framestation` — so a `.env` that omits the key, or spells it
+differently to the shared folder, does not error. Docker creates a second
+directory at the other spelling and writes there instead, which looks like a
+working deployment with an empty library. This NAS uses `/volume1/FrameStation`;
+whatever you choose, it goes in `.env` rather than being left to the default.
 
 #### 4. Create the bind-mount directories
 
@@ -421,7 +424,7 @@ standard Docker does — it fails the container with
 `Bind mount failed: '…/pgdata' does not exist`. Make them first:
 
 ```bash
-mkdir -p /volume1/framestation/{pgdata,blobs,derivatives,incoming,browse,Shared}
+mkdir -p /volume1/FrameStation/{pgdata,blobs,derivatives,incoming,browse,Shared}
 ```
 
 `Shared` holds shared-space libraries (`FRAMESTATION_SHARED_ROOT`, mounted at
