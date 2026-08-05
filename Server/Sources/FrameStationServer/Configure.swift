@@ -52,6 +52,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(SpacesCommand(), as: "spaces")
     app.asyncCommands.use(ImportCommand(), as: "import")
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
+    app.asyncCommands.use(RebuildCommand(), as: "rebuild")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())

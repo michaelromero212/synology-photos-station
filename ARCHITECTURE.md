@@ -170,6 +170,39 @@ so the server keeps a tombstone: a soft-deleted placement records the source
 asset, and probe reports it so a freshly installed app does not re-upload
 something the user deliberately removed.
 
+### Rebuilding the index
+
+"Rebuildable by scanning them" was a claim until it was executed. It is now a
+command:
+
+    FrameStationServer rebuild --homes /volume1/homes --shared /volume1/FrameStation/Shared
+
+It walks `<user>/Photos/MobileBackup` in each home and each folder under the
+shared root, and turns what it finds back into users, libraries, assets and
+placements. Nothing is copied: `storage_path` points at the file where it
+already lies. Accounts are recreated from the home directory names and keyed on
+`dsm_username`, so DSM sign-in adopts them rather than making a second account
+for the same person. Re-running skips what it already indexed, which makes it
+both resumable and a way to pick up files dropped into the library by hand.
+
+`Scripts/smoke-rebuild.sh` is the proof, against its own database: drop the
+schema entirely, run the command, and check that the library comes back —
+right photos in the right libraries, EXIF dates and dimensions read off the
+files, SHA-256 matching the bytes on disk, and `@eaDir`, `#recycle` and
+everything outside `Photos/MobileBackup` correctly left out.
+
+**What does not come back.** Favourites, ratings, tags, captions and albums are
+in the database and nowhere else; a folder has no place to keep them. Shared
+libraries come back with one member — their owner — because the folder says a
+library exists and what it is called, but not who was in it, and guessing that
+hands someone a library they may never have been in. Photo ids are new, so
+every client refetches. The command prints all of this rather than implying a
+clean recovery.
+
+The photos survive a database loss. The annotations do not, and that is the
+honest boundary of the decision: the argument for files-as-truth was never that
+nothing is lost, it was that *the photos* are never lost.
+
 ### What survives from the old design
 
 The chunked resumable upload protocol, the probe/commit handshake, EXIF and
