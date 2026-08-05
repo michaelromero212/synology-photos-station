@@ -404,7 +404,29 @@ struct TimelineView: View {
                         showAddToAlbum = true
                     } onDelete: {
                         confirmDelete = true
-                    } onMore: {
+                    } moreMenu: {
+                        Button {
+                            Task {
+                                let n = await selection.setFavorite(
+                                    true, in: space, client: session.client
+                                )
+                                albumResult = "\(n) item\(n == 1 ? "" : "s") favorited"
+                                selection.clear()
+                            }
+                        } label: {
+                            Label("Add to Favorites", systemImage: "heart")
+                        }
+                        Button {
+                            Task {
+                                let n = await selection.setFavorite(
+                                    false, in: space, client: session.client
+                                )
+                                albumResult = "\(n) item\(n == 1 ? "" : "s") unfavorited"
+                                selection.clear()
+                            }
+                        } label: {
+                            Label("Remove from Favorites", systemImage: "heart.slash")
+                        }
                     }
                 } else {
                     zoomBar(store)

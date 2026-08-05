@@ -41,6 +41,29 @@ final class GridSelection {
         if !contains(item) { picked.append(item) }
     }
 
+    /// Favourites everything picked.
+    ///
+    /// Per-photo and idempotent server-side, so a mixed selection ends up all
+    /// favourited rather than toggling each one to its opposite — "Add to
+    /// Favorites" on twelve photos should mean twelve favourites, not six.
+    func setFavorite(
+        _ favorite: Bool, in space: SpaceDTO, client: FrameStationClient?
+    ) async -> Int {
+        guard let client else { return 0 }
+        var changed = 0
+        for item in picked {
+            do {
+                try await client.setFavorite(
+                    spaceID: space.id, assetID: item.assetID, favorite
+                )
+                changed += 1
+            } catch {
+                continue
+            }
+        }
+        return changed
+    }
+
     func clear() {
         picked.removeAll()
         isActive = false
@@ -109,12 +132,14 @@ final class GridSelection {
 }
 
 /// The contextual bar that replaces the tab bar while selecting.
-struct SelectionBar: View {
+struct SelectionBar<MoreContent: View>: View {
     let selection: GridSelection
     let onShare: () -> Void
     let onAddToAlbum: () -> Void
     let onDelete: () -> Void
-    let onMore: () -> Void
+    /// Menu content, so More opens in place rather than routing back out to
+    /// the timeline for a sheet.
+    @ViewBuilder let moreMenu: () -> MoreContent
 
     var body: some View {
         VStack(spacing: 6) {
@@ -126,7 +151,15 @@ struct SelectionBar: View {
                 action("Share", "square.and.arrow.up", onShare)
                 action("Add to album", "rectangle.stack.badge.plus", onAddToAlbum)
                 action("Delete", "trash", onDelete)
-                action("More", "ellipsis", onMore)
+                Menu {
+                    moreMenu()
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: "ellipsis").font(.system(size: 20))
+                        Text("More").font(.caption2)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
         }
         .padding(.horizontal, 8)
