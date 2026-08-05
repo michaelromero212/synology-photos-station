@@ -25,7 +25,7 @@ services:
     #   docker compose pull && docker compose up -d
     # The NAS then needs only this file and .env — no source checkout, no
     # 20–45 minute Swift build on a J4125.
-    image: ${FRAMESTATION_IMAGE:-ghcr.io/michaelromero212/synology-photos-station:latest}
+    image: ${FRAMESTATION_IMAGE:-ghcr.io/michaelromero212/framestation-server:latest}
     build:
       # Only used by `docker compose build` from a source checkout. Repo root,
       # because the server depends on ../Packages/FrameStationAPI by path.

@@ -368,7 +368,7 @@ docker compose images        # digest of what is running
 ```
 
 Pin a known-good build by setting `FRAMESTATION_IMAGE` in `.env` to
-`ghcr.io/michaelromero212/synology-photos-station:sha-abc1234`, and unset it to
+`ghcr.io/michaelromero212/framestation-server:sha-abc1234`, and unset it to
 follow `latest` again. Container Manager → Image shows the same thing with a
 build date, which is the quickest way to spot a NAS that has quietly not been
 pulled in weeks.

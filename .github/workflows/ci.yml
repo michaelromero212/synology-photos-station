@@ -14,7 +14,13 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Named for the app, not the repository. `${{ github.repository }}` would
+  # publish `synology-photos-station` — the repo's original name, from before
+  # this stopped being a wrapper around Synology Photos and became FrameStation.
+  # Set explicitly so the package matches the app and sits beside
+  # `reelstation-server` in the registry rather than reading like a different
+  # project.
+  IMAGE_NAME: ${{ github.repository_owner }}/framestation-server
 
 jobs:
   # The server has only ever been compiled on macOS. It ships on Linux, where
