@@ -343,7 +343,7 @@ up *before* pulling, or you get the new code running under the old
 configuration — new server, none of the new behaviour, and nothing says so:
 
 ```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
+cat docker-compose.yml | ssh nas 'cat > /volume1/docker/framestation/docker-compose.yml'
 ```
 
 #### What to check, by what changed
@@ -390,7 +390,7 @@ Docker on DSM requires `sudo`, and `docker` is not on the default PATH — use
 the SFTP subsystem, which DSM does not enable by default; pipe files instead:
 
 ```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
+cat docker-compose.yml | ssh nas 'cat > /volume1/docker/framestation/docker-compose.yml'
 ```
 
 #### 2. Enable the user home service
@@ -424,7 +424,7 @@ standard Docker does — it fails the container with
 `Bind mount failed: '…/pgdata' does not exist`. Make them first:
 
 ```bash
-mkdir -p /volume1/FrameStation/{pgdata,blobs,derivatives,incoming,browse,Shared}
+mkdir -p /volume1/docker/framestation/{pgdata,blobs,derivatives,incoming}
 ```
 
 `Shared` holds shared-space libraries (`FRAMESTATION_SHARED_ROOT`, mounted at

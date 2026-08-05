@@ -9,7 +9,11 @@ services:
       POSTGRES_DB: framestation
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
-      - ${FRAMESTATION_ROOT:-/volume1/framestation}/pgdata:/var/lib/postgresql/data
+      # Plumbing, not media. Lives beside the other containers' data rather
+      # than in the media share — a filesystem snapshot of a *live* Postgres
+      # is a database that needs crash recovery, not a backup, and it must not
+      # share a snapshot policy with photos.
+      - ${FRAMESTATION_DATA:-/volume1/docker/framestation}/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U framestation -d framestation"]
       interval: 10s
@@ -45,11 +49,12 @@ services:
       # content-addressed model — storage_path stays NULL, every file is named
       # by hash, and `rebuild` has nothing to read.
       FRAMESTATION_BROWSE_TREE: ${FRAMESTATION_BROWSE_TREE:-1}
-      # Inside the container, not on the host: /volume1/framestation is mounted
-      # at /data. Left unset the code falls back to /volume1/FrameStation/Shared,
-      # which exists on the NAS and not in here — every shared-space placement
-      # would fail on a path that looks right in the logs.
-      FRAMESTATION_SHARED_ROOT: /data/Shared
+      # The media share itself, mounted at /shared, so someone opening it in
+      # File Station sees shared libraries and nothing else. Left unset the code
+      # falls back to /volume1/FrameStation/Shared, which exists on the NAS and
+      # not in here — every shared-space placement would fail on a path that
+      # looks right in the logs.
+      FRAMESTATION_SHARED_ROOT: /shared
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Root, because the layout above writes into each person's DSM home and
     # hands the file to them with chown — both of which a non-root container
@@ -66,7 +71,13 @@ services:
       # support host-gateway, set FRAMESTATION_DSM_URL to the NAS's LAN IP.
       - "host.docker.internal:host-gateway"
     volumes:
-      - ${FRAMESTATION_ROOT:-/volume1/framestation}:/data
+      # Plumbing: the blob store, chunk staging and regenerable derivatives.
+      # Deliberately not the media share — these want a different snapshot
+      # policy to photos, and a person browsing their library should not have
+      # to scroll past blobs/ab/cd/ to find it.
+      - ${FRAMESTATION_DATA:-/volume1/docker/framestation}:/data
+      # Media: shared-space libraries, and nothing else.
+      - ${FRAMESTATION_MEDIA:-/volume1/FrameStation}:/shared
       # User home directories, so each person's photos land in their own
       # DSM-private tree. Reflinked from the blob store, so near-zero extra
       # space — hardlinks can't be used because Synology makes every shared
