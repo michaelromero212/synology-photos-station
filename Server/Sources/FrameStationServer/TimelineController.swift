@@ -326,7 +326,7 @@ struct TimelineController: RouteCollection {
             SELECT t.name FROM tags t
             JOIN space_asset_tags st ON st.tag_id = t.id
             WHERE st.space_asset_id = \(bind: row.id)
-            ORDER BY t.name
+            ORDER BY lower(t.name)
             """).all(decoding: TagRow.self).map(\.name)
 
         return AssetDetail(

@@ -25,6 +25,10 @@ final class AssetDetailModel {
     /// the action can confirm rather than silently succeeding.
     var addedTo: [String] = []
     var addError: String?
+    /// A short confirmation for the edits that change nothing on screen —
+    /// rating and tagging both happen entirely inside the Information panel,
+    /// so without this they look like they did nothing.
+    var notice: String?
 
     private let item: TimelineItem
     private let spaceID: UUID
@@ -82,6 +86,42 @@ final class AssetDetailModel {
         }
     }
 
+    /// Stars, 0–5. Returns 1 when it took, so the sheet can report the same way
+    /// it does for a selection of twelve.
+    func setRating(_ stars: Int, client: FrameStationClient?) async -> Int {
+        guard let client else { return 0 }
+        do {
+            try await client.setRating(spaceID: spaceID, assetID: item.assetID, stars)
+            // Refetched rather than patched locally: the Information panel
+            // reads `detail`, and a value edited in two places drifts.
+            await loadDetail(client)
+            return 1
+        } catch {
+            return 0
+        }
+    }
+
+    func editTags(add: [String], remove: [String], client: FrameStationClient?) async -> Int {
+        guard let client else { return 0 }
+        do {
+            _ = try await client.editTags(
+                spaceID: spaceID, assetID: item.assetID, add: add, remove: remove
+            )
+            await loadDetail(client)
+            return 1
+        } catch {
+            return 0
+        }
+    }
+
+    /// Shows a confirmation and retires it, so the viewer doesn't keep a
+    /// message about something that happened a minute ago.
+    func flash(_ message: String) async {
+        notice = message
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        if notice == message { notice = nil }
+    }
+
     func toggleFavorite(_ client: FrameStationClient?) async {
         guard let client else { return }
         let target = !isFavorite
@@ -115,6 +155,8 @@ struct AssetDetailView: View {
     @State private var shareFiles: [URL] = []
     @State private var showShare = false
     @State private var slideshow: SlideshowMode?
+    @State private var showTagEditor = false
+    @State private var showRatingEditor = false
     @State private var isWorking = false
     @Environment(\.dismiss) private var dismiss
     #endif
@@ -170,10 +212,10 @@ struct AssetDetailView: View {
                 ProgressView().tint(.white)
             }
 
-            if !model.addedTo.isEmpty || model.addError != nil {
+            if let toast {
                 VStack {
                     Spacer()
-                    Text(model.addError ?? "Added to \(model.addedTo.joined(separator: ", "))")
+                    Text(toast)
                         .font(.footnote.weight(.medium))
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.black.opacity(0.75), in: Capsule())
@@ -224,6 +266,25 @@ struct AssetDetailView: View {
             ) { slideshow = nil }
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: shareFiles) }
+        .sheet(isPresented: $showRatingEditor) {
+            RatingSheet(title: subject, current: model.detail?.rating) { stars in
+                await model.setRating(stars, client: session.client)
+            } onFinished: { done in
+                showRatingEditor = false
+                if let done { Task { await model.flash(done) } }
+            }
+        }
+        .sheet(isPresented: $showTagEditor) {
+            TagEditorSheet(
+                session: session, space: space, title: subject,
+                current: model.detail?.tags ?? []
+            ) { add, remove in
+                await model.editTags(add: add, remove: remove, client: session.client)
+            } onFinished: { done in
+                showTagEditor = false
+                if let done { Task { await model.flash(done) } }
+            }
+        }
         .confirmationDialog(
             "Remove this photo from \(space.name)?",
             isPresented: $confirmDelete, titleVisibility: .visible
@@ -245,6 +306,19 @@ struct AssetDetailView: View {
             InformationSheet(model: model, session: session) { showInfo = false }
         }
         .task { await model.load(loader: session.loader, client: session.client) }
+    }
+
+    private var subject: String {
+        item.mediaType == .video ? "This Video" : "This Photo"
+    }
+
+    /// One line, whatever last happened: a failure first, then the edits that
+    /// leave no trace on screen, then the shared-space confirmation.
+    private var toast: String? {
+        if let error = model.addError { return error }
+        if let notice = model.notice { return notice }
+        if !model.addedTo.isEmpty { return "Added to \(model.addedTo.joined(separator: ", "))" }
+        return nil
     }
 
     private func imageView(_ platformImage: PlatformImage) -> some View {
@@ -298,6 +372,18 @@ struct AssetDetailView: View {
                     Label(SlideshowMode.videosOnly.title, systemImage: SlideshowMode.videosOnly.symbol)
                 }
                 .disabled(!dayItems.contains { $0.mediaType == .video })
+
+                Divider()
+                Button {
+                    showTagEditor = true
+                } label: {
+                    Label("Edit Tags", systemImage: "tag")
+                }
+                Button {
+                    showRatingEditor = true
+                } label: {
+                    Label("Edit Rating", systemImage: "star")
+                }
 
                 if !session.sharedSpaces.filter({ $0.id != space.id }).isEmpty {
                     Divider()

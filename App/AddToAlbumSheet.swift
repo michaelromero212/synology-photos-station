@@ -156,7 +156,9 @@ struct AddToAlbumPresentation: ViewModifier {
                     }
                 }
             }
-            .alert("Added", isPresented: Binding(
+            // "Done" rather than "Added": every selection action that reports a
+            // count comes through this one alert, and most of them aren't adds.
+            .alert("Done", isPresented: Binding(
                 get: { result != nil }, set: { if !$0 { result = nil } }
             )) {
                 Button("OK") { result = nil }

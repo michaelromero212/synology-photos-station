@@ -18,6 +18,7 @@ struct InformationPanel: View {
             VStack(alignment: .leading, spacing: 22) {
                 caption
                 dateBlock
+                ratingAndTags
                 // Suppressed in a personal space — "added by me" is noise.
                 if detail.isSharedSpace { addedBy }
                 cameraCard
@@ -51,6 +52,45 @@ struct InformationPanel: View {
                 .font(.headline)
             if let filename = detail.filename {
                 Text(filename).font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Rating and tags
+
+    /// The two things a person edits by hand, shown together because on this
+    /// panel they answer one question: what have we said about this photo?
+    ///
+    /// Absent entirely when neither is set, rather than five empty stars —
+    /// "unrated" and "rated zero" would otherwise look identical.
+    @ViewBuilder
+    private var ratingAndTags: some View {
+        if detail.rating != nil || !detail.tags.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                if let rating = detail.rating {
+                    HStack(spacing: 3) {
+                        ForEach(1...5, id: \.self) { star in
+                            Image(systemName: star <= rating ? "star.fill" : "star")
+                                .foregroundStyle(star <= rating ? Color.yellow : Color.secondary)
+                        }
+                    }
+                    .font(.footnote)
+                }
+                if !detail.tags.isEmpty {
+                    // Horizontally scrolled rather than wrapped: a photo with
+                    // twelve tags shouldn't push the camera card off screen.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(detail.tags, id: \.self) { tag in
+                                Text(tag)
+                                    .font(.caption)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                        }
+                    }
+                }
             }
         }
     }

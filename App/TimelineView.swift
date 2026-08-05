@@ -35,6 +35,8 @@ struct TimelineView: View {
     @State private var dismissedBackupPrompt = false
     @State private var showBackupSettings = false
     @State private var showAddToAlbum = false
+    @State private var showTagEditor = false
+    @State private var showRatingEditor = false
     @State private var albumResult: String?
     @State private var showPicker = false
     @State private var shareResult: Int?
@@ -144,6 +146,11 @@ struct TimelineView: View {
         .modifier(AddToAlbumPresentation(
             session: session, selection: selection,
             isPresented: $showAddToAlbum, result: $albumResult
+        ))
+        .modifier(MetadataPresentation(
+            session: session, space: space, selection: selection,
+            showRating: $showRatingEditor, showTags: $showTagEditor,
+            result: $albumResult
         ))
         .sheet(isPresented: $showBackupSettings) {
             if let engine {
@@ -426,6 +433,17 @@ struct TimelineView: View {
                             }
                         } label: {
                             Label("Remove from Favorites", systemImage: "heart.slash")
+                        }
+                        Divider()
+                        Button {
+                            showTagEditor = true
+                        } label: {
+                            Label("Edit Tags", systemImage: "tag")
+                        }
+                        Button {
+                            showRatingEditor = true
+                        } label: {
+                            Label("Edit Ratings", systemImage: "star")
                         }
                     }
                 } else {

@@ -79,6 +79,40 @@ extension FrameStationClient {
     }
 }
 
+// MARK: - Rating and tags
+
+extension FrameStationClient {
+    /// Stars, 0–5, where 0 clears the rating.
+    ///
+    /// Not per-user, unlike `setFavorite`: rating a photo in a shared space
+    /// rates it for everyone in that space.
+    public func setRating(spaceID: UUID, assetID: UUID, _ rating: Int) async throws {
+        try await sendBodyNoContent(
+            .put, "v1/spaces/\(spaceID)/assets/\(assetID)/rating",
+            body: SetRatingRequest(rating: rating)
+        )
+    }
+
+    /// Adds and removes tags in one call, returning what the photo carries
+    /// afterwards — so the viewer can redraw without refetching its detail.
+    @discardableResult
+    public func editTags(
+        spaceID: UUID, assetID: UUID, add: [String] = [], remove: [String] = []
+    ) async throws -> [String] {
+        let response: TagListResponse = try await post(
+            "v1/spaces/\(spaceID)/assets/\(assetID)/tags",
+            body: EditTagsRequest(add: add, remove: remove)
+        )
+        return response.tags
+    }
+
+    /// Every tag in use in this library, for the editor to offer.
+    public func spaceTags(spaceID: UUID) async throws -> [String] {
+        let response: TagListResponse = try await get("v1/spaces/\(spaceID)/tags")
+        return response.tags
+    }
+}
+
 // MARK: - Spaces
 
 extension FrameStationClient {

@@ -208,3 +208,33 @@ public struct AlbumAssetsRequest: Codable, Sendable {
     public let spaceAssetIDs: [UUID]
     public init(spaceAssetIDs: [UUID]) { self.spaceAssetIDs = spaceAssetIDs }
 }
+
+// MARK: - Rating and tags
+
+/// Stars, 0–5. Zero means unrated — the server stores it as NULL, so there is
+/// one representation of "no stars" rather than two that look identical.
+public struct SetRatingRequest: Codable, Sendable {
+    public let rating: Int
+    public init(rating: Int) { self.rating = rating }
+}
+
+/// Adds and removes in one call.
+///
+/// Not a replace-the-whole-list PUT, because the same request has to work for a
+/// selection of twelve photos that don't share a tag list. "Add Beach" means
+/// add Beach to all twelve, not overwrite what each of them already had.
+public struct EditTagsRequest: Codable, Sendable {
+    public let add: [String]
+    public let remove: [String]
+
+    public init(add: [String] = [], remove: [String] = []) {
+        self.add = add
+        self.remove = remove
+    }
+}
+
+/// The resulting tags — of one photo after an edit, or of a whole space.
+public struct TagListResponse: Codable, Sendable, Hashable {
+    public let tags: [String]
+    public init(tags: [String]) { self.tags = tags }
+}

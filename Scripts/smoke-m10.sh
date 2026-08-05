@@ -42,7 +42,7 @@ echo "=== 2. remove it ==="
 check "delete returns 204" "204" "$(code -X DELETE "$API/v1/spaces/$SP/assets/$AID" -H "$A")"
 check "gone from the library" "0" "$(q "select count(*) from space_assets where space_id='$SP' and deleted_at is null;")"
 check "but the record is kept" "1" "$(q "select count(*) from space_assets where space_id='$SP' and deleted_at is not null;")"
-check "and who did it" "1" "$(q "select count(*) from space_assets where deleted_by is not null;")"
+check "and who did it" "1" "$(q "select count(*) from space_assets where space_id='$SP' and deleted_by is not null;")"
 check "deleting twice is a no-op" "404" "$(code -X DELETE "$API/v1/spaces/$SP/assets/$AID" -H "$A")"
 
 echo
