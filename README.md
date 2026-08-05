@@ -305,7 +305,77 @@ pinned conservatively; bump them if you want a newer toolchain.
 CI publishes a `linux/amd64` image to GHCR on every push to `main`. The NAS
 needs only `docker-compose.yml` and `.env` — no source checkout, no build.
 
-### 1. Authenticate to GHCR
+**The NAS is already running.** [Routine updates](#routine-updates) is the path
+you want. [First-time setup](#first-time-setup) below is for a fresh box.
+
+### Routine updates
+
+Every change reaches the NAS the same way. The whole loop is:
+
+```bash
+git push                                    # on your Mac; CI rebuilds `latest`
+```
+
+then on the NAS, once CI is green:
+
+```bash
+docker compose pull && docker compose up -d
+curl -s http://127.0.0.1:8080/health
+```
+
+Two things make that insufficient, and both are silent when you skip them.
+
+**A new migration is a one-way step on real data.** Snapshot `pgdata` first —
+Btrfs snapshots are why the shared folder is on Btrfs. Compare what you have
+against what the NAS has applied:
+
+```bash
+ls Server/Sources/FrameStationServer/Migrations/SQL/*.sql | wc -l   # on your Mac
+curl -s http://127.0.0.1:8080/health                                # migrationsApplied
+```
+
+Migrations run automatically on first boot of the new image, atomically and in
+filename order. They do not run backwards.
+
+**`docker compose pull` does not update `docker-compose.yml`.** It updates the
+image the file names. If the compose file or `.env.example` changed, copy them
+up *before* pulling, or you get the new code running under the old
+configuration — new server, none of the new behaviour, and nothing says so:
+
+```bash
+cat docker-compose.yml | ssh nas 'cat > /volume1/framestation/docker-compose.yml'
+```
+
+#### What to check, by what changed
+
+| Changed | The NAS needs |
+|---|---|
+| Server Swift only | `pull && up -d` |
+| A new `Migrations/SQL/*.sql` | Snapshot `pgdata` first, then confirm `migrationsApplied` |
+| `docker-compose.yml` or `.env.example` | Copy both up **before** pulling |
+| A new bind mount in compose | Create the directory on the NAS first — Synology's Docker fails rather than creating it |
+| App or `Packages/` only | Nothing. That ships through Xcode, not the NAS |
+
+#### Which build is actually running
+
+`/health` reports `version`, but that is `Build.version` in
+[Configure.swift](Server/Sources/FrameStationServer/Configure.swift) and is
+bumped by hand — it tells you the milestone, not the commit. For the commit,
+CI also publishes a `sha-<short>` tag alongside `latest`, so:
+
+```bash
+docker compose images        # digest of what is running
+```
+
+Pin a known-good build by setting `FRAMESTATION_IMAGE` in `.env` to
+`ghcr.io/michaelromero212/synology-photos-station:sha-abc1234`, and unset it to
+follow `latest` again. Container Manager → Image shows the same thing with a
+build date, which is the quickest way to spot a NAS that has quietly not been
+pulled in weeks.
+
+### First-time setup
+
+#### 1. Authenticate to GHCR
 
 The package inherits the repository's visibility, and this repo is private, so
 the NAS needs a pull credential. Create a GitHub personal access token
@@ -320,34 +390,45 @@ Docker on DSM requires `sudo`, and `docker` is not on the default PATH — use
 the SFTP subsystem, which DSM does not enable by default; pipe files instead:
 
 ```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/FrameStation/docker-compose.yml'
+cat docker-compose.yml | ssh nas 'cat > /volume1/framestation/docker-compose.yml'
 ```
 
-### 2. Create the shared folder
+#### 2. Enable the user home service
+
+Control Panel → User & Group → Advanced → User Home → **Enable user home
+service**. This is what creates `/volume1/homes`, which compose bind-mounts so
+each person's photos land in their own DSM-private tree (ARCHITECTURE.md §3a).
+
+Not optional: Synology's Docker fails a container whose bind-mount source is
+missing, so with home service off the server will not start at all.
+
+#### 3. Create the shared folder
 
 Control Panel → Shared Folder → Create, named `framestation`, on a **Btrfs**
 volume. Btrfs matters here: once this replaces Synology Photos it holds the
 family's only copy, and snapshots plus checksums are the difference between a
 bad day and a lost decade.
 
-### 3. Create the bind-mount directories
+**Lowercase.** Every path below, and `FRAMESTATION_ROOT` in `.env`, spell it
+`framestation`. The path is case-sensitive and a mismatch does not error —
+Docker silently creates a second directory at the other spelling and writes
+there instead, which looks like a working deployment with an empty library.
+
+#### 4. Create the bind-mount directories
 
 **Synology's Docker will not auto-create missing bind-mount sources** the way
 standard Docker does — it fails the container with
 `Bind mount failed: '…/pgdata' does not exist`. Make them first:
 
 ```bash
-mkdir -p /volume1/FrameStation/{pgdata,blobs,derivatives,incoming,browse}
+mkdir -p /volume1/framestation/{pgdata,blobs,derivatives,incoming,browse,Shared}
 ```
 
-Postgres chowns `pgdata` to its own user on first boot, so no permissions work
-is needed.
+`Shared` holds shared-space libraries (`FRAMESTATION_SHARED_ROOT`, mounted at
+`/data/Shared`). Postgres chowns `pgdata` to its own user on first boot, so no
+permissions work is needed.
 
-Note the path is case-sensitive and must match `FRAMESTATION_ROOT` in `.env`
-exactly. A mismatch does not error — Docker silently creates a second directory
-at the other spelling and writes there instead.
-
-### 4. Configure and start
+#### 5. Configure and start
 
 Copy `docker-compose.yml` and `.env` (from `.env.example`) to the NAS. Generate
 the Postgres password with `openssl rand -base64 32`, then:
@@ -363,7 +444,13 @@ curl -s http://127.0.0.1:8080/health
 Expect `{"status":"ok","database":"up",...}`. Migrations apply automatically on
 first boot.
 
-### 5. Expose it through the DSM reverse proxy
+The container runs as **root** (`FRAMESTATION_USER` in `.env`). Writing into
+`/volume1/homes` and handing each file to its DSM owner with `chown` are both
+things a non-root process cannot do, and without them photos never leave the
+blob store. Set `FRAMESTATION_USER=vapor:vapor` to decline — uploads still
+work, they just stay content-addressed.
+
+#### 6. Expose it through the DSM reverse proxy
 
 Control Panel → Login Portal → Advanced → Reverse Proxy. Source
 `yourhost.synology.me:8443` → destination `localhost:8080`, with your existing
@@ -372,7 +459,7 @@ Let's Encrypt certificate assigned. Add the matching router port forward.
 The container binds to `127.0.0.1` only, so the proxy is the sole entry point.
 Leave DSM auto-block and the firewall on.
 
-### 6. Split-horizon DNS
+#### 7. Split-horizon DNS
 
 Resolve `yourhost.synology.me` to the NAS's **LAN IP** from inside the house —
 DSM's DNS Server package, or a router DNS override. One hostname everywhere:
@@ -383,13 +470,46 @@ run out-of-process in `nsurlsessiond`, where custom server-trust overrides are
 unreliable — the app may not even be running to answer the challenge. Without a
 publicly-valid certificate the backup engine fails intermittently and opaquely.
 
-### 7. Create invites
+#### 8. Sign in — with DSM, not an invite
 
-Create an invite for each family member:
+Family members sign in with their **DSM account**, in the app. That is what
+records `dsm_username` and `dsm_uid`, and those are what put someone's photos
+in their own home directory.
+
+An invite-created account has neither, so `BrowseTree.directory` cannot place
+its files: they stay in the content-addressed blob store, `storage_path` stays
+NULL, and that person silently runs the pre-§3a model while everyone else does
+not. Invites remain the fallback for someone with no DSM account at all:
 
 ```bash
 docker compose exec server ./FrameStationServer invite
 ```
+
+Signing in with DSM later adopts an existing row by username (matched
+case-insensitively), so an invite account can be upgraded — but only if the
+DSM username matches.
+
+### Verifying the library layout
+
+The check that proves ARCHITECTURE.md §3a is actually in force, rather than the
+server having quietly fallen back to the blob store. Back up one photo from the
+app, then:
+
+```bash
+ls /volume1/homes/<dsm-user>/Photos/MobileBackup/
+```
+
+A `<device>/YYYY/MM/IMG_*.heic` there is the whole decision working. Nothing
+there means the layout is off, the account has no DSM link, or the container is
+not root — in that order of likelihood.
+
+Then confirm the index can be rebuilt from those files alone:
+
+```bash
+docker compose exec server ./FrameStationServer rebuild --dry-run
+```
+
+It reports the files, people and shared libraries it found, and writes nothing.
 
 ---
 
