@@ -40,7 +40,27 @@ services:
       # self-signed for the LAN address.
       FRAMESTATION_DSM_URL: ${FRAMESTATION_DSM_URL:-http://host.docker.internal:5000}
       FRAMESTATION_HOMES_ROOT: /homes
+      # The §3a layout: photos are written to a real path a person can open in
+      # File Station, and that file is the photo. Off, this runs the old
+      # content-addressed model — storage_path stays NULL, every file is named
+      # by hash, and `rebuild` has nothing to read.
+      FRAMESTATION_BROWSE_TREE: ${FRAMESTATION_BROWSE_TREE:-1}
+      # Inside the container, not on the host: /volume1/framestation is mounted
+      # at /data. Left unset the code falls back to /volume1/FrameStation/Shared,
+      # which exists on the NAS and not in here — every shared-space placement
+      # would fail on a path that looks right in the logs.
+      FRAMESTATION_SHARED_ROOT: /data/Shared
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Root, because the layout above writes into each person's DSM home and
+    # hands the file to them with chown — both of which a non-root container
+    # cannot do. The image itself runs as vapor:vapor and is happy to; this
+    # overrides it only because /volume1/homes demands it.
+    #
+    # The exposure is bounded: the port is loopback-only behind DSM's reverse
+    # proxy, and the only paths mounted are the app's own volume and homes.
+    # Set FRAMESTATION_USER=vapor:vapor to decline — uploads still work, they
+    # just stay in the blob store and never reach anyone's home directory.
+    user: ${FRAMESTATION_USER:-0:0}
     extra_hosts:
       # Lets the container resolve the NAS itself. If your DSM version doesn't
       # support host-gateway, set FRAMESTATION_DSM_URL to the NAS's LAN IP.
