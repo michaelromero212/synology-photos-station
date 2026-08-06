@@ -51,6 +51,50 @@ struct RebuildCommand: AsyncCommand {
 
     // MARK: - What a path says about a file
 
+    /// Reconciles a probed capture date against the folder the file is in.
+    ///
+    /// This is what makes a corrected date survive a rebuild. Re-dating a photo
+    /// moves it into the folder for its new month but never rewrites its EXIF —
+    /// the bytes are the asset's identity — so a rebuild that trusted EXIF alone
+    /// would quietly undo every correction anyone had ever made, and put the
+    /// timeline back at odds with File Station.
+    ///
+    /// The folder wins on year and month; the time of day still comes from the
+    /// file, because the path never carried it. A correction inside the same
+    /// month is the one case this cannot recover, and it is the cheap one to
+    /// redo. Paths that aren't a `YYYY/MM` pair are left entirely alone.
+    static func reconciledCaptureDate(probed: Date?, path: URL) -> Date? {
+        guard let probed else { return nil }
+
+        let month = path.deletingLastPathComponent()
+        let year = month.deletingLastPathComponent()
+        guard let folderYear = Int(year.lastPathComponent),
+              year.lastPathComponent.count == 4,
+              let folderMonth = Int(month.lastPathComponent),
+              month.lastPathComponent.count == 2,
+              (1...12).contains(folderMonth) else { return probed }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        var parts = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second], from: probed
+        )
+        guard parts.year != folderYear || parts.month != folderMonth else { return probed }
+
+        parts.year = folderYear
+        parts.month = folderMonth
+        // The day may not exist in the target month — the 31st moved into
+        // February — so clamp rather than letting the date roll into March.
+        if let day = parts.day {
+            let target = DateComponents(year: folderYear, month: folderMonth)
+            if let monthStart = calendar.date(from: target),
+               let range = calendar.range(of: .day, in: .month, for: monthStart) {
+                parts.day = min(day, range.upperBound - 1)
+            }
+        }
+        return calendar.date(from: parts) ?? probed
+    }
+
     /// Where a file sits in the library, as read from its path alone.
     enum Home: Hashable {
         /// `<homes>/<user>/Photos/MobileBackup/<device>/…`
@@ -212,6 +256,9 @@ struct RebuildCommand: AsyncCommand {
                     // A file with no EXIF date still has to land somewhere in
                     // the timeline, and its mtime is the best evidence left.
                     if metadata.capturedAt == nil { metadata.capturedAt = item.candidate.modifiedAt }
+                    metadata.capturedAt = Self.reconciledCaptureDate(
+                        probed: metadata.capturedAt, path: item.candidate.url
+                    )
 
                     try await index(
                         item, sha: sha, metadata: metadata,
