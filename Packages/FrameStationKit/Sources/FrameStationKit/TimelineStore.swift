@@ -37,15 +37,28 @@ public final class TimelineStore {
     public var buckets: [TimelineBucket] { manifest?.buckets ?? [] }
     public var total: Int { manifest?.total ?? 0 }
 
+    /// Fetches the manifest.
+    ///
+    /// Only *announces* loading when there is nothing on screen yet, and that
+    /// distinction is the difference between a timeline that updates itself and
+    /// one that can't afford to. `refresh()` ends by calling this to pick up new
+    /// bucket counts, so with an unconditional `state = .loading` every delta
+    /// replaced the entire grid with a spinner and then rebuilt it — survivable
+    /// once, on a deliberate pull, and unusable on a timer.
+    ///
+    /// The failure path is guarded for the same reason the one in `refresh()`
+    /// is: a blip on a background poll must not throw away a library the user is
+    /// looking at and put an error in its place.
     public func load() async {
-        state = .loading
+        let isFirstLoad = manifest == nil
+        if isFirstLoad { state = .loading }
         do {
             let manifest = try await client.timeline(spaceID: spaceID, zoom: zoom)
             self.manifest = manifest
             self.cursor = manifest.cursor
             self.state = .loaded
         } catch {
-            state = .failed(error.localizedDescription)
+            if isFirstLoad { state = .failed(error.localizedDescription) }
         }
     }
 

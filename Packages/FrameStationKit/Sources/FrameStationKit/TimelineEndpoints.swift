@@ -113,6 +113,48 @@ extension FrameStationClient {
     }
 }
 
+// MARK: - Correcting the record
+
+extension FrameStationClient {
+    /// Re-times photos, and moves their files to match.
+    ///
+    /// One call for the whole selection rather than one per photo: a date change
+    /// moves the file on disk, and a partial batch spread over fifty requests is
+    /// a much worse thing to recover from than one that either largely worked or
+    /// largely didn't.
+    ///
+    /// Build `items` with `CaptureTimeEdit.plan` — the shift-versus-set-all
+    /// arithmetic lives there so the sheet can show exactly what it will apply.
+    @discardableResult
+    public func setCaptureTimes(
+        spaceID: UUID, items: [EditCaptureTimeRequest.Item]
+    ) async throws -> MediaEditResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/assets/capture-time",
+            body: EditCaptureTimeRequest(items: items)
+        )
+    }
+
+    /// Turns photos a quarter or half turn.
+    ///
+    /// Relative, not absolute: "rotate left" is what the button says, and after
+    /// somebody else has already straightened a photo the client's idea of its
+    /// current orientation is stale anyway.
+    ///
+    /// Returns as soon as the record is written. Thumbnails are regenerated in
+    /// the background and arrive over the usual delta sync, so a bulk rotate
+    /// doesn't hold the app open while a NAS re-renders two hundred images.
+    @discardableResult
+    public func rotate(
+        spaceID: UUID, assetIDs: [UUID], _ rotation: MediaRotation
+    ) async throws -> MediaEditResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/assets/orientation",
+            body: RotateMediaRequest(assetIDs: assetIDs, rotation: rotation)
+        )
+    }
+}
+
 // MARK: - Spaces
 
 extension FrameStationClient {
