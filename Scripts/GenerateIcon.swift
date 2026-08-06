@@ -9,7 +9,7 @@
 // round trip through a design tool.
 //
 // Mark: two overlapping rounded-square frames — a library of frames — on a
-// deep indigo-to-violet gradient. Two rather than three because a third stroke
+// deep crimson-to-coral gradient. Two rather than three because a third stroke
 // turns to mush at the 40pt size the Settings list uses.
 //
 // App Store constraints honoured here:
@@ -34,9 +34,13 @@ struct RGB {
     }
 }
 
-let deepIndigo = RGB(r: 26, g: 22, b: 74)
-let violet = RGB(r: 99, g: 62, b: 227)
-let orchid = RGB(r: 168, g: 85, b: 247)
+// Dark to vivid to bright, so the plate has depth rather than reading as one
+// flat fill at Settings-row size. The mid tone is the brand colour and is
+// mirrored by the AccentColor asset, which is what keeps the sign-in mark and
+// the icon the same red instead of the system blue the app used to inherit.
+let deepCrimson = RGB(r: 74, g: 12, b: 24)
+let crimson = RGB(r: 214, g: 40, b: 57)
+let coral = RGB(r: 247, g: 96, b: 92)
 
 // MARK: - Drawing
 
@@ -78,7 +82,7 @@ func drawIcon(
 
     let gradient = CGGradient(
         colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-        colors: [deepIndigo.cg(), violet.cg(), orchid.cg()] as CFArray,
+        colors: [deepCrimson.cg(), crimson.cg(), coral.cg()] as CFArray,
         locations: [0.0, 0.62, 1.0]
     )!
     context.drawLinearGradient(
@@ -174,7 +178,7 @@ func drawGradientLayer(width: CGFloat, height: CGFloat) -> CGImage? {
     ) else { return nil }
     let gradient = CGGradient(
         colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-        colors: [deepIndigo.cg(), violet.cg(), orchid.cg()] as CFArray,
+        colors: [deepCrimson.cg(), crimson.cg(), coral.cg()] as CFArray,
         locations: [0.0, 0.62, 1.0]
     )!
     context.drawLinearGradient(

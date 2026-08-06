@@ -64,3 +64,60 @@ struct AppearancePicker: View {
         }
     }
 }
+
+/// The app icon, drawn rather than imported.
+///
+/// The sign-in screen used a bare `square.on.square` tinted with `.tint` — and
+/// with no AccentColor asset that resolved to system blue on iOS and to
+/// whatever the user had set on macOS. So the first thing anyone saw after
+/// tapping a red icon was a blue mark on a plain background: the same app,
+/// twice, in two liveries.
+///
+/// Redrawn here from the same three colours `Scripts/GenerateIcon.swift` uses
+/// for the plate, so the sign-in screen reads as the icon enlarged. Drawn in
+/// SwiftUI rather than shipped as a PNG so it stays crisp at any size and picks
+/// up the same shape the system will mask.
+struct AppMark: View {
+    var size: CGFloat = 88
+
+    /// Matches the icon's gradient. Changing one without the other is the
+    /// drift this view exists to prevent — see the palette in GenerateIcon.
+    private static let plate = LinearGradient(
+        colors: [
+            Color(.sRGB, red: 74 / 255, green: 12 / 255, blue: 24 / 255),
+            Color(.sRGB, red: 214 / 255, green: 40 / 255, blue: 57 / 255),
+            Color(.sRGB, red: 247 / 255, green: 96 / 255, blue: 92 / 255),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+            .fill(Self.plate)
+            .frame(width: size, height: size)
+            .overlay {
+                // Two offset frames, the same mark the icon carries: a photo
+                // behind a photo, which is what a library is.
+                ZStack {
+                    frame(scale: 0.46).offset(x: -size * 0.07, y: -size * 0.07)
+                    frame(scale: 0.46)
+                        .offset(x: size * 0.07, y: size * 0.07)
+                        .background(
+                            RoundedRectangle(cornerRadius: size * 0.07, style: .continuous)
+                                .fill(.white.opacity(0.14))
+                                .frame(width: size * 0.46, height: size * 0.46)
+                                .offset(x: size * 0.07, y: size * 0.07)
+                        )
+                }
+            }
+            .shadow(color: .black.opacity(0.28), radius: size * 0.09, y: size * 0.04)
+            .accessibilityLabel("FrameStation")
+    }
+
+    private func frame(scale: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: size * 0.07, style: .continuous)
+            .strokeBorder(.white.opacity(0.92), lineWidth: max(size * 0.028, 1))
+            .frame(width: size * scale, height: size * scale)
+    }
+}
