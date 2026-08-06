@@ -1,4 +1,4 @@
-#if os(iOS)
+#if !os(tvOS)
 import FrameStationAPI
 import FrameStationKit
 import SwiftUI
@@ -66,7 +66,9 @@ struct AddToAlbumSheet: View {
             }
             .disabled(isWorking)
             .navigationTitle(title)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { onFinished(nil) }

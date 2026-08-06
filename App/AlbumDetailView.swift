@@ -20,7 +20,7 @@ struct AlbumDetailView: View {
     #endif
 
     private let columns = 4
-    private let spacing: CGFloat = 2
+    private let spacing: CGFloat = PhotoGridMetrics.spacing
 
     var body: some View {
         Group {
@@ -96,28 +96,32 @@ struct AlbumDetailView: View {
 
     private var grid: some View {
         GeometryReader { proxy in
-            let side = (proxy.size.width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
             ScrollView {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
-                    spacing: spacing
-                ) {
-                    ForEach(items) { item in
-                        if let space = session.spaces.first(where: { $0.id == item.spaceID }) {
-                            NavigationLink {
-                                AssetDetailView(item: item, space: space, session: session)
+                // The same layout the timeline uses. An album that squared
+                // everything off while the timeline kept shapes would be its own
+                // inconsistency, inside one app rather than between two.
+                PhotoGridSection(
+                    entries: items.map(GridEntry.item),
+                    width: proxy.size.width,
+                    targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
+                    spacing: spacing,
+                    columns: columns
+                ) { entry, size in
+                    if case .item(let item) = entry,
+                       let space = session.spaces.first(where: { $0.id == item.spaceID }) {
+                        NavigationLink {
+                            AssetDetailView(item: item, space: space, session: session)
+                        } label: {
+                            PhotoCell(item: item, loader: session.loader, size: size)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                Task { await remove(item) }
                             } label: {
-                                PhotoCell(item: item, loader: session.loader, side: side)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    Task { await remove(item) }
-                                } label: {
-                                    // "Remove from Album", not "Delete" — the
-                                    // photo stays in the library.
-                                    Label("Remove from Album", systemImage: "minus.circle")
-                                }
+                                // "Remove from Album", not "Delete" — the
+                                // photo stays in the library.
+                                Label("Remove from Album", systemImage: "minus.circle")
                             }
                         }
                     }

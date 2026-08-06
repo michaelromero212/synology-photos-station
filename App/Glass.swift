@@ -1,0 +1,90 @@
+import SwiftUI
+
+/// Liquid Glass, with a floor under it.
+///
+/// The SDK is iOS 26 but the deployment target is 17, so every glass call has to
+/// be gated. The fallback is deliberately not "nothing": glass *replaces* the
+/// material these controls already used rather than adding to it, so a control
+/// that reads perfectly on 26 would become white text floating on a photo on 17.
+/// Every helper here has a material underneath it for exactly that reason.
+///
+/// Kept as one file rather than sprinkled `#available` checks: when the
+/// deployment target eventually moves to 26, the fallbacks come out of one place
+/// instead of a dozen call sites.
+
+@available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
+private func frameStationGlass(tint: Color?, interactive: Bool) -> Glass {
+    var glass = Glass.regular
+    if let tint { glass = glass.tint(tint) }
+    // `interactive` is what makes a glass control flex and highlight under a
+    // finger. It's a touch affordance, so it's iOS-only on purpose.
+    #if os(iOS)
+    if interactive { glass = glass.interactive() }
+    #endif
+    return glass
+}
+
+extension View {
+    /// Glass behind this view, clipped to `shape`.
+    ///
+    /// `fallback` is the pre-26 material. Callers pass `.regularMaterial` for
+    /// chrome that sits over the app's own background and `.ultraThinMaterial`
+    /// for chrome floating over a photo, where the photo should still read
+    /// through it.
+    @ViewBuilder
+    func glassBackground(
+        in shape: some Shape,
+        tint: Color? = nil,
+        interactive: Bool = true,
+        fallback: Material = .ultraThinMaterial
+    ) -> some View {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
+            self.glassEffect(
+                frameStationGlass(tint: tint, interactive: interactive), in: shape
+            )
+        } else {
+            self.background(fallback, in: shape)
+        }
+    }
+
+    /// The common case: a capsule of glass, for bars and pills.
+    func glassCapsule(
+        tint: Color? = nil,
+        interactive: Bool = true,
+        fallback: Material = .ultraThinMaterial
+    ) -> some View {
+        glassBackground(
+            in: Capsule(), tint: tint, interactive: interactive, fallback: fallback
+        )
+    }
+
+    /// A single round control, the shape the photo viewer's buttons take.
+    func glassCircle(
+        tint: Color? = nil,
+        interactive: Bool = true,
+        fallback: Material = .ultraThinMaterial
+    ) -> some View {
+        glassBackground(
+            in: Circle(), tint: tint, interactive: interactive, fallback: fallback
+        )
+    }
+}
+
+/// Groups glass siblings so the system can blend and morph them together.
+///
+/// Two `.glassEffect()` views sitting next to each other each sample the
+/// background on their own and the seam between them shows. Inside a container
+/// they're rendered as one piece of glass, which is what makes a row of buttons
+/// read as a single control rather than a row of separate lozenges.
+struct GlassGroup<Content: View>: View {
+    var spacing: CGFloat = 8
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) { content }
+        } else {
+            content
+        }
+    }
+}

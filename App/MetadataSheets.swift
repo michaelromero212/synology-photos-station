@@ -1,4 +1,4 @@
-#if os(iOS)
+#if !os(tvOS)
 import FrameStationAPI
 import FrameStationKit
 import SwiftUI
@@ -67,7 +67,9 @@ struct RatingSheet: View {
             }
             .disabled(isWorking)
             .navigationTitle(title)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { onFinished(nil) }
@@ -137,7 +139,9 @@ struct TagEditorSheet: View {
             }
             .disabled(isWorking)
             .navigationTitle(title)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { onFinished(nil) }
@@ -156,10 +160,14 @@ struct TagEditorSheet: View {
     private var addSection: some View {
         Section("Add") {
             HStack {
+                // Both of these are keyboard affordances, and a Mac has a
+                // hardware one — the modifiers simply don't exist there.
                 TextField("New tag", text: $entry)
                     .autocorrectionDisabled()
+                    #if os(iOS)
                     .textInputAutocapitalization(.words)
                     .submitLabel(.done)
+                    #endif
                     .onSubmit(commitEntry)
                 Button("Add", action: commitEntry)
                     .disabled(trimmedEntry.isEmpty)

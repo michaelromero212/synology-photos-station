@@ -11,7 +11,9 @@ import SwiftUI
 struct PhotoCell: View {
     let item: TimelineItem
     let loader: ThumbnailLoader?
-    var side: CGFloat
+    /// The frame this tile fills. Square on iPhone; on every other platform the
+    /// justified grid hands it a width that follows the photo's own shape.
+    var size: CGSize
 
     @State private var image: PlatformImage?
     @State private var placeholder: PlatformImage?
@@ -30,7 +32,7 @@ struct PhotoCell: View {
 
             overlays
         }
-        .frame(width: side, height: side)
+        .frame(width: size.width, height: size.height)
         .clipped()
         .contentShape(Rectangle())
         .task(id: item.assetID) { await load() }
@@ -74,7 +76,9 @@ struct PhotoCell: View {
         // 202 while the derivation queue is behind; keep the placeholder rather
         // than requesting an image that isn't there yet.
         guard item.isDerived, let loader else { return }
-        let loaded = await loader.thumbnail(assetID: item.assetID, size: 256)
+        let loaded = await loader.thumbnail(
+            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
+        )
         withAnimation(.easeOut(duration: 0.18)) { image = loaded }
     }
 

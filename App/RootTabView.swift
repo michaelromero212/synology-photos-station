@@ -189,6 +189,12 @@ struct MoreView: View {
             }
 
             Section {
+                AppearancePicker()
+            } footer: {
+                Text("Dark keeps the interface out of the way of your photos.")
+            }
+
+            Section {
                 Button(role: .destructive) {
                     session.signOut()
                 } label: {
