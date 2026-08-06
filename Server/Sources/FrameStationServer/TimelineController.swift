@@ -88,16 +88,21 @@ struct TimelineController: RouteCollection {
         let isFavorite: Bool
         let uploadedBy: UUID
         let isDerived: Bool
+        let orientation: Int?
 
         func toItem() -> TimelineItem {
+            // Orientation is applied here rather than baked into the stored
+            // dimensions, so rotating a photo is one column write and every
+            // reader agrees. exiftool reports the pixel grid and leaves the
+            // rotation in a separate tag, so a portrait iPhone photo arrives as
+            // 4032×3024 with orientation 6 — reporting that ratio straight
+            // through laid every portrait shot out landscape.
+            //
             // Square is the safest fallback: an item whose dimensions never
             // arrived should not distort the row it lands in.
-            let ratio: Double
-            if let width, let height, width > 0, height > 0 {
-                ratio = Double(width) / Double(height)
-            } else {
-                ratio = 1
-            }
+            let ratio = ExifOrientation.aspectRatio(
+                width: width, height: height, orientation: orientation
+            ) ?? 1
             return TimelineItem(
                 id: id,
                 spaceID: spaceID,
@@ -131,7 +136,7 @@ struct TimelineController: RouteCollection {
                    sa.space_id   AS "spaceID",
                    a.id          AS "assetID",
                    \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                   a.width, a.height,
+                   a.width, a.height, a.orientation,
                    a.media_type  AS "mediaType",
                    a.duration_ms AS "durationMs",
                    a.thumbhash   AS "thumbHash",
@@ -195,7 +200,7 @@ struct TimelineController: RouteCollection {
                     sa.space_id AS "spaceID",
                        a.id          AS "assetID",
                        \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                       a.width, a.height,
+                       a.width, a.height, a.orientation,
                        a.media_type  AS "mediaType",
                        a.duration_ms AS "durationMs",
                        a.thumbhash   AS "thumbHash",
@@ -239,6 +244,7 @@ struct TimelineController: RouteCollection {
         let byteSize: Int64
         let width: Int?
         let height: Int?
+        let orientation: Int?
         let durationMs: Int?
         let capturedAt: Date?
         let capturedTZOffset: Int?
@@ -282,7 +288,7 @@ struct TimelineController: RouteCollection {
                    a.media_type AS "mediaType",
                    a.mime,
                    a.byte_size AS "byteSize",
-                   a.width, a.height,
+                   a.width, a.height, a.orientation,
                    a.duration_ms AS "durationMs",
                    a.captured_at AS "capturedAt",
                    a.captured_tz_off AS "capturedTZOffset",
@@ -329,6 +335,13 @@ struct TimelineController: RouteCollection {
             ORDER BY lower(t.name)
             """).all(decoding: TagRow.self).map(\.name)
 
+        // Reported as displayed, matching the grid and matching what the person
+        // looking at the photo would measure. A rotated portrait that says
+        // 4032 × 3024 in the Information panel reads as a bug.
+        let displayed = ExifOrientation.displaySize(
+            width: row.width, height: row.height, orientation: row.orientation
+        )
+
         return AssetDetail(
             id: row.id,
             assetID: row.assetID,
@@ -336,8 +349,8 @@ struct TimelineController: RouteCollection {
             mediaType: MediaType(rawValue: row.mediaType) ?? .photo,
             mime: row.mime,
             byteSize: row.byteSize,
-            width: row.width,
-            height: row.height,
+            width: displayed.width,
+            height: displayed.height,
             durationMs: row.durationMs,
             capturedAt: row.capturedAt,
             capturedTZOffset: row.capturedTZOffset,
