@@ -49,9 +49,13 @@ public actor ThumbnailLoader {
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
     }
 
-    public func thumbnail(assetID: UUID, size: Int = 256) async -> PlatformImage? {
+    public func thumbnail(
+        assetID: UUID, size: Int = 256, isPrefetch: Bool = false
+    ) async -> PlatformImage? {
         guard let url = await client.thumbnailURL(assetID: assetID, size: size) else { return nil }
-        return await image(at: url, key: "\(assetID)-\(size)", targetPixels: size)
+        return await image(
+            at: url, key: "\(assetID)-\(size)", targetPixels: size, isPrefetch: isPrefetch
+        )
     }
 
     public func preview(assetID: UUID, targetPixels: Int = 2048) async -> PlatformImage? {
@@ -59,14 +63,102 @@ public actor ThumbnailLoader {
         return await image(at: url, key: "\(assetID)-preview", targetPixels: targetPixels)
     }
 
+    // MARK: - Prefetching
+
+    /// Warms the cache for photos the user is about to reach.
+    ///
+    /// The technique Apple Photos leans on hardest: by the time a tile is on
+    /// screen its bytes should already be local, so scrolling reveals pictures
+    /// rather than grey squares that fill in afterwards.
+    ///
+    /// Fire-and-forget, and deliberately lower priority than anything visible —
+    /// see `acquire`. A prefetch that competed with the tiles someone is
+    /// actually looking at would make scrolling worse, not better.
+    public func prefetch(assetIDs: [UUID], size: Int = 256) {
+        for assetID in assetIDs {
+            let key = "\(assetID)-\(size)" as NSString
+            // Already decoded and resident: nothing to do, and checking here
+            // keeps a re-scroll over warm content completely free.
+            if memory.object(forKey: key) != nil { continue }
+            Task { _ = await self.thumbnail(assetID: assetID, size: size, isPrefetch: true) }
+        }
+    }
+
     // MARK: - Core
 
-    private func image(at url: URL, key: String, targetPixels: Int) async -> PlatformImage? {
+    /// How many thumbnail fetches may be in flight at once.
+    ///
+    /// Unbounded was the real scrolling problem, and it looked like a slow
+    /// server rather than a client bug. A fast fling over a large library
+    /// starts one request per newly-appeared tile and never cancels them, so
+    /// hundreds of fetches for tiles nobody will ever see queue ahead of the
+    /// handful actually on screen. On a J4125 serving a 67k library that
+    /// starves exactly the requests that matter.
+    private static let maxConcurrent = 6
+    /// Prefetch stops short of the cap so a visible tile can always get through.
+    private static let prefetchCeiling = 3
+
+    /// How deep the prefetch queue may get before further requests are dropped.
+    ///
+    /// Bounding concurrency alone was not enough, and missing this was the bug:
+    /// a fling past twenty days still *queued* every one of their thumbnails,
+    /// so the unbounded work simply moved from URLSession's queue to this one
+    /// and came due later, fetching tiles that were long gone. Prefetch is a
+    /// guess about what will be needed next — when the guesses pile up faster
+    /// than they can be served, the old ones are worthless and dropping them is
+    /// the correct answer, not deferring them.
+    private static let maxPrefetchBacklog = 24
+
+    private var active = 0
+    private var waiting: [(isPrefetch: Bool, resume: CheckedContinuation<Void, Never>)] = []
+
+    /// Returns false when a prefetch should simply be abandoned.
+    private func acquire(isPrefetch: Bool) async -> Bool {
+        let ceiling = isPrefetch ? Self.prefetchCeiling : Self.maxConcurrent
+        if active < ceiling {
+            active += 1
+            return true
+        }
+        if isPrefetch, waiting.filter({ $0.isPrefetch }).count >= Self.maxPrefetchBacklog {
+            return false
+        }
+        await withCheckedContinuation { continuation in
+            waiting.append((isPrefetch, continuation))
+        }
+        // No increment here: `release` hands its slot straight over rather than
+        // dropping the count and letting the woken task put it back. That gap
+        // was small but real — another caller could look in between, see room
+        // that wasn't there, and push past the ceiling.
+        return true
+    }
+
+    private func release() {
+        // Visible work first, always: a queue served in arrival order would put
+        // tiles from three screens away ahead of the one under the thumb.
+        if let index = waiting.firstIndex(where: { !$0.isPrefetch }) {
+            waiting.remove(at: index).resume.resume()
+            return
+        }
+        // A prefetch may only take the slot if doing so still leaves it under
+        // its own, lower ceiling.
+        if active <= Self.prefetchCeiling, !waiting.isEmpty {
+            waiting.removeFirst().resume.resume()
+            return
+        }
+        active -= 1
+    }
+
+    private func image(
+        at url: URL, key: String, targetPixels: Int, isPrefetch: Bool = false
+    ) async -> PlatformImage? {
         if let entry = memory.object(forKey: key as NSString) { return entry.image }
 
         // Coalesce: a fast scroll can ask for the same cell several times before
         // the first request returns.
         if let existing = inFlight[url] { return await existing.value }
+
+        guard await acquire(isPrefetch: isPrefetch) else { return nil }
+        defer { release() }
 
         let task = Task<PlatformImage?, Never> { [diskRoot, session, client] in
             let diskPath = diskRoot.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
