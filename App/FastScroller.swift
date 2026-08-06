@@ -1,5 +1,6 @@
 import FrameStationAPI
 import FrameStationKit
+import Observation
 import SwiftUI
 
 #if !os(tvOS)
@@ -12,8 +13,9 @@ import SwiftUI
 /// edge is the only way to get from 2026 to 2011 without flinging repeatedly.
 struct FastScroller: View {
     let buckets: [TimelineBucket]
-    /// 0…1, where the viewport currently sits. Drives the resting indicator.
-    let scrollFraction: Double
+    /// Where the viewport sits, 0…1. An object rather than a `Double` so that
+    /// reading it invalidates *this* view and not the grid — see `ScrollProgress`.
+    let progress: ScrollProgress
     /// Called continuously while dragging, with the bucket under the finger.
     let onScrub: (TimelineBucket) -> Void
     let onScrubEnd: () -> Void
@@ -31,7 +33,7 @@ struct FastScroller: View {
             // While dragging the thumb follows the finger; otherwise it follows
             // the scroll view. Using the finger position during a drag matters —
             // deriving it from scroll offset makes the thumb lag its own gesture.
-            let fraction = isDragging ? dragFraction : scrollFraction
+            let fraction = isDragging ? dragFraction : progress.fraction
             // Explicit CGFloat: `track` is CGFloat and `fraction` is Double, and
             // on a 64-bit platform those are the same type by typealias but not
             // to the type checker. Left implicit it cannot decide, and reports
@@ -106,10 +108,10 @@ struct FastScroller: View {
                 .font(.subheadline)
                 .fontWeight(.semibold)
                 .fixedSize()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(.black.opacity(0.75), in: Capsule())
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .glassCapsule(interactive: false, fallback: .regularMaterial)
         }
     }
 
@@ -165,22 +167,93 @@ extension Comparable {
     }
 }
 
-/// Reports how far the grid has scrolled, 0…1, so the resting indicator tracks it.
+/// One reading of the grid's scroll position.
+struct ScrollReport: Equatable {
+    var offset: Double
+    var scrollable: Double
+}
+
+/// Where the grid is scrolled to, and which way it's going.
 ///
-/// `onScrollGeometryChange` is iOS 18; on 17 the scroller still scrubs, it just
-/// doesn't follow along at rest — a graceful loss rather than a broken control.
-struct ScrollFractionReporter: ViewModifier {
-    let onChange: (Double) -> Void
+/// A shared object rather than values passed down from the grid, and this is a
+/// performance fix rather than a tidying one. `onScrollGeometryChange` fires
+/// every frame of a scroll. Writing that into the grid's own `@State`
+/// re-evaluated the entire timeline body at display rate — every section, every
+/// cell, the merged backup queue, the lot — which is precisely what stopped a
+/// fling from gliding. Holding it out here means each value lands only on the
+/// views that read it.
+///
+/// The split matters: `fraction` changes every frame and belongs to the
+/// scrubber alone, while `chromeHidden` flips a handful of times per scroll and
+/// is the only property the grid itself reads. `@Observable` tracks per
+/// property, so the grid is invalidated by the flip and never by the frame.
+@Observable
+@MainActor
+final class ScrollProgress {
+    var fraction: Double = 0
+
+    /// True once the grid has been pushed far enough up that the title and the
+    /// toolbar have stood down, leaving the pinned date as the only thing
+    /// across the top.
+    var chromeHidden = false
+
+    /// The offset the current direction was measured from, re-anchored on every
+    /// flip so a reversal is judged from the turning point rather than from
+    /// wherever the scroll happened to begin.
+    ///
+    /// `@ObservationIgnored` is load-bearing: an observed write here would
+    /// invalidate the grid on every frame, which is the exact cost the rest of
+    /// this class is arranged to avoid.
+    @ObservationIgnored private var pivot: Double = 0
+
+    /// Enough travel to read as a decision rather than a wobble.
+    private let threshold: Double = 14
+    /// Near the top the chrome is always up, whatever the last direction was.
+    /// Arriving at the top of your library with no title is disorienting.
+    private let topZone: Double = 8
+
+    func apply(_ report: ScrollReport) {
+        let next = report.scrollable > 1
+            ? (report.offset / report.scrollable).clamped(to: 0...1)
+            : 0
+        // Guarded rather than assigned blindly: `@Observable` notifies on every
+        // set, equal value or not, so an unguarded write is a per-frame
+        // invalidation wearing a disguise.
+        if fraction != next { fraction = next }
+
+        guard report.offset > topZone else {
+            pivot = report.offset
+            if chromeHidden { chromeHidden = false }
+            return
+        }
+
+        let delta = report.offset - pivot
+        if delta > threshold {
+            pivot = report.offset
+            if !chromeHidden { chromeHidden = true }
+        } else if delta < -threshold {
+            pivot = report.offset
+            if chromeHidden { chromeHidden = false }
+        }
+    }
+}
+
+/// Feeds `ScrollProgress` from the grid's scroll view.
+///
+/// `onScrollGeometryChange` is iOS 18; on 17 the scrubber still scrubs and the
+/// chrome simply stays up — a graceful loss rather than a broken screen.
+struct ScrollActivityReporter: ViewModifier {
+    let progress: ScrollProgress
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, tvOS 18.0, *) {
-            content.onScrollGeometryChange(for: Double.self) { geometry in
-                let scrollable = geometry.contentSize.height
-                    - geometry.containerSize.height
-                guard scrollable > 1 else { return 0 }
-                return (geometry.contentOffset.y / scrollable).clamped(to: 0...1)
-            } action: { _, fraction in
-                onChange(fraction)
+            content.onScrollGeometryChange(for: ScrollReport.self) { geometry in
+                ScrollReport(
+                    offset: geometry.contentOffset.y,
+                    scrollable: geometry.contentSize.height - geometry.containerSize.height
+                )
+            } action: { _, report in
+                progress.apply(report)
             }
         } else {
             content

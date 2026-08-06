@@ -154,7 +154,8 @@ private struct ActiveRow: View {
     var body: some View {
         HStack(spacing: 12) {
             PendingTile(
-                localIdentifier: active.localIdentifier, state: .uploading, side: 54
+                localIdentifier: active.localIdentifier, state: .uploading,
+                size: CGSize(width: 54, height: 54)
             )
             .frame(width: 54, height: 54)
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -188,8 +189,11 @@ private struct QueueRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            PendingTile(localIdentifier: localIdentifier, state: .pending, side: 44)
-                .frame(width: 44, height: 44)
+            PendingTile(
+                localIdentifier: localIdentifier, state: .pending,
+                size: CGSize(width: 44, height: 44)
+            )
+            .frame(width: 44, height: 44)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             Text("Waiting").font(.subheadline).foregroundStyle(.secondary)
             Spacer()

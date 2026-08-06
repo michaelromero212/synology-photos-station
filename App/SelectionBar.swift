@@ -1,9 +1,9 @@
-#if os(iOS)
+// Selection is not iOS-only. Only the share sheet underneath it ever was.
+#if !os(tvOS)
 import FrameStationAPI
 import FrameStationKit
 import Foundation
 import Observation
-import Photos
 import SwiftUI
 
 /// What the user has picked in the grid, and the things they can do with it.
@@ -62,6 +62,46 @@ final class GridSelection {
             }
         }
         return changed
+    }
+
+    /// Re-times everything picked, in one call.
+    ///
+    /// One request rather than one per photo: each of these moves a file on the
+    /// NAS, and a batch half-applied across fifty requests is a much worse thing
+    /// to be left holding than one that either largely worked or largely didn't.
+    func setCaptureTimes(
+        _ plan: [EditCaptureTimeRequest.Item], in space: SpaceDTO,
+        client: FrameStationClient?
+    ) async -> MediaEditResponse? {
+        guard let client, !plan.isEmpty else { return nil }
+        isWorking = true
+        defer { isWorking = false; progress = "" }
+        progress = "Re-dating \(plan.count) item\(plan.count == 1 ? "" : "s")…"
+        do {
+            return try await client.setCaptureTimes(spaceID: space.id, items: plan)
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Turns everything picked. Returns as soon as the record is written —
+    /// thumbnails are regenerated on the NAS and arrive over delta sync.
+    func rotate(
+        _ rotation: MediaRotation, in space: SpaceDTO, client: FrameStationClient?
+    ) async -> MediaEditResponse? {
+        guard let client, !picked.isEmpty else { return nil }
+        isWorking = true
+        defer { isWorking = false; progress = "" }
+        progress = "Rotating \(picked.count) item\(picked.count == 1 ? "" : "s")…"
+        do {
+            return try await client.rotate(
+                spaceID: space.id, assetIDs: picked.map(\.assetID), rotation
+            )
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
     }
 
     /// Rates everything picked, 0–5, where 0 clears the rating.
@@ -218,7 +258,17 @@ struct SelectionBar<MoreContent: View>: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 10)
-        .background(.regularMaterial)
+        // Floating rather than edge-to-edge, because on iOS 26 the tab bar
+        // this stands in for floats too — a hard-edged bar in its place reads
+        // as a different piece of furniture appearing, not as the same slot
+        // changing what it offers.
+        .glassBackground(
+            in: RoundedRectangle(cornerRadius: 26, style: .continuous),
+            interactive: false,
+            fallback: .regularMaterial
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 4)
         .disabled(selection.count == 0 || selection.isWorking)
     }
 
@@ -238,6 +288,7 @@ struct SelectionBar<MoreContent: View>: View {
 
 /// Wraps `UIActivityViewController` so "Save Image" puts a photo back in the
 /// iPhone's own library — the round trip the user asked for.
+#if os(iOS)
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [URL]
 
@@ -247,9 +298,35 @@ struct ShareSheet: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
+#else
+/// The same idea where there is no activity view controller.
+///
+/// `ShareLink` reaches the system share menu on macOS, which is the round trip
+/// that matters there — AirDrop, Mail, Photos — and it needs the files to exist
+/// already, which they do: the originals were downloaded before this appeared.
+struct ShareSheet: View {
+    let items: [URL]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "square.and.arrow.up").font(.largeTitle)
+            Text("\(items.count) item\(items.count == 1 ? "" : "s") ready")
+                .font(.headline)
+            ShareLink(items: items) {
+                Label("Share…", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderedProminent)
+            Button("Done") { dismiss() }
+        }
+        .padding(28)
+        .frame(minWidth: 320)
+    }
+}
+#endif
 #endif
 
-#if os(iOS)
+#if !os(tvOS)
 /// The circle on each tile while selecting, numbered the way Photos does it.
 struct SelectionMark: View {
     let isPicked: Bool

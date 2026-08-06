@@ -51,6 +51,7 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct FrameStationApp: App {
     @State private var session = AppSession()
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.default
     #if os(iOS)
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     #endif
@@ -73,6 +74,11 @@ struct FrameStationApp: App {
             #if os(macOS)
                 .frame(minWidth: 640, minHeight: 480)
             #endif
+                // At the root so it reaches the sign-in screen, every sheet and
+                // every full-screen cover — a preference applied inside the tab
+                // view would leave the parts presented over it on the system
+                // scheme, which is exactly where a half-done dark mode shows.
+                .preferredColorScheme(appearance.colorScheme)
         }
         #if os(macOS)
         .defaultSize(width: 1100, height: 800)

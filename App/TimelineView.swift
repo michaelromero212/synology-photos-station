@@ -21,7 +21,17 @@ struct TimelineView: View {
     @Binding var backupSettings: BackupSettings
     #endif
 
+    @Environment(\.scenePhase) private var scenePhase
+    /// Ties a tapped tile to the viewer it grows into. Both ends must name the
+    /// same namespace or the system falls back to a push without saying so.
+    @Namespace private var photoTransition
     @State private var store: TimelineStore?
+    /// What the date editor is about to act on. Held here rather than read off
+    /// the selection because macOS has no multi-select — there it's whichever
+    /// one photo was right-clicked — and one sheet serving both is better than
+    /// two that drift.
+    @State private var editingItems: [TimelineItem] = []
+    @State private var showDateEditor = false
     /// Follows the zoom — see TimelineZoom.columns.
     private var columns: Int { (store?.zoom ?? .day).columns }
     @State private var activity: ActivityStore?
@@ -34,34 +44,51 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var dismissedBackupPrompt = false
     @State private var showBackupSettings = false
+    @State private var showPicker = false
+    @State private var shareResult: Int?
+    #endif
+
+    // Selecting photos, and everything that acts on a selection. Not iOS-only:
+    // a Mac has more room for a contact sheet than anything else does, and
+    // "select these forty and re-date them" is the case it is best at.
+    #if !os(tvOS)
     @State private var showAddToAlbum = false
     @State private var showTagEditor = false
     @State private var showRatingEditor = false
     @State private var albumResult: String?
-    @State private var showPicker = false
-    @State private var shareResult: Int?
     @State private var selection = GridSelection()
     @State private var shareFiles: [URL] = []
     @State private var showShare = false
     @State private var confirmDelete = false
     #endif
 
-    private let spacing: CGFloat = 2
-    @State private var scrollFraction: Double = 0
+    private let spacing: CGFloat = PhotoGridMetrics.spacing
+    /// Held, not read. The grid hands this to the fast scroller and to the
+    /// reporter and never touches `.fraction` itself — see `ScrollProgress`.
+    @State private var scrollProgress = ScrollProgress()
     #if os(iOS)
-    /// The photo a tap opened, and the day it came from — the slideshows need
-    /// to know what "that day" contained.
+    /// The photo a tap opened, the day it came from — the slideshows need to
+    /// know what "that day" contained — and everything currently loaded, which
+    /// is what the viewer swipes through.
     @State private var openItem: TimelineItem?
     @State private var openDayItems: [TimelineItem] = []
+    @State private var openPageItems: [TimelineItem] = []
     #endif
 
     var body: some View {
         VStack(spacing: 0) {
-            // Above the content rather than inside it: the answer to "is my
-            // phone backed up?" must not depend on whether the library
-            // happens to have photos in it yet.
+            // Only when there's no grid to carry it. The banner rides at the
+            // top of the scroll content instead, so it scrolls away with the
+            // photos — pinning it here and hiding it on scroll instead was
+            // worse than it sounds: it resized the scroll container mid-gesture
+            // and the grid snapped back to the top.
+            //
+            // The original reason it sat outside still holds, though, which is
+            // why it stays here in every other state: the answer to "is my
+            // phone backed up?" must not depend on the library having photos in
+            // it yet, and an empty library has nothing to scroll.
             #if os(iOS)
-            if let engine {
+            if let engine, !showsGrid {
                 backupBanner(engine)
             }
             #endif
@@ -81,10 +108,25 @@ struct TimelineView: View {
         #endif
         .toolbar { toolbar }
         #if os(iOS)
+        // Scrolling into the library stands the whole bar down — title and
+        // icons both — leaving the pinned date as the only thing across the
+        // top, and scrolling back brings it up. Deliberately un-animated: an
+        // explicit `.animation` on this drove the bar up past the status bar
+        // and lurched the grid with it. The navigation controller's own
+        // transition is the one that looks right.
+        //
+        // Never while selecting, though: the count and the cancel button live
+        // in that bar, and losing them mid-selection strands you.
+        .toolbar(
+            scrollProgress.chromeHidden && !selection.isActive ? .hidden : .automatic,
+            for: .navigationBar
+        )
         .navigationDestination(item: $openItem) { opened in
             AssetDetailView(
-                item: opened, space: space, session: session, dayItems: openDayItems
+                item: opened, space: space, session: session,
+                dayItems: openDayItems, pageItems: openPageItems
             )
+            .photoZoomTransition(id: opened.id, in: photoTransition)
         }
         // Selecting photos reuses the tab bar's slot rather than stacking a
         // second bar above it: the actions apply to what you picked, so the
@@ -94,7 +136,29 @@ struct TimelineView: View {
         .sheet(isPresented: $showSpaces) {
             SpacesView(session: session) { showSpaces = false }
         }
-        #if os(iOS)
+        // Outside the iOS block: correcting a date is one of the few edits
+        // macOS can do too, and it is the same sheet either way. Not tvOS —
+        // nobody is fixing a timestamp with a remote.
+        #if !os(tvOS)
+        .sheet(isPresented: $showDateEditor) {
+            DateTimeEditorSheet(items: editingItems) { plan in
+                try? await session.client?.setCaptureTimes(spaceID: space.id, items: plan)
+            } onFinished: { done in
+                showDateEditor = false
+                editingItems = []
+                guard let done else { return }
+                #if os(iOS)
+                albumResult = done
+                selection.clear()
+                #endif
+                // Re-dated photos belong to other days now, so their buckets
+                // are wrong until the manifest is refetched. The one edit where
+                // waiting for the next poll would leave a visibly wrong grid.
+                Task { await store?.refresh() }
+            }
+        }
+        #endif
+        #if !os(tvOS)
         .sheet(isPresented: $showShare, onDismiss: { selection.clear() }) {
             ShareSheet(items: shareFiles)
         }
@@ -115,8 +179,14 @@ struct TimelineView: View {
         } message: {
             // Say what removal actually does. It is not a deletion from the
             // phone, and it is not permanent on the NAS either.
+            #if os(iOS)
             Text("They stay on this iPhone. On the NAS they move to #recycle, and backup won't add them again.")
+            #else
+            Text("On the NAS they move to #recycle. Nothing is removed from anyone's phone.")
+            #endif
         }
+        #endif
+        #if os(iOS)
         .sheet(isPresented: $showPicker) {
             LibraryPickerView(session: session, space: space) { count in
                 showPicker = false
@@ -143,6 +213,15 @@ struct TimelineView: View {
         }
         // "Set Up Now" is a promise to set backup up, so it opens the settings
         // rather than a hub the settings are one more tap inside.
+        .sheet(isPresented: $showBackupSettings) {
+            if let engine {
+                BackupSettingsView(
+                    session: session, engine: engine, settings: $backupSettings
+                ) { showBackupSettings = false }
+            }
+        }
+        #endif
+        #if !os(tvOS)
         .modifier(AddToAlbumPresentation(
             session: session, selection: selection,
             isPresented: $showAddToAlbum, result: $albumResult
@@ -152,13 +231,6 @@ struct TimelineView: View {
             showRating: $showRatingEditor, showTags: $showTagEditor,
             result: $albumResult
         ))
-        .sheet(isPresented: $showBackupSettings) {
-            if let engine {
-                BackupSettingsView(
-                    session: session, engine: engine, settings: $backupSettings
-                ) { showBackupSettings = false }
-            }
-        }
         #endif
         .sheet(isPresented: $showActivity) {
             if let activity {
@@ -190,7 +262,41 @@ struct TimelineView: View {
             store = newStore
             await newStore?.load()
         }
+        // Coming back to the app should not mean coming back to a stale
+        // library. Photos this device didn't upload — from a phone, from
+        // another person in a shared space — arrive with no local event to
+        // announce them, so without this the only way to see them was to know
+        // to pull down.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await store?.refresh() }
+        }
+        // And while you're actually looking at it, keep it current.
+        //
+        // Cheap on purpose: `/changes` answers an unchanged library with an
+        // empty list, so a tick costs a few hundred bytes and no image traffic.
+        // Keyed on the scene phase as well as the space so the loop is torn
+        // down when the app leaves the foreground rather than polling a NAS
+        // from someone's pocket.
+        .task(id: PollKey(space: space.id, isActive: scenePhase == .active)) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.pollInterval)
+                guard !Task.isCancelled else { return }
+                await store?.refresh()
+            }
+        }
     }
+
+    /// Restarts the poll when either the space or the foreground state changes.
+    private struct PollKey: Equatable {
+        let space: UUID
+        let isActive: Bool
+    }
+
+    /// Fast enough that a photo taken in the next room shows up while you're
+    /// still looking at the grid, slow enough to be free on a J4125.
+    private static let pollInterval: UInt64 = 15_000_000_000
 
     @ViewBuilder
     private func content(_ store: TimelineStore) -> some View {
@@ -224,11 +330,13 @@ struct TimelineView: View {
     /// `#if` — braces have to balance within each conditional block.
     @ViewBuilder
     private func gridCell(
-        _ item: TimelineItem, side: CGFloat, dayItems: [TimelineItem] = []
+        _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = []
     ) -> some View {
-        #if os(iOS)
+        #if !os(tvOS)
         if selection.isActive {
-            PhotoCell(item: item, loader: session.loader, side: side)
+            // Identical on every platform: once you're selecting, a click and a
+            // tap mean the same thing.
+            PhotoCell(item: item, loader: session.loader, size: size)
                 .overlay(alignment: .topLeading) {
                     SelectionMark(isPicked: selection.contains(item)).padding(5)
                 }
@@ -240,10 +348,11 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { selection.toggle(item) }
         } else {
+            #if os(iOS)
             // Not a NavigationLink: the link consumes the press and pushes the
             // photo, so a long press could never start selection. Tap opens,
             // long press selects, and navigation runs off `openItem`.
-            PhotoCell(item: item, loader: session.loader, side: side)
+            PhotoCell(item: item, loader: session.loader, size: size)
                 .overlay(alignment: .bottomTrailing) {
                     if engine?.recentlyUploaded.contains(item.assetID) == true {
                         UploadStateBadge(state: .uploaded).padding(5)
@@ -252,6 +361,10 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     openDayItems = dayItems
+                    // Snapshotted at the tap rather than recomputed in the
+                    // viewer: the pager's contents must not shuffle underneath
+                    // a swipe because a bucket finished loading behind it.
+                    openPageItems = loadedItemsInOrder()
                     openItem = item
                 }
                 // Matches Photos: no mode to find first, and the photo you
@@ -260,15 +373,139 @@ struct TimelineView: View {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     selection.begin(with: item)
                 }
+                .photoTransitionSource(id: item.id, in: photoTransition)
+            #else
+            NavigationLink {
+                AssetDetailView(item: item, space: space, session: session)
+            } label: {
+                PhotoCell(item: item, loader: session.loader, size: size)
+            }
+            .buttonStyle(.plain)
+            // A Mac has no long press. Right-click starts a selection already
+            // holding this photo, which is the same bargain the long press
+            // makes on a phone, and the Select button in the toolbar is there
+            // for people who look for a button.
+            .contextMenu {
+                Button {
+                    selection.begin(with: item)
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                }
+                Divider()
+                Button {
+                    editingItems = [item]
+                    showDateEditor = true
+                } label: {
+                    Label("Edit Date & Time…", systemImage: "calendar")
+                }
+                if item.mediaType != .video {
+                    Button { rotateOne(item, .left) } label: {
+                        Label("Rotate Left", systemImage: "rotate.left")
+                    }
+                    Button { rotateOne(item, .right) } label: {
+                        Label("Rotate Right", systemImage: "rotate.right")
+                    }
+                }
+            }
+            #endif
         }
         #else
         NavigationLink {
             AssetDetailView(item: item, space: space, session: session)
         } label: {
-            PhotoCell(item: item, loader: session.loader, side: side)
+            PhotoCell(item: item, loader: session.loader, size: size)
         }
         .buttonStyle(.plain)
         #endif
+    }
+
+    #if os(macOS)
+    /// Turns one photo. The regenerated thumbnail arrives over delta sync.
+    private func rotateOne(_ item: TimelineItem, _ rotation: MediaRotation) {
+        Task {
+            _ = try? await session.client?.rotate(
+                spaceID: space.id, assetIDs: [item.assetID], rotation
+            )
+        }
+    }
+    #endif
+
+    #if !os(tvOS)
+    /// Turns the selection and reports what took.
+    ///
+    /// No confirmation step: a rotation is one tap to undo in the opposite
+    /// direction, and asking someone to confirm every quarter turn is how
+    /// straightening a dozen photos becomes a chore.
+    private func rotate(_ rotation: MediaRotation) {
+        Task {
+            let result = await selection.rotate(
+                rotation, in: space, client: session.client
+            )
+            guard let result else { return }
+            albumResult = "\(result.updated) item\(result.updated == 1 ? "" : "s") rotated"
+            selection.clear()
+        }
+    }
+    #endif
+
+    /// Asks the loader to warm a day's thumbnails.
+    ///
+    /// Capped rather than the whole bucket: a day with six hundred photos would
+    /// otherwise queue six hundred fetches on the strength of one section
+    /// scrolling into view, which is the unbounded behaviour this is meant to
+    /// replace. A couple of screens' worth is what "about to be seen" means.
+    private func prefetchThumbnails(for key: String, in store: TimelineStore) async {
+        guard let loader = session.loader, let items = store.items[key] else { return }
+        await loader.prefetch(
+            assetIDs: items.prefix(60).map(\.assetID),
+            size: PhotoGridMetrics.thumbnailPixels
+        )
+    }
+
+    /// Everything one section draws, in order.
+    ///
+    /// Pending, real and placeholder tiles all end up in one list so the
+    /// justified layout can size them together — a row that stopped at the last
+    /// uploaded photo and started again underneath would show the seam.
+    private func entries(for bucket: TimelineBucket, items: [TimelineItem]) -> [GridEntry] {
+        var entries: [GridEntry] = []
+
+        // Not-yet-uploaded photos lead their day: they are the newest thing
+        // that happened, and burying them under already-safe photos hides
+        // exactly what the user is waiting on.
+        #if os(iOS)
+        for queued in queuedByDay[bucket.key] ?? [] {
+            entries.append(.pending(localIdentifier: queued.localIdentifier, state: queued.state))
+        }
+        #endif
+
+        if items.isEmpty {
+            // Placeholders keep the section the right height so the scrollbar
+            // doesn't jump when the bucket lands.
+            entries.append(contentsOf: (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) })
+        } else {
+            entries.append(contentsOf: items.map(GridEntry.item))
+        }
+
+        return entries
+    }
+
+    /// Draws one entry at the size the layout worked out for it.
+    @ViewBuilder
+    private func cell(
+        _ entry: GridEntry, size: CGSize, dayItems: [TimelineItem]
+    ) -> some View {
+        switch entry {
+        case .item(let item):
+            gridCell(item, size: size, dayItems: dayItems)
+        case .placeholder:
+            Rectangle().fill(.quaternary)
+                .frame(width: size.width, height: size.height)
+        #if os(iOS)
+        case .pending(let localIdentifier, let state):
+            PendingTile(localIdentifier: localIdentifier, state: state, size: size)
+        #endif
+        }
     }
 
     /// The density control. Hidden while selecting, where the contextual
@@ -305,6 +542,17 @@ struct TimelineView: View {
     }
     #endif
 
+    /// Whether the grid itself is on screen, as opposed to a spinner, an error,
+    /// or the empty state.
+    ///
+    /// Two places have to agree about this — the banner rides inside the grid
+    /// and above everything else — so the condition lives here rather than
+    /// being spelled out twice and drifting.
+    private var showsGrid: Bool {
+        guard let store, store.state == .loaded else { return false }
+        return !store.buckets.isEmpty || hasQueuedItems
+    }
+
     private var hasQueuedItems: Bool {
         #if os(iOS)
         return !queuedByDay.isEmpty
@@ -312,6 +560,19 @@ struct TimelineView: View {
         return false
         #endif
     }
+
+    #if os(iOS)
+    /// Every item the grid has actually loaded, in the order they're drawn.
+    ///
+    /// Not the whole library — buckets load as they scroll into view, and that
+    /// is the honest scope for a swipe: everything you could have reached by
+    /// scrolling is in here, and a bucket nobody has looked at yet isn't worth
+    /// blocking a tap on.
+    private func loadedItemsInOrder() -> [TimelineItem] {
+        guard let store else { return [] }
+        return sections(store).flatMap { store.items[$0.key] ?? [] }
+    }
+    #endif
 
     /// The sections to draw. Only iOS has a local backup queue to merge in.
     private func sections(_ store: TimelineStore) -> [TimelineBucket] {
@@ -343,62 +604,74 @@ struct TimelineView: View {
 
     private func grid(_ store: TimelineStore) -> some View {
         GeometryReader { proxy in
-            let side = (proxy.size.width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
             ScrollViewReader { scroller in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
+                // `spacing: 0`, and every gap lives inside the header instead.
+                // Stack spacing sits *above* a pinned header, so at 18 the
+                // header docked 18pt down from the top and the row it was
+                // meant to be covering slid through the gap.
+                //
+                // Nothing is attached to the `Section`s themselves either: a
+                // `LazyVStack` only pins what it can still recognise as a
+                // section, and a modifier wrapped round one is a good way to
+                // quietly lose the pinning. The per-bucket `.task` and `.id`
+                // hang off the content and the header instead.
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    // Inside the scroll content, above the first date, so it
+                    // scrolls out of the way like Synology's does rather than
+                    // holding a strip of the screen forever.
+                    #if os(iOS)
+                    if let engine {
+                        backupBanner(engine)
+                    }
+                    #endif
+
                     ForEach(sections(store)) { bucket in
                         Section {
-                            LazyVGrid(
-                                columns: Array(
-                                    repeating: GridItem(.fixed(side), spacing: spacing),
-                                    count: columns
+                            let items = store.items[bucket.key] ?? []
+                            PhotoGridSection(
+                                entries: entries(for: bucket, items: items),
+                                width: proxy.size.width,
+                                targetHeight: PhotoGridMetrics.targetRowHeight(
+                                    for: store.zoom
                                 ),
-                                spacing: spacing
-                            ) {
-                                // Not-yet-uploaded photos lead their day: they
-                                // are the newest thing that happened, and
-                                // burying them under already-safe photos hides
-                                // exactly what the user is waiting on.
-                                #if os(iOS)
-                                ForEach(queuedByDay[bucket.key] ?? [], id: \.localIdentifier) { entry in
-                                    PendingTile(
-                                        localIdentifier: entry.localIdentifier,
-                                        state: entry.state,
-                                        side: side
-                                    )
-                                }
-                                #endif
-                                let items = store.items[bucket.key] ?? []
-                                if items.isEmpty {
-                                    // Placeholder tiles keep the section the
-                                    // right height so the scrollbar doesn't jump
-                                    // when the bucket lands.
-                                    ForEach(0..<max(bucket.count, 0), id: \.self) { _ in
-                                        Rectangle().fill(.quaternary)
-                                            .frame(width: side, height: side)
-                                    }
-                                } else {
-                                    ForEach(items) { item in
-                                        gridCell(item, side: side, dayItems: items)
-                                    }
-                                }
+                                spacing: spacing,
+                                columns: columns
+                            ) { entry, size in
+                                cell(entry, size: size, dayItems: items)
+                            }
+                            .task {
+                                await store.loadBucket(bucket.key)
+                                // Warm this day's thumbnails as soon as its
+                                // contents are known. Buckets are fetched as
+                                // they come into view, so this runs a screen or
+                                // so ahead of the tiles themselves — the bytes
+                                // are usually local by the time a cell asks.
+                                await prefetchThumbnails(for: bucket.key, in: store)
                             }
                         } header: {
-                            header(bucket)
+                            // The scrubber's target. On the header rather than
+                            // the section so a jump lands with the date at the
+                            // top of the screen, where the pinned one sits.
+                            header(bucket).id(bucket.key)
                         }
-                        .task { await store.loadBucket(bucket.key) }
-                        .id(bucket.key)
                     }
                 }
             }
+            // Keeps photos out of the strip above the pinned date. The scroll
+            // view's frame stops at the safe area but its content draws past
+            // it, so without this a row slides up under the status bar and sits
+            // there in plain sight above the date — and, while the bar is up,
+            // behind the title too, which on iOS 26 has no background of its
+            // own to hide it.
+            .clipped()
             // Reads the scroll view's own offset rather than inferring it from
             // content geometry: a LazyVStack only measures realised rows, so a
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
-            .modifier(ScrollFractionReporter { scrollFraction = $0 })
+            .modifier(ScrollActivityReporter(progress: scrollProgress))
             .safeAreaInset(edge: .bottom) {
-                #if os(iOS)
+                #if !os(tvOS)
                 if selection.isActive {
                     SelectionBar(selection: selection) {
                         Task {
@@ -445,6 +718,28 @@ struct TimelineView: View {
                         } label: {
                             Label("Edit Ratings", systemImage: "star")
                         }
+
+                        Divider()
+                        // Corrections to what the photo says about itself,
+                        // grouped away from the library actions above: these
+                        // two change the file on the NAS, not just this library's
+                        // opinion of it.
+                        Button {
+                            editingItems = selection.picked
+                            showDateEditor = true
+                        } label: {
+                            Label("Edit Date & Time", systemImage: "calendar")
+                        }
+                        Button {
+                            rotate(.left)
+                        } label: {
+                            Label("Rotate Left", systemImage: "rotate.left")
+                        }
+                        Button {
+                            rotate(.right)
+                        } label: {
+                            Label("Rotate Right", systemImage: "rotate.right")
+                        }
                     }
                 } else {
                     zoomBar(store)
@@ -466,7 +761,7 @@ struct TimelineView: View {
                 if store.buckets.count > 1 {
                     FastScroller(
                         buckets: store.buckets,
-                        scrollFraction: scrollFraction
+                        progress: scrollProgress
                     ) { bucket in
                         // No animation: an animated scroll per drag update
                         // queues up and the grid slides on after your finger
@@ -592,6 +887,20 @@ struct TimelineView: View {
     }
     #endif
 
+    /// The date that rides at the top of the grid.
+    ///
+    /// Pinned, so it holds at the top of the viewport while its own photos
+    /// scroll under it and then gets pushed off by the next date coming up —
+    /// the hand-off in screenshots two through four. Two details make that read
+    /// correctly rather than merely happen:
+    ///
+    /// The breathing room above a date is *inside* the header. It has to be:
+    /// spacing between stack children stays behind when a header pins, so a gap
+    /// carried by the stack becomes a window onto the photos sliding past.
+    ///
+    /// And the fill is opaque to the leading edge. A translucent header lets the
+    /// row underneath ghost through it, and two dates overlapping mid-hand-off
+    /// is the exact thing this layout is supposed to avoid.
     private func header(_ bucket: TimelineBucket) -> some View {
         HStack(spacing: 6) {
             Text(Self.displayDate(bucket.key))
@@ -604,13 +913,22 @@ struct TimelineView: View {
             Spacer()
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        // `.bar` is unavailable on tvOS; the 10-foot layout uses a plain
-        // translucent fill instead.
-        #if os(tvOS)
-        .background(.thinMaterial)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Self.headerFill)
+    }
+
+    /// The app's own background, so photos disappear cleanly underneath rather
+    /// than showing through. `.systemBackground` has no macOS spelling and
+    /// `.windowBackgroundColor` has no iOS one, hence the split.
+    static var headerFill: Color {
+        #if os(macOS)
+        return Color(nsColor: .windowBackgroundColor)
+        #elseif os(tvOS)
+        return Color.black
         #else
-        .background(.bar)
+        return Color(uiColor: .systemBackground)
         #endif
     }
 
@@ -619,9 +937,9 @@ struct TimelineView: View {
         // Top left, mirroring where Photos and Synology both put activity.
         // `.topBarLeading` doesn't exist on macOS; `.navigation` is the
         // equivalent leading slot there.
-        #if os(iOS)
+        #if !os(tvOS)
         if selection.isActive {
-            ToolbarItem(placement: .principal) {
+            ToolbarItem(placement: Self.leadingPlacement) {
                 Text(selection.count == 1 ? "1 selected" : "\(selection.count) selected")
                     .font(.headline)
             }
@@ -630,6 +948,20 @@ struct TimelineView: View {
                     selection.clear()
                 } label: {
                     Image(systemName: "xmark")
+                }
+            }
+        }
+        #endif
+        #if os(macOS)
+        // A Mac has no long press to start a selection with, so the way in has
+        // to be visible. Right-clicking a photo works too, but a button is what
+        // people look for.
+        if !selection.isActive {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    selection.isActive = true
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
                 }
             }
         }

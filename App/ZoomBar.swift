@@ -11,31 +11,44 @@ struct ZoomBar: View {
     @Binding var zoom: TimelineZoom
     let onChange: (TimelineZoom) -> Void
 
+    /// The selected pill morphs between options rather than fading in place —
+    /// on iOS 26 that's a glass-to-glass transition inside the shared container,
+    /// which is the effect Liquid Glass exists to give. Below 26 the same
+    /// namespace drives a plain matched-geometry slide.
+    @Namespace private var selectionShape
+
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(TimelineZoom.allCases, id: \.self) { option in
-                Button {
-                    guard option != zoom else { return }
-                    zoom = option
-                    onChange(option)
-                } label: {
-                    Text(option.title)
-                        .font(.subheadline)
-                        .fontWeight(zoom == option ? .semibold : .regular)
-                        .foregroundStyle(zoom == option ? .primary : .secondary)
-                        .padding(.horizontal, 18).padding(.vertical, 7)
-                        .background {
-                            if zoom == option {
-                                Capsule().fill(.quaternary)
+        GlassGroup(spacing: 4) {
+            HStack(spacing: 2) {
+                ForEach(TimelineZoom.allCases, id: \.self) { option in
+                    Button {
+                        guard option != zoom else { return }
+                        zoom = option
+                        onChange(option)
+                    } label: {
+                        Text(option.title)
+                            .font(.subheadline)
+                            .fontWeight(zoom == option ? .semibold : .regular)
+                            .foregroundStyle(zoom == option ? .primary : .secondary)
+                            .padding(.horizontal, 18).padding(.vertical, 7)
+                            .background {
+                                if zoom == option {
+                                    Capsule()
+                                        .fill(.quaternary)
+                                        .matchedGeometryEffect(
+                                            id: "zoomSelection", in: selectionShape
+                                        )
+                                }
                             }
-                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(4)
+            .glassCapsule(interactive: false, fallback: .regularMaterial)
+            .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
         }
-        .padding(4)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+        .animation(.snappy(duration: 0.28), value: zoom)
     }
 }
 

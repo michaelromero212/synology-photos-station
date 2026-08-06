@@ -73,7 +73,9 @@ struct UploadStateBadge: View {
 struct PendingTile: View {
     let localIdentifier: String
     let state: UploadState
-    let side: CGFloat
+    /// Square, because the shape of a photo the server hasn't seen yet isn't
+    /// known — the aspect ratio arrives with the timeline row, not before it.
+    let size: CGSize
 
     @State private var image: UIImage?
 
@@ -84,7 +86,7 @@ struct PendingTile: View {
                 Image(uiImage: image).resizable().scaledToFill()
             }
         }
-        .frame(width: side, height: side)
+        .frame(width: size.width, height: size.height)
         .clipped()
         .overlay(alignment: .bottomTrailing) {
             UploadStateBadge(state: state).padding(5)
@@ -107,7 +109,9 @@ struct PendingTile: View {
             var resumed = false
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: side * scale, height: side * scale),
+                targetSize: CGSize(
+                    width: size.width * scale, height: size.height * scale
+                ),
                 contentMode: .aspectFill,
                 options: options
             ) { image, info in
