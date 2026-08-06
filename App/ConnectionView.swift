@@ -13,9 +13,7 @@ struct ConnectionView: View {
     var body: some View {
         VStack(spacing: 22) {
             VStack(spacing: 8) {
-                Image(systemName: "square.on.square")
-                    .font(.system(size: 52, weight: .light))
-                    .foregroundStyle(.tint)
+                AppMark(size: 88)
                 Text("FrameStation")
                     .font(.largeTitle.weight(.semibold))
                 Text("Your family's photo library, on your NAS.")
