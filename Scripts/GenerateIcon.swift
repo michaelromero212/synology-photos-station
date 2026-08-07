@@ -287,4 +287,17 @@ for entry in macOSSizes {
     }
 }
 
+// The sign-in screen shows the icon itself rather than a second drawing of it.
+// There used to be a SwiftUI re-creation here, and it was close but not the
+// same — which is the whole problem: two drawings of one mark drift, and the
+// difference shows up side by side the moment somebody taps the icon and lands
+// on the sign-in screen.
+for platform in ["iOS", "macOS", "tvOS"] {
+    if let image = drawIcon(size: 1024) {
+        write(image, to: appRoot.appendingPathComponent(
+            "\(platform)/Assets.xcassets/AppMark.imageset/AppMark-1024.png"
+        ))
+    }
+}
+
 print("installed into asset catalogs")
