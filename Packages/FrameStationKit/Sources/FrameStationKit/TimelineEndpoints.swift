@@ -44,7 +44,7 @@ extension FrameStationClient {
             throw FrameStationClientError.invalidURL("original")
         }
         var request = URLRequest(url: url)
-        if let header = await authorizationHeader() {
+        if let header = authorizationHeader() {
             request.setValue(header, forHTTPHeaderField: "Authorization")
         }
         let (data, response) = try await URLSession.shared.data(for: request)
