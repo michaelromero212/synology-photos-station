@@ -64,6 +64,16 @@ struct DSMAuth {
         }
     }
 
+    /// The DSM application this server authenticates as.
+    ///
+    /// Not a label we get to choose. DSM resolves it against Control Panel →
+    /// User → Applications and checks that account's privilege for it; a name
+    /// not on that list has no privilege, and the sign-in fails with 402 after
+    /// the password has already been accepted. FileStation is present by
+    /// default and granted to ordinary users, which is exactly the set of
+    /// people who need to sign in here.
+    static let dsmApplication = "FileStation"
+
     let baseURL: String
     let client: any Client
     let logger: Logger
@@ -97,7 +107,14 @@ struct DSMAuth {
                     // Only when there is one: DSM rejects an empty otp_code
                     // outright rather than ignoring it.
                 ] + (otpCode.map { [URLQueryItem(name: "otp_code", value: $0)] } ?? []) + [
-                    .init(name: "session", value: "FrameStation"),
+                    // Must name an application DSM actually knows. `session`
+                    // selects which entry in Control Panel → User →
+                    // Applications gets its privilege checked, and DSM has no
+                    // "FrameStation" — so there was no privilege to grant and
+                    // every non-admin sign-in came back 402: password accepted,
+                    // authorization refused. ReelStation uses FileStation
+                    // against this same DSM and authenticates fine.
+                    .init(name: "session", value: Self.dsmApplication),
                     .init(name: "format", value: "sid"),
                 ]
                 request.headers.contentType = .urlEncodedForm
@@ -137,7 +154,7 @@ struct DSMAuth {
 
     private func endSession(_ sid: String) async {
         let uri = URI(string:
-            "\(baseURL)/webapi/entry.cgi?api=SYNO.API.Auth&version=6&method=logout&session=FrameStation&_sid=\(sid)")
+            "\(baseURL)/webapi/entry.cgi?api=SYNO.API.Auth&version=6&method=logout&session=\(Self.dsmApplication)&_sid=\(sid)")
         _ = try? await client.get(uri)
     }
 
