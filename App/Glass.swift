@@ -12,6 +12,12 @@ import SwiftUI
 /// deployment target eventually moves to 26, the fallbacks come out of one place
 /// instead of a dozen call sites.
 
+// `#if compiler(...)` and not `#if available`: availability gates *runtime*,
+// but `Glass` doesn't exist in the iOS 18 SDK at all, so an older toolchain
+// can't even parse the reference. CI builds on Xcode 16 and broke on exactly
+// this — a project that merely *offers* iOS 26 polish should still compile
+// without the iOS 26 SDK, and fall back to the material underneath.
+#if compiler(>=6.2)
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 private func frameStationGlass(tint: Color?, interactive: Bool) -> Glass {
     var glass = Glass.regular
@@ -23,6 +29,7 @@ private func frameStationGlass(tint: Color?, interactive: Bool) -> Glass {
     #endif
     return glass
 }
+#endif
 
 extension View {
     /// Glass behind this view, clipped to `shape`.
@@ -38,6 +45,7 @@ extension View {
         interactive: Bool = true,
         fallback: Material = .ultraThinMaterial
     ) -> some View {
+        #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
             self.glassEffect(
                 frameStationGlass(tint: tint, interactive: interactive), in: shape
@@ -45,6 +53,9 @@ extension View {
         } else {
             self.background(fallback, in: shape)
         }
+        #else
+        self.background(fallback, in: shape)
+        #endif
     }
 
     /// The common case: a capsule of glass, for bars and pills.
@@ -81,10 +92,14 @@ struct GlassGroup<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
+        #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
             GlassEffectContainer(spacing: spacing) { content }
         } else {
             content
         }
+        #else
+        content
+        #endif
     }
 }
