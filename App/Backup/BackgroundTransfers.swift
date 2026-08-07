@@ -22,7 +22,28 @@ final class BackgroundTransfers: NSObject {
 
     /// Set by the app delegate when iOS relaunches us to report finished
     /// transfers; calling it is how we tell the system we're done.
-    var systemCompletionHandler: (@Sendable () -> Void)?
+    ///
+    /// Behind the lock like everything else here, and for the same reason: it
+    /// is written on the main thread by the delegate and taken again on
+    /// URLSession's delegate queue, which is two threads touching one mutable
+    /// reference. `@Sendable` is doing real work on this type — the closure
+    /// genuinely crosses isolation domains — so it stays.
+    private var _systemCompletionHandler: (@Sendable () -> Void)?
+
+    func setSystemCompletionHandler(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        _systemCompletionHandler = handler
+    }
+
+    /// Hands the handler over and forgets it, so it can only ever fire once.
+    private func takeSystemCompletionHandler() -> (@Sendable () -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        let handler = _systemCompletionHandler
+        _systemCompletionHandler = nil
+        return handler
+    }
 
     private let logger = Logger(subsystem: "com.michaelromero.FrameStation", category: "upload")
     private let lock = NSLock()
@@ -135,8 +156,7 @@ extension BackgroundTransfers: URLSessionDataDelegate {
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         // Must be called on the main thread, and must be called, or iOS
         // penalises the app's future background time.
-        let handler = systemCompletionHandler
-        systemCompletionHandler = nil
+        let handler = takeSystemCompletionHandler()
         DispatchQueue.main.async { handler?() }
     }
 }

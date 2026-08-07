@@ -6,6 +6,15 @@ import UIKit
 #endif
 
 #if os(iOS)
+/// Carries a value across an isolation boundary the compiler can't verify.
+///
+/// Only for bridging framework callbacks that predate strict concurrency —
+/// never as a way to quiet a warning about our own types.
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 /// Exists only to receive the APNs token: `didRegisterForRemoteNotifications`
 /// has no SwiftUI equivalent.
 final class PushAppDelegate: NSObject, UIApplicationDelegate {
@@ -29,7 +38,12 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        BackgroundTransfers.shared.systemCompletionHandler = completionHandler
+        // UIKit hands this back without a `Sendable` annotation, even though
+        // its own contract is store-it-now and call-it-later from wherever the
+        // session finishes. The box states that assumption explicitly instead
+        // of weakening the property's type to hide the warning.
+        let box = UncheckedSendableBox(completionHandler)
+        BackgroundTransfers.shared.setSystemCompletionHandler { box.value() }
     }
 
     func application(
