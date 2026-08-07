@@ -247,3 +247,44 @@ for size in [180, 120, 87, 80, 60, 40] {
 }
 
 print("done")
+
+// MARK: - Install into the asset catalogs
+//
+// The whole reason this section exists: the generator used to stop at
+// Design/Icon and somebody copied the results into the catalogs by hand. The
+// app builds from the catalogs, so the day that copy was forgotten the phone
+// kept showing the old icon while every other surface had the new one — which
+// is exactly what happened. Writing both from one run is the only way this
+// stays consistent.
+
+/// macOS ships every size explicitly rather than letting the system downscale.
+let macOSSizes: [(name: String, pixels: CGFloat)] = [
+    ("icon_16x16", 16), ("icon_16x16@2x", 32),
+    ("icon_32x32", 32), ("icon_32x32@2x", 64),
+    ("icon_128x128", 128), ("icon_128x128@2x", 256),
+    ("icon_256x256", 256), ("icon_256x256@2x", 512),
+    ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+]
+
+let appRoot = outputDirectory
+    .deletingLastPathComponent()   // Design
+    .deletingLastPathComponent()   // repo root
+    .appendingPathComponent("App/Resources", isDirectory: true)
+
+// iOS: one full-bleed 1024, masked by the system.
+if let image = drawIcon(size: 1024) {
+    write(image, to: appRoot.appendingPathComponent(
+        "iOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+    ))
+}
+
+// macOS: pre-rounded with margin, at every size the catalog declares.
+for entry in macOSSizes {
+    if let image = drawIcon(size: entry.pixels, inset: 0.10, cornerFraction: 0.225) {
+        write(image, to: appRoot.appendingPathComponent(
+            "macOS/Assets.xcassets/AppIcon.appiconset/\(entry.name).png"
+        ))
+    }
+}
+
+print("installed into asset catalogs")
