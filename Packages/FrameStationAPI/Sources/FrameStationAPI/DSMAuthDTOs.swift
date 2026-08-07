@@ -8,12 +8,20 @@ public struct DSMLoginRequest: Codable, Sendable {
     public let password: String
     public let deviceName: String
     public let platform: Platform
+    /// Six digits from an authenticator app, when the account asks for them.
+    /// Optional because most accounts don't, and a code field on every sign-in
+    /// is a question most people can't answer.
+    public let otpCode: String?
 
-    public init(username: String, password: String, deviceName: String, platform: Platform) {
+    public init(
+        username: String, password: String, deviceName: String,
+        platform: Platform, otpCode: String? = nil
+    ) {
         self.username = username
         self.password = password
         self.deviceName = deviceName
         self.platform = platform
+        self.otpCode = otpCode
     }
 }
 
