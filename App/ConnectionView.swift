@@ -32,6 +32,15 @@ struct ConnectionView: View {
                     field("Username", text: $session.dsmUsername, kind: .username)
                     Divider().padding(.leading, 2)
                     secureField("Password", text: $session.dsmPassword)
+                    // Appears only after DSM has asked. Two-step is off for
+                    // most accounts, and a permanently visible code field reads
+                    // as something you've forgotten to fill in.
+                    if session.needsTwoFactor {
+                        Divider().padding(.leading, 2)
+                        field(
+                            "Six-digit code", text: $session.dsmOTPCode, kind: .otp
+                        )
+                    }
                 } else {
                     field("Hostname or IP", text: $session.host, kind: .host)
                     Divider().padding(.leading, 2)
@@ -86,7 +95,7 @@ struct ConnectionView: View {
     }
 
     #if !os(tvOS)
-    private enum FieldKind { case host, username, name, code }
+    private enum FieldKind { case host, username, name, code, otp }
 
     @ViewBuilder
     private func field(
@@ -97,9 +106,12 @@ struct ConnectionView: View {
             .padding(.vertical, 12)
             #if os(iOS)
             .textInputAutocapitalization(kind == .code ? .characters : (kind == .name ? .words : .never))
-            .keyboardType(kind == .host ? .URL : .default)
+            .keyboardType(kind == .host ? .URL : (kind == .otp ? .numberPad : .default))
+            // `.oneTimeCode` is what makes iOS offer the code above the
+            // keyboard instead of making someone switch apps to read it.
             .textContentType(
-                kind == .username ? .username : (kind == .name ? .name : nil)
+                kind == .username ? .username
+                    : (kind == .name ? .name : (kind == .otp ? .oneTimeCode : nil))
             )
             #endif
     }

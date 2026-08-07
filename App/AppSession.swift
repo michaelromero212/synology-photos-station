@@ -67,6 +67,10 @@ final class AppSession {
     /// the Keychain stores the returned token instead.
     var dsmUsername: String = ""
     var dsmPassword: String = ""
+    /// Six digits, and only asked for once DSM has said it wants them. Showing
+    /// this field to everyone would be a question most people can't answer.
+    var dsmOTPCode: String = ""
+    var needsTwoFactor = false
     var useDSMLogin: Bool = true
     private(set) var phase: Phase = .disconnected
 
@@ -212,10 +216,13 @@ final class AppSession {
                     username: username,
                     password: dsmPassword,
                     deviceName: deviceName,
-                    platform: currentPlatform
+                    platform: currentPlatform,
+                    otpCode: dsmOTPCode.isEmpty ? nil : dsmOTPCode
                 )
             )
             dsmPassword = ""
+            dsmOTPCode = ""
+            needsTwoFactor = false
             persist(.init(serverURL: url, token: response.token))
 
             self.client = client
@@ -225,8 +232,17 @@ final class AppSession {
             self.selectedSpace = response.spaces.first { $0.kind == .personal } ?? response.spaces.first
             self.phase = .connected
         } catch {
-            dsmPassword = ""
-            phase = .failed(error.localizedDescription)
+            // DSM asking for a code isn't a failed sign-in, it's an unfinished
+            // one — so the password survives and only the code is still needed.
+            // Clearing it would make every retry a full re-type.
+            let reason = error.localizedDescription
+            if reason.localizedCaseInsensitiveContains("two-step") {
+                needsTwoFactor = true
+            } else {
+                dsmPassword = ""
+                dsmOTPCode = ""
+            }
+            phase = .failed(reason)
         }
     }
 

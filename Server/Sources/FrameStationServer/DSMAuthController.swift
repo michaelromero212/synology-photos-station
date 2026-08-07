@@ -50,7 +50,9 @@ struct DSMAuthController: RouteCollection {
         do {
             identity = try await DSMAuth(
                 baseURL: dsmURL, client: req.client, logger: req.logger
-            ).authenticate(username: username, password: input.password)
+            ).authenticate(
+                username: username, password: input.password, otpCode: input.otpCode
+            )
         } catch let failure as DSMAuth.Failure {
             throw Abort(failure.status, reason: failure.description)
         }

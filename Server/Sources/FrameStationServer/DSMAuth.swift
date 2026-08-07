@@ -22,6 +22,7 @@ struct DSMAuth {
         case unreachable(String)
         case badCredentials
         case accountDisabled
+        case permissionDenied
         case twoFactorRequired
         case blocked
         case other(Int)
@@ -34,8 +35,18 @@ struct DSMAuth {
                 return "That DSM username or password is incorrect."
             case .accountDisabled:
                 return "That DSM account is disabled."
+            case .permissionDenied:
+                // 402 is not a bad password — DSM accepted the credentials and
+                // then declined to open a session. In practice that is either an
+                // account without permission for this application, or a sign-in
+                // arriving from outside the LAN that DSM won't grant.
+                return """
+                    DSM accepted that password but won't allow this account to \
+                    sign in from here. Check Control Panel → User → Applications, \
+                    and try the NAS's local address while on your home network.
+                    """
             case .twoFactorRequired:
-                return "That DSM account requires two-step verification, which FrameStation doesn't support yet."
+                return "That DSM account uses two-step verification. Enter the six-digit code from your authenticator app."
             case .blocked:
                 return "DSM has temporarily blocked this address after too many failed attempts."
             case .other(let code):
@@ -59,7 +70,9 @@ struct DSMAuth {
 
     /// Authenticates, then immediately ends the DSM session — we only wanted to
     /// know the password was right, not to hold a session open.
-    func authenticate(username: String, password: String) async throws -> Identity {
+    func authenticate(
+        username: String, password: String, otpCode: String? = nil
+    ) async throws -> Identity {
         struct Envelope: Content {
             struct Data: Content { let sid: String? }
             struct ErrorBody: Content { let code: Int }
@@ -81,6 +94,9 @@ struct DSMAuth {
                     .init(name: "method", value: "login"),
                     .init(name: "account", value: username),
                     .init(name: "passwd", value: password),
+                    // Only when there is one: DSM rejects an empty otp_code
+                    // outright rather than ignoring it.
+                ] + (otpCode.map { [URLQueryItem(name: "otp_code", value: $0)] } ?? []) + [
                     .init(name: "session", value: "FrameStation"),
                     .init(name: "format", value: "sid"),
                 ]
@@ -101,6 +117,7 @@ struct DSMAuth {
             switch code {
             case 400: throw Failure.badCredentials
             case 401: throw Failure.accountDisabled
+            case 402: throw Failure.permissionDenied
             case 403, 404, 406: throw Failure.twoFactorRequired
             case 407: throw Failure.blocked
             default: throw Failure.other(code)
