@@ -118,9 +118,6 @@ final class AppSession {
         #endif
     }
 
-    /// Reconnects from stored credentials so a relaunch doesn't need a new
-    /// invite. Returns false when there's nothing saved.
-    @discardableResult
     /// Writes the credential and says so if it doesn't stick.
     ///
     /// Silently discarding this failure is how a signed-in session turns into a
