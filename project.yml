@@ -83,10 +83,25 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.michaelromero.FrameStation.backup
           - com.michaelromero.FrameStation.refresh
+        # iPhone deliberately stops at three. Upside-down portrait is a
+        # position nobody holds a phone in on purpose, and Apple's own apps
+        # don't offer it.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # iPad has to declare all four. Split View and Slide Over can put this
+        # app on either side of a screen the user has rotated any which way, so
+        # opting into multitasking — which UIRequiresFullScreen: false does —
+        # means committing to every orientation. Declaring three and claiming
+        # multitasking is the contradiction Xcode is pointing at.
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Kept false on purpose: the justified grid was built to reflow into a
+        # narrow split-view column, and there is a test asserting it does.
         UIRequiresFullScreen: false
     settings:
       base:
