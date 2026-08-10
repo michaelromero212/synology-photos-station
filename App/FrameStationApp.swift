@@ -73,6 +73,20 @@ struct FrameStationApp: App {
     /// Durable backup queue. On-disk because the engine must survive being
     /// killed mid-run — see BackupQueue.
     private let backupContainer: ModelContainer = {
+        // SwiftData puts its store in Application Support, and iOS does not
+        // create that directory for you — only `Library` itself. On a fresh
+        // install the store therefore fails to open, CoreData dumps a few
+        // hundred lines of filesystem diagnostics walking the tree looking for
+        // somewhere writable, and *then* recovers by creating the directory it
+        // needed all along. The store ends up fine; the log looks like the app
+        // is broken. Creating it first skips the whole performance.
+        if let support = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first {
+            try? FileManager.default.createDirectory(
+                at: support, withIntermediateDirectories: true
+            )
+        }
         do { return try ModelContainer(for: BackupItem.self) }
         catch { fatalError("Could not open the backup queue: \(error)") }
     }()
