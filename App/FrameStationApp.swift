@@ -104,7 +104,26 @@ struct RootView: View {
     @Bindable var session: AppSession
 
     var body: some View {
-        if session.phase == .connected {
+        content
+            // At the root rather than on the sign-in screen. Hanging the
+            // restore off `ConnectionView` meant the only way to *start*
+            // restoring was to already be showing the form — which is why a
+            // relaunch flashed sign-in at someone who was signed in.
+            .task {
+                guard session.phase == .launching else { return }
+                // Stored credentials first — a relaunch shouldn't need a
+                // new invite.
+                if await session.restore() { return }
+                if session.shouldAutoConnect, session.phase == .disconnected {
+                    await session.connect()
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch session.phase {
+        case .connected:
             RootTabView(session: session)
             #if os(iOS)
             .task {
@@ -122,16 +141,33 @@ struct RootView: View {
                 await registrar.flushPendingRegistration()
             }
             #endif
-        } else {
+
+        case .launching:
+            LaunchView()
+
+        case .disconnected, .connecting, .failed:
             ConnectionView(session: session)
-                .task {
-                    // Stored credentials first — a relaunch shouldn't need a
-                    // new invite.
-                    if await session.restore() { return }
-                    if session.shouldAutoConnect, session.phase == .disconnected {
-                        await session.connect()
-                    }
-                }
         }
+    }
+}
+
+/// What the app shows before it knows whether anyone is signed in.
+///
+/// The sign-in screen's header and nothing else, so the two are continuous:
+/// when a restore fails the form appears beneath an icon that hasn't moved,
+/// and when it succeeds this is simply the last frame before the grid. No
+/// spinner — restoring usually takes a few hundred milliseconds, and a
+/// spinner that appears and vanishes reads as a stutter rather than progress.
+private struct LaunchView: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            AppMark(size: 88)
+            Text("FrameStation")
+                .font(.largeTitle.weight(.semibold))
+            Text("Your family's photo library, on your NAS.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

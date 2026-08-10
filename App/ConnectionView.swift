@@ -128,7 +128,7 @@ struct ConnectionView: View {
     @ViewBuilder
     private var status: some View {
         switch session.phase {
-        case .disconnected, .connected:
+        case .launching, .disconnected, .connected:
             EmptyView()
         case .connecting:
             ProgressView()

@@ -11,6 +11,13 @@ import Observation
 @MainActor
 final class AppSession {
     enum Phase: Equatable {
+        /// Before the stored credential has been read and checked.
+        ///
+        /// Distinct from `disconnected`, which is a *finding* — we looked, and
+        /// nobody is signed in. Starting at `disconnected` made the sign-in
+        /// screen the launch screen: a signed-in person saw the form until
+        /// `/v1/me` answered, which is a network round trip, not a frame.
+        case launching
         case disconnected
         case connecting
         case connected
@@ -72,7 +79,7 @@ final class AppSession {
     var dsmOTPCode: String = ""
     var needsTwoFactor = false
     var useDSMLogin: Bool = true
-    private(set) var phase: Phase = .disconnected
+    private(set) var phase: Phase = .launching
 
     private(set) var user: UserDTO?
     private(set) var spaces: [SpaceDTO] = []
@@ -98,6 +105,11 @@ final class AppSession {
     /// must never be a path in a shipping build.
     init() {
         let defaults = UserDefaults.standard
+        // Before anything reads the Keychain.
+        clearCredentialsIfReinstalled()
+        loadRememberedSignInFields()
+        // Launch arguments win: they exist to override whatever the last run
+        // left behind.
         if let text = defaults.string(forKey: "FSServerURL"), let url = URL(string: text) {
             applyAddress(url)
         }
@@ -109,7 +121,12 @@ final class AppSession {
         UserDefaults.standard.bool(forKey: "FSAutoConnect")
     }
     #else
-    init() { displayName = Self.suggestedName }
+    init() {
+        // Before anything reads the Keychain.
+        clearCredentialsIfReinstalled()
+        loadRememberedSignInFields()
+        displayName = Self.suggestedName
+    }
     var shouldAutoConnect: Bool { false }
     #endif
 
@@ -141,9 +158,17 @@ final class AppSession {
     }
 
     func restore() async -> Bool {
-        guard let saved = credentials.load() else { return false }
+        guard let saved = credentials.load() else {
+            // Resolve `launching` explicitly. Returning without setting it
+            // would leave a first-run user staring at the splash forever.
+            phase = .disconnected
+            return false
+        }
         applyAddress(saved.serverURL)
-        phase = .connecting
+        // Deliberately *not* `.connecting`: that phase means "you tapped Sign
+        // In and we're working on it", and the sign-in form renders for it. A
+        // silent restore has no form to show progress in — it stays on the
+        // launch screen until it knows the answer.
 
         let client = FrameStationClient(configuration: .init(baseURL: saved.serverURL, token: saved.token))
         do {
@@ -173,8 +198,78 @@ final class AppSession {
         }
     }
 
+    /// What the sign-in screen may remember between sessions.
+    ///
+    /// The address someone typed and the account they used — conveniences, not
+    /// credentials. Never the password.
+    ///
+    /// These live in UserDefaults rather than the Keychain *because*
+    /// UserDefaults is erased when the app is deleted and the Keychain is not.
+    /// Storing a hostname somewhere it would outlive the app would be the
+    /// wrong trade in the other direction.
+    private enum Remembered {
+        static let host = "signin.host"
+        static let port = "signin.port"
+        static let useHTTPS = "signin.useHTTPS"
+        static let username = "signin.dsmUsername"
+        static let useDSMLogin = "signin.useDSMLogin"
+    }
+
+    /// Called once a sign-in has actually worked, so what gets remembered is
+    /// what got someone in — not the last thing they mistyped.
+    private func rememberSignInFields() {
+        let defaults = UserDefaults.standard
+        defaults.set(host, forKey: Remembered.host)
+        defaults.set(port, forKey: Remembered.port)
+        defaults.set(useHTTPS, forKey: Remembered.useHTTPS)
+        defaults.set(useDSMLogin, forKey: Remembered.useDSMLogin)
+        defaults.set(
+            dsmUsername.trimmingCharacters(in: .whitespacesAndNewlines),
+            forKey: Remembered.username
+        )
+    }
+
+    fileprivate func loadRememberedSignInFields() {
+        let defaults = UserDefaults.standard
+        guard let savedHost = defaults.string(forKey: Remembered.host) else { return }
+        host = savedHost
+        if let savedPort = defaults.string(forKey: Remembered.port) { port = savedPort }
+        if defaults.object(forKey: Remembered.useHTTPS) != nil {
+            useHTTPS = defaults.bool(forKey: Remembered.useHTTPS)
+        }
+        if defaults.object(forKey: Remembered.useDSMLogin) != nil {
+            useDSMLogin = defaults.bool(forKey: Remembered.useDSMLogin)
+        }
+        dsmUsername = defaults.string(forKey: Remembered.username) ?? ""
+    }
+
+    /// The Keychain outlives the app; everything else doesn't.
+    ///
+    /// Deleting an iOS app erases its UserDefaults, its container and its
+    /// SwiftData store — but Keychain items survive, so a reinstall would find
+    /// the previous device token and sign straight back in as whoever last
+    /// used the phone. Nobody expects a deleted app to remember them.
+    ///
+    /// The sentinel is the absence of UserDefaults: if the flag is gone, so is
+    /// the container, so the app was deleted and the token goes with it.
+    fileprivate func clearCredentialsIfReinstalled() {
+        let defaults = UserDefaults.standard
+        let key = "install.hasLaunchedBefore"
+        guard !defaults.bool(forKey: key) else { return }
+        credentials.clear()
+        defaults.set(true, forKey: key)
+    }
+
+    /// Signs out without forgetting who you are.
+    ///
+    /// The token goes and the password was never stored, but the address and
+    /// username stay — signing out of a family photo library is routine, and
+    /// retyping a NAS hostname every time is a small punishment for it.
     func signOut() {
         credentials.clear()
+        dsmPassword = ""
+        dsmOTPCode = ""
+        needsTwoFactor = false
         client = nil
         loader = nil
         user = nil
@@ -193,6 +288,9 @@ final class AppSession {
         self.spaces = me.spaces
         self.selectedSpace = me.spaces.first { $0.kind == .personal } ?? me.spaces.first
         self.phase = .connected
+        // Covers the invite path and re-confirms on every restore, so the
+        // remembered address stays whatever last actually worked.
+        rememberSignInFields()
     }
 
     /// Signs in with a DSM account. The password is sent once and then cleared
@@ -223,6 +321,7 @@ final class AppSession {
             dsmPassword = ""
             dsmOTPCode = ""
             needsTwoFactor = false
+            rememberSignInFields()
             persist(.init(serverURL: url, token: response.token))
 
             self.client = client
