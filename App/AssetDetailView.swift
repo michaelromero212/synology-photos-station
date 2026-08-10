@@ -479,7 +479,11 @@ struct AssetDetailView: View {
                     ViewerButton(
                         symbol: currentModel.isFavorite ? "heart.fill" : "heart",
                         label: "Favorite",
-                        tint: currentModel.isFavorite ? .red : .white
+                        // The brand red, not the system one. `.red` is
+                        // #FF453A — oranger and more saturated than the
+                        // #F7605C the icon and every other accent use, and
+                        // the two sitting a tab bar apart read as a mistake.
+                        tint: currentModel.isFavorite ? .accentColor : .white
                     ) {
                         Task { [model = currentModel] in
                             await model.toggleFavorite(session.client)
@@ -610,7 +614,7 @@ struct AssetDetailView: View {
                 Task { await model.toggleFavorite(session.client) }
             } label: {
                 Image(systemName: model.isFavorite ? "heart.fill" : "heart")
-                    .foregroundStyle(model.isFavorite ? .red : .white)
+                    .foregroundStyle(model.isFavorite ? Color.accentColor : .white)
             }
 
             Button { showInfo = true } label: {
