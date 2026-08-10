@@ -105,6 +105,10 @@ struct RootView: View {
 
     var body: some View {
         content
+            // A cut from a blank screen to a full library reads as a jolt even
+            // when it is fast. Short and eased: long enough to feel like the
+            // library arriving, too short to feel like waiting for it.
+            .animation(.easeOut(duration: 0.18), value: session.phase)
             // At the root rather than on the sign-in screen. Hanging the
             // restore off `ConnectionView` meant the only way to *start*
             // restoring was to already be showing the form — which is why a
@@ -141,33 +145,31 @@ struct RootView: View {
                 await registrar.flushPendingRegistration()
             }
             #endif
+            .transition(.opacity)
 
         case .launching:
             LaunchView()
+                .transition(.opacity)
 
         case .disconnected, .connecting, .failed:
             ConnectionView(session: session)
+                .transition(.opacity)
         }
     }
 }
 
 /// What the app shows before it knows whether anyone is signed in.
 ///
-/// The sign-in screen's header and nothing else, so the two are continuous:
-/// when a restore fails the form appears beneath an icon that hasn't moved,
-/// and when it succeeds this is simply the last frame before the grid. No
-/// spinner — restoring usually takes a few hundred milliseconds, and a
-/// spinner that appears and vanishes reads as a stutter rather than progress.
+/// Deliberately empty. `UILaunchScreen: {}` is a bare background, so anything
+/// drawn here is a *second* thing the eye has to see and lose on the way to the
+/// grid — which is exactly what a branded splash looked like: blank, logo,
+/// grid, with the logo lingering for however long `/v1/me` took.
+///
+/// Matching the launch screen instead makes the handoff invisible. The first
+/// frame the app draws is the frame iOS was already showing, and the only
+/// visible change is the library arriving.
 private struct LaunchView: View {
     var body: some View {
-        VStack(spacing: 8) {
-            AppMark(size: 88)
-            Text("FrameStation")
-                .font(.largeTitle.weight(.semibold))
-            Text("Your family's photo library, on your NAS.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Color.clear
     }
 }

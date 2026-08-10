@@ -63,7 +63,19 @@ targets:
       path: App/Resources/iOS/Info.plist
       properties:
         CFBundleDisplayName: FrameStation
-        UILaunchScreen: {}
+        # Pinned to the app's own background rather than left as `{}`.
+        #
+        # An empty launch screen follows the *device's* appearance, while the
+        # app forces dark by default (Appearance.swift) — so a phone in light
+        # mode showed a white launch screen cutting to a black app on every
+        # cold start. Black here matches what the app draws next, and the
+        # handoff stops being visible.
+        #
+        # The trade: someone who deliberately sets Appearance to Light gets a
+        # brief dark frame instead. That's a minority choice, and a far smaller
+        # flash than the one it replaces.
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         ITSAppUsesNonExemptEncryption: false
         # Full library access. Limited access silently breaks backup — the app
         # detects it and says so rather than backing up twelve photos.
