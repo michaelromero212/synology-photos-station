@@ -61,6 +61,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: UploadController())
     try app.grouped("v1").register(collection: AssetController())
     try app.grouped("v1").register(collection: TimelineController())
+    try app.grouped("v1").register(collection: SearchController())
     try app.grouped("v1").register(collection: FavoriteController())
     try app.grouped("v1").register(collection: MetadataController())
     try app.grouped("v1").register(collection: MediaEditController())

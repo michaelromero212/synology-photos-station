@@ -1,6 +1,17 @@
 import FrameStationAPI
 import Foundation
 
+extension CharacterSet {
+    /// `.urlQueryAllowed` permits `&`, `=` and `+`, which are exactly the
+    /// characters that break a *value* inside a query string. A place called
+    /// "Baden-Baden & Umgebung" would otherwise arrive as two parameters.
+    static let urlQueryValue: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#")
+        return allowed
+    }()
+}
+
 extension FrameStationClient {
 
     // MARK: - Timeline
@@ -23,6 +34,25 @@ extension FrameStationClient {
 
     public func detail(spaceID: UUID, assetID: UUID) async throws -> AssetDetail {
         try await get("v1/spaces/\(spaceID)/assets/\(assetID)/detail")
+    }
+
+    // MARK: - Search
+
+    /// Every place this space has photos from, commonest first.
+    public func places(spaceID: UUID) async throws -> PlacesResponse {
+        try await get("v1/spaces/\(spaceID)/places")
+    }
+
+    /// Photos taken somewhere whose name contains `place`.
+    public func search(
+        spaceID: UUID, place: String, offset: Int = 0, limit: Int = 120
+    ) async throws -> SearchResults {
+        let encoded = place.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryValue
+        ) ?? ""
+        return try await get(
+            "v1/spaces/\(spaceID)/search?place=\(encoded)&offset=\(offset)&limit=\(limit)"
+        )
     }
 
     // MARK: - Media URLs

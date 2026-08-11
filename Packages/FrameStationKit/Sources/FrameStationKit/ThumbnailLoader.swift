@@ -22,7 +22,7 @@ public actor ThumbnailLoader {
     private let session: URLSession
     private let memory = NSCache<NSString, CacheEntry>()
     private let diskRoot: URL
-    private var inFlight: [URL: Task<PlatformImage?, Never>] = [:]
+    private var inFlight: [URL: Task<Fetched, Never>] = [:]
 
     final class CacheEntry: NSObject {
         let image: PlatformImage
@@ -33,20 +33,35 @@ public actor ThumbnailLoader {
         }
     }
 
+    /// Bytes the disk tier may hold. See `pruneIfNeeded`.
+    private var diskLimitBytes: Int64
+    /// Running total, so an ordinary cache write doesn't stat the whole
+    /// directory. `nil` until the first measurement.
+    private var diskBytes: Int64?
+
     public init(
         client: FrameStationClient,
         memoryLimitBytes: Int = 96 * 1024 * 1024,
+        diskLimitBytes: Int64 = CacheLimit.default.bytes,
         diskRoot: URL? = nil
     ) {
         self.client = client
         self.session = .shared
         self.memory.totalCostLimit = memoryLimitBytes
+        self.diskLimitBytes = diskLimitBytes
 
         let base = diskRoot ?? FileManager.default
             .urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FrameStation/thumbs", isDirectory: true)
         self.diskRoot = base
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    }
+
+    /// Applied immediately, so lowering the cap in Settings frees space then
+    /// rather than at some later write.
+    public func setDiskLimit(_ bytes: Int64) {
+        diskLimitBytes = bytes
+        pruneIfNeeded(remeasure: true)
     }
 
     public func thumbnail(
@@ -154,18 +169,26 @@ public actor ThumbnailLoader {
         if let entry = memory.object(forKey: key as NSString) { return entry.image }
 
         // Coalesce: a fast scroll can ask for the same cell several times before
-        // the first request returns.
-        if let existing = inFlight[url] { return await existing.value }
+        // the first request returns. Only the originating call accounts for the
+        // bytes, so a coalesced caller takes the image and nothing else.
+        if let existing = inFlight[url] { return await existing.value.image }
 
         guard await acquire(isPrefetch: isPrefetch) else { return nil }
         defer { release() }
 
-        let task = Task<PlatformImage?, Never> { [diskRoot, session, client] in
+        let task = Task<Fetched, Never> { [diskRoot, session, client] in
             let diskPath = diskRoot.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
 
             if let data = try? Data(contentsOf: diskPath),
                let image = Self.decode(data, targetPixels: targetPixels) {
-                return image
+                // Stamp it as used. The modification date is what eviction
+                // sorts on, so without this the cache would evict by age
+                // rather than by use and throw away the tiles someone scrolls
+                // past every day.
+                try? FileManager.default.setAttributes(
+                    [.modificationDate: Date()], ofItemAtPath: diskPath.path
+                )
+                return Fetched(image: image, bytesWritten: 0)
             }
 
             var request = URLRequest(url: url)
@@ -175,20 +198,29 @@ public actor ThumbnailLoader {
 
             guard let (data, response) = try? await session.data(for: request),
                   let http = response as? HTTPURLResponse
-            else { return nil }
+            else { return Fetched(image: nil, bytesWritten: 0) }
 
             // 202 means the derivation queue hasn't reached it yet. Not an
             // error and not cacheable — the caller keeps its ThumbHash and the
             // next scroll pass will pick it up.
-            guard http.statusCode == 200 else { return nil }
+            guard http.statusCode == 200 else { return Fetched(image: nil, bytesWritten: 0) }
 
-            try? data.write(to: diskPath, options: .atomic)
-            return Self.decode(data, targetPixels: targetPixels)
+            let wrote = (try? data.write(to: diskPath, options: .atomic)) != nil
+            return Fetched(
+                image: Self.decode(data, targetPixels: targetPixels),
+                bytesWritten: wrote ? Int64(data.count) : 0
+            )
         }
 
         inFlight[url] = task
-        let image = await task.value
+        let fetched = await task.value
+        let image = fetched.image
         inFlight[url] = nil
+
+        if fetched.bytesWritten > 0 {
+            diskBytes = (diskBytes ?? measureDiskBytes()) + fetched.bytesWritten
+            pruneIfNeeded()
+        }
 
         if let image {
             memory.setObject(
@@ -257,12 +289,82 @@ public actor ThumbnailLoader {
         memory.removeAllObjects()
     }
 
+    /// Drops every cached image, on both tiers.
+    ///
+    /// Leaves the timeline snapshot alone deliberately — that is metadata, it
+    /// is what lets the grid draw at all with no network, and it is a rounding
+    /// error next to the pictures.
+    public func clearDiskCache() {
+        memory.removeAllObjects()
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: diskRoot, includingPropertiesForKeys: nil
+        )) ?? []
+        for file in files { try? FileManager.default.removeItem(at: file) }
+        diskBytes = 0
+    }
+
+    /// What Settings shows. Measured rather than reported from the running
+    /// total, because iOS may empty `Caches/` underneath us at any time.
     public func diskCacheSize() -> Int64 {
+        let measured = measureDiskBytes()
+        diskBytes = measured
+        return measured
+    }
+
+    private func measureDiskBytes() -> Int64 {
+        entries().reduce(0) { $0 + $1.size }
+    }
+
+    private struct DiskEntry {
+        let url: URL
+        let size: Int64
+        let used: Date
+    }
+
+    private func entries() -> [DiskEntry] {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
         guard let files = try? FileManager.default.contentsOfDirectory(
-            at: diskRoot, includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return 0 }
-        return files.reduce(0) { total, url in
-            total + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            at: diskRoot, includingPropertiesForKeys: keys
+        ) else { return [] }
+        return files.map { url in
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            return DiskEntry(
+                url: url,
+                size: Int64(values?.fileSize ?? 0),
+                used: values?.contentModificationDate ?? .distantPast
+            )
         }
     }
+
+    /// Evicts least-recently-used files once the cache is over its limit.
+    ///
+    /// Prunes down to 80% rather than exactly to the cap: trimming a single
+    /// file per write would mean a full directory scan on nearly every
+    /// thumbnail, and scrolling is the one thing this class exists to keep
+    /// fast. Going under leaves room for a few thousand more writes first.
+    ///
+    /// `remeasure` is for an explicit user action — iOS empties `Caches/` on
+    /// its own schedule, so the running total is a good enough guide for a
+    /// write but not for something someone is watching.
+    private func pruneIfNeeded(remeasure: Bool = false) {
+        let total = remeasure ? measureDiskBytes() : (diskBytes ?? measureDiskBytes())
+        diskBytes = total
+        guard total > diskLimitBytes else { return }
+
+        let target = Int64(Double(diskLimitBytes) * 0.8)
+        var remaining = total
+        // Oldest use first — the definition of least-recently-used, and why
+        // the read path above touches the modification date.
+        for entry in entries().sorted(by: { $0.used < $1.used }) {
+            guard remaining > target else { break }
+            guard (try? FileManager.default.removeItem(at: entry.url)) != nil else { continue }
+            remaining -= entry.size
+        }
+        diskBytes = remaining
+    }
+}
+
+private struct Fetched {
+    let image: PlatformImage?
+    let bytesWritten: Int64
 }

@@ -38,7 +38,9 @@ extension Image {
 @MainActor
 final class VideoPlaybackModel {
     private(set) var player: AVPlayer?
-    private(set) var lastError: String?
+    /// The failure itself, not a sentence about it. The view decides the
+    /// wording, because only the view knows whether the network is down.
+    private(set) var lastError: (any Error)?
     private(set) var isLoading = false
 
     private(set) var duration: Double = 0
@@ -55,6 +57,8 @@ final class VideoPlaybackModel {
 
     @ObservationIgnored private var observer: Any?
     @ObservationIgnored private var endObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var statusObserver: NSKeyValueObservation?
+    @ObservationIgnored private var stallObserver: (any NSObjectProtocol)?
     /// The newest position asked for while a seek is already running.
     @ObservationIgnored private var pendingSeek: CMTime = .invalid
     @ObservationIgnored private var isSeeking = false
@@ -77,7 +81,7 @@ final class VideoPlaybackModel {
             track(player)
             await describe(item)
         } catch {
-            lastError = error.localizedDescription
+            lastError = error
         }
     }
 
@@ -131,6 +135,32 @@ final class VideoPlaybackModel {
             MainActor.assumeIsolated {
                 self?.isPlaying = false
                 self?.hasFinished = true
+            }
+        }
+
+        // The signed URL resolving is not the same as the video playing. If the
+        // NAS goes away mid-stream — or was already gone when AVPlayer went for
+        // the bytes — the fetch above has long since succeeded, and without
+        // these the viewer sits on a frozen frame with no spinner and nothing
+        // to explain itself. AVPlayer streams outside our URLSession, so this
+        // is the only place that failure is visible.
+        statusObserver = player.currentItem?.observe(\.status, options: [.new]) {
+            [weak self] item, _ in
+            guard item.status == .failed else { return }
+            MainActor.assumeIsolated {
+                self?.lastError = item.error ?? URLError(.cannotConnectToHost)
+                self?.isPlaying = false
+            }
+        }
+
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: player.currentItem, queue: .main
+        ) { [weak self] note in
+            let failure = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? (any Error)
+            MainActor.assumeIsolated {
+                self?.lastError = failure ?? URLError(.networkConnectionLost)
+                self?.isPlaying = false
             }
         }
     }
@@ -242,8 +272,12 @@ final class VideoPlaybackModel {
     func stop() {
         if let observer { player?.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
+        statusObserver?.invalidate()
         observer = nil
         endObserver = nil
+        stallObserver = nil
+        statusObserver = nil
         player?.pause()
         player = nil
         isPlaying = false
@@ -265,8 +299,14 @@ struct VideoPlayerView: View {
     /// by the caller because the double-tap skip zones have to win the
     /// disambiguation, and two gestures can only be ordered within one view.
     var onSingleTap: () -> Void = {}
+    /// Fired when the clip reaches its end on its own. Not called for a pause,
+    /// a swipe away, or a failure — only for "that one is over".
+    var onFinished: () -> Void = {}
 
     @State private var model = VideoPlaybackModel()
+    /// Nil on macOS and tvOS, which have no monitor wired up yet; the wording
+    /// falls back to classifying the error on its own.
+    @Environment(\.connectionMonitor) private var connection
 
     var body: some View {
         ZStack {
@@ -304,14 +344,22 @@ struct VideoPlayerView: View {
             }
             if let error = model.lastError {
                 ContentUnavailableView(
-                    "Can't play this video",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(error)
+                    "Can't Play This Video",
+                    systemImage: connection?.state == .online || connection == nil
+                        ? "exclamationmark.triangle" : "wifi.slash",
+                    description: Text(
+                        ConnectionMonitor.mediaMessage(for: error, state: connection?.state)
+                    )
                 )
             }
         }
         .task { await model.load(assetID: assetID, client: client) }
         .onDisappear { model.stop() }
+        // The model already tracks this for the replay button; the viewer
+        // above needs the same edge to decide whether anything follows.
+        .onChange(of: model.hasFinished) { _, finished in
+            if finished { onFinished() }
+        }
     }
 
     #if os(iOS)

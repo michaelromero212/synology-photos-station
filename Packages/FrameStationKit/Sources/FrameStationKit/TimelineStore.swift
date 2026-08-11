@@ -27,6 +27,10 @@ public final class TimelineStore {
     public let spaceID: UUID
     public private(set) var zoom: TimelineZoom
     private var loadingBuckets: Set<String> = []
+    private var snapshotTask: Task<Void, Never>?
+    /// Whether what's on screen came off the disk rather than the server. The
+    /// grid uses this to stop asking for buckets that cannot arrive.
+    public private(set) var isFromSnapshot = false
 
     public init(client: FrameStationClient, spaceID: UUID, zoom: TimelineZoom = .day) {
         self.client = client
@@ -57,8 +61,52 @@ public final class TimelineStore {
             self.manifest = manifest
             self.cursor = manifest.cursor
             self.state = .loaded
+            self.isFromSnapshot = false
+            scheduleSnapshot()
         } catch {
-            if isFirstLoad { state = .failed(error.localizedDescription) }
+            guard isFirstLoad else { return }
+            // Nothing in memory and nothing on the wire — but there may still
+            // be the last timeline this device saw. Showing that beats showing
+            // an error page over a library the user knows perfectly well
+            // exists, and the connection banner already says why the pictures
+            // are missing.
+            if restoreSnapshot() { return }
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Returns false when there is nothing stored to fall back to.
+    @discardableResult
+    private func restoreSnapshot() -> Bool {
+        guard let snapshot = TimelineSnapshotStore.load(spaceID: spaceID, zoom: zoom)
+        else { return false }
+        manifest = snapshot.manifest
+        items = snapshot.items
+        cursor = snapshot.cursor
+        state = .loaded
+        isFromSnapshot = true
+        return true
+    }
+
+    /// Coalesces writes.
+    ///
+    /// Every bucket that scrolls into view would otherwise re-encode the whole
+    /// snapshot; a fling through a year would do it dozens of times for a file
+    /// only the next cold launch reads.
+    private func scheduleSnapshot() {
+        guard let manifest else { return }
+        snapshotTask?.cancel()
+        let items = items
+        let cursor = cursor
+        let spaceID = spaceID
+        let zoom = zoom
+        snapshotTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            TimelineSnapshotStore.save(
+                manifest: manifest, items: items, cursor: cursor,
+                spaceID: spaceID, zoom: zoom
+            )
         }
     }
 
@@ -78,8 +126,13 @@ public final class TimelineStore {
         do {
             let page = try await client.bucket(spaceID: spaceID, key: key, zoom: zoom)
             items[key] = page.items
+            scheduleSnapshot()
         } catch {
-            items[key] = []
+            // Only claim the bucket is empty when the server said so. Writing
+            // `[]` after a network failure is what turns a restored snapshot
+            // into a grid of blank tiles: the day already has items from disk,
+            // and a failed fetch would throw them away and cache the loss.
+            if items[key] == nil, !isFromSnapshot { items[key] = [] }
         }
     }
 

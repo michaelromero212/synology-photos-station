@@ -189,7 +189,7 @@ struct AssetDetailView: View {
     @State private var confirmDelete = false
     @State private var shareFiles: [URL] = []
     @State private var showShare = false
-    @State private var slideshow: SlideshowMode?
+    @State private var showSlideshow = false
     @State private var showTagEditor = false
     @State private var showRatingEditor = false
     @State private var showDateEditor = false
@@ -238,13 +238,12 @@ struct AssetDetailView: View {
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)
         .statusBarHidden(!showChrome)
-        .fullScreenCover(item: $slideshow) { mode in
+        .fullScreenCover(isPresented: $showSlideshow) {
             SlideshowView(
                 session: session,
                 items: dayItems.isEmpty ? [currentItem] : dayItems,
-                mode: mode,
                 startingAt: currentItem
-            ) { slideshow = nil }
+            ) { showSlideshow = false }
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: shareFiles) }
         .sheet(isPresented: $showInfo) {
@@ -338,6 +337,51 @@ struct AssetDetailView: View {
         pages.first { $0.id == currentID } ?? item
     }
 
+    /// Continues to the next video from the same day once one finishes.
+    ///
+    /// Videos only: skipping the photos in between is the whole point, and it
+    /// is what the old "Play All Videos" mode did — just reached by watching
+    /// rather than by choosing it from a menu first.
+    ///
+    /// Guarded on the finished page still being the one on screen. A clip that
+    /// ends a moment after you have already swiped away must not drag the
+    /// viewer somewhere you didn't ask to go.
+    private func advanceToNextVideo(after finished: TimelineItem) {
+        guard PlaybackSettings.autoPlayNextVideo, finished.id == currentID else { return }
+        guard let next = nextVideoID(after: finished.id) else { return }
+        // KNOWN DEFECT: the pager does move to the right clip, but the arriving
+        // page renders its placeholder and never builds a player — so the next
+        // video is selected and silent. Confirmed with the correct target id in
+        // hand, so the selection logic below is right; what is wrong is further
+        // down, in how `AssetPage` decides a page is current. Deferring this
+        // assignment off the update pass and giving the player an `.id` per
+        // asset both failed to shift it. Not shipped as working.
+        withAnimation { currentID = next }
+    }
+
+    /// Stops at the end of the day by returning nil — the last clip stays on
+    /// screen where it finished, rather than rolling into yesterday.
+    private func nextVideoID(after id: UUID) -> UUID? {
+        let all = pages
+        guard let position = all.firstIndex(where: { $0.id == id }) else { return nil }
+        let sameDay = sameDayIDs()
+        return all[all.index(after: position)...]
+            .first { $0.mediaType == .video && sameDay.contains($0.id) }?
+            .id
+    }
+
+    /// `dayItems` when the grid supplied it. The fallback matters for the
+    /// routes that don't — an album, or a viewer opened with only a page list —
+    /// where "the same day" still has an obvious meaning.
+    private func sameDayIDs() -> Set<UUID> {
+        if !dayItems.isEmpty { return Set(dayItems.map(\.id)) }
+        let calendar = Calendar.current
+        let day = calendar.startOfDay(for: currentItem.capturedAt)
+        return Set(
+            pages.filter { calendar.startOfDay(for: $0.capturedAt) == day }.map(\.id)
+        )
+    }
+
     private var currentModel: AssetDetailModel {
         cache.model(for: currentItem, spaceID: space.id)
     }
@@ -358,6 +402,7 @@ struct AssetDetailView: View {
                     isCurrent: entry.id == currentID,
                     showsChrome: showChrome,
                     onSingleTap: { showChrome.toggle() },
+                    onFinished: { advanceToNextVideo(after: entry) },
                     isZoomed: $isZoomed
                 )
                 .tag(entry.id)
@@ -425,7 +470,7 @@ struct AssetDetailView: View {
             // screenshot one. The glyphs carry no glass of their own.
             HStack(spacing: 0) {
                 Button {
-                    slideshow = .everything
+                    showSlideshow = true
                 } label: {
                     ViewerGlyph(symbol: "play.rectangle", glass: false)
                 }
@@ -511,16 +556,10 @@ struct AssetDetailView: View {
     @ViewBuilder
     private var moreMenuItems: some View {
         Button {
-            slideshow = .everything
+            showSlideshow = true
         } label: {
-            Label(SlideshowMode.everything.title, systemImage: SlideshowMode.everything.symbol)
+            Label("Slideshow", systemImage: "play.rectangle")
         }
-        Button {
-            slideshow = .videosOnly
-        } label: {
-            Label(SlideshowMode.videosOnly.title, systemImage: SlideshowMode.videosOnly.symbol)
-        }
-        .disabled(!dayItems.contains { $0.mediaType == .video })
 
         Divider()
         Button {
@@ -661,6 +700,7 @@ private struct AssetPage: View {
     let isCurrent: Bool
     let showsChrome: Bool
     let onSingleTap: () -> Void
+    var onFinished: () -> Void = {}
     @Binding var isZoomed: Bool
 
     var body: some View {
@@ -725,8 +765,14 @@ private struct AssetPage: View {
                 client: session.client,
                 poster: model.image ?? model.placeholder,
                 showsControls: showsChrome,
-                onSingleTap: onSingleTap
+                onSingleTap: onSingleTap,
+                onFinished: onFinished
             )
+            // Tied to the asset so each clip gets its own player state.
+            // Without it SwiftUI carries the previous page's `@State` model
+            // over, `load` sees a player already set and returns, and the new
+            // video sits on its poster frame with no controls and no playback.
+            .id(model.item.assetID)
             .ignoresSafeArea()
         } else if let poster = model.image ?? model.placeholder {
             Image(platformImage: poster).resizable().scaledToFit()

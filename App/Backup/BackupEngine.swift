@@ -60,11 +60,24 @@ final class BackupEngine {
     private var session: AppSession
     private var settings: BackupSettings
     private var cancelled = false
+    private let connection: ConnectionMonitor
 
-    init(container: ModelContainer, session: AppSession, settings: BackupSettings) {
+    /// The item an outage stopped on, and how many runs in a row it has done
+    /// that. A transport error costs an item nothing, which would let one
+    /// genuinely broken item bounce the queue forever if it always failed that
+    /// way — this is the backstop that eventually blames the item instead.
+    private var stalled: (localIdentifier: String, runs: Int)?
+
+    init(
+        container: ModelContainer,
+        session: AppSession,
+        settings: BackupSettings,
+        connection: ConnectionMonitor
+    ) {
         self.container = container
         self.session = session
         self.settings = settings
+        self.connection = connection
     }
 
     func update(settings: BackupSettings) { self.settings = settings }
@@ -309,8 +322,16 @@ final class BackupEngine {
 
         while !cancelled {
             guard let item = nextItem(context) else { break }
-            await upload(item, client: client, spaceID: space.id, context: context)
+            let failure = await upload(
+                item, client: client, spaceID: space.id, context: context
+            )
             refreshProgress(context)
+
+            // Stop the run rather than marching the rest of the queue into the
+            // same wall. Without this the banner would appear while the engine
+            // carried on failing three hundred more items against a server
+            // that is not there.
+            if failure == .unreachable || failure == .authentication { break }
         }
 
         statusText = progress.summary
@@ -332,12 +353,16 @@ final class BackupEngine {
         }
     }
 
+    /// Returns why the item failed, or nil if it went up or was skipped.
+    /// `start` uses that to decide whether the rest of the queue is worth
+    /// attempting.
+    @discardableResult
     private func upload(
         _ item: BackupItem,
         client: FrameStationClient,
         spaceID: UUID,
         context: ModelContext
-    ) async {
+    ) async -> TransferFailure? {
         item.state = .uploading
         item.attempts += 1
         try? context.save()
@@ -362,7 +387,7 @@ final class BackupEngine {
             item.state = .skipped
             item.lastError = "No longer in the photo library"
             try? context.save()
-            return
+            return nil
         }
 
         do {
@@ -379,7 +404,7 @@ final class BackupEngine {
                     item.state = .skipped
                     item.lastError = "No longer a Live Photo"
                     try? context.save()
-                    return
+                    return nil
                 }
                 resource = paired
             }
@@ -410,26 +435,84 @@ final class BackupEngine {
             item.completedAt = Date()
             item.lastError = nil
             try? context.save()
+            stalled = nil
+            connection.noteSuccess()
+            return nil
         } catch UploadError.removedByUser {
             // Deliberately deleted from the library. Skipped, not failed, so it
             // never retries and never reappears.
             item.state = .skipped
             item.lastError = "Removed from this library"
             try? context.save()
+            // The server answered, which is what this is evidence of.
+            connection.noteSuccess()
+            return nil
         } catch UploadError.noExportableResource {
             item.state = .skipped
             item.lastError = "No exportable resource"
             try? context.save()
+            return nil
+        } catch UploadError.chunkRejected(let status, let index) {
+            // The only error carrying a bare status rather than a wrapped one.
+            return record(
+                TransferFailure.classify(httpStatus: status), on: item,
+                detail: "The server rejected part \(index + 1) of this file (HTTP \(status)).",
+                context: context
+            )
         } catch {
             // Reflecting rather than localizing: a URLError or a bare Swift
             // error localizes to "unknown error", which names nothing and
             // sends you looking in the wrong place.
-            let detail = String(reflecting: error)
+            return record(
+                TransferFailure.classify(error), on: item,
+                detail: String(reflecting: error), context: context
+            )
+        }
+    }
+
+    /// Applies a failure to the queue row.
+    ///
+    /// The whole point of the classification: only `.itemFailed` spends one of
+    /// the item's three attempts. An outage puts the row back exactly as it
+    /// was found, so a phone that spent an afternoon out of signal comes home
+    /// with its queue intact rather than three hundred items parked behind a
+    /// Retry button nobody knows to press.
+    private func record(
+        _ failure: TransferFailure,
+        on item: BackupItem,
+        detail: String,
+        context: ModelContext
+    ) -> TransferFailure {
+        switch failure {
+        case .itemFailed:
             item.state = .failed
             item.lastError = detail
             lastError = detail
-            try? context.save()
+            stalled = nil
+
+        case .authentication:
+            item.attempts -= 1
+            item.state = .pending
+            lastError = "Sign in again to keep backing up."
+
+        case .unreachable:
+            // Three runs in a row stopped by the same item, each of which had
+            // to get past a healthy `/health` to start, is no longer credible
+            // as an outage. Blame the item so the rest of the queue can move.
+            let runs = stalled?.localIdentifier == item.localIdentifier
+                ? (stalled?.runs ?? 0) + 1 : 1
+            stalled = (item.localIdentifier, runs)
+            guard runs < 3 else {
+                stalled = nil
+                return record(.itemFailed, on: item, detail: detail, context: context)
+            }
+            item.attempts -= 1
+            item.state = .pending
+            connection.noteFailure(.unreachable)
         }
+
+        try? context.save()
+        return failure
     }
 
     // MARK: - Helpers

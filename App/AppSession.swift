@@ -188,12 +188,26 @@ final class AppSession {
             if case FrameStationClientError.http(let status, _) = error,
                status == 401 || status == 403 {
                 credentials.clear()
+                SessionSnapshotStore.clear()
+                TimelineSnapshotStore.clearAll()
                 phase = .disconnected
-            } else {
-                // Keep the credential and say what went wrong, so the next
-                // launch — or a tap on Retry — can pick up where this left off.
-                phase = .failed(error.localizedDescription)
+                return false
             }
+
+            // Unreachable, and we know who this is. Going in with the last
+            // known account beats showing a sign-in form to someone who never
+            // signed out — the token is valid, the library is cached, and the
+            // only thing missing is the network. The connection banner is
+            // already saying so at the top of the grid.
+            if TransferFailure.classify(error) == .unreachable,
+               let remembered = SessionSnapshotStore.load() {
+                adopt(client: client, me: remembered)
+                return true
+            }
+
+            // Keep the credential and say what went wrong, so the next
+            // launch — or a tap on Retry — can pick up where this left off.
+            phase = .failed(error.localizedDescription)
             return false
         }
     }
@@ -267,6 +281,12 @@ final class AppSession {
     /// retyping a NAS hostname every time is a small punishment for it.
     func signOut() {
         credentials.clear()
+        // The cached timeline is this family's dates and places. It must not
+        // outlive the session that fetched it, and it must not be sitting
+        // there for whoever signs in next.
+        TimelineSnapshotStore.clearAll()
+        SessionSnapshotStore.clear()
+        if let loader { Task { await loader.clearDiskCache() } }
         dsmPassword = ""
         dsmOTPCode = ""
         needsTwoFactor = false
@@ -280,7 +300,9 @@ final class AppSession {
 
     private func adopt(client: FrameStationClient, me: MeResponse) {
         self.client = client
-        self.loader = ThumbnailLoader(client: client)
+        self.loader = ThumbnailLoader(
+            client: client, diskLimitBytes: CacheSettings.limit.bytes
+        )
         self.user = me.user
         // The server is the authority on who you are; a restored session had
         // only whatever name was typed at onboarding, or none at all.
@@ -288,6 +310,7 @@ final class AppSession {
         self.spaces = me.spaces
         self.selectedSpace = me.spaces.first { $0.kind == .personal } ?? me.spaces.first
         self.phase = .connected
+        SessionSnapshotStore.save(me)
         // Covers the invite path and re-confirms on every restore, so the
         // remembered address stays whatever last actually worked.
         rememberSignInFields()

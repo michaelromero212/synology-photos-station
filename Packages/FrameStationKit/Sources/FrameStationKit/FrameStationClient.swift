@@ -20,10 +20,22 @@ public actor FrameStationClient {
 
     private var configuration: Configuration
     private let session: URLSession
+    private var outcomeObserver: (@Sendable (TransferFailure?) -> Void)?
 
     public init(configuration: Configuration, session: URLSession = .shared) {
         self.configuration = configuration
         self.session = session
+    }
+
+    /// Watches whether requests are getting through, so something outside can
+    /// tell the difference between a quiet app and an unreachable server.
+    ///
+    /// At this level rather than at each call site: the stores above
+    /// deliberately swallow failures — a blip must not blank the grid — which
+    /// is exactly what makes an outage invisible from up there. Nil reports a
+    /// success.
+    public func observeOutcomes(_ observer: (@Sendable (TransferFailure?) -> Void)?) {
+        outcomeObserver = observer
     }
 
     public func setToken(_ token: String?) {
@@ -58,9 +70,7 @@ public actor FrameStationClient {
 
     /// Authenticated request with no body either way (favourite toggles).
     func sendEmpty(_ method: Method, _ path: String) async throws {
-        let request = try makeRequest(method, path)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
+        _ = try await run(makeRequest(method, path))
     }
 
     // MARK: - Endpoints
@@ -164,8 +174,7 @@ public actor FrameStationClient {
     ) async throws -> ChunkAcceptedResponse {
         var request = try makeRequest(.put, "v1/uploads/\(uploadID)/chunk/\(index)")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.upload(for: request, fromFile: fileURL)
-        try validate(response, data: data)
+        let data = try await run(request, fromFile: fileURL)
         return try FrameStationCoding.decoder.decode(ChunkAcceptedResponse.self, from: data)
     }
 
@@ -227,9 +236,7 @@ public actor FrameStationClient {
         _ path: String,
         authenticated: Bool = true
     ) async throws -> Response {
-        let request = try makeRequest(method, path, authenticated: authenticated)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
+        let data = try await run(makeRequest(method, path, authenticated: authenticated))
         return try FrameStationCoding.decoder.decode(Response.self, from: data)
     }
 
@@ -242,8 +249,7 @@ public actor FrameStationClient {
         var request = try makeRequest(method, path, authenticated: authenticated)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try FrameStationCoding.encoder.encode(body)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
+        let data = try await run(request)
         return try FrameStationCoding.decoder.decode(Response.self, from: data)
     }
 
@@ -256,8 +262,30 @@ public actor FrameStationClient {
         var request = try makeRequest(method, path, authenticated: authenticated)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try FrameStationCoding.encoder.encode(body)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
+        _ = try await run(request)
+    }
+
+    /// Sends a request and reports what happened.
+    ///
+    /// Every path funnels through here so the reporting is written once. Doing
+    /// it per call site would let a newly added endpoint opt out of the
+    /// connection banner by simply forgetting to.
+    private func run(_ request: URLRequest, fromFile fileURL: URL? = nil) async throws -> Data {
+        do {
+            let data: Data
+            let response: URLResponse
+            if let fileURL {
+                (data, response) = try await session.upload(for: request, fromFile: fileURL)
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
+            try validate(response, data: data)
+            outcomeObserver?(nil)
+            return data
+        } catch {
+            outcomeObserver?(TransferFailure.classify(error))
+            throw error
+        }
     }
 
     private func validate(_ response: URLResponse, data: Data) throws {

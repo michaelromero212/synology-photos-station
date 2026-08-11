@@ -20,6 +20,9 @@ struct RootTabView: View {
     @Environment(\.backupContainer) private var modelContainer
     @State private var engine: BackupEngine?
     @State private var backupSettings = BackupSettings.load()
+    /// Built alongside the engine and shared with it: the engine is what
+    /// discovers an outage, and the grid is what has to say so.
+    @State private var connection: ConnectionMonitor?
     #endif
 
     var body: some View {
@@ -45,11 +48,20 @@ struct RootTabView: View {
             .tabItem { Label("More", systemImage: "ellipsis") }
         }
         #if os(iOS)
+        .environment(\.connectionMonitor, connection)
         .task {
             guard engine == nil, let container = modelContainer else { return }
+            let monitor = ConnectionMonitor { [weak session] in session?.client }
+            monitor.start()
             let created = BackupEngine(
-                container: container, session: session, settings: backupSettings
+                container: container, session: session, settings: backupSettings,
+                connection: monitor
             )
+            // Picking up where the outage stopped it. Waiting for the next
+            // background window instead would mean a phone that reconnects on
+            // the sofa does nothing until iOS decides to wake us.
+            monitor.onReconnect = { [weak created] in await created?.start() }
+            connection = monitor
             engine = created
             if backupSettings.enabled { created.enableBackgroundRuns() }
         }
@@ -185,6 +197,25 @@ struct MoreView: View {
                     SpacesView(session: session) {}
                 } label: {
                     Label("Manage Spaces", systemImage: "person.2.badge.gearshape")
+                }
+            }
+
+            Section {
+                AutoPlayToggle()
+            } header: {
+                Text("Playback")
+            } footer: {
+                Text(
+                    "When a video ends, continue to the next video from the "
+                    + "same day. Turn this off to play only the video you opened."
+                )
+            }
+
+            Section("Offline") {
+                NavigationLink {
+                    CacheManagementView(session: session)
+                } label: {
+                    Label("Cache Management", systemImage: "internaldrive")
                 }
             }
 

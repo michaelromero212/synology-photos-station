@@ -12,6 +12,27 @@ import SwiftUI
 /// only visible buckets are ever materialised. ARCHITECTURE.md §9a still calls
 /// for a `UICollectionView` before this meets a 100k library — one flat lazy
 /// grid at that size stutters, and prefetching needs real control.
+#if os(iOS)
+/// A tapped photo together with the context the viewer needs.
+///
+/// The three used to be separate `@State` properties, with the destination
+/// closure reading two of them off the view while only the third drove
+/// presentation. That closure is captured, so it could run a render behind the
+/// state it was reading: the viewer opened knowing about one photo, with no day
+/// and no page list. Swiping did nothing, the slideshow played a single frame,
+/// and nothing anywhere said why.
+///
+/// Travelling as one value makes that impossible — the destination receives
+/// the context as its argument rather than looking it up.
+struct OpenedPhoto: Identifiable, Hashable {
+    let item: TimelineItem
+    let dayItems: [TimelineItem]
+    let pageItems: [TimelineItem]
+
+    var id: UUID { item.id }
+}
+#endif
+
 struct TimelineView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
@@ -45,7 +66,11 @@ struct TimelineView: View {
     @State private var dismissedBackupPrompt = false
     @State private var showBackupSettings = false
     @State private var showPicker = false
+    @State private var showSearch = false
     @State private var shareResult: Int?
+    /// Owned by RootTabView, read here because this is where a broken
+    /// connection has to be visible.
+    @Environment(\.connectionMonitor) private var connection
     #endif
 
     // Selecting photos, and everything that acts on a selection. Not iOS-only:
@@ -70,9 +95,7 @@ struct TimelineView: View {
     /// The photo a tap opened, the day it came from — the slideshows need to
     /// know what "that day" contained — and everything currently loaded, which
     /// is what the viewer swipes through.
-    @State private var openItem: TimelineItem?
-    @State private var openDayItems: [TimelineItem] = []
-    @State private var openPageItems: [TimelineItem] = []
+    @State private var openItem: OpenedPhoto?
     #endif
 
     var body: some View {
@@ -90,6 +113,7 @@ struct TimelineView: View {
             #if os(iOS)
             if let engine, !showsGrid {
                 backupBanner(engine)
+                    .animation(.easeOut(duration: 0.2), value: connection?.state)
             }
             #endif
 
@@ -123,8 +147,8 @@ struct TimelineView: View {
         )
         .navigationDestination(item: $openItem) { opened in
             AssetDetailView(
-                item: opened, space: space, session: session,
-                dayItems: openDayItems, pageItems: openPageItems
+                item: opened.item, space: space, session: session,
+                dayItems: opened.dayItems, pageItems: opened.pageItems
             )
             .photoZoomTransition(id: opened.id, in: photoTransition)
         }
@@ -213,6 +237,19 @@ struct TimelineView: View {
         }
         // "Set Up Now" is a promise to set backup up, so it opens the settings
         // rather than a hub the settings are one more tap inside.
+        // Its own stack rather than a push: search is a place you go and come
+        // back from, and pushing it would leave the grid's scroll position and
+        // the viewer's navigation tangled up with it.
+        .sheet(isPresented: $showSearch) {
+            NavigationStack {
+                SearchView(session: session, space: space)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showSearch = false }
+                        }
+                    }
+            }
+        }
         .sheet(isPresented: $showBackupSettings) {
             if let engine {
                 BackupSettingsView(
@@ -360,12 +397,12 @@ struct TimelineView: View {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    openDayItems = dayItems
                     // Snapshotted at the tap rather than recomputed in the
                     // viewer: the pager's contents must not shuffle underneath
                     // a swipe because a bucket finished loading behind it.
-                    openPageItems = loadedItemsInOrder()
-                    openItem = item
+                    openItem = OpenedPhoto(
+                        item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
+                    )
                 }
                 // Matches Photos: no mode to find first, and the photo you
                 // pressed is already picked.
@@ -623,6 +660,7 @@ struct TimelineView: View {
                     #if os(iOS)
                     if let engine {
                         backupBanner(engine)
+                            .animation(.easeOut(duration: 0.2), value: connection?.state)
                     }
                     #endif
 
@@ -784,7 +822,13 @@ struct TimelineView: View {
     /// banner that only appears during work can't answer it.
     @ViewBuilder
     private func backupBanner(_ engine: BackupEngine) -> some View {
-        if !backupSettings.enabled {
+        // Ahead of both backup states, and shown even when backup is off. A
+        // NAS that isn't answering breaks browsing too — tiles beyond the cache
+        // stay blank and tapping one fails — so this is the more useful thing
+        // to say regardless of whether anything is being uploaded.
+        if let connection, connection.state != .online {
+            connectionBanner(connection.state)
+        } else if !backupSettings.enabled {
             // Backup being off is worth interrupting for once, with the action
             // attached — a status row you have to know to tap is how people end
             // up months later with nothing backed up. Dismissible, because
@@ -825,6 +869,48 @@ struct TimelineView: View {
         } else {
             runningBanner(engine)
         }
+    }
+
+    /// Why the library is unreachable, in the terms that decide what to do
+    /// about it.
+    ///
+    /// "No signal" and "the NAS isn't answering" are separated deliberately:
+    /// one resolves itself and the other means somebody should go and look at
+    /// the box. Collapsing them into "offline" would leave a NAS that has been
+    /// down since Tuesday looking like a bad cell.
+    ///
+    /// Not a button. It clears itself within seconds of the server coming
+    /// back, and a tappable banner whose only action is the one already
+    /// running invites a tap that changes nothing.
+    private func connectionBanner(_ state: ConnectionMonitor.State) -> some View {
+        let isOffline = state == .offline
+        return HStack(spacing: 12) {
+            Image(systemName: isOffline ? "wifi.slash" : "exclamationmark.icloud.fill")
+                .font(.title3)
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(isOffline ? "No Internet Connection" : "Can't Reach FrameStation")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.primary)
+                Text(
+                    isOffline
+                        ? "Photos will sync when you're back online."
+                        : "Your library is unavailable and backups are paused."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     /// The status row, once backup is actually on.
@@ -983,6 +1069,16 @@ struct TimelineView: View {
         }
 
         #if os(iOS)
+        // Declared before `+` so it lands to its left: adding a control beside
+        // one people already reach for is fine, sliding that one over is not.
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showSearch = true
+            } label: {
+                Label("Search \(space.name)", systemImage: "magnifyingglass")
+            }
+        }
+
         ToolbarItem(placement: .primaryAction) {
             Button {
                 showPicker = true

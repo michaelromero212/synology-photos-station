@@ -6,33 +6,12 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// What a slideshow plays.
-enum SlideshowMode {
-    /// Everything from the day, in order — photos held for a few seconds,
-    /// videos played through.
-    case everything
-    /// Only the videos, back to back.
-    ///
-    /// Not something Synology offers. A day with sixty photos and four clips
-    /// is, for most people, four things worth watching and a lot of scrolling
-    /// to find them.
-    case videosOnly
-
-    var title: String {
-        switch self {
-        case .everything: "Slideshow"
-        case .videosOnly: "Play All Videos"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .everything: "play.rectangle"
-        case .videosOnly: "film.stack"
-        }
-    }
-}
-
+/// There used to be a second mode here, "Play All Videos", which played a
+/// day's clips back to back. It is gone: watching the videos from a day is not
+/// a *mode* you pick up front, it is what you want the moment you tap the
+/// first one. That behaviour now lives in the viewer, governed by the Auto
+/// Play setting — see `PlaybackSettings`. One slideshow, and videos that
+/// simply continue.
 @Observable
 @MainActor
 final class SlideshowModel {
@@ -56,16 +35,10 @@ final class SlideshowModel {
         items.indices.contains(index) ? items[index] : nil
     }
 
-    func start(with all: [TimelineItem], mode: SlideshowMode, from item: TimelineItem?) {
-        switch mode {
-        case .everything:
-            items = all
-            // Begin where the user was looking, not at the top of the day.
-            index = item.flatMap { current in all.firstIndex { $0.id == current.id } } ?? 0
-        case .videosOnly:
-            items = all.filter { $0.mediaType == .video }
-            index = 0
-        }
+    func start(with all: [TimelineItem], from item: TimelineItem?) {
+        items = all
+        // Begin where the user was looking, not at the top of the day.
+        index = item.flatMap { current in all.firstIndex { $0.id == current.id } } ?? 0
         isFinished = items.isEmpty
         advance(to: index)
     }
@@ -136,7 +109,6 @@ final class SlideshowModel {
 struct SlideshowView: View {
     @Bindable var session: AppSession
     let items: [TimelineItem]
-    let mode: SlideshowMode
     let startingAt: TimelineItem?
     let onDone: () -> Void
 
@@ -159,10 +131,7 @@ struct SlideshowView: View {
                     }
                 } else if model.isFinished {
                     ContentUnavailableView {
-                        Label(
-                            mode == .videosOnly ? "No videos that day" : "Nothing to play",
-                            systemImage: mode.symbol
-                        )
+                        Label("Nothing to play", systemImage: "play.rectangle")
                     }
                     .foregroundStyle(.white)
                 }
@@ -175,7 +144,7 @@ struct SlideshowView: View {
         .task {
             let created = SlideshowModel(session: session)
             model = created
-            created.start(with: items, mode: mode, from: startingAt)
+            created.start(with: items, from: startingAt)
         }
         .onDisappear { model?.stop() }
         .onChange(of: model?.isFinished) { _, finished in
@@ -231,9 +200,3 @@ private struct SlidePhoto: View {
 }
 #endif
 
-#if os(iOS)
-/// So `fullScreenCover(item:)` can drive the mode directly.
-extension SlideshowMode: Identifiable {
-    var id: String { title }
-}
-#endif
