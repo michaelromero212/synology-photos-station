@@ -63,26 +63,63 @@ final class VideoPlaybackModel {
     @ObservationIgnored private var pendingSeek: CMTime = .invalid
     @ObservationIgnored private var isSeeking = false
     @ObservationIgnored private var resumeAfterScrub = false
+    /// Set while `prepare` is in flight, so two pages asking at once don't both
+    /// build a player.
+    @ObservationIgnored private var isPreparing = false
+    /// Whether this video should be playing once it is ready. A page can become
+    /// current before its buffer exists.
+    @ObservationIgnored private var wantsPlayback = false
 
-    func load(assetID: UUID, client: FrameStationClient?) async {
-        guard let client, player == nil else { return }
+    /// Fetches the signed URL and starts buffering, without playing.
+    ///
+    /// Split from `start` so a video can be got ready before anyone is looking
+    /// at it — see `VideoPreloader`. An `AVPlayer` holding an item buffers on
+    /// its own, so by the time this page becomes current the first frames are
+    /// usually already in hand and playback begins immediately rather than
+    /// after a round trip.
+    ///
+    /// Idempotent: the pager rebuilds neighbours freely, and re-preparing a
+    /// video that is already prepared would throw away its buffer.
+    func prepare(assetID: UUID, client: FrameStationClient?) async {
+        guard let client, player == nil, !isPreparing else { return }
+        isPreparing = true
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isPreparing = false
+            isLoading = false
+        }
         do {
             let playback = try await client.playbackURL(assetID: assetID)
             let item = AVPlayerItem(url: playback.url)
             let player = AVPlayer(playerItem: item)
             self.player = player
-            configureAudioSession()
-            player.play()
-            isPlaying = true
             lastError = nil
 
             track(player)
             await describe(item)
+            // A page that became current while this was in flight asked to
+            // play before there was anything to play.
+            if wantsPlayback { start() }
         } catch {
             lastError = error
         }
+    }
+
+    /// Begins, or resumes, playback of an already-prepared video.
+    func start() {
+        wantsPlayback = true
+        guard let player else { return }
+        configureAudioSession()
+        player.play()
+        isPlaying = true
+    }
+
+    /// Leaves the buffer intact — this is a page scrolling out of view, not a
+    /// video being closed.
+    func pause() {
+        wantsPlayback = false
+        player?.pause()
+        isPlaying = false
     }
 
     /// Playback belongs in the "playback" category, otherwise a video plays
@@ -302,8 +339,12 @@ struct VideoPlayerView: View {
     /// Fired when the clip reaches its end on its own. Not called for a pause,
     /// a swipe away, or a failure — only for "that one is over".
     var onFinished: () -> Void = {}
-
-    @State private var model = VideoPlaybackModel()
+    /// Whether this is the page being looked at. False for a neighbour the
+    /// pager has built ahead — those prepare but stay silent.
+    var isActive: Bool = true
+    /// Supplied by the viewer so it survives this page scrolling out of view
+    /// and back, and so a video can be prepared before it is watched.
+    let model: VideoPlaybackModel
     /// Nil on macOS and tvOS, which have no monitor wired up yet; the wording
     /// falls back to classifying the error on its own.
     @Environment(\.connectionMonitor) private var connection
@@ -353,8 +394,16 @@ struct VideoPlayerView: View {
                 )
             }
         }
-        .task { await model.load(assetID: assetID, client: client) }
-        .onDisappear { model.stop() }
+        .task {
+            await model.prepare(assetID: assetID, client: client)
+            if isActive { model.start() }
+        }
+        .onChange(of: isActive) { _, active in
+            // Paused rather than stopped: the buffer is what makes coming back
+            // — or arriving from the previous clip — instant.
+            active ? model.start() : model.pause()
+        }
+        .onDisappear { model.pause() }
         // The model already tracks this for the replay button; the viewer
         // above needs the same edge to decide whether anything follows.
         .onChange(of: model.hasFinished) { _, finished in

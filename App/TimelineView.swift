@@ -413,7 +413,12 @@ struct TimelineView: View {
                 .photoTransitionSource(id: item.id, in: photoTransition)
             #else
             NavigationLink {
-                AssetDetailView(item: item, space: space, session: session)
+                AssetDetailView(
+                    item: item, space: space, session: session,
+                    // So the next/previous video controls have a day to
+                    // walk. There is no pager on these platforms.
+                    dayItems: dayItems
+                )
             } label: {
                 PhotoCell(item: item, loader: session.loader, size: size)
             }
@@ -448,7 +453,12 @@ struct TimelineView: View {
         }
         #else
         NavigationLink {
-            AssetDetailView(item: item, space: space, session: session)
+            AssetDetailView(
+                    item: item, space: space, session: session,
+                    // So the next/previous video controls have a day to
+                    // walk. There is no pager on these platforms.
+                    dayItems: dayItems
+                )
         } label: {
             PhotoCell(item: item, loader: session.loader, size: size)
         }

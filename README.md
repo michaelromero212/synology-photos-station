@@ -18,8 +18,9 @@ queue's retry budget, and launching out of range shows the cached library
 instead of a sign-in form.
 
 Remaining: a `UICollectionView` grid for 100k scale, Recently Deleted, and the
-view-only macOS/tvOS clients. One known defect — video auto-advance selects the
-next clip but doesn't play it (ARCHITECTURE.md M12).
+view-only macOS/tvOS clients. One known defect — swiping *backwards* through the
+viewer no longer commits (ARCHITECTURE.md §9a). Forward paging, auto-advance and
+video preloading all work.
 
 ---
 
@@ -580,3 +581,12 @@ It reports the files, people and shared libraries it found, and writes nothing.
 - **Sign-out clears three things,** not one: credentials, the timeline snapshot,
   and the image cache. The snapshot holds a family's dates and places and has no
   business surviving into the next person's session.
+- **A grid tile clips its picture before the overlay goes on.** `scaledToFill`
+  makes the image larger than the tile, so a `ZStack` of image-plus-overlay
+  sizes itself to the *image* and the overlay's bottom edge lands outside the
+  clip. That is why no video ever showed its duration: the label was drawn
+  offscreen. Clip first, then `.overlay`.
+- **The viewer's pager is `UIPageViewController`, not `TabView`.** `TabView(.page)`
+  builds pages lazily and silently ignores a programmatic selection to a page it
+  has not built — which is what made video auto-advance dead-end. The
+  representable also exposes the before/after hook that video preloading needs.

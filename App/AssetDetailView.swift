@@ -178,10 +178,18 @@ struct AssetDetailView: View {
     var pageItems: [TimelineItem] = []
 
     @State private var cache = ViewerModelCache()
+    /// Outlives any one page, which is the point: a video prepared as a
+    /// neighbour must still be prepared when you arrive at it.
+    @State private var preloader = VideoPreloader()
     @State private var showInfo = false
     #if os(iOS)
     /// Which page is on screen, keyed by placement id.
-    @State private var currentID: UUID
+    ///
+    /// Owned by an observable so the hosted pages can watch it themselves. They
+    /// are built once and kept, so they cannot learn they've become current
+    /// from a rebuilt root view.
+    @State private var focus: PagerFocus
+    private var currentID: UUID { focus.currentID }
     @State private var showChrome = true
     /// True while the open photo is zoomed past its resting size. The chrome
     /// gets out of the way when it is.
@@ -195,6 +203,11 @@ struct AssetDetailView: View {
     @State private var showDateEditor = false
     @State private var isWorking = false
     @Environment(\.dismiss) private var dismiss
+    #else
+    /// What the viewer is showing. A `let` on the outside, but the
+    /// next/previous video controls have to be able to move it — there is no
+    /// pager on these platforms to do that for them.
+    @State private var displayedItem: TimelineItem
     #endif
 
     init(
@@ -210,7 +223,9 @@ struct AssetDetailView: View {
         self.dayItems = dayItems
         self.pageItems = pageItems
         #if os(iOS)
-        self._currentID = State(initialValue: item.id)
+        self._focus = State(initialValue: PagerFocus(currentID: item.id))
+        #else
+        self._displayedItem = State(initialValue: item)
         #endif
     }
 
@@ -298,13 +313,32 @@ struct AssetDetailView: View {
         }
     }
     #else
+    /// The neighbouring video from the same day.
+    ///
+    /// `dayItems` rather than a pager's page list, because there is no pager
+    /// here — this viewer shows one item and the buttons move it.
+    private func adjacentVideo(forward: Bool) -> TimelineItem? {
+        guard let position = dayItems.firstIndex(where: { $0.id == displayedItem.id })
+        else { return nil }
+        let candidates = forward
+            ? Array(dayItems[dayItems.index(after: position)...])
+            : Array(dayItems[..<position].reversed())
+        return candidates.first { $0.mediaType == .video }
+    }
+
+    private func goToAdjacentVideo(forward: Bool) {
+        guard let target = adjacentVideo(forward: forward) else { return }
+        displayedItem = target
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             AssetPage(
-                model: cache.model(for: item, spaceID: space.id),
+                model: cache.model(for: displayedItem, spaceID: space.id),
                 session: session,
-                isCurrent: true,
+                focus: PagerFocus(currentID: displayedItem.id),
+                preloader: preloader,
                 showsChrome: true,
                 onSingleTap: {},
                 isZoomed: .constant(false)
@@ -313,7 +347,7 @@ struct AssetDetailView: View {
         .safeAreaInset(edge: .bottom) { actionBar }
         .sheet(isPresented: $showInfo) {
             InformationSheet(
-                model: cache.model(for: item, spaceID: space.id),
+                model: cache.model(for: displayedItem, spaceID: space.id),
                 session: session
             ) { showInfo = false }
         }
@@ -349,25 +383,39 @@ struct AssetDetailView: View {
     private func advanceToNextVideo(after finished: TimelineItem) {
         guard PlaybackSettings.autoPlayNextVideo, finished.id == currentID else { return }
         guard let next = nextVideoID(after: finished.id) else { return }
-        // KNOWN DEFECT: the pager does move to the right clip, but the arriving
-        // page renders its placeholder and never builds a player — so the next
-        // video is selected and silent. Confirmed with the correct target id in
-        // hand, so the selection logic below is right; what is wrong is further
-        // down, in how `AssetPage` decides a page is current. Deferring this
-        // assignment off the update pass and giving the player an `.id` per
-        // asset both failed to shift it. Not shipped as working.
-        withAnimation { currentID = next }
+        focus.currentID = next
     }
 
     /// Stops at the end of the day by returning nil — the last clip stays on
     /// screen where it finished, rather than rolling into yesterday.
     private func nextVideoID(after id: UUID) -> UUID? {
+        videoID(from: id, forward: true)
+    }
+
+    /// The neighbouring video in the same day, skipping the photos between.
+    ///
+    /// Skipping them is the point: the horizontal swipe already walks every
+    /// item in order, video to photo to video, and that stays exactly as it
+    /// was. This is the other thing people want from a day with four clips in
+    /// it — the next *clip*, without scrolling past the thirty stills.
+    private func videoID(from id: UUID, forward: Bool) -> UUID? {
         let all = pages
         guard let position = all.firstIndex(where: { $0.id == id }) else { return nil }
         let sameDay = sameDayIDs()
-        return all[all.index(after: position)...]
-            .first { $0.mediaType == .video && sameDay.contains($0.id) }?
-            .id
+        let candidates = forward
+            ? Array(all[all.index(after: position)...])
+            : Array(all[..<position].reversed())
+        return candidates.first { $0.mediaType == .video && sameDay.contains($0.id) }?.id
+    }
+
+    /// Whether there is another clip ahead, so the skip control can stay hidden
+    /// on the last one rather than doing nothing when pressed.
+    private var hasNextVideo: Bool { nextVideoID(after: currentID) != nil }
+
+    private func goToAdjacentVideo(forward: Bool) {
+        guard currentItem.mediaType == .video else { return }
+        guard let target = videoID(from: currentID, forward: forward) else { return }
+        focus.currentID = target
     }
 
     /// `dayItems` when the grid supplied it. The fallback matters for the
@@ -394,25 +442,28 @@ struct AssetDetailView: View {
     /// hands the drag to the photo and only takes it back at the edge of the
     /// content, which is exactly the hand-off Photos has.
     private var pager: some View {
-        TabView(selection: $currentID) {
-            ForEach(pages) { entry in
-                AssetPage(
-                    model: cache.model(for: entry, spaceID: space.id),
-                    session: session,
-                    isCurrent: entry.id == currentID,
-                    showsChrome: showChrome,
-                    onSingleTap: { showChrome.toggle() },
-                    onFinished: { advanceToNextVideo(after: entry) },
-                    isZoomed: $isZoomed
-                )
-                .tag(entry.id)
-            }
+        PagerView(items: pages, focus: focus) { entry in
+            AssetPage(
+                model: cache.model(for: entry, spaceID: space.id),
+                session: session,
+                focus: focus,
+                preloader: preloader,
+                showsChrome: showChrome,
+                onSingleTap: { showChrome.toggle() },
+                onFinished: { advanceToNextVideo(after: entry) },
+                isZoomed: $isZoomed
+            )
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
         .ignoresSafeArea()
         // A photo left zoomed shouldn't hold the pager hostage once you've
         // swiped away from it.
         .onChange(of: currentID) { _, _ in isZoomed = false }
+        // No vertical gesture here on purpose. This briefly had swipe-up for
+        // the next clip and swipe-down for the previous, which is the Reels
+        // convention, not Photos': there, up opens the info panel and down
+        // dismisses the viewer. Claiming those would cost two gestures people
+        // already know to buy one this app invented. Skipping to the next clip
+        // is a button in the chrome instead.
     }
     #endif
 
@@ -476,6 +527,20 @@ struct AssetDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Play slideshow")
+
+                // Only while watching a clip that has another after it. A
+                // button rather than a gesture: Photos spends up on the info
+                // panel and down on dismissing, and neither is worth trading
+                // for a skip. One tap, in the chrome that is already open.
+                if currentItem.mediaType == .video, hasNextVideo {
+                    Button {
+                        goToAdjacentVideo(forward: true)
+                    } label: {
+                        ViewerGlyph(symbol: "forward.end", glass: false)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Next video from this day")
+                }
 
                 Menu {
                     moreMenuItems
@@ -644,8 +709,35 @@ struct AssetDetailView: View {
 
     #if !os(iOS)
     private var actionBar: some View {
-        let model = cache.model(for: item, spaceID: space.id)
+        let model = cache.model(for: displayedItem, spaceID: space.id)
         return HStack(spacing: 34) {
+            // No swipe on a Mac or an Apple TV, so the thing an iPhone does
+            // with a flick needs a button here. Only while watching a video —
+            // on a photo they would have nothing to say.
+            if displayedItem.mediaType == .video {
+                Button {
+                    goToAdjacentVideo(forward: false)
+                } label: {
+                    Image(systemName: "backward.end")
+                }
+                .disabled(adjacentVideo(forward: false) == nil)
+                .help("Previous video from this day")
+                #if os(macOS)
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+                #endif
+
+                Button {
+                    goToAdjacentVideo(forward: true)
+                } label: {
+                    Image(systemName: "forward.end")
+                }
+                .disabled(adjacentVideo(forward: true) == nil)
+                .help("Next video from this day")
+                #if os(macOS)
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+                #endif
+            }
+
             Button {} label: { Image(systemName: "square.and.arrow.up") }
                 .disabled(true)
 
@@ -697,11 +789,17 @@ struct AssetDetailView: View {
 private struct AssetPage: View {
     let model: AssetDetailModel
     let session: AppSession
-    let isCurrent: Bool
+    /// Read rather than passed in: this page is hosted in a view controller
+    /// that outlives any one render, so a flag baked in at build time would
+    /// still say "not current" long after the pager arrived here.
+    let focus: PagerFocus
+    let preloader: VideoPreloader
     let showsChrome: Bool
     let onSingleTap: () -> Void
     var onFinished: () -> Void = {}
     @Binding var isZoomed: Bool
+
+    private var isCurrent: Bool { focus.currentID == model.item.id }
 
     var body: some View {
         ZStack {
@@ -753,8 +851,9 @@ private struct AssetPage: View {
     @ViewBuilder
     private var video: some View {
         #if os(iOS)
-        // Only the page you're looking at gets a player. Without this a swipe
-        // past three clips leaves three of them playing.
+        // Only the page you're looking at gets a *layer*. A neighbour still
+        // prepares — see the `task` below — but rendering three video layers to
+        // have two of them offscreen costs GPU for nothing.
         if isCurrent {
             // The tap goes *in* rather than being wrapped around the outside:
             // the player owns the double-tap skip zones, and a chrome toggle
@@ -766,22 +865,24 @@ private struct AssetPage: View {
                 poster: model.image ?? model.placeholder,
                 showsControls: showsChrome,
                 onSingleTap: onSingleTap,
-                onFinished: onFinished
+                onFinished: onFinished,
+                isActive: true,
+                model: preloader.model(for: model.item.assetID)
             )
-            // Tied to the asset so each clip gets its own player state.
-            // Without it SwiftUI carries the previous page's `@State` model
-            // over, `load` sees a player already set and returns, and the new
-            // video sits on its poster frame with no controls and no playback.
-            .id(model.item.assetID)
             .ignoresSafeArea()
         } else if let poster = model.image ?? model.placeholder {
+            // Built ahead by the pager and not being watched. Show the poster,
+            // but get the bytes moving: this is the page you are one swipe —
+            // or one finished clip — away from.
             Image(platformImage: poster).resizable().scaledToFit()
+                .task { preloader.warm(assetID: model.item.assetID, client: session.client) }
         }
         #else
         VideoPlayerView(
             assetID: model.item.assetID,
             client: session.client,
-            poster: model.image ?? model.placeholder
+            poster: model.image ?? model.placeholder,
+            model: preloader.model(for: model.item.assetID)
         )
         #endif
     }
