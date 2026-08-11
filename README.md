@@ -6,12 +6,20 @@ with native clients for iOS, iPadOS, macOS, and tvOS. Replaces Synology Photos.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. This file covers
 running and deploying what exists today.
 
-**Status: M4.** Everything through the media pipeline,
-plus the timeline manifest, delta sync, asset detail, and a working sectioned
-grid on iOS with ThumbHash placeholders and a two-tier thumbnail cache.
-Shared spaces with membership and attribution are working. Remaining: a
-`UICollectionView` grid for 100k scale, then M5 (the iOS backup engine) and
-M6 (push).
+**Status: M11.** The library works end to end — upload, media pipeline,
+timeline with delta sync, shared spaces with attribution, albums, tags and
+ratings, video playback, the iOS backup engine, and search by place. Push is
+built and verified in the simulator but has never made a real APNs round trip —
+that needs an Apple Developer account and a physical device.
+
+It also behaves when the NAS doesn't: an unreachable server is named as such
+rather than blamed on the phone, losing the network no longer burns the backup
+queue's retry budget, and launching out of range shows the cached library
+instead of a sign-in form.
+
+Remaining: a `UICollectionView` grid for 100k scale, Recently Deleted, and the
+view-only macOS/tvOS clients. One known defect — video auto-advance selects the
+next clip but doesn't play it (ARCHITECTURE.md M12).
 
 ---
 
@@ -86,6 +94,15 @@ tests:
 FRAMESTATION_LIVE_URL=http://127.0.0.1:8099 swift test --package-path Packages/FrameStationKit
 ```
 
+21 tests. The two worth knowing about: `TransferFailureTests` pins which
+failures may cost an item a retry, and `CacheLimitTests` writes past the disk
+cap and asserts the newest entry survives while the oldest is evicted —
+the eviction that ARCHITECTURE claimed for a while without it existing.
+
+**Place search has no smoke script yet.** It was verified by hand against a
+geocoded library in the simulator; the other milestones each have a
+`Scripts/smoke-*.sh` and this one should get one.
+
 ---
 
 ## Running locally
@@ -153,12 +170,29 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
 | GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
 | GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
+| DELETE | `/v1/spaces/:id/assets/:id` | Bearer | Soft delete; the file moves to File Station's `#recycle` |
 | PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favourite, not a shared boolean |
+| PUT | `/v1/spaces/:id/assets/:id/rating` | Bearer | Stars 0–5. Shared, unlike favourites |
+| POST | `/v1/spaces/:id/assets/:id/tags` | Bearer | Add and remove in one call; returns the result |
+| GET | `/v1/spaces/:id/tags` | Bearer | Every tag in use, for the editor to offer |
+| POST | `/v1/spaces/:id/assets/capture-time` | Bearer | Re-time a selection, moving files to match |
+| POST | `/v1/spaces/:id/assets/orientation` | Bearer | Rotate; relative, not absolute |
+| **GET** | **`/v1/spaces/:id/places`** | Bearer | Place names with counts, commonest first |
+| **GET** | **`/v1/spaces/:id/search?place=`** | Bearer | Paged matches plus a total. Substring, case-insensitive |
+| GET | `/v1/assets/:id/playback` | Bearer | Short-lived signed URL — AVPlayer fetches outside our session |
+| GET | `/v1/stream/:assetID` | Signed | The bytes that signed URL points at |
+| GET | `/v1/activity` | Bearer | Recent shared-space contributions, with an unread watermark |
+| POST | `/v1/activity/read` | Bearer | Move the watermark |
+| GET/POST | `/v1/albums` | Bearer | List, create. Albums are private and borrow their permissions |
+| GET/PATCH/DELETE | `/v1/albums/:id` | Bearer | Detail, rename, remove |
+| GET | `/v1/albums/:id/items` | Bearer | Contents |
+| POST/DELETE | `/v1/albums/:id/assets` | Bearer | Add a selection, or remove one |
 | GET | `/v1/household` | Bearer | Everyone with an account, for picking space members |
 | POST | `/v1/spaces` | Bearer | Create a shared space; creator becomes owner |
 | PATCH | `/v1/spaces/:id` | Bearer | Rename (owner only) |
 | GET | `/v1/spaces/:id/members` | Bearer | Members, roles, and per-member contribution counts |
 | PUT/DELETE | `/v1/spaces/:id/members/:userID` | Bearer | Add/remove (owner), or leave (self) |
+| POST | `/v1/auth/dsm` | — | Sign in with a DSM account (the path family members use) |
 
 ### Importing an existing library
 
@@ -530,3 +564,19 @@ It reports the files, people and shared libraries it found, and writes nothing.
   `bigserial` is assigned at INSERT, not COMMIT, so concurrent uploads can
   commit out of sequence order and a client polling `since=N` would permanently
   miss rows. See ARCHITECTURE.md §5.
+- **A failed transfer is classified before it is counted.** `TransferFailure`
+  decides whether a failure was the network's fault, the token's, or the item's,
+  and only the last spends one of an item's three retries. Anything that adds a
+  new failure path should classify it — treating an outage as an item failure is
+  how a whole queue ends up parked behind a Retry button.
+- **The image cache is bounded, and that is not optional.** `ThumbnailLoader`
+  evicts least-recently-used down to 80% of its cap. The read path touches each
+  file's modification date on a hit, which is what makes "least recently *used*"
+  true rather than "oldest" — don't remove it as a stray write.
+- **The timeline snapshot lives in Application Support, not `Caches/`.** iOS
+  empties `Caches/` under storage pressure, which is exactly the moment someone
+  needs their library to still open. Images may be evicted; the metadata that
+  lets the grid draw at all may not.
+- **Sign-out clears three things,** not one: credentials, the timeline snapshot,
+  and the image cache. The snapshot holds a family's dates and places and has no
+  business surviving into the next person's session.

@@ -41,7 +41,7 @@ end-to-end encryption, sharing outside the household, web client.
 | Video playback | Direct play of the original over HTTP Range | AVPlayer streams and seeks natively at 1080p and 4K with no transcode and no quality loss. HLS ladders deferred until 4K-over-cellular actually hurts |
 | Device deletions | NAS copy is **kept** | The NAS is the archive of record; that's the point |
 | Push | APNs direct from container | Household deployment — the `.p8` key never leaves your NAS |
-| Search v1 | Metadata only: date, place, camera, media type, uploader | Face/semantic search deferred; no ML runtime in the container |
+| Search v1 | Metadata only, place first | Place is populated automatically at import; tags are not, so tag search waits on keyword extraction. Face/semantic search deferred; no ML runtime in the container |
 | Reverse geocoding | Offline, GeoNames cities1000 baked into the image | The alternative is 100,000 API requests carrying the family's complete location history to a third party |
 
 ### DSM as the identity provider
@@ -615,7 +615,9 @@ POST   /v1/uploads/:sid/commit    { spaceId, metadata } → assetId
 
 POST   /v1/spaces/:id/assets/:assetId                  → link existing blob (share)
 DELETE /v1/spaces/:id/assets/:assetId                  → soft delete
-POST   /v1/assets/:id/verify      { sha256 }           → gate for Free Up Space
+
+GET    /v1/spaces/:id/places                           → place names + counts
+GET    /v1/spaces/:id/search?place=&offset=&limit=     → paged matches + total
 ```
 
 ### Timeline manifest
@@ -739,16 +741,25 @@ which space is the backup target.
 | Archived | On NAS only — removed from device, deliberately kept here |
 | Pending | On device, not yet uploaded |
 
-### Free Up Space
+### Free Up Space — dropped
 
-Select backed-up assets → server confirms hash match via `/verify` → batched
-`PHAssetChangeRequest.deleteAssets` shows the system confirmation sheet. Items
-sit in Recently Deleted for 30 days and still occupy space until then; say so in
-the UI.
+**Not building this.** The plan was: select backed-up assets → server confirms
+hash match via `/verify` → batched `PHAssetChangeRequest.deleteAssets`.
 
-Gate this feature behind an existing NAS backup. Once this app replaces Synology
-Photos, the NAS holds the family's only copy, and RAID is not a backup —
-Btrfs snapshots plus Hyper Backup to an external drive or B2 before this ships.
+Dropped on 2026-08-10. Leaving photos on the phone until storage runs low, then
+bulk-deleting them in Apple Photos, is easy enough that the feature does not earn
+what it costs — and what it costs is high, because it is the one feature that
+deletes the only copy of something. Recovering from a bug in it is not a support
+call, it is a lost decade.
+
+That also drops the `/verify` endpoint.
+
+**`Archived` survives this**, though. It is produced by Axis A — someone
+deleting in Apple Photos while the NAS copy is kept — which still happens and
+has nothing to do with this feature. What it never gains is a way for *this
+app* to put an item there. It is a storage-location fact, which is why it does
+not belong in `UploadState`: that enum tracks how far an upload got
+(pending/uploading/uploaded), not where the bytes ended up.
 
 ---
 
@@ -777,12 +788,35 @@ compositional layout wrapped in `UIViewControllerRepresentable`:
   `kCGImageSourceThumbnailMaxPixelSize` — never decode full-size into memory.
 - Cancel in-flight requests on cell reuse. HTTP/2 keep-alive to the NAS.
 
-### Search v1
+### Search v1 — place, built
 
-Metadata only, and it's nearly free: date ranges, place name, camera/lens,
-media type, and uploader. Place names come from an **offline** GeoNames
-`cities1000` lookup (~10 MB in the container) — no external geocoding API, so
-the family's location history never leaves the NAS.
+Metadata only, and it's nearly free. **Place is done**; date ranges,
+camera/lens, media type and uploader are the obvious next axes on the same
+machinery.
+
+Place names come from an **offline** GeoNames `cities1000` lookup (~10 MB in
+the container) — no external geocoding API, so the family's location history
+never leaves the NAS. That is also why place went first: `place_name` is
+filled in at import for every photo carrying GPS, so search works across a
+whole library the day it ships.
+
+`GET /places` returns distinct names with counts, commonest first, and the
+screen opens on that list rather than on an empty box — a search field asks
+you to guess what the app knows, a list of places tells you. Typing filters
+the list; submitting runs a substring match, so "Virginia" finds every county
+in it.
+
+Matching is `ILIKE '%…%'` with `%`, `_` and `\` escaped. A leading wildcard
+cannot use a btree index; at this scale a sequential scan over one text column
+is milliseconds, and `pg_trgm` is one migration away if that stops being true.
+Paging is by offset rather than keyset — simpler, and the failure mode is a row
+shifting between pages if the library changes mid-scroll.
+
+**Tags are not searchable yet, and cannot be until the importer keeps them.**
+`MediaProbe.exifTags` requests a fixed list that does not include `-Keywords`
+or `-Subject`, so IPTC keywords in the originals are discarded. Tags exist only
+where somebody typed one in the app, so a tag search today would open on an
+empty vocabulary. Keyword extraction plus a backfill is the prerequisite.
 
 ---
 
@@ -864,7 +898,8 @@ Adopted from Synology, with the gaps filled:
 | Sort order | Ascending/descending by date taken |
 | Show dates and locations | Overlay toggle for full-screen browsing |
 | Playback quality | Auto / Original / High / Medium → the lazy HLS ladder |
-| Cache management | Size readout, cap, clear. Backs the bounded LRU disk cache |
+| **Auto Play Next Video** ✅ | When a clip ends, continue to the next video from the same day. Replaced a "Play All Videos" slideshow mode — watching a day's clips isn't a mode you pick up front, it's what you want after tapping the first one |
+| Cache management ✅ | Size readout, cap (250 MB / 500 MB / 1 GB / 2 GB, default 500), clear. Backs the bounded LRU disk cache. No "unlimited" option: that is the bug it exists to close, not a preference |
 | Deletion settings | See below — **two axes, not one** |
 
 **Not adopting: "Play Content Over HTTP."** Synology offers it as a workaround
@@ -875,14 +910,31 @@ strictly better fallback.
 
 ### Deletion has two independent axes
 
-We only decided one of these. Synology's single "Deletion Settings" screen
-conflates them:
+Synology's single "Deletion Settings" screen conflates them:
 
-- **Axis A — user deletes in Apple Photos.** *Decided:* the NAS copy is kept and
-  the item becomes `Archived`.
-- **Axis B — user deletes inside our app.** *Undecided.* Options are NAS only
-  (default, mirrors Axis A), device only, or both. Synology defaults to
-  "Delete from NAS only."
+- **Axis A — user deletes in Apple Photos.** *Decided:* the NAS copy is kept.
+- **Axis B — user deletes inside our app.** *Decided (2026-08-10):* NAS only.
+  Nothing this app does removes a file from someone's phone.
+
+### Where a removed file goes
+
+Two different destinations, and the difference is deliberate:
+
+- **Uploaded media removed from a space** goes to the **recycle bin inside File
+  Station** — DSM's own. `AssetController.moveToRecycleBin` already moves the
+  file to `#recycle` beside it and soft-deletes the placement. Recovery is
+  DSM's job, which means it is already familiar, already has retention
+  settings, and does not need a second implementation.
+- **Recently Deleted, in the app,** is only for a user's **own media backup** —
+  their personal space. Not built yet.
+
+That split is why "who can restore in a shared space" is not a question this
+app has to answer: shared-space recovery happens in File Station.
+
+**Watch when building Recently Deleted:** `#recycle` is DSM's own folder name
+and DSM can empty it on a schedule the app knows nothing about. Correct for
+shared removals, a hazard for a 30-day promise on personal ones — that
+retention must not depend on a DSM setting nobody remembers.
 
 ---
 
@@ -963,8 +1015,13 @@ of watching progress bars before anything is evaluable.
 | **M8** ✅ | Fast scroller | Scrubber down the trailing edge: a resting indicator that follows scroll position, and a drag that jumps the grid with a `MMM yyyy` pill beside the thumb. Bucket mapping is weighted by item count, not bucket index. Excluded on tvOS, which has no `DragGesture` and navigates by remote. |
 | **M6** 🟡 | Push | **Built and verified without Apple credentials.** Token registration on the device row, ES256 JWT signing via swift-crypto (no new dependency), a sweeper that closes idle `activity_sessions` and sends one summary per burst, uploader excluded, personal spaces silent, dead tokens dropped on 410. Notification delivery, copy, and tap-to-open-space verified in the simulator with `simctl push`. 28 assertions green. **Remaining:** a real `.p8` key and an actual APNs round-trip, which needs an Apple Developer account and a physical device. |
 | **M6b** ✅ | Activity inbox | Bell in the top-left with an unread badge, recent shared-space contributions with relative times, tap-to-open the space, and Clear All. Reads the same `activity_sessions` rows the sweeper closes, so the inbox works even when push is unconfigured or declined. Per-user read watermark on `users.activity_read_at`. 15 further assertions. |
-| **M7** | Free Up Space | Verified-then-delete, gated on NAS backup existing |
-| **M8** | macOS / iPadOS / tvOS | Shared package, view-only clients |
+| **M9** ✅ | Bad connections | `TransferFailure` classifies every failure as unreachable / authentication / the item's own fault, and only the last spends one of an item's three retries — losing the network used to burn the whole queue's budget in seconds and park it behind a Retry button. `ConnectionMonitor` turns that into a banner separating "you're offline" from "your NAS isn't answering", clears itself once `/health` returns, and resumes the queue. Reporting hangs off `FrameStationClient` so browsing counts too. 10 unit tests; verified in the simulator across kill, banner, auto-clear, and drain. |
+| **M10** ✅ | Offline | Timeline manifest and loaded buckets persist to Application Support, and the last `/v1/me` is remembered so a valid token no longer needs a round trip to render — launching out of range used to show a **sign-in form**. Image cache is finally bounded: a real LRU with a 250 MB/500 MB/1 GB/2 GB cap, plus the Cache Management screen. A 401 clears all three. |
+| **M11** ✅ | Search: place | `/places` and `/search`, the search screen, and the magnifier left of `+`. Verified against real geocoded coordinates — typing "California" matched two different place names. |
+| **M12** 🟡 | Video continuation | "Play All Videos" removed in favour of an Auto Play setting. **Broken:** the pager advances to the right clip but the arriving page never builds a player, so the next video is selected and silent. Flagged at the call site in `AssetDetailView`. |
+| **M13** | Recently Deleted | Personal-space backups only — see §9a. Shared removals already go to File Station |
+| **M14** | macOS / iPadOS / tvOS | Shared package, view-only clients |
+| — | ~~Free Up Space~~ | **Dropped** 2026-08-10, was M7. See §8 |
 
 ---
 
@@ -974,8 +1031,14 @@ of watching progress bars before anything is evaluable.
   Synology Photos. Revisit as a setting; on-device Vision is cheap, CLIP
   embeddings on the NAS enable natural-language search but add an ML runtime.
 - Semantic/object search.
-- Albums and curated collections.
+- Tag search — blocked on the importer keeping IPTC keywords, see §9.
 - Memories / on-this-day.
 - Sharing outside the household (public links).
+- Pinning ("keep this album on my device"). The timeline snapshot and the
+  image cache already make a library browsable offline; pinning is the
+  stronger promise that a *specific* set is guaranteed there.
 - Web client.
 - End-to-end encryption — would eliminate server-side thumbnails and search.
+- **Free Up Space — dropped**, not deferred. See §8.
+
+Albums, tags and ratings were on this list and are now built.
