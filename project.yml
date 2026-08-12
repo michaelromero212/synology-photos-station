@@ -62,7 +62,9 @@ targets:
     info:
       path: App/Resources/iOS/Info.plist
       properties:
-        CFBundleDisplayName: FrameStation
+        # Follows the configuration, so a Debug build is called FrameStation Dev
+        # on the home screen and cannot be mistaken for the real one.
+        CFBundleDisplayName: $(APP_DISPLAY_NAME)
         # Pinned to the app's own background rather than left as `{}`.
         #
         # An empty launch screen follows the *device's* appearance, while the
@@ -136,10 +138,34 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation
+        APP_DISPLAY_NAME: FrameStation
         # iPhone + iPad.
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/Resources/iOS/FrameStation.entitlements
+      configs:
+        # A Debug build is a different app from the one on your phone, and this
+        # is the line that makes that true rather than merely intended.
+        #
+        # iOS scopes a Keychain item by access group, which defaults to
+        # `$(AppIdentifierPrefix)$(CFBundleIdentifier)` — so a separate bundle
+        # identifier means the test build cannot read, overwrite or sign out the
+        # real app's session even when both are installed on the same iPhone. It
+        # gets its own container, its own cached library and its own push topic
+        # for free, along the same seam.
+        #
+        # The alternative was discipline: never install a debug build on the
+        # real device. That works right up until the one time you need to test
+        # something on real hardware, and by then the damage is a sign-in screen
+        # where the family library used to be.
+        #
+        # Nothing else needed renaming. The BGTask identifiers are matched
+        # against Info.plist rather than the bundle id, background URLSession
+        # identifiers are already per-app, and the Keychain *service* string can
+        # stay shared precisely because the access group is what separates them.
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation.dev
+          APP_DISPLAY_NAME: FrameStation Dev
     dependencies:
       - package: FrameStationKit
         product: FrameStationKit
