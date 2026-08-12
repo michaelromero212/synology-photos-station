@@ -33,7 +33,22 @@ struct PhotoCell: View {
             .overlay(alignment: .top) { durationBadge }
             .overlay(alignment: .bottom) { favouriteBadge }
             .contentShape(Rectangle())
-            .task(id: item.assetID) { await load() }
+            // Keyed on the derivation state as well as the identity. Keyed on
+            // the id alone, a tile drawn before its thumbnail existed never
+            // asked again: the id doesn't change when the derivation lands, so
+            // the task never re-ran and the cell sat grey until the app was
+            // relaunched. The id still has to be in the key — cells are recycled
+            // between photos and must reload when the photo changes.
+            .task(id: LoadKey(assetID: item.assetID, isDerived: item.isDerived)) {
+                await load()
+            }
+    }
+
+    /// What makes a reload necessary: a different photo, or the same photo
+    /// finally having a picture to fetch.
+    private struct LoadKey: Equatable {
+        let assetID: UUID
+        let isDerived: Bool
     }
 
     @ViewBuilder

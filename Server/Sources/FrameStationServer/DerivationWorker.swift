@@ -39,6 +39,17 @@ actor DerivationWorker {
         let blobExt: String
     }
 
+    /// Where an asset sits, so a finished derivation can be announced.
+    ///
+    /// Both halves matter. `/changes` is scoped per space, and it filters on
+    /// `entity = 'space_asset'` and hydrates by the *placement* id — so
+    /// announcing the asset's own id under `entity = 'asset'` is silently
+    /// dropped on the floor.
+    struct SpacePlacement: Decodable {
+        let id: UUID
+        let spaceID: UUID
+    }
+
     func start() {
         guard !running else { return }
         running = true
@@ -173,14 +184,55 @@ actor DerivationWorker {
                     store: app.blobStore,
                     logger: app.logger
                 )
-                try await app.sql.raw("""
-                    UPDATE assets
-                    SET thumbhash  = \(bind: output.thumbHash.map { ByteBuffer(bytes: $0) }),
-                        width      = COALESCE(width, \(bind: output.width)),
-                        height     = COALESCE(height, \(bind: output.height)),
-                        derived_at = now()
-                    WHERE id = \(bind: asset.id)
-                    """).run()
+                let assetID = asset.id
+                let thumbHash = output.thumbHash.map { ByteBuffer(bytes: $0) }
+                let width = output.width
+                let height = output.height
+
+                // Announced, not just recorded.
+                //
+                // This is the moment a grey tile becomes a picture: before it,
+                // the asset has no thumbnail and no ThumbHash, so the grid draws
+                // a blank rectangle and `PhotoCell` won't even request an image
+                // because `isDerived` is false. Setting `derived_at` silently
+                // left every client holding a cached item that still said
+                // false — and since nothing changes the item's id, the cell
+                // never reloads either. The tile stayed grey until the app was
+                // relaunched, which hit hardest the one person guaranteed to be
+                // looking: whoever just uploaded.
+                //
+                // Delta sync already exists to carry exactly this. It was simply
+                // never told. One row per space the asset belongs to, because
+                // `/changes` is scoped per space.
+                try await app.withPinnedConnection { sql in
+                    try await sql.raw("BEGIN").run()
+                    do {
+                        try await sql.raw("""
+                            UPDATE assets
+                            SET thumbhash  = \(bind: thumbHash),
+                                width      = COALESCE(width, \(bind: width)),
+                                height     = COALESCE(height, \(bind: height)),
+                                derived_at = now()
+                            WHERE id = \(bind: assetID)
+                            """).run()
+
+                        let placements = try await sql.raw("""
+                            SELECT id, space_id AS "spaceID" FROM space_assets
+                            WHERE asset_id = \(bind: assetID) AND deleted_at IS NULL
+                            """).all(decoding: SpacePlacement.self)
+
+                        for placement in placements {
+                            _ = try await ChangeLog.append(
+                                spaceID: placement.spaceID, entity: "space_asset",
+                                entityID: placement.id, op: "update", on: sql
+                            )
+                        }
+                        try await sql.raw("COMMIT").run()
+                    } catch {
+                        try? await sql.raw("ROLLBACK").run()
+                        throw error
+                    }
+                }
 
             default:
                 try await finish(job: job, app: app, error: "unknown job kind \(job.kind)")

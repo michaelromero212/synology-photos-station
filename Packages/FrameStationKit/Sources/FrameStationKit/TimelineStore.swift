@@ -148,6 +148,11 @@ public final class TimelineStore {
             guard !delta.changes.isEmpty else { return }
 
             var touched = Set<String>()
+            // Whether any bucket gained or lost an item, as opposed to an item
+            // being replaced where it already sat. See the manifest refetch
+            // below — this is the difference between the two.
+            var membershipMoved = false
+
             for change in delta.changes {
                 switch change.op {
                 case .insert, .update:
@@ -157,13 +162,17 @@ public final class TimelineStore {
                     var bucket = items[key] ?? []
                     if let index = bucket.firstIndex(where: { $0.id == item.id }) {
                         bucket[index] = item
-                    } else if items[key] != nil {
-                        bucket.append(item)
+                    } else {
+                        // Either genuinely new, or re-dated out of another
+                        // bucket and into this one. Both change the counts.
+                        membershipMoved = true
+                        if items[key] != nil { bucket.append(item) }
                     }
                     if items[key] != nil {
                         items[key] = bucket.sorted { $0.capturedAt > $1.capturedAt }
                     }
                 case .delete:
+                    membershipMoved = true
                     for (key, bucket) in items where bucket.contains(where: { $0.id == change.entityID }) {
                         items[key] = bucket.filter { $0.id != change.entityID }
                         touched.insert(key)
@@ -172,8 +181,21 @@ public final class TimelineStore {
             }
 
             cursor = delta.cursor
-            // Counts and bucket membership changed; the manifest is cheap.
-            await load()
+
+            // Only when membership actually moved.
+            //
+            // `load()` replaces the manifest, and the grid builds its sections
+            // from that — so every call re-identifies the whole `LazyVStack`.
+            // Done while somebody is scrolled into the middle of a library, that
+            // can strand the scroll position past the end of the rebuilt content
+            // and leave them looking at nothing.
+            //
+            // It used to be rare enough not to matter, because only real inserts
+            // and deletes produced a delta. Now a finished thumbnail produces one
+            // too — that is the whole point of announcing derivations — and an
+            // update in place changes neither bucket membership nor any count,
+            // so there is nothing in the manifest for it to refresh.
+            if membershipMoved { await load() }
         } catch {
             // A failed refresh leaves the existing timeline intact on purpose —
             // a transient network blip should not blank the grid.
