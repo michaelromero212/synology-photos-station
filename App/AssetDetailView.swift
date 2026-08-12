@@ -457,7 +457,14 @@ struct AssetDetailView: View {
         .ignoresSafeArea()
         // A photo left zoomed shouldn't hold the pager hostage once you've
         // swiped away from it.
-        .onChange(of: currentID) { _, _ in isZoomed = false }
+        .onChange(of: currentID) { _, _ in
+            isZoomed = false
+            // Whatever you just left stops. Nil on a photo, so swiping from a
+            // clip to a still silences it too.
+            preloader.playOnly(
+                currentItem.mediaType == .video ? currentItem.assetID : nil
+            )
+        }
         // No vertical gesture here on purpose. This briefly had swipe-up for
         // the next clip and swipe-down for the previous, which is the Reels
         // convention, not Photos': there, up opens the info panel and down

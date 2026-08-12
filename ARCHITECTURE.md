@@ -919,14 +919,25 @@ which is the Reels convention dressed up as an obvious one. Photos spends up on
 the info panel and down on dismissing; claiming both to buy one invented gesture
 is a bad trade, and neither is ours to take.
 
-**Known defect:** paging *backwards* by swipe does not commit. The zoom
-navigation transition installs an interactive dismiss that took the rightward
-drag before the pager's scroll view saw it — the data source was never even
-asked for the previous page, and the swipe popped the viewer back to the grid.
-Making the dismiss recognisers wait for the pager's pan (`claimHorizontalDrags`)
-stopped the pop and the data source is now consulted, but the transition still
-does not complete. Forward paging is unaffected. This must be resolved before
-the viewer work merges.
+Two things had to be fixed for that split to hold, and one of them was my own
+testing. The zoom navigation transition installs an interactive dismiss that
+took a rightward drag before the pager's scroll view saw it — the data source
+was never asked for the previous page and the swipe popped the viewer back to
+the grid. Making the dismiss recognisers wait for the pager's pan
+(`claimHorizontalDrags`) settles that: a horizontal drag is one the pan
+recognises, so it pages; a vertical one it fails, so the dismiss runs.
+
+`updateUIViewController` also must not touch the pager mid-drag. During an
+interactive transition `viewControllers.first` already reports the *incoming*
+page, so a SwiftUI update — and a playing video causes plenty — would decide the
+pager was in the wrong place and call `setViewControllers` back to the start of
+the swipe, cancelling it a frame before it committed. Hence `isTransitioning`.
+
+**Only one video plays at a time**, and that is enforced by `VideoPreloader.playOnly`
+rather than by the player view disappearing. The pages are hosted in view
+controllers built once and kept, so a page scrolling away does not reliably tear
+its player down — a clip left running off-screen keeps its audio going and plays
+itself to the end, so returning to it lands on a black frame at `-0:00`.
 
 ### Deletion has two independent axes
 
@@ -1038,7 +1049,7 @@ of watching progress bars before anything is evaluable.
 | **M9** ✅ | Bad connections | `TransferFailure` classifies every failure as unreachable / authentication / the item's own fault, and only the last spends one of an item's three retries — losing the network used to burn the whole queue's budget in seconds and park it behind a Retry button. `ConnectionMonitor` turns that into a banner separating "you're offline" from "your NAS isn't answering", clears itself once `/health` returns, and resumes the queue. Reporting hangs off `FrameStationClient` so browsing counts too. 10 unit tests; verified in the simulator across kill, banner, auto-clear, and drain. |
 | **M10** ✅ | Offline | Timeline manifest and loaded buckets persist to Application Support, and the last `/v1/me` is remembered so a valid token no longer needs a round trip to render — launching out of range used to show a **sign-in form**. Image cache is finally bounded: a real LRU with a 250 MB/500 MB/1 GB/2 GB cap, plus the Cache Management screen. A 401 clears all three. |
 | **M11** ✅ | Search: place | `/places` and `/search`, the search screen, and the magnifier left of `+`. Verified against real geocoded coordinates — typing "California" matched two different place names. |
-| **M12** 🟡 | Video continuation | "Play All Videos" removed in favour of an Auto Play setting. **Auto-advance works**: a finished clip rolls into the next one from the same day and plays. The cause of the old failure was `TabView(.page)` — it builds pages lazily and silently ignores a programmatic selection to a page it has not built, so the destination never existed. Replaced with a `UIPageViewController` representable, which also gives the preload hook. Next videos are prepared while the current one plays (`VideoPreloader`), so arriving costs no round trip. Skip-to-next is a button in the viewer chrome; macOS and tvOS get Previous/Next. **Remaining:** paging *backwards* by swipe no longer commits — see §9a. |
+| **M12** ✅ | Video continuation | "Play All Videos" removed in favour of an Auto Play setting. **Auto-advance works**: a finished clip rolls into the next one from the same day and plays. The cause of the old failure was `TabView(.page)` — it builds pages lazily and silently ignores a programmatic selection to a page it has not built, so the destination never existed. Replaced with a `UIPageViewController` representable, which also gives the preload hook. Next videos are prepared while the current one plays (`VideoPreloader`), so arriving costs no round trip. Skip-to-next is a button in the viewer chrome; macOS and tvOS get Previous/Next. Horizontal paging works both ways, video to photo to video, verified on device. |
 | **M13** | Recently Deleted | Personal-space backups only — see §9a. Shared removals already go to File Station |
 | **M14** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 | — | ~~Free Up Space~~ | **Dropped** 2026-08-10, was M7. See §8 |

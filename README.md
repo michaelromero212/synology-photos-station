@@ -6,9 +6,10 @@ with native clients for iOS, iPadOS, macOS, and tvOS. Replaces Synology Photos.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. This file covers
 running and deploying what exists today.
 
-**Status: M11.** The library works end to end — upload, media pipeline,
+**Status: M12.** The library works end to end — upload, media pipeline,
 timeline with delta sync, shared spaces with attribution, albums, tags and
-ratings, video playback, the iOS backup engine, and search by place. Push is
+ratings, video playback that continues into the next clip, the iOS backup
+engine, and search by place. Push is
 built and verified in the simulator but has never made a real APNs round trip —
 that needs an Apple Developer account and a physical device.
 
@@ -18,9 +19,7 @@ queue's retry budget, and launching out of range shows the cached library
 instead of a sign-in form.
 
 Remaining: a `UICollectionView` grid for 100k scale, Recently Deleted, and the
-view-only macOS/tvOS clients. One known defect — swiping *backwards* through the
-viewer no longer commits (ARCHITECTURE.md §9a). Forward paging, auto-advance and
-video preloading all work.
+view-only macOS/tvOS clients.
 
 ---
 

@@ -87,6 +87,17 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIPageViewController, context: Context) {
         context.coordinator.parent = self
 
+        // Never while a swipe is in flight, and this is the whole reason
+        // backwards paging appeared broken.
+        //
+        // During an interactive transition `viewControllers.first` already
+        // reports the *incoming* page, so any SwiftUI update mid-drag — and a
+        // playing video causes plenty — saw a controller that didn't match
+        // `focus`, decided the pager was in the wrong place, and called
+        // `setViewControllers` back to where the swipe started. The drag was
+        // being cancelled by its own view update, a frame before it committed.
+        guard !context.coordinator.isTransitioning else { return }
+
         guard let target = context.coordinator.controller(for: focus.currentID) else { return }
         let showing = controller.viewControllers?.first
         guard showing !== target else { return }
@@ -107,6 +118,11 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
         /// Built once per item and kept, so paging back to a photo doesn't
         /// re-download its preview.
         private var hosted: [UUID: UIHostingController<Page>] = [:]
+
+        /// True from the moment a swipe starts moving a page until it lands or
+        /// springs back. `updateUIViewController` must keep its hands off the
+        /// pager for that whole window.
+        private(set) var isTransitioning = false
 
         init(_ parent: PagerView) {
             self.parent = parent
@@ -189,10 +205,18 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
 
         func pageViewController(
             _ controller: UIPageViewController,
+            willTransitionTo pendingViewControllers: [UIViewController]
+        ) {
+            isTransitioning = true
+        }
+
+        func pageViewController(
+            _ controller: UIPageViewController,
             didFinishAnimating finished: Bool,
             previousViewControllers: [UIViewController],
             transitionCompleted completed: Bool
         ) {
+            isTransitioning = false
             // Only when the swipe actually landed. A drag that springs back
             // must not renumber the viewer.
             guard completed, let showing = controller.viewControllers?.first,

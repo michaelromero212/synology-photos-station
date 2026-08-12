@@ -43,6 +43,22 @@ final class VideoPreloader {
         Task { await model.prepare(assetID: assetID, client: client) }
     }
 
+    /// Exactly one video plays at a time, and it is the one on screen.
+    ///
+    /// Relying on the player view disappearing is not enough: the pages are
+    /// hosted in view controllers that are built once and kept, so a page
+    /// scrolling away does not reliably tear its player down. A clip left
+    /// running off-screen keeps its audio going and, worse, quietly plays
+    /// itself to the end — so arriving back at it, or auto-advancing into it,
+    /// lands on a black frame at `-0:00`.
+    ///
+    /// Pass nil when the current item is a photo.
+    func playOnly(_ assetID: UUID?) {
+        for (id, model) in models where id != assetID {
+            model.pause()
+        }
+    }
+
     private func touch(_ assetID: UUID) {
         recency.removeAll { $0 == assetID }
         recency.append(assetID)
