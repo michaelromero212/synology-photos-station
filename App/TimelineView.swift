@@ -67,7 +67,6 @@ struct TimelineView: View {
     @State private var showBackupSettings = false
     @State private var showPicker = false
     @State private var showSearch = false
-    @State private var shareResult: Int?
     /// Owned by RootTabView, read here because this is where a broken
     /// connection has to be visible.
     @Environment(\.connectionMonitor) private var connection
@@ -222,22 +221,16 @@ struct TimelineView: View {
         }
         #endif
         #if os(iOS)
+        // No confirmation when the sheet closes. The photos appearing in the
+        // grid behind it *is* the confirmation, and an alert on top of that
+        // makes you dismiss a dialog to look at the thing it is describing.
         .sheet(isPresented: $showPicker) {
-            LibraryPickerView(session: session, space: space) { count in
+            LibraryPickerView(session: session, space: space) { _ in
                 showPicker = false
-                shareResult = count
                 Task { await store?.refresh() }
             } onCancel: {
                 showPicker = false
             }
-        }
-        .alert(
-            "Added to \(space.name)",
-            isPresented: Binding(get: { shareResult != nil }, set: { if !$0 { shareResult = nil } })
-        ) {
-            Button("OK") { shareResult = nil }
-        } message: {
-            Text(shareResult.map { "\($0) item\($0 == 1 ? "" : "s") shared." } ?? "")
         }
         .sheet(isPresented: $showBackup) {
             if let engine {
@@ -891,6 +884,16 @@ struct TimelineView: View {
         // to say regardless of whether anything is being uploaded.
         if let connection, connection.state != .online {
             connectionBanner(connection.state)
+        } else if space.kind != .personal {
+            // Backup is about *this phone's camera roll*, which has nothing to
+            // do with a library the family contributes to. Offering "turn on
+            // Photo Backup" above a shared space invites the reading that it
+            // would back up into that space, and it wouldn't — backup has one
+            // target, chosen in its own settings.
+            //
+            // A broken connection still shows above, because that breaks
+            // browsing here as much as anywhere.
+            EmptyView()
         } else if !backupSettings.enabled {
             // Backup being off is worth interrupting for once, with the action
             // attached — a status row you have to know to tap is how people end
