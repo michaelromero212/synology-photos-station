@@ -47,6 +47,9 @@ struct RootTabView: View {
             NavigationStack { moreTab }
             .tabItem { Label("More", systemImage: "ellipsis") }
         }
+        // On the TabView rather than per-tab: the bar is one control shared by
+        // all four, and setting it four times is four chances to miss one.
+        .glassTabBar()
         #if os(iOS)
         .environment(\.connectionMonitor, connection)
         .task {

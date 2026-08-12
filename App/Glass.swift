@@ -79,6 +79,33 @@ extension View {
             in: Circle(), tint: tint, interactive: interactive, fallback: fallback
         )
     }
+
+    /// The tab bar the library is meant to show through.
+    ///
+    /// Nothing to do on 26: the system already floats a Liquid Glass bar down
+    /// there, and overriding its background is how you swap glass for a flat
+    /// material. What made ours read as a solid slab was never the bar — it was
+    /// that nothing was passing behind it to be seen through. See the grid's
+    /// top-edge clip.
+    ///
+    /// Below 26 the bar is opaque enough to cut the grid off, so it takes a
+    /// material instead. `.thin` rather than the `.ultraThin` the floating
+    /// chrome uses: those are pills carrying one or two glyphs, and this one
+    /// carries four labels that have to stay readable over a bright photo.
+    ///
+    /// iOS only — macOS has no tab bar to place this on.
+    @ViewBuilder
+    func glassTabBar() -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            self
+        } else {
+            self.toolbarBackground(.thinMaterial, for: .tabBar)
+        }
+        #else
+        self
+        #endif
+    }
 }
 
 /// Groups glass siblings so the system can blend and morph them together.

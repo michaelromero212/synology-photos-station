@@ -152,10 +152,21 @@ struct TimelineView: View {
             )
             .photoZoomTransition(id: opened.id, in: photoTransition)
         }
-        // Selecting photos reuses the tab bar's slot rather than stacking a
-        // second bar above it: the actions apply to what you picked, so the
-        // places you could navigate to are not the question being asked.
-        .toolbar(selection.isActive ? .hidden : .automatic, for: .tabBar)
+        // The bottom bar stands down on the same signal as the top one, so
+        // scrolling into the library leaves nothing but photos — the whole
+        // point of letting them run under the glass in the first place is that
+        // there is then something worth uncovering.
+        //
+        // Selecting hides it too, and for a different reason: selection reuses
+        // the tab bar's slot rather than stacking a second bar above it, since
+        // the actions apply to what you picked and the places you could
+        // navigate to are not the question being asked. Which is also why this
+        // one hides during selection where the navigation bar does not — that
+        // bar is carrying the count and the way out.
+        .toolbar(
+            selection.isActive || scrollProgress.chromeHidden ? .hidden : .automatic,
+            for: .tabBar
+        )
         #endif
         .sheet(isPresented: $showSpaces) {
             SpacesView(session: session) { showSpaces = false }
@@ -558,10 +569,45 @@ struct TimelineView: View {
     /// The density control. Hidden while selecting, where the contextual
     /// actions take its place.
     private func zoomBar(_ store: TimelineStore) -> some View {
-        ZoomBar(zoom: Binding(get: { store.zoom }, set: { _ in })) { newZoom in
-            Task { await store.setZoom(newZoom) }
+        ZoomBar(zoom: store.zoom) { newZoom in
+            apply(newZoom)
         }
         .padding(.bottom, 6)
+    }
+
+    /// The zoom pill, when there is a reason for it to be there.
+    ///
+    /// It stands down on the same signal as the two bars around it, so scrolling
+    /// into the library leaves nothing but photographs — which is the whole
+    /// point of a bar that a photo can pass behind. Coming back up brings all
+    /// three together.
+    ///
+    /// The `ZStack` is load-bearing. `.animation` has to hang off something that
+    /// survives the pill leaving, or there is nothing left to run the transition
+    /// on and the bar simply blinks out — and it collapses to nothing when empty,
+    /// so the inset gives its height back rather than leaving a gap.
+    ///
+    /// Not on macOS, where the same two steps live in the window toolbar.
+    @ViewBuilder
+    private func floatingZoom(_ store: TimelineStore) -> some View {
+        #if !os(macOS)
+        ZStack {
+            if !scrollProgress.chromeHidden {
+                zoomBar(store)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.28), value: scrollProgress.chromeHidden)
+        #endif
+    }
+
+    /// Takes one step along the zoom ladder, if there is one to take.
+    ///
+    /// Shared by the pill and by the Mac's toolbar and keyboard shortcuts, so
+    /// the two can't drift into disagreeing about what a step does.
+    private func apply(_ newZoom: TimelineZoom?) {
+        guard let newZoom, let store else { return }
+        Task { await store.setZoom(newZoom) }
     }
 
     #if os(iOS)
@@ -712,7 +758,10 @@ struct TimelineView: View {
             // there in plain sight above the date — and, while the bar is up,
             // behind the title too, which on iOS 26 has no background of its
             // own to hide it.
-            .clipped()
+            //
+            // The top edge only. `.clipped()` did all four, and the bottom one
+            // was the price: see `TopEdgeClip`.
+            .clipShape(TopEdgeClip())
             // Reads the scroll view's own offset rather than inferring it from
             // content geometry: a LazyVStack only measures realised rows, so a
             // background GeometryReader reports a height that grows as you
@@ -790,9 +839,13 @@ struct TimelineView: View {
                         }
                     }
                 } else {
-                    zoomBar(store)
+                    floatingZoom(store)
                 }
                 #else
+                // tvOS keeps its pill up. Hiding chrome on scroll is a gesture
+                // idiom; on a remote the bar is somewhere you *navigate* to,
+                // and one that disappears as you move down the grid is one you
+                // can no longer reach.
                 zoomBar(store)
                 #endif
             }
@@ -1060,6 +1113,33 @@ struct TimelineView: View {
                     Label("Select", systemImage: "checkmark.circle")
                 }
             }
+
+            // The Mac's answer to the phone's zoom pill. A capsule floating over
+            // the photos is a touch idiom — it exists because a phone has no
+            // window furniture to put anything in — and a Mac emphatically does,
+            // so the same two steps go where a Mac keeps its view controls, with
+            // the ⌘+ / ⌘− every Mac app has trained people to reach for first.
+            //
+            // Declared out-then-in so they read left to right the way the pill
+            // does, and disabled at the ends for the same reason it is.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    apply(store?.zoom.zoomedOut)
+                } label: {
+                    Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                }
+                .disabled(store?.zoom.zoomedOut == nil)
+                .keyboardShortcut("-", modifiers: .command)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    apply(store?.zoom.zoomedIn)
+                } label: {
+                    Label("Zoom In", systemImage: "plus.magnifyingglass")
+                }
+                .disabled(store?.zoom.zoomedIn == nil)
+                .keyboardShortcut("+", modifiers: .command)
+            }
         }
         #endif
 
@@ -1131,5 +1211,26 @@ struct TimelineView: View {
         guard let date = parser.date(from: key) else { return key }
         display.timeZone = TimeZone(identifier: "UTC")
         return display.string(from: date)
+    }
+}
+
+/// Trims the grid at the top edge and lets it run off the bottom.
+///
+/// The grid used to be `.clipped()`, which trims all four. The top edge is the
+/// one that had to be trimmed — a row drawn above the frame sits under the
+/// status bar in plain sight above the pinned date — but the bottom edge came
+/// along with it, and that is what stopped the library dead at the tab bar.
+/// Photos ended behind a bar with nothing passing under it, so the glass down
+/// there had nothing to be glass over and read as a solid slab.
+///
+/// The overhang has to clear the zoom bar, the tab bar and the home indicator
+/// stacked together, and there is nothing below the screen for the surplus to
+/// spill onto, so it is set generously rather than measured.
+private struct TopEdgeClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(
+            x: rect.minX, y: rect.minY,
+            width: rect.width, height: rect.height + 320
+        ))
     }
 }
