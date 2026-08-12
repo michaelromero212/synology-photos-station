@@ -94,6 +94,14 @@ final class AppSession {
 
     var selectedSpace: SpaceDTO?
 
+    /// A `-FSServerURL` supplied at launch, if there was one.
+    ///
+    /// Only ever written by the DEBUG hook below; nil in a shipping build. Held
+    /// rather than merely applied to the address fields, because `restore()`
+    /// needs to know that the address it is about to read off the stored
+    /// credential has been deliberately overridden.
+    private var launchServerURL: URL?
+
     #if DEBUG
     /// Launch-argument hook so the app can be driven headlessly for screenshots
     /// and UI verification:
@@ -111,6 +119,7 @@ final class AppSession {
         // Launch arguments win: they exist to override whatever the last run
         // left behind.
         if let text = defaults.string(forKey: "FSServerURL"), let url = URL(string: text) {
+            launchServerURL = url
             applyAddress(url)
         }
         if let code = defaults.string(forKey: "FSInviteCode") { inviteCode = code }
@@ -164,13 +173,29 @@ final class AppSession {
             phase = .disconnected
             return false
         }
-        applyAddress(saved.serverURL)
+        // The stored address, unless launch arguments overrode it.
+        //
+        // `init()` says launch arguments win, and until now this line quietly
+        // decided otherwise: it read the address back off the credential and put
+        // the app straight back on whichever server it last signed in to. So the
+        // documented `-FSServerURL` hook worked on a fresh install and silently
+        // did nothing on every run after — which is precisely when you reach for
+        // it, moving a test build between a laptop server and the NAS.
+        //
+        // The token travels with the override rather than being discarded.
+        // Moving a dev server to a different port does not invalidate anyone's
+        // session, and forcing a fresh invite code for a port change would make
+        // the hook useless for the thing it exists to do. If the token really
+        // doesn't belong to whatever is answering there, the `me()` below gets a
+        // 401 and the existing path clears it.
+        let baseURL = launchServerURL ?? saved.serverURL
+        applyAddress(baseURL)
         // Deliberately *not* `.connecting`: that phase means "you tapped Sign
         // In and we're working on it", and the sign-in form renders for it. A
         // silent restore has no form to show progress in — it stays on the
         // launch screen until it knows the answer.
 
-        let client = FrameStationClient(configuration: .init(baseURL: saved.serverURL, token: saved.token))
+        let client = FrameStationClient(configuration: .init(baseURL: baseURL, token: saved.token))
         do {
             let me = try await client.me()
             adopt(client: client, me: me)

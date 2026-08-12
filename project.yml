@@ -84,6 +84,24 @@ targets:
         NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network for full-speed backup and browsing.
         NSBonjourServices:
           - _framestation._tcp
+        # Without this the app cannot talk to a NAS over plain HTTP, and the
+        # sign-in screen offers an HTTPS toggle precisely because plain HTTP is
+        # a supported way to run this.
+        #
+        # App Transport Security blocks cleartext to an IP literal by default,
+        # and it blocks it *before* the request reaches the network — so the
+        # failure arrives as a transport error, is classified `.unreachable`,
+        # and the grid tells the user their NAS isn't responding when in fact
+        # iOS never let us ask it. Turning the toggle off produced a permanently
+        # broken connection blamed on the box in the basement.
+        #
+        # `NSAllowsLocalNetworking` and not `NSAllowsArbitraryLoads`: this
+        # exempts link-local addresses, `.local` names and unqualified hosts —
+        # exactly the addresses a NAS on your own network has — while leaving
+        # cleartext to the public internet blocked. It also needs no App Review
+        # justification, which the blanket key does.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # M5: background uploads survive termination only via a background
         # URLSession; BGTaskScheduler drives the catch-up scans.
         UIBackgroundModes:
