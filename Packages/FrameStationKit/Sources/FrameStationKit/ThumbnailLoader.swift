@@ -20,7 +20,12 @@ public typealias PlatformImage = NSImage
 public actor ThumbnailLoader {
     private let client: FrameStationClient
     private let session: URLSession
-    private let memory = NSCache<NSString, CacheEntry>()
+    /// `nonisolated(unsafe)` because `NSCache` carries its own lock, so the
+    /// actor's isolation is redundant for it — and `cachedThumbnail` needs to
+    /// read it without suspending. Spelled out rather than left implicit: the
+    /// exemption is safe for *this* type specifically, not for the rest of the
+    /// actor's state, which genuinely does need the isolation.
+    nonisolated(unsafe) private let memory = NSCache<NSString, CacheEntry>()
     private let diskRoot: URL
     private var inFlight: [URL: Task<Fetched, Never>] = [:]
 
@@ -71,6 +76,22 @@ public actor ThumbnailLoader {
         return await image(
             at: url, key: "\(assetID)-\(size)", targetPixels: size, isPrefetch: isPrefetch
         )
+    }
+
+    /// An already-decoded thumbnail, without suspending.
+    ///
+    /// Everything else here is `async`, which means even a tile whose image is
+    /// sitting decoded in memory has to wait for two actor hops — one to build
+    /// the URL, one to reach this cache — before it can be drawn. Across a
+    /// screenful that is a frame or two of grey on every appearance, and leaving
+    /// a tab and coming back re-runs all of it: the grid is rebuilt from
+    /// scratch, so every visible cell pays the round trip again at once.
+    ///
+    /// The key is derivable from the asset and the size alone, so the lookup
+    /// needs none of that. `NSCache` is its own lock, and this only ever reads,
+    /// so it is safe to reach from outside the actor's isolation.
+    nonisolated public func cachedThumbnail(assetID: UUID, size: Int) -> PlatformImage? {
+        memory.object(forKey: "\(assetID)-\(size)" as NSString)?.image
     }
 
     public func preview(assetID: UUID, targetPixels: Int = 2048) async -> PlatformImage? {

@@ -18,6 +18,20 @@ struct PhotoCell: View {
     @State private var image: PlatformImage?
     @State private var placeholder: PlatformImage?
 
+    /// Seeded from the decoded-image cache, so a tile whose picture is already
+    /// in memory draws it in the very first frame rather than after two actor
+    /// hops. That is what a tab switch costs otherwise: the grid is rebuilt, so
+    /// every visible cell starts from nothing at the same moment and the whole
+    /// screen greys before it fills.
+    init(item: TimelineItem, loader: ThumbnailLoader?, size: CGSize) {
+        self.item = item
+        self.loader = loader
+        self.size = size
+        _image = State(initialValue: loader?.cachedThumbnail(
+            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
+        ))
+    }
+
     /// The picture is clipped to the tile *before* the overlay goes on.
     ///
     /// It used to be a `ZStack` of image and overlay with the frame applied to
@@ -127,16 +141,40 @@ struct PhotoCell: View {
     }
 
     private func load() async {
+        // Already painted from the memory cache by `init`; nothing to fetch and
+        // nothing to animate.
+        if image != nil { return }
+
         if let bytes = item.thumbHashBytes {
             placeholder = ThumbnailLoader.placeholder(from: bytes)
         }
         // 202 while the derivation queue is behind; keep the placeholder rather
-        // than requesting an image that isn't there yet.
+        // than requesting an image that isn't there yet. The grid is told when
+        // that changes — see DerivationWorker — and this task is keyed on it.
         guard item.isDerived, let loader else { return }
-        let loaded = await loader.thumbnail(
-            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
-        )
-        withAnimation(.easeOut(duration: 0.18)) { image = loaded }
+
+        // A nil answer is a setback, not a verdict.
+        //
+        // It used to be final: one dropped connection, one request cancelled by
+        // navigating away mid-flight, or one coalesced caller inheriting a
+        // failure, and that tile stayed grey for the life of the cell. Nothing
+        // ever asked again, which is why thumbnails "sometimes" didn't come back
+        // after leaving a tab and returning.
+        //
+        // Three tries with a widening gap, and only for photos the server has
+        // already said it derived — so this retries a genuine failure and never
+        // polls for work that hasn't been done yet.
+        for attempt in 0..<3 {
+            if let loaded = await loader.thumbnail(
+                assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
+            ) {
+                withAnimation(.easeOut(duration: 0.18)) { image = loaded }
+                return
+            }
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: 300_000_000 << UInt64(attempt))
+            guard !Task.isCancelled else { return }
+        }
     }
 
     /// `0:59`, `12:08`, `1:02:33` — the way Photos writes them.
