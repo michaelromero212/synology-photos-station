@@ -344,68 +344,14 @@ you want. [First-time setup](#first-time-setup) below is for a fresh box.
 
 ### Routine updates
 
-Every change reaches the NAS the same way. The whole loop is:
+**See [DEPLOY.md](DEPLOY.md).** The commands that actually work against this
+NAS live there rather than here — literal values, the decision table for what
+a given change needs, and the gotchas (`ssh -t` for sudo, docker not being on
+`PATH`, `pull` never updating the compose file, `/health` being unable to tell
+you the NAS is current).
 
-```bash
-git push                                    # on your Mac; CI rebuilds `latest`
-```
-
-then on the NAS, once CI is green:
-
-```bash
-docker compose pull && docker compose up -d
-curl -s http://127.0.0.1:8080/health
-```
-
-Two things make that insufficient, and both are silent when you skip them.
-
-**A new migration is a one-way step on real data.** Snapshot `pgdata` first —
-Btrfs snapshots are why the shared folder is on Btrfs. Compare what you have
-against what the NAS has applied:
-
-```bash
-ls Server/Sources/FrameStationServer/Migrations/SQL/*.sql | wc -l   # on your Mac
-curl -s http://127.0.0.1:8080/health                                # migrationsApplied
-```
-
-Migrations run automatically on first boot of the new image, atomically and in
-filename order. They do not run backwards.
-
-**`docker compose pull` does not update `docker-compose.yml`.** It updates the
-image the file names. If the compose file or `.env.example` changed, copy them
-up *before* pulling, or you get the new code running under the old
-configuration — new server, none of the new behaviour, and nothing says so:
-
-```bash
-cat docker-compose.yml | ssh nas 'cat > /volume1/docker/framestation/docker-compose.yml'
-```
-
-#### What to check, by what changed
-
-| Changed | The NAS needs |
-|---|---|
-| Server Swift only | `pull && up -d` |
-| A new `Migrations/SQL/*.sql` | Snapshot `pgdata` first, then confirm `migrationsApplied` |
-| `docker-compose.yml` or `.env.example` | Copy both up **before** pulling |
-| A new bind mount in compose | Create the directory on the NAS first — Synology's Docker fails rather than creating it |
-| App or `Packages/` only | Nothing. That ships through Xcode, not the NAS |
-
-#### Which build is actually running
-
-`/health` reports `version`, but that is `Build.version` in
-[Configure.swift](Server/Sources/FrameStationServer/Configure.swift) and is
-bumped by hand — it tells you the milestone, not the commit. For the commit,
-CI also publishes a `sha-<short>` tag alongside `latest`, so:
-
-```bash
-docker compose images        # digest of what is running
-```
-
-Pin a known-good build by setting `FRAMESTATION_IMAGE` in `.env` to
-`ghcr.io/michaelromero212/framestation-server:sha-abc1234`, and unset it to
-follow `latest` again. Container Manager → Image shows the same thing with a
-build date, which is the quickest way to spot a NAS that has quietly not been
-pulled in weeks.
+Kept in one place deliberately: a runbook duplicated across two files is a
+runbook that disagrees with itself within a month.
 
 ### First-time setup
 
