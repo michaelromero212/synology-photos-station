@@ -133,3 +133,25 @@ public struct MediaEditResponse: Codable, Sendable {
         self.relocated = relocated
     }
 }
+
+// MARK: - Credit
+
+/// Who a photo should be attributed to, when that isn't who uploaded it.
+///
+/// A correction, not a rewrite. `space_assets.uploaded_by_user_id` records which
+/// account pushed the bytes and stays exactly as it was; this sets an override
+/// that display prefers. The two genuinely differ — a phone handed round at a
+/// birthday uploads under whoever is signed in, and a shared iPad backs up the
+/// whole household under one account. In both cases the upload record is right
+/// and the credit is wrong.
+public struct SetCreditRequest: Codable, Sendable, Hashable {
+    public let assetIDs: [UUID]
+    /// The member to credit, or nil to drop the correction and fall back to
+    /// whoever actually uploaded it.
+    public let creditedTo: UUID?
+
+    public init(assetIDs: [UUID], creditedTo: UUID?) {
+        self.assetIDs = assetIDs
+        self.creditedTo = creditedTo
+    }
+}

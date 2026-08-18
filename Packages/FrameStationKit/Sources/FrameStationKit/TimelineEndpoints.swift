@@ -183,6 +183,21 @@ extension FrameStationClient {
             body: RotateMediaRequest(assetIDs: assetIDs, rotation: rotation)
         )
     }
+
+    /// Corrects who photos are attributed to, or clears the correction.
+    ///
+    /// Never rewrites who uploaded them — that stays recorded server-side as the
+    /// fact it is. Passing nil for `creditedTo` drops the override and returns
+    /// the credit to the uploader.
+    @discardableResult
+    public func setCredit(
+        spaceID: UUID, assetIDs: [UUID], creditedTo: UUID?
+    ) async throws -> MediaEditResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/assets/credit",
+            body: SetCreditRequest(assetIDs: assetIDs, creditedTo: creditedTo)
+        )
+    }
 }
 
 // MARK: - Spaces

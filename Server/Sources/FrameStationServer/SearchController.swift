@@ -113,7 +113,7 @@ struct SearchController: RouteCollection {
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                    ) AS "isFavorite",
-                   sa.uploaded_by_user_id AS "uploadedBy",
+                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                    (a.derived_at IS NOT NULL) AS "isDerived"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id

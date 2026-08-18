@@ -144,7 +144,7 @@ struct TimelineController: RouteCollection {
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                    ) AS "isFavorite",
-                   sa.uploaded_by_user_id AS "uploadedBy",
+                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                    (a.derived_at IS NOT NULL) AS "isDerived"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
@@ -208,7 +208,7 @@ struct TimelineController: RouteCollection {
                            SELECT 1 FROM space_asset_favorites f
                            WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                        ) AS "isFavorite",
-                       sa.uploaded_by_user_id AS "uploadedBy",
+                       COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                        (a.derived_at IS NOT NULL) AS "isDerived"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
@@ -318,7 +318,10 @@ struct TimelineController: RouteCollection {
                    sa.on_device AS "onDevice"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            JOIN users u ON u.id = sa.uploaded_by_user_id
+            -- The corrected credit when there is one, the uploader otherwise.
+            -- `uploaded_by_user_id` stays untouched as the record of who sent
+            -- the bytes; see migration 0016.
+            JOIN users u ON u.id = COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id)
             JOIN spaces s ON s.id = sa.space_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.asset_id = \(bind: assetID)

@@ -12,6 +12,10 @@ import MapKit
 /// See ARCHITECTURE.md §9a.
 struct InformationPanel: View {
     let detail: AssetDetail
+    /// Supplied by hosts that can actually apply a correction. Nil leaves the
+    /// row as a plain statement — the panel stays presentational and doesn't
+    /// need a client of its own.
+    var onEditCredit: (() -> Void)?
 
     var body: some View {
         ScrollView {
@@ -97,6 +101,12 @@ struct InformationPanel: View {
 
     // MARK: - Added by
 
+    /// Tappable when the host offers a way to correct it.
+    ///
+    /// Worth being able to fix: a phone handed round at a birthday uploads under
+    /// whoever is signed in, and a shared iPad backs up the whole household
+    /// under one account. The upload record is right in both cases and the name
+    /// on the photo is wrong.
     private var addedBy: some View {
         HStack(spacing: 10) {
             Circle()
@@ -115,9 +125,16 @@ struct InformationPanel: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if onEditCredit != nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { onEditCredit?() }
     }
 
     // MARK: - Camera card

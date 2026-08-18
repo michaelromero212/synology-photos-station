@@ -982,6 +982,8 @@ private struct InformationSheet: View {
     let session: AppSession
     let onDone: () -> Void
 
+    @State private var showCreditEditor = false
+
     var body: some View {
         NavigationStack {
             content
@@ -1005,7 +1007,33 @@ private struct InformationSheet: View {
     @ViewBuilder
     private var content: some View {
         if let detail = model.detail {
+            #if !os(tvOS)
+            // Only where a correction can actually be applied: a shared space,
+            // where more than one person's photos are mixed together and the
+            // name on one can be wrong.
+            InformationPanel(
+                detail: detail,
+                onEditCredit: detail.isSharedSpace ? { showCreditEditor = true } : nil
+            )
+            .sheet(isPresented: $showCreditEditor) {
+                CreditEditorSheet(
+                    session: session,
+                    spaceID: detail.spaceID,
+                    assetIDs: [detail.assetID],
+                    currentName: detail.uploadedBy.displayName
+                ) { changed in
+                    showCreditEditor = false
+                    // Re-read rather than patch locally: the server decides what
+                    // the effective credit is, and guessing here is how the panel
+                    // and the grid end up disagreeing.
+                    if changed, let client = session.client {
+                        Task { await model.loadDetail(client) }
+                    }
+                }
+            }
+            #else
             InformationPanel(detail: detail)
+            #endif
         } else if let error = model.detailError {
             ContentUnavailableView {
                 Label("Couldn't load details", systemImage: "exclamationmark.triangle")
