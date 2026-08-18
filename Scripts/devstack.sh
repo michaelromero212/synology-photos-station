@@ -112,6 +112,33 @@ PLIST
 PLIST
 }
 
+# The server refuses to boot without its blob root and exits, which under
+# `KeepAlive` becomes a crash loop rather than a visible failure — the stack
+# looks "loaded" while nothing answers.
+#
+# This bit us for real: the blob root lived in /tmp, macOS clears /tmp on
+# reboot, and the launchd agents dutifully came back to storage that no longer
+# existed. Recreating it here means a reboot can cost you the cached blobs but
+# never the stack itself. Keep the blob root somewhere durable and it costs you
+# neither.
+check_paths() {
+    local blobs geonames
+    blobs=$(sed -n 's/^FRAMESTATION_BLOB_ROOT=//p' "$ENVFILE" | tr -d '"')
+    geonames=$(sed -n 's/^FRAMESTATION_GEONAMES_DIR=//p' "$ENVFILE" | tr -d '"')
+
+    case "$blobs" in
+        /tmp/*|/private/tmp/*)
+            echo "  warning: blob root is under /tmp, which macOS clears on reboot" >&2
+            echo "           uploaded media will not survive a restart: $blobs" >&2
+            ;;
+    esac
+    [ -n "$blobs" ] && mkdir -p "$blobs" && echo "  blob root ok: $blobs"
+    if [ -n "$geonames" ] && [ ! -d "$geonames" ]; then
+        # Not fatal — place names simply stay empty without it.
+        echo "  warning: geonames dir missing, reverse geocoding will be inert: $geonames" >&2
+    fi
+}
+
 stop_strays() {
     # Anything started by hand before this script existed. Left running it would
     # hold the port and launchd's copy would crash-loop against it.
@@ -129,6 +156,7 @@ install)
     [ -x "$SRVBIN" ] || die "server not built — run: (cd Server && swift build)"
     [ -f "$ENVFILE" ] || die "missing $ENVFILE (FRAMESTATION_* vars, one per line)"
     [ -d "$PGDATA" ] || die "no database at $PGDATA"
+    check_paths
 
     echo "stopping anything already running…"
     stop_strays
