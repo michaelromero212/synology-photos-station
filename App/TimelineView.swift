@@ -130,7 +130,11 @@ struct TimelineView: View {
             }
             .frame(maxHeight: .infinity)
         }
-        .navigationTitle(space.name)
+        // The count takes the title while selecting. It used to sit in the
+        // leading slot beside the space name, which left two pieces of text
+        // competing for one bar and both of them truncated — "8…" next to
+        // "Family Sh…" tells you neither how many nor where.
+        .navigationTitle(selectionTitle)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -1145,18 +1149,23 @@ struct TimelineView: View {
         // Top left, mirroring where Photos and Synology both put activity.
         // `.topBarLeading` doesn't exist on macOS; `.navigation` is the
         // equivalent leading slot there.
+        // Selecting strips the bar back to a way out and a count, and nothing
+        // else — the count moves into the title, where there is room for it.
+        //
+        // Everything else up here belongs to *browsing*: activity, search, and
+        // adding photos are all things you do to a library, not to a selection.
+        // Leaving them alongside the count left six controls fighting over one
+        // bar, with both the count and the space name truncated to make room
+        // for buttons that did nothing useful in that moment.
         #if !os(tvOS)
         if selection.isActive {
-            ToolbarItem(placement: Self.leadingPlacement) {
-                Text(selection.count == 1 ? "1 selected" : "\(selection.count) selected")
-                    .font(.headline)
-            }
             ToolbarItem(placement: .cancellationAction) {
                 Button {
                     selection.clear()
                 } label: {
                     Image(systemName: "xmark")
                 }
+                .accessibilityLabel("Done selecting")
             }
         }
         #endif
@@ -1202,49 +1211,63 @@ struct TimelineView: View {
         }
         #endif
 
-        ToolbarItem(placement: Self.leadingPlacement) {
-            Button {
-                showActivity = true
-            } label: {
-                Image(systemName: (activity?.unreadCount ?? 0) > 0
-                      ? "bell.badge.fill" : "bell")
-                    .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
-            }
-            .accessibilityLabel(
-                (activity?.unreadCount ?? 0) > 0
-                    ? "Recent activity, \(activity?.unreadCount ?? 0) new"
-                    : "Recent activity"
-            )
-        }
-
-        #if os(iOS)
-        // Declared before `+` so it lands to its left: adding a control beside
-        // one people already reach for is fine, sliding that one over is not.
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                showSearch = true
-            } label: {
-                Label("Search \(space.name)", systemImage: "magnifyingglass")
-            }
-        }
-
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                showPicker = true
-            } label: {
-                Label(
-                    space.kind == .shared ? "Add to \(space.name)" : "Add Photos",
-                    systemImage: "plus"
+        // The browsing controls, and only while browsing. See the note above.
+        if !selection.isActive {
+            ToolbarItem(placement: Self.leadingPlacement) {
+                Button {
+                    showActivity = true
+                } label: {
+                    Image(systemName: (activity?.unreadCount ?? 0) > 0
+                          ? "bell.badge.fill" : "bell")
+                        .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                }
+                .accessibilityLabel(
+                    (activity?.unreadCount ?? 0) > 0
+                        ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                        : "Recent activity"
                 )
             }
+
+            #if os(iOS)
+            // Declared before `+` so it lands to its left: adding a control
+            // beside one people already reach for is fine, sliding that one
+            // over is not.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showSearch = true
+                } label: {
+                    Label("Search \(space.name)", systemImage: "magnifyingglass")
+                }
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showPicker = true
+                } label: {
+                    Label(
+                        space.kind == .shared ? "Add to \(space.name)" : "Add Photos",
+                        systemImage: "plus"
+                    )
+                }
+            }
+            #endif
         }
-        #endif
     }
 
     /// Names the coordinate space the sweep measures tiles in. Shared by the
     /// cells that report their frames and the gesture that reads them, so the
     /// two cannot drift onto different spaces and silently never match.
     static let gridSpace = "photo-grid"
+
+    /// Where you are, or what you've picked — never both at once.
+    private var selectionTitle: String {
+        #if os(tvOS)
+        return space.name
+        #else
+        guard selection.isActive else { return space.name }
+        return selection.count == 1 ? "1 item selected" : "\(selection.count) items selected"
+        #endif
+    }
 
     static var leadingPlacement: ToolbarItemPlacement {
         #if os(macOS)
