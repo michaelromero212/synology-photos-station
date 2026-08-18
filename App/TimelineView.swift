@@ -90,6 +90,11 @@ struct TimelineView: View {
     /// Held, not read. The grid hands this to the fast scroller and to the
     /// reporter and never touches `.fraction` itself — see `ScrollProgress`.
     @State private var scrollProgress = ScrollProgress()
+    /// The section currently at the top of the viewport, bound to the scroll
+    /// view so it both reports and drives. Written a handful of times per
+    /// scroll — once per section boundary crossed — which is why this can be
+    /// ordinary `@State` where `ScrollProgress.fraction` could not be.
+    @State private var topBucket: String?
     #if os(iOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
     /// know what "that day" contained — and everything currently loaded, which
@@ -596,11 +601,35 @@ struct TimelineView: View {
 
     /// Takes one step along the zoom ladder, if there is one to take.
     ///
-    /// Shared by the pill and by the Mac's toolbar and keyboard shortcuts, so
-    /// the two can't drift into disagreeing about what a step does.
+    /// Shared by the pill, the pinch, and the Mac's toolbar and keyboard
+    /// shortcuts, so they can't drift into disagreeing about what a step does.
+    ///
+    /// Keeps your place across a density change.
+    ///
+    /// `topBucket` is whatever section is at the top right now, so the anchor
+    /// costs nothing to read. It has to be read *before* the swap, though —
+    /// the moment the new manifest lands it describes a bucket that no longer
+    /// exists — and translated *after*, because the keys it translates into
+    /// don't exist until then.
+    ///
+    /// Without this, zooming out to find 2012 and back in to look at it landed
+    /// you in 2026, which made the whole control useless for the one thing
+    /// people zoom out to do.
     private func apply(_ newZoom: TimelineZoom?) {
         guard let newZoom, let store else { return }
-        Task { await store.setZoom(newZoom) }
+        let anchor = topBucket
+        Task {
+            await store.setZoom(newZoom)
+            guard let anchor, let target = store.buckets.counterpart(of: anchor) else { return }
+            // After the grid has settled, not before.
+            //
+            // Replacing every section resets the scroll to the top, and that
+            // reset writes to this very binding — so assigning first means
+            // SwiftUI overwrites the anchor a moment later with the new first
+            // section. One wait, then assign, and the binding sticks.
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            topBucket = target
+        }
     }
 
     #if os(iOS)
@@ -744,7 +773,24 @@ struct TimelineView: View {
                         }
                     }
                 }
+                // Marks the sections as scroll targets, which is what lets
+                // `scrollPosition` below name one. On the stack rather than on
+                // the `Section`s — see the note above about wrapping those.
+                .scrollTargetLayout()
             }
+            // Which section is at the top, maintained by SwiftUI in both
+            // directions: it reports where you are as you scroll, and scrolls
+            // when it's assigned to.
+            //
+            // Assigning is how a density change keeps its place. The imperative
+            // alternative — `scrollTo` right after swapping every bucket —
+            // cannot work: at that instant the lazy stack has realised almost
+            // nothing, so the scroll finds no such section and silently does
+            // nothing. Timing it with sleeps only turns that into a race, and a
+            // race that fights the layout is how the grid ended up frozen.
+            // Binding the position lets SwiftUI resolve it once the section
+            // actually exists, which is the whole difference.
+            .scrollPosition(id: $topBucket, anchor: .top)
             // Keeps photos out of the strip above the pinned date. The scroll
             // view's frame stops at the safe area but its content draws past
             // it, so without this a row slides up under the status bar and sits

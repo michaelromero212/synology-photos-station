@@ -29,6 +29,44 @@ public struct TimelineBucket: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+extension Array where Element == TimelineBucket {
+    /// Which bucket a 0…1 position through the library lands on.
+    ///
+    /// Weighted by item count rather than by bucket index, because a day with
+    /// two hundred photos is a long scroll and a day with two is not. An even
+    /// split would make the busy stretches of a library nearly impossible to
+    /// land in.
+    public func bucket(atFraction fraction: Double) -> TimelineBucket? {
+        guard !isEmpty else { return nil }
+        let total = reduce(0) { $0 + Swift.max($1.count, 1) }
+        let target = Double(total) * Swift.min(Swift.max(fraction, 0), 1)
+        var running = 0.0
+        for bucket in self {
+            running += Double(Swift.max(bucket.count, 1))
+            if running >= target { return bucket }
+        }
+        return last
+    }
+
+    /// The same moment in time, named at whatever granularity these buckets use.
+    ///
+    /// Keys nest as prefixes — `2012-06-14` sits inside `2012-06` sits inside
+    /// `2012` — which is what makes a density change survivable: the bucket you
+    /// were reading at one zoom has an unambiguous counterpart at the next, and
+    /// the grid can be told to put it back under your eyes.
+    ///
+    /// Zooming out finds the shorter key that contains yours. Zooming in finds
+    /// the first longer key inside it — first, not any, because buckets run
+    /// newest-first, so that is the most recent day of the month or year you
+    /// were looking at, which is the edge you were nearest.
+    public func counterpart(of key: String) -> String? {
+        if contains(where: { $0.key == key }) { return key }
+        if let containing = first(where: { key.hasPrefix($0.key) }) { return containing.key }
+        if let contained = first(where: { $0.key.hasPrefix(key) }) { return contained.key }
+        return nil
+    }
+}
+
 public struct TimelineManifest: Codable, Sendable, Hashable {
     public let spaceID: UUID
     public let zoom: TimelineZoom

@@ -110,11 +110,36 @@ public final class TimelineStore {
         }
     }
 
+    /// Changes density, or leaves everything exactly as it was.
+    ///
+    /// This used to set `zoom`, empty `items` and *then* fetch — so a failed
+    /// fetch left the grid contradicting itself. `load()` deliberately keeps the
+    /// manifest it already has when a refresh fails, which is right for a
+    /// network blip but wrong here: the result was the new zoom's column count
+    /// and row height applied to the old zoom's buckets, with no items at all.
+    /// Day headings laid out at year density, every tile a placeholder.
+    ///
+    /// Fetching first and swapping all of it together means a failure is simply
+    /// a zoom that didn't happen.
     public func setZoom(_ newZoom: TimelineZoom) async {
         guard newZoom != zoom else { return }
-        zoom = newZoom
-        items.removeAll()
-        await load()
+        do {
+            let fresh = try await client.timeline(spaceID: spaceID, zoom: newZoom)
+            items.removeAll()
+            manifest = fresh
+            cursor = fresh.cursor
+            state = .loaded
+            isFromSnapshot = false
+            // Last, deliberately. `zoom` is what observers watch to know the
+            // density changed, and anything reacting to it — restoring the
+            // scroll anchor, most of all — needs the new buckets already in
+            // place when it looks.
+            zoom = newZoom
+            scheduleSnapshot()
+        } catch {
+            // Nothing moved. The caller's anchor is still valid, and the grid
+            // the user is looking at is still the one they were reading.
+        }
     }
 
     /// Idempotent and de-duplicated — safe to call from `onAppear` on every cell.

@@ -125,19 +125,11 @@ struct FastScroller: View {
 
     /// Which bucket a position along the track lands on.
     ///
-    /// Weighted by item count, not by bucket index: a day with 200 photos is a
-    /// long scroll and a day with 2 is not, so an even split would make busy
-    /// stretches of the library nearly impossible to land in.
+    /// Shared with the zoom, which needs the same answer to know what to anchor
+    /// on — two copies of this would eventually disagree, and the symptom would
+    /// be a zoom that lands somewhere the scrubber says you weren't.
     private func bucket(at fraction: Double) -> TimelineBucket? {
-        guard !buckets.isEmpty else { return nil }
-        let total = buckets.reduce(0) { $0 + max($1.count, 1) }
-        let target = Double(total) * fraction
-        var running = 0.0
-        for bucket in buckets {
-            running += Double(max(bucket.count, 1))
-            if running >= target { return bucket }
-        }
-        return buckets.last
+        buckets.bucket(atFraction: fraction)
     }
 
     /// `2026-07-18` → `JUL 2026`. Day precision is noise on a scrubber — you're
