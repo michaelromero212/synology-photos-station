@@ -167,7 +167,9 @@ install)
         echo "  loaded $label"
     done
     echo "waiting for health…"
-    for _ in $(seq 1 20); do
+    # Generous: the server loads ~170k geonames places before it listens,
+    # and a short wait reported a false failure on a server that was fine.
+    for _ in $(seq 1 60); do
         sleep 1
         if curl -fsS -m 2 "http://127.0.0.1:$SRVPORT/health" >/dev/null 2>&1; then
             echo "stack is up on http://127.0.0.1:$SRVPORT"; exit 0
@@ -181,7 +183,9 @@ restart)
     # started with, so a rebuilt binary does nothing until the process is
     # replaced. This is that step.
     launchctl kickstart -k "$DOMAIN/$LABEL_SRV"
-    for _ in $(seq 1 20); do
+    # Generous: the server loads ~170k geonames places before it listens,
+    # and a short wait reported a false failure on a server that was fine.
+    for _ in $(seq 1 60); do
         sleep 1
         curl -fsS -m 2 "http://127.0.0.1:$SRVPORT/health" >/dev/null 2>&1 && {
             echo "server restarted on :$SRVPORT"; exit 0; }
