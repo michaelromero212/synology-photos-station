@@ -393,6 +393,11 @@ struct TimelineView: View {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { selection.toggle(item) }
+                // Lets a drag across the grid find this tile. Reports only
+                // while selecting, so browsing pays nothing for it.
+                #if os(iOS)
+                .sweepTarget(item, in: Self.gridSpace, active: selection.isActive)
+                #endif
         } else {
             #if os(iOS)
             // Not a NavigationLink: the link consumes the press and pushes the
@@ -791,6 +796,11 @@ struct TimelineView: View {
             // Binding the position lets SwiftUI resolve it once the section
             // actually exists, which is the whole difference.
             .scrollPosition(id: $topBucket, anchor: .top)
+            #if os(iOS)
+            // Drag across tiles to select a run of them. Inert until a selection
+            // is already open, so an ordinary drag still means scroll.
+            .selectionSweep(selection, space: Self.gridSpace)
+            #endif
             // Keeps photos out of the strip above the pinned date. The scroll
             // view's frame stops at the safe area but its content draws past
             // it, so without this a row slides up under the status bar and sits
@@ -1230,6 +1240,11 @@ struct TimelineView: View {
         }
         #endif
     }
+
+    /// Names the coordinate space the sweep measures tiles in. Shared by the
+    /// cells that report their frames and the gesture that reads them, so the
+    /// two cannot drift onto different spaces and silently never match.
+    static let gridSpace = "photo-grid"
 
     static var leadingPlacement: ToolbarItemPlacement {
         #if os(macOS)
