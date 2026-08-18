@@ -31,6 +31,25 @@ final class ActivityStore {
         }
     }
 
+    /// Clears the badge because the list has been seen, without un-marking the
+    /// rows themselves.
+    ///
+    /// Opening the inbox *is* reading it — leaving a red dot on the bell after
+    /// someone has looked is how a badge stops meaning anything. But clearing
+    /// the rows at the same moment would strip the "new" markers out from under
+    /// them mid-glance, so those stay for this viewing and are simply not new
+    /// the next time the feed is fetched.
+    func markSeen() async {
+        guard unreadCount > 0, let client = session?.client else { return }
+        let previous = unreadCount
+        unreadCount = 0
+        do {
+            try await client.markActivityRead()
+        } catch {
+            unreadCount = previous
+        }
+    }
+
     /// Clears the badge immediately, then tells the server. The optimistic
     /// update matters: tapping "Clear All" and watching the badge sit there
     /// while a round-trip completes reads as a broken button.
@@ -91,6 +110,12 @@ struct ActivityInboxView: View {
                     Button("Clear All") { Task { await store.markAllRead() } }
                         .disabled(store.unreadCount == 0)
                 }
+            }
+            // Seen on arrival. The refresh runs first so the count being
+            // cleared is the one actually on screen, not a stale one.
+            .task {
+                await store.refresh()
+                await store.markSeen()
             }
             .refreshable { await store.refresh() }
             .overlay(alignment: .bottom) {
