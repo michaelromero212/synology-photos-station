@@ -6,6 +6,7 @@ import Vapor
 extension EditCaptureTimeRequest: @retroactive Content {}
 extension RotateMediaRequest: @retroactive Content {}
 extension MediaEditResponse: @retroactive Content {}
+extension SetCreditRequest: @retroactive Content {}
 
 /// Correcting what a photo says about itself: when it was taken, and which way
 /// up it goes.
@@ -28,6 +29,70 @@ struct MediaEditController: RouteCollection {
 
         protected.post("spaces", ":spaceID", "assets", "capture-time", use: editCaptureTime)
         protected.post("spaces", ":spaceID", "assets", "orientation", use: rotate)
+        protected.post("spaces", ":spaceID", "assets", "credit", use: setCredit)
+    }
+
+    /// Corrects who a photo is attributed to.
+    ///
+    /// Additive: `uploaded_by_user_id` is never touched, because it is a fact
+    /// about which account sent the bytes and the upload path depends on it.
+    /// The credit is a separate column that display prefers, and clearing it
+    /// returns to the truth rather than to another guess. Who made the
+    /// correction and when are recorded alongside, so an attribution that looks
+    /// wrong later can be traced rather than argued about.
+    ///
+    /// The person credited must be a member of the space — crediting someone
+    /// who cannot see the photo would put a name on it that nobody can resolve.
+    @Sendable
+    func setCredit(req: Request) async throws -> MediaEditResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let input = try req.content.decode(SetCreditRequest.self)
+        guard !input.assetIDs.isEmpty else {
+            throw Abort(.badRequest, reason: "Nothing to credit.")
+        }
+        guard input.assetIDs.count <= 500 else {
+            throw Abort(.badRequest, reason: "Credit at most 500 items at once.")
+        }
+
+        let spaceID = try await requireContributorSpace(req)
+
+        if let creditedTo = input.creditedTo {
+            try await SpaceAccess.requireMembership(
+                spaceID: spaceID, userID: creditedTo, on: req.sql
+            )
+        }
+
+        var updated = 0
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                for assetID in input.assetIDs {
+                    guard let target = try await Self.target(
+                        assetID: assetID, spaceID: spaceID, on: sql
+                    ) else { continue }
+
+                    try await sql.raw("""
+                        UPDATE space_assets
+                        SET credited_to_user_id = \(bind: input.creditedTo),
+                            credited_by_user_id = \(bind: input.creditedTo == nil ? nil : device.userID),
+                            credited_at         = \(bind: input.creditedTo == nil ? nil : Date())
+                        WHERE id = \(bind: target.placementID)
+                        """).run()
+
+                    _ = try await ChangeLog.append(
+                        spaceID: spaceID, entity: "space_asset",
+                        entityID: target.placementID, op: "update", on: sql
+                    )
+                    updated += 1
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+
+        return MediaEditResponse(updated: updated)
     }
 
     private struct TargetRow: Decodable {
@@ -199,9 +264,14 @@ struct MediaEditController: RouteCollection {
     private static func target(
         assetID: UUID, spaceID: UUID, on sql: any SQLDatabase
     ) async throws -> TargetRow? {
+        // `filename` is on the *placement*, not the asset — one file can sit in
+        // several spaces under different names, so it cannot live on the row
+        // that is keyed by content hash. This selected `a.filename` and threw
+        // `column a.filename does not exist` on every call, which took editing a
+        // capture time and rotating a photo down with it: both go through here.
         try await sql.raw("""
             SELECT sa.id AS "placementID", a.captured_at AS "capturedAt",
-                   a.storage_path AS "storagePath", a.filename, a.sha256,
+                   a.storage_path AS "storagePath", sa.filename, a.sha256,
                    a.orientation
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
