@@ -17,11 +17,23 @@ struct BackupSettings: Equatable {
     var includeVideos = true
     var targetSpaceID: UUID?
 
+    /// Always your own library, and never anyone else's.
+    ///
+    /// This used to honour `targetSpaceID`, so backup could be pointed at a
+    /// shared space — which meant one setting, chosen once and then forgotten,
+    /// could quietly publish an entire camera roll to the family. Backup runs
+    /// unattended on everything the phone takes; the blast radius of getting
+    /// that wrong is every private photo you own, and no amount of confirming
+    /// at the time makes it safe a year later.
+    ///
+    /// Sharing deliberately still exists — that is what the picker and Move To
+    /// are for. The difference is that those are decisions taken per photo,
+    /// with the photos in front of you.
+    ///
+    /// `targetSpaceID` is left on the type rather than deleted so an existing
+    /// stored preference deserialises; it is simply no longer consulted.
     func targetSpace(in spaces: [SpaceDTO]) -> SpaceDTO? {
-        if let targetSpaceID, let match = spaces.first(where: { $0.id == targetSpaceID }) {
-            return match
-        }
-        return spaces.first { $0.kind == .personal }
+        spaces.first { $0.kind == .personal }
     }
 
     private enum Key {
@@ -76,7 +88,9 @@ struct BackupSettingsView: View {
         let name = settings.targetSpace(in: session.spaces)?.name ?? "your personal space"
         return "Photos and videos are backed up to folders created under "
             + "/\(name)/MobileBackup/iPhone, named by the year and month they "
-            + "were taken."
+            + "were taken.\n\nBackup only ever goes to your own library. To put "
+            + "something in a shared space, choose it there — nothing reaches "
+            + "the family by default."
     }
 
     var body: some View {
@@ -117,12 +131,19 @@ struct BackupSettingsView: View {
                     }
                 }
 
+                // Stated, not chosen. Backup has exactly one destination now —
+                // see `BackupSettings.targetSpace`.
                 Section {
-                    Picker("Backup Destination", selection: $settings.targetSpaceID) {
-                        ForEach(session.spaces) { space in
-                            Text(space.name).tag(Optional(space.id))
-                        }
+                    // A plain row rather than `LabeledContent` holding a
+                    // `Label`: that combination expands to fill the section and
+                    // leaves a tall empty box under a single line of text.
+                    HStack {
+                        Text("Backup Destination")
+                        Spacer(minLength: 12)
+                        Image(systemName: "person")
+                        Text(settings.targetSpace(in: session.spaces)?.name ?? "Personal Space")
                     }
+                    .foregroundStyle(.primary)
                 } header: {
                     Text("Backup Path")
                 } footer: {
@@ -166,11 +187,12 @@ struct BackupSettingsView: View {
             .task {
                 access = PhotoLibraryScanner.access
                 await registrar.refreshAuthorization()
-                // Resolve the implicit default into the binding so the picker
-                // shows the space that backup will actually use, instead of
-                // rendering blank because nil matches no tag.
-                if settings.targetSpaceID == nil {
-                    settings.targetSpaceID = settings.targetSpace(in: session.spaces)?.id
+                // Retires any destination a previous version stored. Nothing
+                // reads it now, but leaving a shared space's id sitting in
+                // preferences invites a future change to honour it again.
+                if settings.targetSpaceID != nil {
+                    settings.targetSpaceID = nil
+                    settings.save()
                 }
             }
         }
