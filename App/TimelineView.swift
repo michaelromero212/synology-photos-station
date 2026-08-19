@@ -41,6 +41,17 @@ struct TimelineView: View {
     let engine: BackupEngine?
     @Binding var backupSettings: BackupSettings
     #endif
+    /// A control for changing which space is shown, put in the title's place.
+    ///
+    /// Supplied by the host rather than built here, because the grid has no
+    /// business knowing what else it could be showing — the Shared tab knows
+    /// which spaces exist, and the personal tab has nothing to switch between.
+    ///
+    /// It lives here rather than being wrapped around this view from outside so
+    /// that it can be withdrawn during a selection: the title belongs to the
+    /// count then, and a space switcher would both fight it for the slot and
+    /// offer to navigate away mid-selection.
+    var spaceSwitcher: AnyView?
 
     @Environment(\.scenePhase) private var scenePhase
     /// Ties a tapped tile to the viewer it grows into. Both ends must name the
@@ -1208,6 +1219,13 @@ struct TimelineView: View {
                 .disabled(store?.zoom.zoomedIn == nil)
                 .keyboardShortcut("+", modifiers: .command)
             }
+        }
+        #endif
+
+        #if !os(tvOS)
+        // Takes the title's slot, and only while browsing.
+        if !isSelecting, let spaceSwitcher {
+            ToolbarItem(placement: .principal) { spaceSwitcher }
         }
         #endif
 
