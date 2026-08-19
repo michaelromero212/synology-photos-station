@@ -304,6 +304,18 @@ struct AssetController: RouteCollection {
         contentType: String,
         immutable: Bool
     ) async throws -> Response {
+        // A missing file is a 404, not a 500.
+        //
+        // `asyncStreamFile` on a path that isn't there throws something Vapor
+        // renders as "Internal Server Error", which tells the player nothing and
+        // tells whoever reads the log even less — the video simply refuses to
+        // play. `preview` already guarded for this; the streaming path did not,
+        // so a blob missing from storage looked like a server fault rather than
+        // an absent file. Worth saying plainly: it is the difference between
+        // "your NAS is broken" and "this one file isn't where it should be".
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            throw Abort(.notFound, reason: "Original is missing from storage.")
+        }
         let response = try await req.fileio.asyncStreamFile(at: path.path)
         response.headers.replaceOrAdd(name: .contentType, value: contentType)
         // Vapor serves 206 for a Range request but doesn't advertise the
