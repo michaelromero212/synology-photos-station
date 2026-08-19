@@ -7,6 +7,8 @@ extension EditCaptureTimeRequest: @retroactive Content {}
 extension RotateMediaRequest: @retroactive Content {}
 extension MediaEditResponse: @retroactive Content {}
 extension SetCreditRequest: @retroactive Content {}
+extension MoveAssetsRequest: @retroactive Content {}
+extension MoveAssetsResponse: @retroactive Content {}
 
 /// Correcting what a photo says about itself: when it was taken, and which way
 /// up it goes.
@@ -30,6 +32,142 @@ struct MediaEditController: RouteCollection {
         protected.post("spaces", ":spaceID", "assets", "capture-time", use: editCaptureTime)
         protected.post("spaces", ":spaceID", "assets", "orientation", use: rotate)
         protected.post("spaces", ":spaceID", "assets", "credit", use: setCredit)
+        protected.post("spaces", ":spaceID", "assets", "move", use: move)
+    }
+
+    private struct SpaceRow: Decodable {
+        let id: UUID
+        let name: String
+        let kind: String
+    }
+
+    /// Moves photos out of this space and into another.
+    ///
+    /// A move rather than a copy, which makes it the one edit here that changes
+    /// where the *file* lives as well as what the database says. Both have to
+    /// agree or the two halves of this system start describing different
+    /// libraries — the app showing a photo in one place and File Station showing
+    /// it in another is exactly the confusion the canonical-file layout exists
+    /// to prevent.
+    ///
+    /// Order matters. The file is relocated first and the rows are updated after,
+    /// inside a transaction: if the move fails the rows never change, and a photo
+    /// stays wholly in the space it started in. The reverse order can leave a
+    /// database pointing at a path with nothing on the end of it.
+    ///
+    /// Destination must be a shared space you can contribute to. Moving *into*
+    /// someone's personal library would put your photos in their private tree,
+    /// which is not a thing one member of a household should be able to do to
+    /// another.
+    @Sendable
+    func move(req: Request) async throws -> MoveAssetsResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let input = try req.content.decode(MoveAssetsRequest.self)
+        guard !input.assetIDs.isEmpty else {
+            throw Abort(.badRequest, reason: "Nothing to move.")
+        }
+        guard input.assetIDs.count <= 500 else {
+            throw Abort(.badRequest, reason: "Move at most 500 items at once.")
+        }
+
+        let sourceID = try await requireContributorSpace(req)
+        guard sourceID != input.destinationSpaceID else {
+            throw Abort(.badRequest, reason: "That's already where they are.")
+        }
+        try await SpaceAccess.requireContributor(
+            spaceID: input.destinationSpaceID, userID: device.userID, on: req.sql
+        )
+
+        guard let destination = try await req.sql.raw("""
+            SELECT id, name, kind FROM spaces WHERE id = \(bind: input.destinationSpaceID)
+            """).first(decoding: SpaceRow.self) else {
+            throw Abort(.notFound, reason: "No such space.")
+        }
+        guard destination.kind == "shared" else {
+            throw Abort(.forbidden, reason: "Photos can only be moved into a shared space.")
+        }
+
+        let configuration = BrowseTree.Configuration.fromEnvironment()
+        var movedIDs: [UUID] = []
+
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                for assetID in input.assetIDs {
+                    guard let target = try await Self.target(
+                        assetID: assetID, spaceID: sourceID, on: sql
+                    ) else { continue }
+
+                    // Where the file should end up. Nil when the browse tree is
+                    // off, or when the destination can't be resolved — the rows
+                    // still move, because the database is the library and the
+                    // tree is a mirror of it.
+                    var relocated: String?
+                    if let current = target.storagePath, !current.isEmpty,
+                       let sha256 = target.sha256 {
+                        let placement = BrowseTree.Placement(
+                            id: target.placementID,
+                            sha256: sha256,
+                            blobExt: (current as NSString).pathExtension,
+                            filename: target.filename,
+                            capturedAt: target.capturedAt,
+                            spaceKind: destination.kind,
+                            spaceName: destination.name,
+                            dsmUsername: nil,
+                            dsmUID: nil
+                        )
+                        if let wanted = BrowseTree.destination(
+                            for: placement, configuration: configuration
+                        ) {
+                            // Same collision rule the worker uses when it first
+                            // writes a file, so a move can't quietly overwrite
+                            // a different photo that happens to share a name.
+                            let path = BrowseTreeWorker.deduplicated(wanted, sha256: sha256)
+                            try FileManager.default.createDirectory(
+                                atPath: (path as NSString).deletingLastPathComponent,
+                                withIntermediateDirectories: true
+                            )
+                            try FileManager.default.moveItem(atPath: current, toPath: path)
+                            relocated = path
+                        }
+                    }
+
+                    try await sql.raw("""
+                        UPDATE space_assets SET space_id = \(bind: destination.id)
+                        WHERE id = \(bind: target.placementID)
+                        """).run()
+                    if let relocated {
+                        try await sql.raw("""
+                            UPDATE assets SET storage_path = \(bind: relocated)
+                            WHERE id = \(bind: assetID)
+                            """).run()
+                    }
+
+                    // Both spaces are told: it left one and arrived in the
+                    // other, so anyone looking at either sees it happen without
+                    // a refresh.
+                    _ = try await ChangeLog.append(
+                        spaceID: sourceID, entity: "space_asset",
+                        entityID: target.placementID, op: "delete", on: sql
+                    )
+                    _ = try await ChangeLog.append(
+                        spaceID: destination.id, entity: "space_asset",
+                        entityID: target.placementID, op: "insert", on: sql
+                    )
+                    movedIDs.append(assetID)
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+
+        return MoveAssetsResponse(
+            moved: movedIDs.count,
+            assetIDs: movedIDs,
+            destinationSpaceID: destination.id
+        )
     }
 
     /// Corrects who a photo is attributed to.

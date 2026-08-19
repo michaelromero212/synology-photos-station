@@ -155,3 +155,37 @@ public struct SetCreditRequest: Codable, Sendable, Hashable {
         self.creditedTo = creditedTo
     }
 }
+
+// MARK: - Moving between spaces
+
+/// Moves photos out of one space and into another.
+///
+/// A move, not a copy: the placement leaves the source. Adding to a shared space
+/// already exists and copies (see ARCHITECTURE.md §3a) — this is the other verb,
+/// for when something is in the wrong library rather than wanted in two.
+public struct MoveAssetsRequest: Codable, Sendable, Hashable {
+    public let assetIDs: [UUID]
+    public let destinationSpaceID: UUID
+
+    public init(assetIDs: [UUID], destinationSpaceID: UUID) {
+        self.assetIDs = assetIDs
+        self.destinationSpaceID = destinationSpaceID
+    }
+}
+
+/// What moved, and where it can be found afterwards.
+///
+/// Returns the moved placements so the app can walk them in the destination —
+/// verifying that forty photos landed where you meant is the part a person
+/// actually cares about, and it cannot be done without knowing which they were.
+public struct MoveAssetsResponse: Codable, Sendable, Hashable {
+    public let moved: Int
+    public let assetIDs: [UUID]
+    public let destinationSpaceID: UUID
+
+    public init(moved: Int, assetIDs: [UUID], destinationSpaceID: UUID) {
+        self.moved = moved
+        self.assetIDs = assetIDs
+        self.destinationSpaceID = destinationSpaceID
+    }
+}
