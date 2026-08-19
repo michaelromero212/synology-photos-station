@@ -1212,7 +1212,7 @@ struct TimelineView: View {
         #endif
 
         // The browsing controls, and only while browsing. See the note above.
-        if !selection.isActive {
+        if !isSelecting {
             ToolbarItem(placement: Self.leadingPlacement) {
                 Button {
                     showActivity = true
@@ -1258,6 +1258,20 @@ struct TimelineView: View {
     /// cells that report their frames and the gesture that reads them, so the
     /// two cannot drift onto different spaces and silently never match.
     static let gridSpace = "photo-grid"
+
+    /// Whether a selection is open.
+    ///
+    /// `selection` itself only exists off tvOS — there is no multi-select with a
+    /// remote — so anything outside a `#if` has to ask through here. The toolbar
+    /// referred to it directly and compiled fine on iOS while breaking the tvOS
+    /// build, which is the failure mode this exists to remove.
+    private var isSelecting: Bool {
+        #if os(tvOS)
+        return false
+        #else
+        return selection.isActive
+        #endif
+    }
 
     /// Where you are, or what you've picked — never both at once.
     private var selectionTitle: String {
