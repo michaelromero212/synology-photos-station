@@ -64,6 +64,11 @@ Work out which row applies **before** step 3.
 | A new bind mount in compose | create the directory on the NAS first; Synology's Docker fails rather than creating it |
 | App or `Packages/` only | nothing. That ships through Xcode, not the NAS |
 
+Two failures arrive without changing anything yourself, because they are about
+the NAS rather than the commit: the **address moving** (DHCP — see Gotchas) and
+the **registry token expiring** (see below). Neither announces itself until a
+deploy is already half done.
+
 ### When the compose file changed
 
 `docker compose pull` updates the **image**, never the file that names it. Skip
@@ -77,6 +82,63 @@ cat docker-compose.yml | ssh nas 'cat > /volume1/docker/framestation/docker-comp
 > is blocking your terminal from reading `~/Documents`. Either grant it
 > **System Settings → Privacy & Security → Full Disk Access** and restart it,
 > or ask Claude to push the file up — its tooling has its own grant.
+
+### When the pull says `unauthorized`
+
+The server image is a **private** GHCR package, so the NAS has to be logged in to
+fetch it. The credential is a GitHub personal access token, and tokens expire —
+so this breaks on a date nobody wrote down, in the middle of a deploy.
+
+The symptom is specific and easy to misread:
+
+```
+✔ db 11 layers [⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿] Pulled
+WARNING: Some service image(s) must be built from source by running:
+    docker compose build server
+1 error occurred:
+	* Error response from daemon: Head "https://ghcr.io/v2/.../manifests/latest": unauthorized
+```
+
+`db` pulls happily — it comes from Docker Hub and is public — so the output looks
+mostly successful, and every one of those completed layers is postgres. Only the
+`server` line failed. The "must be built from source" warning is compose saying
+it gave up fetching, not a suggestion worth taking: building the Vapor graph on a
+J4125 takes far longer than fixing the login.
+
+**Fixing it.** Take the two steps separately rather than as one `ssh -t nas '…'`,
+because you are asked for two different secrets in a row and *both prompts say
+`Password:`*:
+
+```bash
+ssh -t nas
+```
+
+```bash
+sudo /usr/local/bin/docker login ghcr.io -u michaelromero212
+```
+
+1. First `Password:` — the NAS account password, for `sudo`
+2. Then `Password:` — the GitHub PAT, for `docker login`
+
+Pasting the token into the first prompt is the obvious mistake, and a one-liner
+puts the two prompts back to back with nothing to distinguish them.
+
+Expect `Login Succeeded`, then re-run step 3.
+
+**The token needs package read.** A classic PAT needs `read:packages`; a
+fine-grained one needs Packages → Read. Without it `docker login` still reports
+`Login Succeeded` and the *pull* fails with the same `unauthorized` — the login
+proves who you are, not what you may read.
+
+**Where it lands.** `/root/.docker/config.json` on the NAS, base64-encoded rather
+than encrypted — normal Docker behaviour, but it means root on the NAS can read
+the token. Give it the narrowest scope, and note the expiry date somewhere: this
+failure returns on that day.
+
+The alternative is making the package public, which removes the credential
+entirely and cannot expire. The image holds the compiled server and its runtime
+dependencies — no data, no secrets — so it is a defensible choice; it is simply a
+decision about publishing rather than about deployment.
 
 ### When a migration is pending
 
