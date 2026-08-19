@@ -9,7 +9,7 @@ a change is on `main` and needs to reach the NAS.
 
 | | |
 |---|---|
-| SSH alias | `nas` → `192.168.4.83` |
+| SSH alias | `nas` → `192.168.1.17` (see below — it moves) |
 | Stack | `/volume1/docker/framestation/` (compose, `.env`, `pgdata`, `blobs`) |
 | Media | `/volume1/FrameStation/` (shared libraries only) |
 | Docker | `/usr/local/bin/docker` — **not on `PATH`** |
@@ -94,6 +94,29 @@ on Btrfs.
 ---
 
 ## Gotchas, each one earned
+
+**The NAS is on DHCP, so its address moves.** It was `192.168.4.83` and is now
+`192.168.1.17`. The symptom is not an error you can read: `ssh` sits there and
+eventually times out, and because the session never opens, `sudo` never prompts —
+so it looks like the password step is broken rather than the network. Check
+before assuming anything else is wrong:
+
+```bash
+ping -c 2 192.168.1.17
+```
+
+If that fails, find the current address in DSM (Control Panel → Network →
+Network Interface) or the router's client list, then fix `HostName` in
+`~/.ssh/config` and the table above. A DHCP reservation on the router stops this
+recurring; the alternative is rediscovering it every few months.
+
+The public endpoint keeps working throughout, because it goes through DSM's
+reverse proxy rather than the LAN address — which makes it a useful way to check
+the server is alive, and what it thinks its migration count is, without SSH:
+
+```bash
+curl -s https://mike-home-nas-920.synology.me:8443/health
+```
 
 **`ssh -t`, not `ssh`.** `sudo` needs a TTY. Without `-t`:
 
