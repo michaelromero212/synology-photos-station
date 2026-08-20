@@ -189,6 +189,23 @@ extension FrameStationClient {
     /// Never rewrites who uploaded them — that stays recorded server-side as the
     /// fact it is. Passing nil for `creditedTo` drops the override and returns
     /// the credit to the uploader.
+    /// Moves photos out of `spaceID` and into another space.
+    ///
+    /// A move, not a copy — they leave the source. Returns the ids that actually
+    /// moved, which is what lets the app walk them in the destination afterwards
+    /// rather than asking someone to take its word for it.
+    @discardableResult
+    public func move(
+        spaceID: UUID, assetIDs: [UUID], to destinationSpaceID: UUID
+    ) async throws -> MoveAssetsResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/assets/move",
+            body: MoveAssetsRequest(
+                assetIDs: assetIDs, destinationSpaceID: destinationSpaceID
+            )
+        )
+    }
+
     @discardableResult
     public func setCredit(
         spaceID: UUID, assetIDs: [UUID], creditedTo: UUID?

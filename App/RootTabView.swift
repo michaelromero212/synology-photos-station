@@ -120,6 +120,10 @@ struct SharedTab: View {
     /// Which shared space is on screen. Nil until the first list of spaces
     /// arrives, then whichever the person last picked.
     @State private var selectedSpaceID: UUID?
+    #if os(iOS)
+    /// What a just-completed move put here, for checking. Cleared when done.
+    @State private var review: MoveReview?
+    #endif
 
     var body: some View {
         Group {
@@ -147,6 +151,12 @@ struct SharedTab: View {
                 // what you see the instant the tab opens.
                 let current = shared.first { $0.id == selectedSpaceID } ?? shared[0]
                 timeline(for: current, switcher: switcher(among: shared, current: current))
+                    #if os(iOS)
+                    // Following a move is the whole point of the review: the
+                    // photos went somewhere, so go there. Switching the space
+                    // and handing down what arrived are one action.
+                    .id(current.id)
+                    #endif
             }
         }
         .task { await session.refreshSpaces() }
@@ -194,7 +204,18 @@ struct SharedTab: View {
         TimelineView(
             session: session, space: space,
             engine: engine, backupSettings: $backupSettings,
-            spaceSwitcher: switcher
+            spaceSwitcher: switcher,
+            onMoved: { destination, movedIDs in
+                // Land where they went, carrying what arrived. Set together so
+                // the review belongs to the space it describes and cannot be
+                // shown over the wrong grid.
+                review = MoveReview(
+                    assetIDs: movedIDs, destinationName: destination.name
+                )
+                selectedSpaceID = destination.id
+            },
+            review: review,
+            onReviewDone: { review = nil }
         )
         #else
         TimelineView(session: session, space: space, spaceSwitcher: switcher)

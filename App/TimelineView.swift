@@ -52,6 +52,22 @@ struct TimelineView: View {
     /// count then, and a space switcher would both fight it for the slot and
     /// offer to navigate away mid-selection.
     var spaceSwitcher: AnyView?
+    /// Told where a selection went, so the host can follow it there.
+    ///
+    /// The grid can move photos but cannot navigate to the result — it only
+    /// knows the space it is showing. The Shared tab owns which space is on
+    /// screen, so it is the thing that can land you in the destination.
+    #if os(iOS)
+    var onMoved: ((SpaceDTO, [UUID]) -> Void)?
+    /// Items that have just landed in this space, offered for checking.
+    ///
+    /// Passed in rather than owned here because the move happens in the space
+    /// being left, and this is the space being arrived at — two different
+    /// instances of this view.
+    var review: MoveReview?
+    /// Dismisses the review bar. Held by the host for the same reason.
+    var onReviewDone: (() -> Void)?
+    #endif
 
     @Environment(\.scenePhase) private var scenePhase
     /// Ties a tapped tile to the viewer it grows into. Both ends must name the
@@ -78,6 +94,8 @@ struct TimelineView: View {
     @State private var showBackupSettings = false
     @State private var showPicker = false
     @State private var showSearch = false
+    @State private var showMoveTo = false
+    @State private var moveError: String?
     /// Owned by RootTabView, read here because this is where a broken
     /// connection has to be visible.
     @Environment(\.connectionMonitor) private var connection
@@ -89,7 +107,6 @@ struct TimelineView: View {
     #if !os(tvOS)
     @State private var showAddToAlbum = false
     @State private var showTagEditor = false
-    @State private var showRatingEditor = false
     @State private var albumResult: String?
     @State private var selection = GridSelection()
     @State private var shareFiles: [URL] = []
@@ -274,6 +291,22 @@ struct TimelineView: View {
                     }
             }
         }
+        .sheet(isPresented: $showMoveTo) {
+            MoveToSheet(session: session, source: space, count: selection.count) {
+                showMoveTo = false
+            } onConfirm: { destination in
+                showMoveTo = false
+                move(to: destination)
+            }
+        }
+        .alert(
+            "Couldn't move these",
+            isPresented: Binding(get: { moveError != nil }, set: { if !$0 { moveError = nil } })
+        ) {
+            Button("OK") { moveError = nil }
+        } message: {
+            Text(moveError ?? "")
+        }
         .sheet(isPresented: $showBackupSettings) {
             if let engine {
                 BackupSettingsView(
@@ -289,7 +322,7 @@ struct TimelineView: View {
         ))
         .modifier(MetadataPresentation(
             session: session, space: space, selection: selection,
-            showRating: $showRatingEditor, showTags: $showTagEditor,
+            showTags: $showTagEditor,
             result: $albumResult
         ))
         #endif
@@ -424,6 +457,17 @@ struct TimelineView: View {
                         UploadStateBadge(state: .uploaded).padding(5)
                     }
                 }
+                // The one being checked, once the grid has scrolled to its day.
+                // A ring rather than a dimming of everything else: the point is
+                // to find this photo among its neighbours, not to hide them.
+                .overlay {
+                    if review?.current == item.assetID {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.accentColor, lineWidth: 3)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeOut(duration: 0.2), value: review?.index)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     // Snapshotted at the tap rather than recomputed in the
@@ -619,6 +663,55 @@ struct TimelineView: View {
         #endif
     }
 
+    #if os(iOS)
+    /// Which day a given asset sits in, loading buckets until it turns up.
+    ///
+    /// Buckets are fetched as they scroll into view, so a freshly moved item is
+    /// usually in one nobody has looked at yet. Searching loaded buckets first
+    /// keeps the common case free; the walk is bounded by the manifest, which is
+    /// small even for a large library.
+    private func bucketKey(for assetID: UUID, in store: TimelineStore) async -> String? {
+        if let key = store.items.first(where: { _, items in
+            items.contains { $0.assetID == assetID }
+        })?.key {
+            return key
+        }
+        for bucket in store.buckets where store.items[bucket.key] == nil {
+            await store.loadBucket(bucket.key)
+            if store.items[bucket.key]?.contains(where: { $0.assetID == assetID }) == true {
+                return bucket.key
+            }
+        }
+        return nil
+    }
+
+    /// Sends the selection to another space, then hands the result upward.
+    ///
+    /// The grid it left is refreshed rather than patched: a move changes what
+    /// this space contains, and the server has just told both spaces about it
+    /// through the change log, so the honest thing is to re-read rather than
+    /// guess which rows to drop.
+    private func move(to destination: SpaceDTO) {
+        let assetIDs = selection.picked.map(\.assetID)
+        guard let client = session.client, !assetIDs.isEmpty else { return }
+        Task {
+            do {
+                let result = try await client.move(
+                    spaceID: space.id, assetIDs: assetIDs, to: destination.id
+                )
+                selection.clear()
+                await store?.refresh()
+                onMoved?(destination, result.assetIDs)
+            } catch {
+                // Said out loud. A move that silently does nothing leaves people
+                // wondering whether it half-happened, which for an action that
+                // relocates files is the worst thing it could leave them with.
+                moveError = error.localizedDescription
+            }
+        }
+    }
+    #endif
+
     /// Takes one step along the zoom ladder, if there is one to take.
     ///
     /// Shared by the pill, the pinch, and the Mac's toolbar and keyboard
@@ -812,6 +905,23 @@ struct TimelineView: View {
             // actually exists, which is the whole difference.
             .scrollPosition(id: $topBucket, anchor: .top)
             #if os(iOS)
+            // Walks the grid to whichever moved item is being pointed at.
+            //
+            // Scrolls to the item's *section* rather than the tile, because
+            // sections are what this grid can be scrolled to — and it is enough:
+            // the ring on the tile is what actually finds it once its day is on
+            // screen. The bucket has to be loaded to know which day that is, so
+            // an item in a day nobody has scrolled to yet is fetched first.
+            .onChange(of: review?.index) { _, _ in
+                guard let assetID = review?.current else { return }
+                Task {
+                    if let key = await bucketKey(for: assetID, in: store) {
+                        topBucket = key
+                    }
+                }
+            }
+            #endif
+            #if os(iOS)
             // Drag across tiles to select a run of them. Inert until a selection
             // is already open, so an ordinary drag still means scroll.
             .selectionSweep(selection, space: Self.gridSpace)
@@ -868,16 +978,22 @@ struct TimelineView: View {
                         } label: {
                             Label("Remove from Favorites", systemImage: "heart.slash")
                         }
+                        // First, and on its own, because it is the only entry
+                        // here that takes photos *out* of this space rather
+                        // than annotating them where they sit.
+                        #if os(iOS)
+                        Button {
+                            showMoveTo = true
+                        } label: {
+                            Label("Move to Shared Space", systemImage: "arrow.right.doc.on.clipboard")
+                        }
                         Divider()
+                        #endif
+
                         Button {
                             showTagEditor = true
                         } label: {
                             Label("Edit Tags", systemImage: "tag")
-                        }
-                        Button {
-                            showRatingEditor = true
-                        } label: {
-                            Label("Edit Ratings", systemImage: "star")
                         }
 
                         Divider()
@@ -903,7 +1019,18 @@ struct TimelineView: View {
                         }
                     }
                 } else {
+                    // Takes the pill's slot while a review is running: checking
+                    // what just arrived is the one job on screen, and two
+                    // floating bars stacked over the photos is one too many.
+                    #if os(iOS)
+                    if let review, let onReviewDone {
+                        MoveReviewBar(review: review, onDone: onReviewDone)
+                    } else {
+                        floatingZoom(store)
+                    }
+                    #else
                     floatingZoom(store)
+                    #endif
                 }
                 #else
                 // tvOS keeps its pill up. Hiding chrome on scroll is a gesture
