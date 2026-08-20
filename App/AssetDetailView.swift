@@ -93,21 +93,6 @@ final class AssetDetailModel {
         }
     }
 
-    /// Stars, 0–5. Returns 1 when it took, so the sheet can report the same way
-    /// it does for a selection of twelve.
-    func setRating(_ stars: Int, client: FrameStationClient?) async -> Int {
-        guard let client else { return 0 }
-        do {
-            try await client.setRating(spaceID: spaceID, assetID: item.assetID, stars)
-            // Refetched rather than patched locally: the Information panel
-            // reads `detail`, and a value edited in two places drifts.
-            await loadDetail(client)
-            return 1
-        } catch {
-            return 0
-        }
-    }
-
     func editTags(add: [String], remove: [String], client: FrameStationClient?) async -> Int {
         guard let client else { return 0 }
         do {
@@ -199,7 +184,6 @@ struct AssetDetailView: View {
     @State private var showShare = false
     @State private var showSlideshow = false
     @State private var showTagEditor = false
-    @State private var showRatingEditor = false
     @State private var showDateEditor = false
     @State private var isWorking = false
     @Environment(\.dismiss) private var dismiss
@@ -263,14 +247,6 @@ struct AssetDetailView: View {
         .sheet(isPresented: $showShare) { ShareSheet(items: shareFiles) }
         .sheet(isPresented: $showInfo) {
             InformationSheet(model: currentModel, session: session) { showInfo = false }
-        }
-        .sheet(isPresented: $showRatingEditor) {
-            RatingSheet(title: subject, current: currentModel.detail?.rating) { stars in
-                await currentModel.setRating(stars, client: session.client)
-            } onFinished: { done in
-                showRatingEditor = false
-                if let done { Task { [model = currentModel] in await model.flash(done) } }
-            }
         }
         .sheet(isPresented: $showDateEditor) {
             DateTimeEditorSheet(items: [currentItem]) { plan in
@@ -639,12 +615,6 @@ struct AssetDetailView: View {
         } label: {
             Label("Edit Tags", systemImage: "tag")
         }
-        Button {
-            showRatingEditor = true
-        } label: {
-            Label("Edit Rating", systemImage: "star")
-        }
-
         Divider()
         Button {
             showDateEditor = true

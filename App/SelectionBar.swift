@@ -104,37 +104,6 @@ final class GridSelection {
         }
     }
 
-    /// Rates everything picked, 0–5, where 0 clears the rating.
-    ///
-    /// Unlike a favourite this is one shared value rather than one per person,
-    /// so a contributor rating twelve photos rates them for the whole library.
-    func setRating(
-        _ rating: Int, in space: SpaceDTO, client: FrameStationClient?
-    ) async -> Int {
-        guard let client, !picked.isEmpty else { return 0 }
-        isWorking = true
-        defer { isWorking = false; progress = "" }
-
-        var changed = 0
-        for (index, item) in picked.enumerated() {
-            progress = "Rating \(index + 1) of \(picked.count)…"
-            do {
-                try await client.setRating(
-                    spaceID: space.id, assetID: item.assetID, rating
-                )
-                changed += 1
-            } catch {
-                lastError = error.localizedDescription
-            }
-        }
-        return changed
-    }
-
-    /// Applies one tag edit to everything picked.
-    ///
-    /// Add and remove travel together because that is what one pass through the
-    /// editor produces, and sending them as two requests would leave a failure
-    /// halfway with half the edit applied.
     func editTags(
         add: [String], remove: [String],
         in space: SpaceDTO, client: FrameStationClient?

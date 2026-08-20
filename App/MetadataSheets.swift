@@ -3,104 +3,6 @@ import FrameStationAPI
 import FrameStationKit
 import SwiftUI
 
-/// Stars, for one photo or for everything selected.
-///
-/// A tap applies and dismisses. A rating is one value and trivially changed
-/// again, so asking someone to pick it and then confirm it is just a second tap.
-struct RatingSheet: View {
-    let title: String
-    /// Applies the rating and reports how many photos took it, so the
-    /// confirmation can say what happened rather than assume it all worked.
-    let apply: (Int) async -> Int
-    let onFinished: (String?) -> Void
-
-    @State private var stars: Int
-    @State private var isWorking = false
-    @State private var failure: String?
-
-    init(
-        title: String,
-        current: Int?,
-        apply: @escaping (Int) async -> Int,
-        onFinished: @escaping (String?) -> Void
-    ) {
-        self.title = title
-        self.apply = apply
-        self.onFinished = onFinished
-        _stars = State(initialValue: current ?? 0)
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Spacer(minLength: 0)
-                        ForEach(1...5, id: \.self) { star in
-                            Button { choose(star) } label: {
-                                Image(systemName: star <= stars ? "star.fill" : "star")
-                                    .font(.title)
-                                    .foregroundStyle(star <= stars ? Color.yellow : Color.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.vertical, 8)
-                } footer: {
-                    // Worth saying: unlike a favourite, this one is not yours
-                    // alone.
-                    Text("Everyone in this library sees the same rating.")
-                }
-
-                Section {
-                    Button("No Rating") { choose(0) }
-                        .disabled(stars == 0)
-                }
-
-                if let failure {
-                    Section {
-                        Label(failure, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                }
-            }
-            .disabled(isWorking)
-            .navigationTitle(title)
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onFinished(nil) }
-                }
-            }
-        }
-    }
-
-    private func choose(_ value: Int) {
-        stars = value
-        failure = nil
-        Task {
-            isWorking = true
-            let count = await apply(value)
-            isWorking = false
-            // Nothing took it: stay open with the reason rather than dismissing
-            // as though it had worked.
-            guard count > 0 else {
-                failure = "Couldn't change the rating."
-                return
-            }
-            let noun = count == 1 ? "item" : "items"
-            onFinished(
-                value == 0
-                    ? "Rating cleared on \(count) \(noun)"
-                    : "\(count) \(noun) rated \(value) star\(value == 1 ? "" : "s")"
-            )
-        }
-    }
-}
-
 /// Adding and removing tags, for one photo or for everything selected.
 ///
 /// Two sections that each mean one thing, rather than one list of checkboxes:
@@ -295,25 +197,13 @@ struct MetadataPresentation: ViewModifier {
     let session: AppSession
     let space: SpaceDTO
     let selection: GridSelection
-    @Binding var showRating: Bool
     @Binding var showTags: Bool
     @Binding var result: String?
 
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $showRating) {
-                RatingSheet(title: countTitle, current: nil) { stars in
-                    await selection.setRating(stars, in: space, client: session.client)
-                } onFinished: { done in
-                    showRating = false
-                    // Only success clears the selection: after a failure the
-                    // photos stay picked, ready to try again.
-                    if let done {
-                        result = done
-                        selection.clear()
-                    }
-                }
-            }
+            // Only success clears the selection: after a failure the photos
+            // stay picked, ready to try again.
             .sheet(isPresented: $showTags) {
                 TagEditorSheet(
                     session: session, space: space, title: countTitle, current: []
