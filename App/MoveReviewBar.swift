@@ -73,8 +73,16 @@ final class MoveReview {
     }
 }
 
-/// The bar itself: what landed, where it is, arrows through it, and the offer to
-/// clear the originals once you've looked.
+/// The bar itself: one row, the way Apple writes a transient bar.
+///
+/// It started as two. A status line, then a red "Remove from Personal Space"
+/// underneath — which put a destructive action one stray tap from the chevron
+/// you were already tapping, in a capsule floating over photographs, at the
+/// exact size where a thumb covers half of it. Find-on-page, Recently Deleted,
+/// the Files selection bar: none of them stack, and none of them put delete in
+/// the open. So the removal moves into an overflow menu, where reaching it
+/// costs an open, a tap and a confirmation, and the row itself stays about the
+/// one thing it is for — looking at what arrived.
 struct MoveReviewBar: View {
     let review: MoveReview
     let onDone: () -> Void
@@ -85,31 +93,28 @@ struct MoveReviewBar: View {
     @State private var confirmRemoval = false
 
     var body: some View {
-        VStack(spacing: 8) {
-            mainRow
-            if review.canRemoveOriginals, onRemoveOriginals != nil {
-                removalRow
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            row
+            // The one thing allowed to break the single-row rule, because it is
+            // exceptional and because a failure people can't read is worse than
+            // a bar that grew a line.
             if let error = review.removeError {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
         .glassCapsule(interactive: false, fallback: .regularMaterial)
         .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
         .transition(.move(edge: .bottom).combined(with: .opacity))
-        // Said plainly, because this is the destructive half of the flow and the
-        // photos it removes are the copies on the phone's own library, not the
-        // ones just shared.
         .confirmationDialog(
-            "Remove \(counted) from \(review.source?.space.name ?? "your library")?",
+            "Remove \(counted) from \(sourceName)?",
             isPresented: $confirmRemoval,
             titleVisibility: .visible
         ) {
@@ -123,53 +128,58 @@ struct MoveReviewBar: View {
         }
     }
 
-    private var mainRow: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(headline)
-                    .font(.subheadline.weight(.medium))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    private var row: some View {
+        HStack(spacing: 4) {
+            // One line, and it carries the count and the position together
+            // rather than spending a second line saying both.
+            Text(label)
+                .font(.subheadline)
+                .lineLimit(1)
+                .monospacedDigit()
 
             Spacer(minLength: 8)
 
             step(-1, symbol: "chevron.left", label: "Previous shared item")
             step(1, symbol: "chevron.right", label: "Next shared item")
 
+            if review.canRemoveOriginals, onRemoveOriginals != nil {
+                overflow
+            }
+
             Button(action: onDone) {
-                Text("Done").font(.subheadline.weight(.semibold))
+                Text("Done")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .frame(height: 30)
+                    .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(.leading, 4)
         }
     }
 
-    /// A second line rather than another button in the first: the row above is
-    /// about looking, this one is about deleting, and a destructive action
-    /// crammed in beside two chevrons is one mis-tap away from a mistake.
-    private var removalRow: some View {
-        HStack(spacing: 10) {
-            Divider().frame(height: 1).hidden()
-            Button {
+    private var overflow: some View {
+        Menu {
+            Button(role: .destructive) {
                 confirmRemoval = true
             } label: {
-                HStack(spacing: 6) {
-                    if review.isRemoving {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "trash")
-                    }
-                    Text(review.isRemoving ? "Removing…" : "Remove from \(sourceName)")
-                }
-                .font(.caption.weight(.medium))
+                Label("Remove Originals from \(sourceName)", systemImage: "trash")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.red)
-            .disabled(review.isRemoving)
-            Spacer(minLength: 0)
+        } label: {
+            if review.isRemoving {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 34, height: 30)
+            } else {
+                Image(systemName: "ellipsis")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 34, height: 30)
+                    .contentShape(Capsule())
+            }
         }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .disabled(review.isRemoving)
+        .accessibilityLabel("More actions for the items just shared")
     }
 
     private var sourceName: String {
@@ -180,22 +190,19 @@ struct MoveReviewBar: View {
         review.count == 1 ? "1 original" : "\(review.count) originals"
     }
 
-    private var headline: String {
-        review.count == 1
-            ? "1 item shared here"
-            : "\(review.count) items shared here"
-    }
-
-    /// Counts from one while stepping, because "3 of 8" is what a person is
-    /// checking against — not a zero-based index.
-    private var detail: String {
+    /// Says the count until you start stepping, then says where you are.
+    ///
+    /// Both facts in one line rather than one above the other: "1 of 3 shared
+    /// here" is the whole status, and counting from one is what a person is
+    /// checking against.
+    private var label: String {
         if review.removedOriginals {
-            return "Originals removed from \(sourceName)"
+            return "Originals removed"
         }
         if let index = review.index {
-            return "Showing \(index + 1) of \(review.count)"
+            return "\(index + 1) of \(review.count) shared here"
         }
-        return "Step through to check them"
+        return review.count == 1 ? "1 item shared here" : "\(review.count) items shared here"
     }
 
     private func step(_ offset: Int, symbol: String, label: String) -> some View {
