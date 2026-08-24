@@ -54,19 +54,25 @@ struct TimelineView: View {
     var spaceSwitcher: AnyView?
     /// Told where a selection went, so the host can follow it there.
     ///
-    /// The grid can move photos but cannot navigate to the result — it only
+    /// The grid can share photos but cannot navigate to the result — it only
     /// knows the space it is showing. The Shared tab owns which space is on
     /// screen, so it is the thing that can land you in the destination.
+    ///
+    /// Carries the source alongside the destination ids: the originals stay put
+    /// now, and offering to remove them later means knowing which they were.
     #if os(iOS)
-    var onMoved: ((SpaceDTO, [UUID]) -> Void)?
+    var onShared: ((SpaceDTO, ShareAssetsResponse, SpaceDTO) -> Void)?
     /// Items that have just landed in this space, offered for checking.
     ///
-    /// Passed in rather than owned here because the move happens in the space
+    /// Passed in rather than owned here because the sharing happens in the space
     /// being left, and this is the space being arrived at — two different
     /// instances of this view.
     var review: MoveReview?
     /// Dismisses the review bar. Held by the host for the same reason.
     var onReviewDone: (() -> Void)?
+    /// Clears the originals out of the space they were shared from. Held by the
+    /// host because the source is a different space from this one.
+    var onRemoveOriginals: (() -> Void)?
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -296,11 +302,11 @@ struct TimelineView: View {
                 showMoveTo = false
             } onConfirm: { destination in
                 showMoveTo = false
-                move(to: destination)
+                share(to: destination)
             }
         }
         .alert(
-            "Couldn't move these",
+            "Couldn't share these",
             isPresented: Binding(get: { moveError != nil }, set: { if !$0 { moveError = nil } })
         ) {
             Button("OK") { moveError = nil }
@@ -350,6 +356,13 @@ struct TimelineView: View {
         .onChange(of: engine?.completedRuns) { _, _ in
             Task { await store?.refresh() }
         }
+        // And the same for a batch shared straight from the library: the local
+        // tiles retire as each one lands, so without this there is a gap where
+        // the photo has left the pending queue and the server row hasn't been
+        // read yet — a tile that disappears and comes back.
+        .onChange(of: session.pendingUploads.completedBatches) { _, _ in
+            Task { await store?.refresh() }
+        }
         #endif
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
@@ -375,7 +388,9 @@ struct TimelineView: View {
         .task(id: PollKey(space: space.id, isActive: scenePhase == .active)) {
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: Self.pollInterval)
+                // Read each time round rather than captured once: the whole
+                // point is that the cadence changes as the grid does.
+                try? await Task.sleep(nanoseconds: pollInterval)
                 guard !Task.isCancelled else { return }
                 await store?.refresh()
             }
@@ -388,9 +403,27 @@ struct TimelineView: View {
         let isActive: Bool
     }
 
-    /// Fast enough that a photo taken in the next room shows up while you're
-    /// still looking at the grid, slow enough to be free on a J4125.
-    private static let pollInterval: UInt64 = 15_000_000_000
+    /// How long to wait before asking the NAS what changed.
+    ///
+    /// Two speeds, because there are two situations and one interval cannot
+    /// serve both. Normally nothing is expected, a tick is a courtesy, and
+    /// fifteen seconds is fast enough that a photo taken in the next room turns
+    /// up while you're still looking at the grid.
+    ///
+    /// But a grid holding an undelivered photo is *waiting for a specific
+    /// answer*, and it is nearly always the person who just uploaded it who is
+    /// staring at the grey square. Fifteen seconds of that reads as a broken
+    /// upload — which is exactly the complaint, and why "it appears if I leave
+    /// the tab and come back" was the workaround. So while anything is
+    /// undelivered this polls at two seconds and stops the moment the last one
+    /// lands.
+    ///
+    /// The fast rate costs nothing worth counting: `/changes` answers an
+    /// unchanged library with an empty list, and the burst only lasts as long as
+    /// the derivation queue does.
+    private var pollInterval: UInt64 {
+        store?.hasPendingDerivations == true ? 2_000_000_000 : 15_000_000_000
+    }
 
     @ViewBuilder
     private func content(_ store: TimelineStore) -> some View {
@@ -685,27 +718,26 @@ struct TimelineView: View {
         return nil
     }
 
-    /// Sends the selection to another space, then hands the result upward.
+    /// Shares the selection into another space, then hands the result upward.
     ///
-    /// The grid it left is refreshed rather than patched: a move changes what
-    /// this space contains, and the server has just told both spaces about it
-    /// through the change log, so the honest thing is to re-read rather than
-    /// guess which rows to drop.
-    private func move(to destination: SpaceDTO) {
+    /// This space is refreshed even though nothing left it: the copies are new
+    /// rows the server has just announced, and re-reading is honest where
+    /// guessing which rows changed is not.
+    private func share(to destination: SpaceDTO) {
         let assetIDs = selection.picked.map(\.assetID)
         guard let client = session.client, !assetIDs.isEmpty else { return }
         Task {
             do {
-                let result = try await client.move(
+                let result = try await client.share(
                     spaceID: space.id, assetIDs: assetIDs, to: destination.id
                 )
                 selection.clear()
                 await store?.refresh()
-                onMoved?(destination, result.assetIDs)
+                onShared?(destination, result, space)
             } catch {
-                // Said out loud. A move that silently does nothing leaves people
-                // wondering whether it half-happened, which for an action that
-                // relocates files is the worst thing it could leave them with.
+                // Said out loud. An action that silently does nothing leaves
+                // people wondering whether it half-happened, and half-happened
+                // is exactly what they will assume.
                 moveError = error.localizedDescription
             }
         }
@@ -747,11 +779,28 @@ struct TimelineView: View {
 
     #if os(iOS)
     /// Queued local items grouped by the same day key the server buckets use.
+    ///
+    /// Two sources, both showing photos that exist on the phone and not yet on
+    /// the NAS: the backup queue, and anything shared straight from the library.
+    ///
+    /// Scoped to this space, which it wasn't. The backup queue targets the
+    /// personal space, so before this every shared space's grid drew the phone's
+    /// entire backlog of pending uploads as though they were on their way *there*
+    /// — tiles for photos that were never going to appear.
     private var queuedByDay: [String: [(localIdentifier: String, state: UploadState)]] {
-        guard let engine, backupSettings.enabled else { return [:] }
         var grouped: [String: [(localIdentifier: String, state: UploadState)]] = [:]
-        for entry in engine.queued {
-            let key = Self.dayKey(entry.capturedAt, zoom: store?.zoom ?? .day)
+        let zoom = store?.zoom ?? .day
+
+        if let engine, backupSettings.enabled,
+           backupSettings.targetSpace(in: session.spaces)?.id == space.id {
+            for entry in engine.queued {
+                let key = Self.dayKey(entry.capturedAt, zoom: zoom)
+                grouped[key, default: []].append((entry.localIdentifier, entry.state))
+            }
+        }
+
+        for entry in session.pendingUploads.items(in: space.id) {
+            let key = Self.dayKey(entry.capturedAt, zoom: zoom)
             grouped[key, default: []].append((entry.localIdentifier, entry.state))
         }
         return grouped
@@ -957,13 +1006,13 @@ struct TimelineView: View {
                         confirmDelete = true
                     } moreMenu: {
                         // First, and on its own, because it is the only entry
-                        // here that takes photos *out* of this space rather
+                        // here that puts photos in front of other people rather
                         // than annotating them where they sit.
                         #if os(iOS)
                         Button {
                             showMoveTo = true
                         } label: {
-                            Label("Move to Shared Space", systemImage: "arrow.right.doc.on.clipboard")
+                            Label("Add to Shared Space", systemImage: "person.2.badge.plus")
                         }
                         Divider()
                         #endif
@@ -1002,7 +1051,10 @@ struct TimelineView: View {
                     // floating bars stacked over the photos is one too many.
                     #if os(iOS)
                     if let review, let onReviewDone {
-                        MoveReviewBar(review: review, onDone: onReviewDone)
+                        MoveReviewBar(
+                            review: review, onDone: onReviewDone,
+                            onRemoveOriginals: onRemoveOriginals
+                        )
                     } else {
                         floatingZoom(store)
                     }

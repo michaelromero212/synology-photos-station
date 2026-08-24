@@ -199,18 +199,19 @@ extension FrameStationClient {
         )
     }
 
-    /// Moves photos out of `spaceID` and into another space.
+    /// Puts photos into a shared space, leaving the originals where they are.
     ///
-    /// A move, not a copy — they leave the source. Returns the ids that actually
-    /// moved, which is what lets the app walk them in the destination afterwards
-    /// rather than asking someone to take its word for it.
+    /// Returns the ids they carry **in the destination**, which are not the ids
+    /// that were sent — the destination gets its own rows — so the app can walk
+    /// them there rather than asking anyone to take its word for it. The source
+    /// ids come back too, for offering to remove the originals afterwards.
     @discardableResult
-    public func move(
+    public func share(
         spaceID: UUID, assetIDs: [UUID], to destinationSpaceID: UUID
-    ) async throws -> MoveAssetsResponse {
+    ) async throws -> ShareAssetsResponse {
         try await post(
-            "v1/spaces/\(spaceID)/assets/move",
-            body: MoveAssetsRequest(
+            "v1/spaces/\(spaceID)/assets/share",
+            body: ShareAssetsRequest(
                 assetIDs: assetIDs, destinationSpaceID: destinationSpaceID
             )
         )

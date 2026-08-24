@@ -7,8 +7,8 @@ extension EditCaptureTimeRequest: @retroactive Content {}
 extension RotateMediaRequest: @retroactive Content {}
 extension MediaEditResponse: @retroactive Content {}
 extension SetCreditRequest: @retroactive Content {}
-extension MoveAssetsRequest: @retroactive Content {}
-extension MoveAssetsResponse: @retroactive Content {}
+extension ShareAssetsRequest: @retroactive Content {}
+extension ShareAssetsResponse: @retroactive Content {}
 
 /// Correcting what a photo says about itself: when it was taken, and which way
 /// up it goes.
@@ -32,8 +32,10 @@ struct MediaEditController: RouteCollection {
         protected.post("spaces", ":spaceID", "assets", "capture-time", use: editCaptureTime)
         protected.post("spaces", ":spaceID", "assets", "orientation", use: rotate)
         protected.post("spaces", ":spaceID", "assets", "credit", use: setCredit)
-        protected.post("spaces", ":spaceID", "assets", "move", use: move)
+        protected.post("spaces", ":spaceID", "assets", "share", use: share)
     }
+
+    private struct IDRow: Decodable { let id: UUID }
 
     private struct SpaceRow: Decodable {
         let id: UUID
@@ -41,33 +43,38 @@ struct MediaEditController: RouteCollection {
         let kind: String
     }
 
-    /// Moves photos out of this space and into another.
+    /// Puts photos into a shared space, leaving them where they already are.
     ///
-    /// A move rather than a copy, which makes it the one edit here that changes
-    /// where the *file* lives as well as what the database says. Both have to
-    /// agree or the two halves of this system start describing different
-    /// libraries — the app showing a photo in one place and File Station showing
-    /// it in another is exactly the confusion the canonical-file layout exists
-    /// to prevent.
+    /// This used to be a move, and the move was wrong. Sharing a photo with the
+    /// family is not a statement that you want it out of your own library —
+    /// those are two decisions, and running them together means the second one
+    /// gets made silently, by an app, on someone's behalf. So the source
+    /// placement is untouched here and the app offers the removal afterwards,
+    /// once the photos are visibly sitting in the destination.
     ///
-    /// Order matters. The file is relocated first and the rows are updated after,
-    /// inside a transaction: if the move fails the rows never change, and a photo
-    /// stays wholly in the space it started in. The reverse order can leave a
-    /// database pointing at a path with nothing on the end of it.
+    /// The copy is the same one `link` performs: a hard link into the shared
+    /// tree plus that space's own asset row, so the shared library's contents
+    /// live in the shared folder rather than inside somebody's home directory,
+    /// and the file is stored once. See ARCHITECTURE.md §3a.
     ///
-    /// Destination must be a shared space you can contribute to. Moving *into*
+    /// Every item recorded through `ActivityTracker`, which is what turns a
+    /// batch of shares into the single "Morgan added 10 photos to Family Shared"
+    /// push the family actually receives. Sharing is the moment worth telling
+    /// people about; an upload into your own library is not.
+    ///
+    /// Destination must be a shared space you can contribute to. Adding *into*
     /// someone's personal library would put your photos in their private tree,
-    /// which is not a thing one member of a household should be able to do to
+    /// which is not something one member of a household should be able to do to
     /// another.
     @Sendable
-    func move(req: Request) async throws -> MoveAssetsResponse {
+    func share(req: Request) async throws -> ShareAssetsResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
-        let input = try req.content.decode(MoveAssetsRequest.self)
+        let input = try req.content.decode(ShareAssetsRequest.self)
         guard !input.assetIDs.isEmpty else {
-            throw Abort(.badRequest, reason: "Nothing to move.")
+            throw Abort(.badRequest, reason: "Nothing to share.")
         }
         guard input.assetIDs.count <= 500 else {
-            throw Abort(.badRequest, reason: "Move at most 500 items at once.")
+            throw Abort(.badRequest, reason: "Share at most 500 items at once.")
         }
 
         let sourceID = try await requireContributorSpace(req)
@@ -84,88 +91,92 @@ struct MediaEditController: RouteCollection {
             throw Abort(.notFound, reason: "No such space.")
         }
         guard destination.kind == "shared" else {
-            throw Abort(.forbidden, reason: "Photos can only be moved into a shared space.")
+            throw Abort(.forbidden, reason: "Photos can only be shared into a shared space.")
         }
 
-        let configuration = BrowseTree.Configuration.fromEnvironment()
-        var movedIDs: [UUID] = []
+        struct SourceRow: Decodable {
+            let mediaType: String
+        }
 
-        try await req.withPinnedConnection { sql in
-            try await sql.raw("BEGIN").run()
-            do {
-                for assetID in input.assetIDs {
-                    guard let target = try await Self.target(
-                        assetID: assetID, spaceID: sourceID, on: sql
-                    ) else { continue }
+        var landed: [UUID] = []
+        var sources: [UUID] = []
 
-                    // Where the file should end up. Nil when the browse tree is
-                    // off, or when the destination can't be resolved — the rows
-                    // still move, because the database is the library and the
-                    // tree is a mirror of it.
-                    var relocated: String?
-                    if let current = target.storagePath, !current.isEmpty,
-                       let sha256 = target.sha256 {
-                        let placement = BrowseTree.Placement(
-                            id: target.placementID,
-                            sha256: sha256,
-                            blobExt: (current as NSString).pathExtension,
-                            filename: target.filename,
-                            capturedAt: target.capturedAt,
-                            spaceKind: destination.kind,
-                            spaceName: destination.name,
-                            dsmUsername: nil,
-                            dsmUID: nil
-                        )
-                        if let wanted = BrowseTree.destination(
-                            for: placement, configuration: configuration
-                        ) {
-                            // Same collision rule the worker uses when it first
-                            // writes a file, so a move can't quietly overwrite
-                            // a different photo that happens to share a name.
-                            let path = BrowseTreeWorker.deduplicated(wanted, sha256: sha256)
-                            try FileManager.default.createDirectory(
-                                atPath: (path as NSString).deletingLastPathComponent,
-                                withIntermediateDirectories: true
-                            )
-                            try FileManager.default.moveItem(atPath: current, toPath: path)
-                            relocated = path
-                        }
+        // Deliberately not one big transaction. Copying makes a file on disk per
+        // item, and a rollback cannot unmake those — so a failure halfway would
+        // leave the tree holding links the database had forgotten. Per-item
+        // instead: each photo either arrives completely or not at all, and the
+        // response says which ones did.
+        for assetID in input.assetIDs {
+            // You may only place a photo you can already see. Without this,
+            // holding an asset id would be enough to pull any file in the
+            // household into a space you happen to belong to — and ids leak far
+            // more easily than blobs do. Skipped rather than refused, so one
+            // stale id in a batch doesn't discard the other forty-nine.
+            guard let source = try await req.sql.raw("""
+                SELECT a.media_type AS "mediaType" FROM assets a
+                WHERE a.id = \(bind: assetID)
+                  AND EXISTS (
+                      SELECT 1 FROM space_assets sa
+                      WHERE sa.asset_id = a.id AND sa.space_id = \(bind: sourceID)
+                        AND sa.deleted_at IS NULL
+                  )
+                """).first(decoding: SourceRow.self) else { continue }
+
+            // Already there: nothing to copy and nothing to announce. Sharing
+            // the same photo twice should be quiet, not a second notification.
+            let existing = try await req.sql.raw("""
+                SELECT sa.id FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: destination.id) AND sa.deleted_at IS NULL
+                  AND a.sha256 = (SELECT sha256 FROM assets WHERE id = \(bind: assetID))
+                """).first(decoding: IDRow.self)
+            if existing != nil { continue }
+
+            let targetAssetID = try await UploadController.copyIntoSpace(
+                assetID: assetID, spaceID: destination.id, device: device, req: req
+            ) ?? assetID
+
+            try await req.withPinnedConnection { sql in
+                try await sql.raw("BEGIN").run()
+                do {
+                    guard let placement = try await sql.raw("""
+                        INSERT INTO space_assets
+                            (space_id, asset_id, uploaded_by_user_id, source_device_id)
+                        VALUES
+                            (\(bind: destination.id), \(bind: targetAssetID),
+                             \(bind: device.userID), \(bind: device.deviceID))
+                        ON CONFLICT (space_id, asset_id)
+                        DO UPDATE SET deleted_at = NULL
+                        RETURNING id
+                        """).first(decoding: IDRow.self) else {
+                        throw Abort(.internalServerError, reason: "Could not place asset in space.")
                     }
 
-                    try await sql.raw("""
-                        UPDATE space_assets SET space_id = \(bind: destination.id)
-                        WHERE id = \(bind: target.placementID)
-                        """).run()
-                    if let relocated {
-                        try await sql.raw("""
-                            UPDATE assets SET storage_path = \(bind: relocated)
-                            WHERE id = \(bind: assetID)
-                            """).run()
-                    }
-
-                    // Both spaces are told: it left one and arrived in the
-                    // other, so anyone looking at either sees it happen without
-                    // a refresh.
-                    _ = try await ChangeLog.append(
-                        spaceID: sourceID, entity: "space_asset",
-                        entityID: target.placementID, op: "delete", on: sql
-                    )
                     _ = try await ChangeLog.append(
                         spaceID: destination.id, entity: "space_asset",
-                        entityID: target.placementID, op: "insert", on: sql
+                        entityID: placement.id, op: "insert", on: sql
                     )
-                    movedIDs.append(assetID)
+                    try await ActivityTracker.record(
+                        spaceID: destination.id,
+                        userID: device.userID,
+                        mediaType: MediaType(rawValue: source.mediaType) ?? .photo,
+                        on: sql
+                    )
+                    try await sql.raw("COMMIT").run()
+                } catch {
+                    try? await sql.raw("ROLLBACK").run()
+                    throw error
                 }
-                try await sql.raw("COMMIT").run()
-            } catch {
-                try? await sql.raw("ROLLBACK").run()
-                throw error
             }
+
+            landed.append(targetAssetID)
+            sources.append(assetID)
         }
 
-        return MoveAssetsResponse(
-            moved: movedIDs.count,
-            assetIDs: movedIDs,
+        return ShareAssetsResponse(
+            shared: landed.count,
+            assetIDs: landed,
+            sourceAssetIDs: sources,
             destinationSpaceID: destination.id
         )
     }

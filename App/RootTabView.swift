@@ -23,12 +23,26 @@ struct RootTabView: View {
     /// Built alongside the engine and shared with it: the engine is what
     /// discovers an outage, and the grid is what has to say so.
     @State private var connection: ConnectionMonitor?
+    /// Which shared space the Shared tab is showing, and what just landed there
+    /// for checking.
+    ///
+    /// Held here rather than inside `SharedTab` because sharing happens in the
+    /// grid you are *leaving* — usually the Photos tab — and the review belongs
+    /// to the grid you arrive at. Two sibling tabs cannot hand state to each
+    /// other; their parent can.
+    @State private var sharedSpaceID: UUID?
+    @State private var review: MoveReview?
     #endif
+
+    /// Which tab is on screen. Bound so following a share can move you.
+    @State private var tab = Tabs.photos
+
+    private enum Tabs: Hashable { case photos, albums, shared, more }
 
     var body: some View {
         // `.tabItem` rather than the iOS 18 `Tab` builder: the deployment
         // target is 17, and this form behaves identically on both.
-        TabView {
+        TabView(selection: $tab) {
             NavigationStack {
                 if let personal = session.personalSpace {
                     photosTimeline(personal)
@@ -37,15 +51,19 @@ struct RootTabView: View {
                 }
             }
             .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
+            .tag(Tabs.photos)
 
             NavigationStack { AlbumsView(session: session) }
                 .tabItem { Label("Albums", systemImage: "rectangle.stack") }
+                .tag(Tabs.albums)
 
             NavigationStack { sharedTab }
                 .tabItem { Label("Shared", systemImage: "person.2") }
+                .tag(Tabs.shared)
 
             NavigationStack { moreTab }
             .tabItem { Label("More", systemImage: "ellipsis") }
+            .tag(Tabs.more)
         }
         // On the TabView rather than per-tab: the bar is one control shared by
         // all four, and setting it four times is four chances to miss one.
@@ -83,7 +101,11 @@ struct RootTabView: View {
     @ViewBuilder
     private var sharedTab: some View {
         #if os(iOS)
-        SharedTab(session: session, engine: engine, backupSettings: $backupSettings)
+        SharedTab(
+            session: session, engine: engine, backupSettings: $backupSettings,
+            selectedSpaceID: $sharedSpaceID, review: $review,
+            onShared: followShare
+        )
         #else
         SharedTab(session: session)
         #endif
@@ -94,7 +116,8 @@ struct RootTabView: View {
         #if os(iOS)
         TimelineView(
             session: session, space: space,
-            engine: engine, backupSettings: $backupSettings
+            engine: engine, backupSettings: $backupSettings,
+            onShared: followShare
         )
         #else
         TimelineView(session: session, space: space)
@@ -102,6 +125,24 @@ struct RootTabView: View {
     }
 
     #if os(iOS)
+    /// Goes where the photos went.
+    ///
+    /// The same three steps wherever the share started: remember what landed and
+    /// where it came from, point the Shared tab at the destination, then show
+    /// that tab. Ordered so the grid is already looking at the right space by
+    /// the time it appears — switching tabs first would flash the previous one.
+    private func followShare(
+        destination: SpaceDTO, result: ShareAssetsResponse, from: SpaceDTO
+    ) {
+        review = MoveReview(
+            assetIDs: result.assetIDs,
+            destinationName: destination.name,
+            source: MoveReview.Source(space: from, assetIDs: result.sourceAssetIDs)
+        )
+        sharedSpaceID = destination.id
+        tab = .shared
+    }
+
     private var engineIfReady: BackupEngine? { engine }
     #endif
 }
@@ -117,12 +158,17 @@ struct SharedTab: View {
     @Binding var backupSettings: BackupSettings
     #endif
 
-    /// Which shared space is on screen. Nil until the first list of spaces
-    /// arrives, then whichever the person last picked.
-    @State private var selectedSpaceID: UUID?
+    /// Which shared space is on screen, and what just landed in it.
+    ///
+    /// Owned by `RootTabView`: a share that starts in the Photos tab has to be
+    /// able to point this tab at a destination before it is even on screen, and
+    /// state private to this view could not be reached from there.
     #if os(iOS)
-    /// What a just-completed move put here, for checking. Cleared when done.
-    @State private var review: MoveReview?
+    @Binding var selectedSpaceID: UUID?
+    @Binding var review: MoveReview?
+    let onShared: (SpaceDTO, ShareAssetsResponse, SpaceDTO) -> Void
+    #else
+    @State private var selectedSpaceID: UUID?
     #endif
 
     var body: some View {
@@ -197,6 +243,43 @@ struct SharedTab: View {
         )
     }
 
+    #if os(iOS)
+    /// Clears the originals from the space they were shared out of.
+    ///
+    /// Offered rather than assumed, and offered *here* — after the copies are
+    /// visibly sitting in the destination — because that is the only point at
+    /// which agreeing to it is an informed decision rather than a guess about
+    /// whether the share worked.
+    ///
+    /// Failures are collected rather than fatal: nineteen of twenty removed is
+    /// a better outcome than nothing removed, and the one that didn't is still
+    /// in the library where it started.
+    private func removeOriginals() {
+        guard let review, let source = review.source, let client = session.client else { return }
+        review.isRemoving = true
+        review.removeError = nil
+        Task {
+            var failed = 0
+            for assetID in source.assetIDs {
+                do {
+                    try await client.removeAsset(spaceID: source.space.id, assetID: assetID)
+                } catch {
+                    failed += 1
+                }
+            }
+            review.isRemoving = false
+            if failed == 0 {
+                review.removedOriginals = true
+            } else {
+                review.removeError = failed == source.assetIDs.count
+                    ? "Couldn't remove the originals."
+                    : "\(failed) of \(source.assetIDs.count) couldn't be removed."
+                review.removedOriginals = failed < source.assetIDs.count
+            }
+        }
+    }
+    #endif
+
     /// The backup bar's state is iOS-only; other platforms get the plain grid.
     @ViewBuilder
     private func timeline(for space: SpaceDTO, switcher: AnyView? = nil) -> some View {
@@ -205,17 +288,10 @@ struct SharedTab: View {
             session: session, space: space,
             engine: engine, backupSettings: $backupSettings,
             spaceSwitcher: switcher,
-            onMoved: { destination, movedIDs in
-                // Land where they went, carrying what arrived. Set together so
-                // the review belongs to the space it describes and cannot be
-                // shown over the wrong grid.
-                review = MoveReview(
-                    assetIDs: movedIDs, destinationName: destination.name
-                )
-                selectedSpaceID = destination.id
-            },
+            onShared: onShared,
             review: review,
-            onReviewDone: { review = nil }
+            onReviewDone: { review = nil },
+            onRemoveOriginals: removeOriginals
         )
         #else
         TimelineView(session: session, space: space, spaceSwitcher: switcher)

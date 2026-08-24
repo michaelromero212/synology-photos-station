@@ -156,14 +156,19 @@ public struct SetCreditRequest: Codable, Sendable, Hashable {
     }
 }
 
-// MARK: - Moving between spaces
+// MARK: - Sharing into a space
 
-/// Moves photos out of one space and into another.
+/// Puts photos into a shared space without taking them out of where they are.
 ///
-/// A move, not a copy: the placement leaves the source. Adding to a shared space
-/// already exists and copies (see ARCHITECTURE.md §3a) — this is the other verb,
-/// for when something is in the wrong library rather than wanted in two.
-public struct MoveAssetsRequest: Codable, Sendable, Hashable {
+/// A copy, not a move — and the distinction is the whole design. Sharing a photo
+/// with the family should not empty it out of your own library; whether the
+/// original stays is a second, separate decision, made later and once you can
+/// see the photos arrived. So this leaves the source placement alone, and the
+/// app offers the removal afterwards rather than assuming it.
+///
+/// The file is hard-linked into the shared tree rather than duplicated, so a
+/// shared photo costs a directory entry and no additional storage.
+public struct ShareAssetsRequest: Codable, Sendable, Hashable {
     public let assetIDs: [UUID]
     public let destinationSpaceID: UUID
 
@@ -173,19 +178,28 @@ public struct MoveAssetsRequest: Codable, Sendable, Hashable {
     }
 }
 
-/// What moved, and where it can be found afterwards.
+/// What landed, and under which ids it can be found there.
 ///
-/// Returns the moved placements so the app can walk them in the destination —
-/// verifying that forty photos landed where you meant is the part a person
-/// actually cares about, and it cannot be done without knowing which they were.
-public struct MoveAssetsResponse: Codable, Sendable, Hashable {
-    public let moved: Int
+/// `assetIDs` are the ids **in the destination**, which are deliberately not the
+/// ids that were sent: copying into a shared space creates that space's own
+/// asset row, so the photo you shared and the photo now in Family Shared are two
+/// rows pointing at one file. The app needs the destination ids to walk them,
+/// and the source ids would send it looking for photos that aren't there.
+///
+/// `sourceAssetIDs` come back alongside so the app can offer to remove exactly
+/// the originals it just shared, and nothing else.
+public struct ShareAssetsResponse: Codable, Sendable, Hashable {
+    public let shared: Int
     public let assetIDs: [UUID]
+    public let sourceAssetIDs: [UUID]
     public let destinationSpaceID: UUID
 
-    public init(moved: Int, assetIDs: [UUID], destinationSpaceID: UUID) {
-        self.moved = moved
+    public init(
+        shared: Int, assetIDs: [UUID], sourceAssetIDs: [UUID], destinationSpaceID: UUID
+    ) {
+        self.shared = shared
         self.assetIDs = assetIDs
+        self.sourceAssetIDs = sourceAssetIDs
         self.destinationSpaceID = destinationSpaceID
     }
 }

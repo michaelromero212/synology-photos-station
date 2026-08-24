@@ -4,16 +4,16 @@ import SwiftUI
 
 #if os(iOS)
 
-/// Choosing where a selection of photos should go, and confirming it before it
-/// goes there.
+/// Choosing which shared space a selection should go into, and confirming it
+/// before it goes.
 ///
 /// Only shared spaces are offered, and never the one you are already in.
 /// Synology's version of this screen starts by asking you to pick a *source*,
 /// which is a question the app already knows the answer to — you are standing in
 /// the source, with the photos selected. So this opens straight on destinations.
 ///
-/// Personal spaces are absent on purpose: moving into someone's own library
-/// would put your photos in their private tree, and moving into your own is what
+/// Personal spaces are absent on purpose: adding into someone else's own library
+/// would put your photos in their private tree, and adding into your own is what
 /// you already have. The whole verb exists for putting things in front of the
 /// family.
 struct MoveToSheet: View {
@@ -35,10 +35,10 @@ struct MoveToSheet: View {
             Group {
                 if destinations.isEmpty {
                     ContentUnavailableView {
-                        Label("Nowhere to move these", systemImage: "person.2")
+                        Label("Nowhere to add these", systemImage: "person.2")
                     } description: {
                         Text(
-                            "Photos can only be moved into a shared space. "
+                            "Photos can only be added to a shared space. "
                             + "Create one and everyone in it sees the same photos."
                         )
                     }
@@ -46,7 +46,7 @@ struct MoveToSheet: View {
                     list
                 }
             }
-            .navigationTitle("Move To")
+            .navigationTitle("Add To")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -54,20 +54,23 @@ struct MoveToSheet: View {
                 }
             }
         }
-        // Said plainly, and said before it happens: a move is the one action
-        // here that takes photos *out* of where they are, and the sentence has
-        // to carry that or people will read it as sharing.
+        // Still confirmed, though it no longer takes anything away. What it
+        // does instead is publish: everyone in that space sees these photos and
+        // gets told about them, and that is worth a deliberate second tap.
         .confirmationDialog(
-            pending.map { "Move \(countedItems) to \($0.name)?" } ?? "",
+            pending.map { "Add \(countedItems) to \($0.name)?" } ?? "",
             isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
             titleVisibility: .visible
         ) {
             if let pending {
-                Button("Move") { onConfirm(pending) }
+                Button("Add") { onConfirm(pending) }
                 Button("Cancel", role: .cancel) { self.pending = nil }
             }
         } message: {
-            Text("They'll leave \(source.name) and live in the shared space instead. On the NAS the files move too.")
+            Text(
+                "Everyone in \(pending?.name ?? "the space") will see them and be notified. "
+                + "Your copies stay in \(source.name) — you can remove them afterwards if you want."
+            )
         }
     }
 

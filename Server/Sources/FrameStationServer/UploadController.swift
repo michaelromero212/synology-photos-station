@@ -445,7 +445,10 @@ struct UploadController: RouteCollection {
     ///
     /// Returns nil when the library layout is off, in which case the caller
     /// falls back to sharing the asset row — the pre-§3a behaviour.
-    private static func copyIntoSpace(
+    /// Internal rather than private: the batch share endpoint in
+    /// `MediaEditController` is the same operation done fifty times, and two
+    /// implementations of "copy a photo into a space" would drift.
+    static func copyIntoSpace(
         assetID: UUID, spaceID: UUID, device: AuthenticatedDevice, req: Request
     ) async throws -> UUID? {
         let configuration = BrowseTree.Configuration.fromEnvironment()
