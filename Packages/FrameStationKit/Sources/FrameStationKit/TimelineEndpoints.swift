@@ -184,11 +184,21 @@ extension FrameStationClient {
         )
     }
 
-    /// Corrects who photos are attributed to, or clears the correction.
+    /// Sets or clears where a photo was taken.
     ///
-    /// Never rewrites who uploaded them — that stays recorded server-side as the
-    /// fact it is. Passing nil for `creditedTo` drops the override and returns
-    /// the credit to the uploader.
+    /// The place *name* comes back from the server rather than being sent to it:
+    /// search matches on the name the server derived, so a client-supplied one
+    /// would be a place you could read and not find. Pass nil for both to clear.
+    @discardableResult
+    public func setLocation(
+        spaceID: UUID, assetID: UUID, latitude: Double?, longitude: Double?
+    ) async throws -> SetLocationResponse {
+        try await put(
+            "v1/spaces/\(spaceID)/assets/\(assetID)/location",
+            body: SetLocationRequest(latitude: latitude, longitude: longitude)
+        )
+    }
+
     /// Moves photos out of `spaceID` and into another space.
     ///
     /// A move, not a copy — they leave the source. Returns the ids that actually
@@ -206,6 +216,11 @@ extension FrameStationClient {
         )
     }
 
+    /// Corrects who photos are attributed to, or clears the correction.
+    ///
+    /// Never rewrites who uploaded them — that stays recorded server-side as the
+    /// fact it is. Passing nil for `creditedTo` drops the override and returns
+    /// the credit to the uploader.
     @discardableResult
     public func setCredit(
         spaceID: UUID, assetIDs: [UUID], creditedTo: UUID?

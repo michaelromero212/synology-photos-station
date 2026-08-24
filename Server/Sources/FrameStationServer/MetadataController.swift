@@ -6,6 +6,8 @@ import Vapor
 extension SetRatingRequest: @retroactive Content {}
 extension EditTagsRequest: @retroactive Content {}
 extension TagListResponse: @retroactive Content {}
+extension SetLocationRequest: @retroactive Content {}
+extension SetLocationResponse: @retroactive Content {}
 
 /// Ratings and tags — the metadata a person edits by hand.
 ///
@@ -28,6 +30,87 @@ struct MetadataController: RouteCollection {
         protected.put("spaces", ":spaceID", "assets", ":assetID", "rating", use: setRating)
         protected.post("spaces", ":spaceID", "assets", ":assetID", "tags", use: editTags)
         protected.get("spaces", ":spaceID", "tags", use: spaceTags)
+        protected.put("spaces", ":spaceID", "assets", ":assetID", "location", use: setLocation)
+    }
+
+    // MARK: - Location
+
+    /// Corrects where a photo was taken, or clears it.
+    ///
+    /// Unlike tags and ratings this is a property of the *file*, not of the
+    /// placement: a photograph was taken in one place, and the same photo in two
+    /// libraries cannot honestly have been taken in two. So it writes to
+    /// `assets` — but the write is still gated on being a contributor to a space
+    /// the photo is in, which is what proves you may touch it at all.
+    ///
+    /// `place_name` is re-derived here rather than accepted from the client.
+    /// Search matches on that column, so a name the server didn't produce would
+    /// be a place you could see and not find. Coordinates are the input; the
+    /// words are the server's to choose.
+    @Sendable
+    func setLocation(req: Request) async throws -> SetLocationResponse {
+        let input = try req.content.decode(SetLocationRequest.self)
+
+        // Both or neither. Half a coordinate places a photo on the equator or
+        // the meridian, which is worse than leaving it unplaced.
+        let latitude = input.latitude
+        let longitude = input.longitude
+        guard (latitude == nil) == (longitude == nil) else {
+            throw Abort(.badRequest, reason: "A location needs both a latitude and a longitude.")
+        }
+        if let latitude, let longitude {
+            guard (-90...90).contains(latitude), (-180...180).contains(longitude) else {
+                throw Abort(.badRequest, reason: "That isn't a point on Earth.")
+            }
+        }
+
+        // Called for its access check and its "is this photo actually here?"
+        // check; the asset id itself comes off the route, since the location
+        // belongs to the file rather than to this one placement of it.
+        _ = try await writablePlacement(req)
+        let assetID = try req.parameters.require("assetID", as: UUID.self)
+        let placeName = latitude.flatMap { lat in
+            longitude.flatMap { req.application.geocoder?.label(latitude: lat, longitude: $0) }
+        }
+
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                try await sql.raw("""
+                    UPDATE assets
+                    SET lat = \(bind: latitude),
+                        lon = \(bind: longitude),
+                        place_name = \(bind: placeName)
+                    WHERE id = \(bind: assetID)
+                    """).run()
+                // Every space holding this photo hears about it: the day headers
+                // carry the place, so a correction that only reached one library
+                // would leave the others captioned with the old one.
+                let placements = try await sql.raw("""
+                    SELECT space_id AS "spaceID", id FROM space_assets
+                    WHERE asset_id = \(bind: assetID) AND deleted_at IS NULL
+                    """).all(decoding: PlacementRow.self)
+                for placement in placements {
+                    _ = try await ChangeLog.append(
+                        spaceID: placement.spaceID, entity: "space_asset",
+                        entityID: placement.id, op: "update", on: sql
+                    )
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+
+        return SetLocationResponse(
+            latitude: latitude, longitude: longitude, placeName: placeName
+        )
+    }
+
+    private struct PlacementRow: Decodable {
+        let spaceID: UUID
+        let id: UUID
     }
 
     private struct IDRow: Decodable { let id: UUID }

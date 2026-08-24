@@ -189,3 +189,40 @@ public struct MoveAssetsResponse: Codable, Sendable, Hashable {
         self.destinationSpaceID = destinationSpaceID
     }
 }
+
+// MARK: - Location
+
+/// Where a photo was taken, when the file is wrong or silent about it.
+///
+/// Two cases, both common in a family library. Older scans and imports carry no
+/// GPS at all, so they are unfindable by place however well you remember where
+/// you were. And a phone occasionally records a location that is simply wrong —
+/// a cached fix from the last place it had signal.
+///
+/// Correcting it is worth more than tidiness here: `place_name` is derived from
+/// these coordinates, and place is what search actually looks at.
+public struct SetLocationRequest: Codable, Sendable, Hashable {
+    /// Nil clears the location entirely, for a photo whose recorded position is
+    /// wrong and whose real one nobody knows.
+    public let latitude: Double?
+    public let longitude: Double?
+
+    public init(latitude: Double?, longitude: Double?) {
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+}
+
+/// What the server made of it — chiefly the place name, which is derived rather
+/// than supplied, so the client shows the same words search will match on.
+public struct SetLocationResponse: Codable, Sendable, Hashable {
+    public let latitude: Double?
+    public let longitude: Double?
+    public let placeName: String?
+
+    public init(latitude: Double?, longitude: Double?, placeName: String?) {
+        self.latitude = latitude
+        self.longitude = longitude
+        self.placeName = placeName
+    }
+}

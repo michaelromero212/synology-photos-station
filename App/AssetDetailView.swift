@@ -953,6 +953,7 @@ private struct InformationSheet: View {
     let onDone: () -> Void
 
     @State private var showCreditEditor = false
+    @State private var showLocationEditor = false
 
     var body: some View {
         NavigationStack {
@@ -983,8 +984,27 @@ private struct InformationSheet: View {
             // name on one can be wrong.
             InformationPanel(
                 detail: detail,
-                onEditCredit: detail.isSharedSpace ? { showCreditEditor = true } : nil
+                onEditCredit: detail.isSharedSpace ? { showCreditEditor = true } : nil,
+                onEditLocation: { showLocationEditor = true }
             )
+            .sheet(isPresented: $showLocationEditor) {
+                LocationEditorSheet(
+                    session: session,
+                    spaceID: detail.spaceID,
+                    assetID: detail.assetID,
+                    current: detail.latitude.flatMap { lat in
+                        detail.longitude.map { (latitude: lat, longitude: $0) }
+                    },
+                    currentName: detail.placeName
+                ) { changed in
+                    showLocationEditor = false
+                    // Re-read: the server decides the place name, and the panel
+                    // should show the words search will actually match.
+                    if changed, let client = session.client {
+                        Task { await model.loadDetail(client) }
+                    }
+                }
+            }
             .sheet(isPresented: $showCreditEditor) {
                 CreditEditorSheet(
                     session: session,

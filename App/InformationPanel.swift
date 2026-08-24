@@ -16,6 +16,10 @@ struct InformationPanel: View {
     /// row as a plain statement — the panel stays presentational and doesn't
     /// need a client of its own.
     var onEditCredit: (() -> Void)?
+    /// Supplied by hosts that can apply a location. Nil leaves the map as a
+    /// picture, and hides the "add a location" row entirely — there is no point
+    /// inviting an edit the panel cannot carry out.
+    var onEditLocation: (() -> Void)?
 
     var body: some View {
         ScrollView {
@@ -27,7 +31,11 @@ struct InformationPanel: View {
                 if detail.isSharedSpace { addedBy }
                 cameraCard
                 #if !os(tvOS)
-                if detail.latitude != nil { mapCard }
+                if detail.latitude != nil {
+                    mapCard
+                } else if onEditLocation != nil {
+                    addLocationRow
+                }
                 #endif
                 storageRow
             }
@@ -199,7 +207,43 @@ struct InformationPanel: View {
             }
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .onTapGesture { onEditLocation?() }
         }
+    }
+
+    /// The invitation when a photo has no location at all.
+    ///
+    /// Worth a row of its own rather than nothing: a photo with no place is
+    /// invisible to search by place, and there is no other hint anywhere that
+    /// this is fixable. Scans and old imports are exactly the pictures people
+    /// most want to find again.
+    private var addLocationRow: some View {
+        Button {
+            onEditLocation?()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "mappin.and.ellipse")
+                    .foregroundStyle(.tint)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Add a Location")
+                        .font(.subheadline.weight(.medium))
+                    Text("This photo has none, so it can't be found by place.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .tint(.primary)
     }
     #endif
 

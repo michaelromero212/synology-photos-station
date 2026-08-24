@@ -63,6 +63,12 @@ public actor FrameStationClient {
         try await send(.patch, path, body: body)
     }
 
+    /// PUT that expects a body back — for the writes whose result the caller
+    /// needs, rather than the ones that only need to have happened.
+    func put<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {
+        try await send(.put, path, body: body)
+    }
+
     /// Request with a JSON body and no response body.
     func sendBodyNoContent<Body: Encodable>(_ method: Method, _ path: String, body: Body) async throws {
         try await sendNoContent(method, path, body: body)
