@@ -53,6 +53,31 @@ Expect `{"status":"ok","database":"up","migrationsApplied":N,...}`.
 **5. Verify it's the *new* build.** Step 4 cannot tell you this — see below — and
 this is the step that catches a deploy which quietly didn't take.
 
+Ask the image which commit it was built from. CI stamps OCI labels through
+`docker/metadata-action`, so the running image names its own source:
+
+```bash
+ssh -t nas "sudo /usr/local/bin/docker inspect ghcr.io/michaelromero212/framestation-server:latest --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+```
+
+Compare the first seven characters against what you pushed:
+
+```bash
+git rev-parse --short HEAD
+```
+
+They match or they don't; there is nothing to interpret. This is the only check
+here that stays true a week later — every other signal below decays into "some
+time ago" and stops distinguishing a deploy that worked from one that never
+happened.
+
+It reads the tag rather than the container on purpose. A pull that failed leaves
+`:latest` pointing at the *old* image locally, so the label reports the old
+commit — which is exactly the answer wanted.
+
+**Corroborating signals.** Useful in the minutes after a deploy, and worth a
+glance because they come free with the pull.
+
 ```bash
 ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose ps && sudo /usr/local/bin/docker compose images'
 ```
@@ -235,7 +260,8 @@ server is *up*, never which server.
 *The image tag in `compose images`.* It reads `latest`, always, because that is
 what `docker-compose.yml` asks for. CI does publish a `sha-<short>` tag, but
 nothing on the NAS is pulling by it, so the `TAG` column can never identify a
-commit. The `IMAGE ID` does distinguish builds — it just doesn't say which.
+commit. The `IMAGE ID` does distinguish builds — it just doesn't say which. Read
+the `org.opencontainers.image.revision` label instead (step 5), which does.
 
 *Probing for a route the new code added.* The obvious idea, and it silently
 always passes:
