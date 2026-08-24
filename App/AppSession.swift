@@ -92,6 +92,12 @@ final class AppSession {
     private(set) var loader: ThumbnailLoader?
     private let credentials = CredentialStore()
 
+    #if os(iOS)
+    /// Photos on their way to a space, so the grid can draw them before they
+    /// arrive. Lives here because an upload outlives the sheet that started it.
+    let pendingUploads = PendingUploads()
+    #endif
+
     var selectedSpace: SpaceDTO?
 
     /// A `-FSServerURL` supplied at launch, if there was one.

@@ -41,6 +41,24 @@ public final class TimelineStore {
     public var buckets: [TimelineBucket] { manifest?.buckets ?? [] }
     public var total: Int { manifest?.total ?? 0 }
 
+    /// Whether anything on screen is still waiting for the NAS to render it.
+    ///
+    /// A photo arrives in the timeline before it has a thumbnail — derivation is
+    /// a queue, and on a J4125 a 4K video can sit in it for a while. Until it
+    /// finishes there is no thumbnail *and* no ThumbHash, so the tile is a grey
+    /// rectangle, and the person guaranteed to be looking at it is whoever just
+    /// uploaded.
+    ///
+    /// The server announces the derivation through the change log, so the only
+    /// question is how soon the app asks. This is what lets it ask more often
+    /// while there is something specific to wait for, and go back to its lazy
+    /// cadence once there isn't. Short-circuits on the first one it finds.
+    public var hasPendingDerivations: Bool {
+        items.values.contains { bucket in
+            bucket.contains { !$0.isDerived }
+        }
+    }
+
     /// Fetches the manifest.
     ///
     /// Only *announces* loading when there is nothing on screen yet, and that

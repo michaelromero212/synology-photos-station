@@ -14,11 +14,6 @@ final class LibraryPickerModel {
     private(set) var access = PhotoLibraryScanner.access
     var selection: [String] = []
 
-    private(set) var isUploading = false
-    private(set) var sent = 0
-    private(set) var failed = 0
-    private(set) var total = 0
-    private(set) var lastError: String?
 
     /// Prefetches decoded thumbnails around the visible range. Without this the
     /// grid decodes on the scroll and stutters at exactly the moment the user
@@ -97,43 +92,14 @@ final class LibraryPickerModel {
         selection.firstIndex(of: asset.localIdentifier).map { $0 + 1 }
     }
 
-    /// Uploads the selection into `space`. Returns true if everything landed.
-    @discardableResult
-    func upload(to space: SpaceDTO, client: FrameStationClient) async -> Bool {
-        guard !selection.isEmpty else { return true }
-        isUploading = true
-        sent = 0
-        failed = 0
-        lastError = nil
-        total = selection.count
-        defer { isUploading = false }
-
-        // Oldest-first so a batch lands in the order it was shot, which is the
-        // order it will read in once the timeline groups it.
-        let chosen = selection.compactMap { identifier in
+    /// The selection, oldest-first.
+    ///
+    /// Oldest-first so a batch lands in the order it was shot, which is the
+    /// order it will read in once the timeline groups it.
+    func chosenAssets() -> [PHAsset] {
+        selection.compactMap { identifier in
             assets.first { $0.localIdentifier == identifier }
         }.sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
-
-        for asset in chosen {
-            guard let candidate = PhotoLibraryScanner.describe(asset) else {
-                failed += 1
-                lastError = UploadError.noExportableResource.localizedDescription
-                continue
-            }
-            do {
-                _ = try await AssetUploader.send(
-                    asset,
-                    descriptor: UploadDescriptor(asset: asset, candidate: candidate),
-                    to: space.id,
-                    client: client
-                )
-                sent += 1
-            } catch {
-                failed += 1
-                lastError = error.localizedDescription
-            }
-        }
-        return failed == 0
     }
 }
 
@@ -180,22 +146,16 @@ struct LibraryPickerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel).disabled(model.isUploading)
+                    Button("Cancel", action: onCancel)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if model.isUploading {
-                        ProgressView()
-                    } else {
-                        Button(addLabel) { Task { await send() } }
-                            .disabled(model.selection.isEmpty)
-                            .fontWeight(.semibold)
-                    }
+                    Button(addLabel) { send() }
+                        .disabled(model.selection.isEmpty)
+                        .fontWeight(.semibold)
                 }
             }
-            .safeAreaInset(edge: .bottom) { statusBar }
             .task { model.load() }
         }
-        .interactiveDismissDisabled(model.isUploading)
     }
 
     private var addLabel: String {
@@ -225,33 +185,24 @@ struct LibraryPickerView: View {
         }
     }
 
-    @ViewBuilder
-    private var statusBar: some View {
-        if model.isUploading || model.failed > 0 {
-            VStack(spacing: 4) {
-                if model.isUploading {
-                    ProgressView(value: Double(model.sent + model.failed), total: Double(model.total))
-                    Text("Sharing \(model.sent + model.failed) of \(model.total)…")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if let error = model.lastError, model.failed > 0 {
-                    Text("\(model.failed) failed — \(error)")
-                        .font(.caption).foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                }
-            }
-            .padding(.horizontal).padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(.bar)
-        }
-    }
-
-    private func send() async {
+    /// Hands the upload to the session and gets out of the way.
+    ///
+    /// It used to hold this sheet open until the last byte landed, which meant
+    /// sharing a four-minute video was four minutes of watching a progress bar
+    /// over a grid you couldn't see. The photographs are already on the phone;
+    /// there is nothing to wait for before showing them. So the batch goes to
+    /// `PendingUploads`, the grid draws it from the local library with an upload
+    /// badge, and this closes at once.
+    ///
+    /// Failures surface in the grid's own banner rather than here, because by
+    /// the time one happens this sheet is long gone.
+    private func send() {
         guard let client = session.client else { return }
-        let allLanded = await model.upload(to: space, client: client)
-        // Anything that failed stays on screen with its reason rather than
-        // closing and quietly losing the report.
-        if allLanded { onFinished(model.sent) }
+        let chosen = model.chosenAssets()
+        guard !chosen.isEmpty else { return }
+        let pending = session.pendingUploads
+        Task { await pending.upload(chosen, to: space, client: client) }
+        onFinished(chosen.count)
     }
 }
 
