@@ -41,29 +41,6 @@ final class GridSelection {
         if !contains(item) { picked.append(item) }
     }
 
-    /// Favourites everything picked.
-    ///
-    /// Per-photo and idempotent server-side, so a mixed selection ends up all
-    /// favourited rather than toggling each one to its opposite — "Add to
-    /// Favorites" on twelve photos should mean twelve favourites, not six.
-    func setFavorite(
-        _ favorite: Bool, in space: SpaceDTO, client: FrameStationClient?
-    ) async -> Int {
-        guard let client else { return 0 }
-        var changed = 0
-        for item in picked {
-            do {
-                try await client.setFavorite(
-                    spaceID: space.id, assetID: item.assetID, favorite
-                )
-                changed += 1
-            } catch {
-                continue
-            }
-        }
-        return changed
-    }
-
     /// Re-times everything picked, in one call.
     ///
     /// One request rather than one per photo: each of these moves a file on the

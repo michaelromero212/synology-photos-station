@@ -956,28 +956,6 @@ struct TimelineView: View {
                     } onDelete: {
                         confirmDelete = true
                     } moreMenu: {
-                        Button {
-                            Task {
-                                let n = await selection.setFavorite(
-                                    true, in: space, client: session.client
-                                )
-                                albumResult = "\(n) item\(n == 1 ? "" : "s") favorited"
-                                selection.clear()
-                            }
-                        } label: {
-                            Label("Add to Favorites", systemImage: "heart")
-                        }
-                        Button {
-                            Task {
-                                let n = await selection.setFavorite(
-                                    false, in: space, client: session.client
-                                )
-                                albumResult = "\(n) item\(n == 1 ? "" : "s") unfavorited"
-                                selection.clear()
-                            }
-                        } label: {
-                            Label("Remove from Favorites", systemImage: "heart.slash")
-                        }
                         // First, and on its own, because it is the only entry
                         // here that takes photos *out* of this space rather
                         // than annotating them where they sit.
