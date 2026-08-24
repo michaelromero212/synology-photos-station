@@ -42,13 +42,45 @@ gh run list --limit 1
 ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose up -d'
 ```
 
-**4. Verify.**
+**4. Verify it's alive.**
 
 ```bash
 ssh nas 'curl -s http://127.0.0.1:8080/health'
 ```
 
 Expect `{"status":"ok","database":"up","migrationsApplied":N,...}`.
+
+**5. Verify it's the *new* build.** Step 4 cannot tell you this — see below — and
+this is the step that catches a deploy which quietly didn't take.
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose ps && sudo /usr/local/bin/docker compose images'
+```
+
+Read the `STATUS` column for **`server`**:
+
+```
+NAME                    ...   CREATED          STATUS
+framestation-db-1       ...   5 days ago       Up 5 days (healthy)
+framestation-server-1   ...   2 minutes ago    Up 2 minutes
+```
+
+Minutes means the pull took. Hours or days means it didn't, and the old code is
+still serving. **`db` being days old is correct** — nothing in a server-only
+deploy touches it, and recreating it would be the surprise.
+
+The pull output in step 3 is corroborating evidence. A server layer reporting
+`Pull complete` rather than `Already exists` means the image genuinely changed:
+
+```
+✔ server 8 layers [⣿⣿⣿⣿⣿⣿⣿⣿]  Pulled
+  ✔ d544298cabd5 Already exists      ← base OS and Swift runtime, unchanged
+  ...
+  ✔ 906865990182 Pull complete       ← the compiled server. This is the one to look for
+```
+
+Seven `Already exists` and one `Pull complete` is the normal shape of a code-only
+deploy: same base, new binary.
 
 ---
 
@@ -193,23 +225,31 @@ needs `sudo` — the daemon socket refuses ordinary users.
 arrives with a literal backslash and Docker rejects it with
 `could not be parsed`. Plain `docker compose ps` shows the same columns.
 
-**`/health` cannot tell you the NAS is current.** `version` is
-`Build.version` in `Configure.swift`, bumped by hand — a six-week-old image and
-a current one both say `1.1.0-M9`. To actually tell:
+**Three ways of checking the NAS is current that don't work.** Each looks
+convincing, which is the problem. Step 5 above is the one that does.
+
+*`/health`.* `version` is `Build.version` in `Configure.swift`, bumped by hand —
+a six-week-old image and a current one both say `1.1.0-M9`. It tells you the
+server is *up*, never which server.
+
+*The image tag in `compose images`.* It reads `latest`, always, because that is
+what `docker-compose.yml` asks for. CI does publish a `sha-<short>` tag, but
+nothing on the NAS is pulling by it, so the `TAG` column can never identify a
+commit. The `IMAGE ID` does distinguish builds — it just doesn't say which.
+
+*Probing for a route the new code added.* The obvious idea, and it silently
+always passes:
 
 ```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose ps'
+# Both return 401. So does a route that has never existed.
+curl -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/v1/spaces/$S/assets/share
+curl -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/v1/spaces/$S/assets/invented-nonsense
 ```
 
-`STATUS` shows container age. Minutes means the pull took; hours means it
-didn't. The pull output is evidence too — a layer reporting `Pull complete`
-rather than `Already exists` means the image genuinely changed.
-
-For the digest of what is running:
-
-```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose images'
-```
+The auth middleware answers before routing resolves, so everything under
+`/v1/spaces/…` is `401` whether the endpoint exists or not. A 404 only comes back
+from paths outside that group. Calibrate any probe against a made-up route first;
+this one read as a clean pass on a server that had not been updated at all.
 
 **Pinning a known-good build.** CI publishes a `sha-<short>` tag alongside
 `latest`, so a bad deploy can be rolled back without reverting anything:
