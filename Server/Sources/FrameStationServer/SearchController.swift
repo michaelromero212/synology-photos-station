@@ -30,19 +30,46 @@ struct SearchController: RouteCollection {
         let count: Int
     }
 
-    /// Every place this space has photos from, commonest first.
+    /// The places this space has photos from, commonest first.
     ///
-    /// Commonest rather than alphabetical because this list is the screen you
-    /// land on before typing anything: the top of it should be where the family
-    /// actually lives and holidays, not wherever happens to start with A.
+    /// Commonest rather than alphabetical because the top of this list is the
+    /// screen you land on before typing anything: it should open on where the
+    /// family actually lives and holidays, not wherever happens to start with A.
+    ///
+    /// Bounded, and that matters more than it sounds. A library accumulates one
+    /// row per town anyone ever drove through, so ordering by count produces a
+    /// genuinely useful handful followed by a very long tail of places with a
+    /// count of one — and the tail is most of the list *and* most of the
+    /// payload. `limit` is what lets the landing screen ask for the handful.
+    ///
+    /// `q` filters by name, so a caller holding only the top twelve can still
+    /// offer search over all of them without downloading the vocabulary first.
+    /// Sorted by count here too: typing "spring" should offer the Springfield
+    /// with four hundred photos before the one with two.
     @Sendable
     func places(req: Request) async throws -> PlacesResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let limit = min(max(req.query[Int.self, at: "limit"] ?? Self.placesPageSize, 1), 2000)
+        let sort = req.query[String.self, at: "sort"] ?? "count"
+
+        let query = (req.query[String.self, at: "q"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         try await SpaceAccess.requireMembership(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
+
+        // Matches everything when nothing was typed, so one query serves both
+        // the landing screen and search rather than two that can disagree.
+        let pattern = query.isEmpty ? "%" : "%\(escapeForLike(query))%"
+
+        // Alphabetical is the right order for the full list, where the job is
+        // finding a name you already have in mind rather than being shown what
+        // you shoot most. Two screens, two jobs, two orders.
+        let ordering = sort == "name"
+            ? "name ASC"
+            : "count DESC, name ASC"
 
         let rows = try await req.sql.raw("""
             SELECT a.place_name AS name, count(*)::int AS count
@@ -51,14 +78,33 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND a.place_name IS NOT NULL
+              AND a.place_name ILIKE \(bind: pattern)
             GROUP BY a.place_name
-            ORDER BY count DESC, name
+            ORDER BY \(unsafeRaw: ordering)
+            LIMIT \(bind: limit)
             """).all(decoding: PlaceRow.self)
 
+        // Counted separately rather than inferred from `rows`, which is capped:
+        // the "See All" row has to be able to say 340 while holding 12.
+        struct CountRow: Decodable { let total: Int }
+        let total = try await req.sql.raw("""
+            SELECT count(DISTINCT a.place_name)::int AS total
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND a.place_name IS NOT NULL
+              AND a.place_name ILIKE \(bind: pattern)
+            """).first(decoding: CountRow.self)?.total ?? 0
+
         return PlacesResponse(
-            places: rows.map { PlaceSummary(name: $0.name, count: $0.count) }
+            places: rows.map { PlaceSummary(name: $0.name, count: $0.count) },
+            total: total
         )
     }
+
+    /// What the landing screen asks for when it doesn't say.
+    static let placesPageSize = 12
 
     // MARK: - Search
 

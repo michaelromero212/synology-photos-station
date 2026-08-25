@@ -18,11 +18,21 @@ public struct PlaceSummary: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// The places a space has photos from.
+///
+/// `places` is a *page*, not the whole vocabulary. A library accumulates one
+/// entry per town anyone ever passed through, so the honest shape here is a
+/// bounded list plus a count of what was left out — the caller decides whether
+/// it wants the handful worth showing on a landing screen or the lot.
 public struct PlacesResponse: Codable, Sendable, Hashable {
     public let places: [PlaceSummary]
+    /// How many distinct places exist in total, whatever `places` holds. What
+    /// lets a "See All" row say how many it is offering.
+    public let total: Int
 
-    public init(places: [PlaceSummary]) {
+    public init(places: [PlaceSummary], total: Int) {
         self.places = places
+        self.total = total
     }
 }
 

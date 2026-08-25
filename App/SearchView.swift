@@ -7,8 +7,19 @@ import SwiftUI
 /// The screen is useful before anything is typed: it opens on the places this
 /// library actually has photos from, commonest first, with counts. That is the
 /// difference between a search box — which asks you to guess what the app
-/// knows — and a way in. Typing filters the same list, and picking one shows
-/// the photos.
+/// knows — and a way in.
+///
+/// It shows a *handful*, not all of them, and that is the whole design. A
+/// library accumulates one entry per town anyone ever drove through, so the
+/// full list is a dozen genuinely useful rows followed by several hundred with
+/// a count of one. Ordering by count makes the top good and does nothing about
+/// the tail, which is most of the list. So the landing screen is bounded and
+/// the rest lives behind "All Places" — the shape Apple uses everywhere it has
+/// more content than screen.
+///
+/// Typing searches the server rather than filtering what happens to be loaded.
+/// Filtering locally would have quietly meant search only worked on the twelve
+/// places already on screen.
 ///
 /// One axis for now, deliberately. Place names are filled in at import for
 /// every photo carrying GPS, so this works on day one across a whole library;
@@ -19,8 +30,12 @@ struct SearchView: View {
     let space: SpaceDTO
 
     @State private var places: [PlaceSummary] = []
+    /// How many distinct places exist, which is usually far more than `places`
+    /// holds. What the "All Places" row counts.
+    @State private var placeTotal = 0
     @State private var query = ""
     @State private var selected: String?
+    @State private var showAllPlaces = false
     @State private var results: [TimelineItem] = []
     @State private var total = 0
     @State private var nextOffset: Int?
@@ -62,15 +77,26 @@ struct SearchView: View {
             // you on results for something you just deleted.
             if new.isEmpty, selected != nil { back() }
         }
-        .task { await loadPlaces() }
+        // Searches the server as you type, debounced. The alternative — filter
+        // the loaded array — silently limits search to whatever the landing
+        // screen happened to fetch.
+        .task(id: query) {
+            guard selected == nil else { return }
+            if !query.isEmpty {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            await loadPlaces(matching: query)
+        }
+        .navigationDestination(isPresented: $showAllPlaces) {
+            AllPlacesView(session: session, space: space, total: placeTotal) { name in
+                showAllPlaces = false
+                choose(name)
+            }
+        }
     }
 
     // MARK: - Places
-
-    private var filtered: [PlaceSummary] {
-        guard !query.isEmpty else { return places }
-        return places.filter { $0.name.localizedCaseInsensitiveContains(query) }
-    }
 
     @ViewBuilder
     private var placesList: some View {
@@ -92,27 +118,51 @@ struct SearchView: View {
                     + "were taken. None of the photos in \(space.name) have one yet."
                 )
             )
-        } else if filtered.isEmpty {
+        } else if places.isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
-            List(filtered) { place in
-                Button {
-                    choose(place.name)
-                } label: {
-                    HStack {
-                        Image(systemName: "mappin.circle.fill")
-                            .foregroundStyle(.tint)
-                        Text(place.name).foregroundStyle(.primary)
-                        Spacer()
-                        Text("\(place.count)")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
+            List {
+                Section {
+                    ForEach(places) { place in
+                        PlaceRow(place: place) { choose(place.name) }
                     }
-                    .contentShape(Rectangle())
+                } header: {
+                    // Only worth a heading when it is a selection rather than
+                    // the lot; over twelve places it explains why the list
+                    // stops, and under it the heading would be a lie.
+                    if query.isEmpty, placeTotal > places.count {
+                        Text("Most Photographed")
+                    }
                 }
-                .buttonStyle(.plain)
+
+                // The way to everything the landing screen left out, and it
+                // says how much that is — a bare "All Places" gives no sense of
+                // whether the next screen holds twenty rows or eight hundred.
+                if query.isEmpty, placeTotal > places.count {
+                    Section {
+                        Button {
+                            showAllPlaces = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "list.bullet")
+                                    .foregroundStyle(.tint)
+                                    .frame(width: 22)
+                                Text("All Places").foregroundStyle(.primary)
+                                Spacer()
+                                Text("\(placeTotal)")
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
-            .listStyle(.plain)
+            .placesListStyle()
         }
     }
 
@@ -172,12 +222,22 @@ struct SearchView: View {
 
     // MARK: - Loading
 
-    private func loadPlaces() async {
+    /// Fetches the landing screen's handful, or the matches for what's typed.
+    private func loadPlaces(matching query: String = "") async {
         guard let client = session.client else { return }
-        isLoadingPlaces = true
+        // Only the very first load gets a spinner. Re-running this on every
+        // keystroke would otherwise blank the list under the cursor.
+        if places.isEmpty { isLoadingPlaces = true }
         defer { isLoadingPlaces = false }
         do {
-            places = try await client.places(spaceID: space.id).places
+            // More rows while searching: a match list that stops at twelve
+            // looks like the answer isn't there.
+            let response = try await client.places(
+                spaceID: space.id, matching: query,
+                limit: query.isEmpty ? 12 : 60
+            )
+            places = response.places
+            placeTotal = response.total
             failure = nil
         } catch {
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
@@ -225,5 +285,138 @@ struct SearchView: View {
             nextOffset = nil
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
+    }
+}
+
+/// One place, with how many photos came from it.
+private struct PlaceRow: View {
+    let place: PlaceSummary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: "mappin.circle.fill")
+                    .foregroundStyle(.tint)
+                    .frame(width: 22)
+                Text(place.name).foregroundStyle(.primary)
+                Spacer()
+                Text("\(place.count)")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Everything the landing screen left out.
+///
+/// Alphabetical here, where the landing screen is by count — two screens doing
+/// two different jobs. The landing answers "where do we take photographs", so
+/// the commonest belong at the top. This one answers "I know the name, find
+/// it", and for that an A–Z with a scrub index beats any relevance order: you
+/// already know what you're looking for, you just need to reach it.
+struct AllPlacesView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let total: Int
+    let onPick: (String) -> Void
+
+    @State private var places: [PlaceSummary] = []
+    @State private var query = ""
+    @State private var isLoading = true
+    @State private var failure: String?
+
+    var body: some View {
+        Group {
+            if isLoading, places.isEmpty {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let failure, places.isEmpty {
+                ContentUnavailableView(
+                    "Can't Load Places", systemImage: "wifi.slash", description: Text(failure)
+                )
+            } else if places.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else {
+                list
+            }
+        }
+        .navigationTitle("All Places")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .searchable(text: $query, prompt: "Places")
+        .task(id: query) {
+            if !query.isEmpty {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            await load()
+        }
+    }
+
+    /// Sectioned by first letter, which is what earns the index down the side.
+    private var sections: [(letter: String, places: [PlaceSummary])] {
+        let grouped = Dictionary(grouping: places) { place -> String in
+            let first = place.name.prefix(1).uppercased()
+            // Anything not A–Z shares one bucket rather than each punctuation
+            // mark getting an index entry of its own.
+            return first.rangeOfCharacter(from: .letters) != nil ? first : "#"
+        }
+        return grouped.keys.sorted().map { ($0, grouped[$0] ?? []) }
+    }
+
+    private var list: some View {
+        List {
+            ForEach(sections, id: \.letter) { section in
+                Section {
+                    ForEach(section.places) { place in
+                        PlaceRow(place: place) { onPick(place.name) }
+                    }
+                } header: {
+                    Text(section.letter)
+                }
+                .id(section.letter)
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    private func load() async {
+        guard let client = session.client else { return }
+        if places.isEmpty { isLoading = true }
+        defer { isLoading = false }
+        do {
+            // The whole vocabulary, alphabetically. Bounded by the server's own
+            // ceiling rather than paged: this is one short string and an integer
+            // per row, so even a library with two thousand places is a small
+            // response — and paging an A–Z list would break the scrub index,
+            // which has to know every section to be worth having.
+            let response = try await client.places(
+                spaceID: space.id, matching: query, limit: 2000, alphabetical: true
+            )
+            places = response.places
+            failure = nil
+        } catch {
+            failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
+        }
+    }
+}
+
+private extension View {
+    /// Grouped on iPhone, where the "All Places" row wants to sit apart from
+    /// the places above it. `.insetGrouped` doesn't exist off iOS, and this is
+    /// the second time that has broken the tvOS build — hence a named helper
+    /// rather than the modifier spelled out at the call site.
+    @ViewBuilder
+    func placesListStyle() -> some View {
+        #if os(iOS)
+        self.listStyle(.insetGrouped)
+        #else
+        self.listStyle(.plain)
+        #endif
     }
 }

@@ -38,9 +38,27 @@ extension FrameStationClient {
 
     // MARK: - Search
 
-    /// Every place this space has photos from, commonest first.
-    public func places(spaceID: UUID) async throws -> PlacesResponse {
-        try await get("v1/spaces/\(spaceID)/places")
+    /// The places this space has photos from.
+    ///
+    /// Bounded by `limit`, because the full vocabulary grows one entry per town
+    /// anyone ever passed through. `query` filters by name so a caller holding
+    /// only the top few can still search all of them; `alphabetical` is for the
+    /// full list, where the job is finding a name rather than being shown the
+    /// ones you shoot most.
+    public func places(
+        spaceID: UUID, matching query: String = "",
+        limit: Int = 12, alphabetical: Bool = false
+    ) async throws -> PlacesResponse {
+        var path = "v1/spaces/\(spaceID)/places?limit=\(limit)"
+        if alphabetical { path += "&sort=name" }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let encoded = trimmed.addingPercentEncoding(
+                withAllowedCharacters: .urlQueryValue
+            ) ?? ""
+            path += "&q=\(encoded)"
+        }
+        return try await get(path)
     }
 
     /// Photos taken somewhere whose name contains `place`.
