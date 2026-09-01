@@ -57,16 +57,27 @@ struct CollectionsController: RouteCollection {
         let onThisDay = try await onThisDayCollections(
             spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
+        let found = try await trips(spaceID: spaceID, seed: seed, on: req.sql)
+
+        // Days already inside a trip are not also "days worth keeping". The
+        // fortnight in the Outer Banks is one card, not one card plus fourteen —
+        // and every day of a holiday is busy by definition, so without this the
+        // busy-day rule would flood the page with the trip it just summarised.
+        let claimed = Set(found.flatMap { Self.days(inKey: $0.key) })
+
         let days = try await busyDays(
-            spaceID: spaceID, seed: seed, userID: device.userID, on: req.sql
+            spaceID: spaceID, seed: seed, userID: device.userID,
+            excluding: claimed, on: req.sql
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
 
         return CollectionsResponse(
-            // The most recent year first: "last year today" beats "eleven years
-            // ago today" as the thing to open a page with.
-            hero: onThisDay.first,
-            trips: [],
+            // On This Day when there is one — the most recent year first,
+            // because "last year today" beats "eleven years ago today" as a
+            // thing to open a page with. Otherwise the latest trip, which is
+            // the next most likely reason anybody came here.
+            hero: onThisDay.first ?? found.first,
+            trips: found,
             days: days,
             recentlyDeleted: deleted
         )
@@ -125,6 +136,198 @@ struct CollectionsController: RouteCollection {
         }
     }
 
+    // MARK: - Trips
+
+    struct TripDay: Decodable {
+        let day: String
+        let count: Int
+        /// Everywhere this day went, not just where most of it was.
+        ///
+        /// The daily mode was the first attempt and it quietly lost the point:
+        /// a week on the Outer Banks moves between Nags Head, Kill Devil Hills
+        /// and Duck every day, the mode collapses each day to one of them, and
+        /// the trip ended up named after whichever won a tie — "Seven days in
+        /// Duck" for a holiday that was nothing of the sort.
+        let places: [String]
+        let coverAssetIDs: [UUID]
+    }
+
+    /// Runs of consecutive days spent a long way from home.
+    ///
+    /// The whole of it is arithmetic. Home is the coordinate centre of wherever
+    /// the library has most of its photographs — for a family that is the house,
+    /// and it needs no setting up and no asking. A day whose photographs average
+    /// more than eighty kilometres from there was a day away. Consecutive days
+    /// away are one trip.
+    ///
+    /// Eighty kilometres rather than ten: the bar has to clear the ordinary
+    /// radius of a life. Work, school, the shops and the next town over are all
+    /// "not home" and none of them are trips, and a threshold that called them
+    /// trips would bury the fortnight in the Outer Banks under two hundred
+    /// commutes.
+    ///
+    /// A single day that far away is a day out, not a trip, so a run has to
+    /// span at least two.
+    private func trips(
+        spaceID: UUID, seed: String, on sql: any SQLDatabase
+    ) async throws -> [CollectionSummary] {
+        let local = TimelineController.localTime
+        let rows = try await sql.raw("""
+            WITH located AS (
+                SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
+                       a.lat, a.lon, a.place_name, a.id, a.derived_at, a.camera_make,
+                       a.burst_id, a.burst_pick, a.media_type
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID)
+                  AND sa.deleted_at IS NULL
+                  AND a.lat IS NOT NULL AND a.lon IS NOT NULL
+            ),
+            -- Home: the centre of the place the library holds most of.
+            busiest AS (
+                SELECT place_name FROM located
+                WHERE place_name IS NOT NULL
+                GROUP BY place_name ORDER BY count(*) DESC, place_name LIMIT 1
+            ),
+            home AS (
+                SELECT avg(l.lat) AS lat, avg(l.lon) AS lon
+                FROM located l JOIN busiest b ON b.place_name = l.place_name
+            ),
+            -- Places worth naming the day after: ones holding at least a fifth
+            -- of it. A trip picks up stray coordinates — the drive home, a
+            -- screenshot, someone else's phone with a stale fix — and a single
+            -- outlier should not be able to turn "Four days in Bay Lake" into
+            -- "Four days away" by making the town count look like two.
+            per_place AS (
+                SELECT day, place_name, count(*)::int AS n
+                FROM located WHERE place_name IS NOT NULL
+                GROUP BY day, place_name
+            ),
+            day_total AS (
+                SELECT day, sum(n)::int AS total FROM per_place GROUP BY day
+            ),
+            main_places AS (
+                SELECT p.day, ARRAY_AGG(p.place_name) AS places
+                FROM per_place p JOIN day_total d ON d.day = p.day
+                WHERE p.n * 5 >= d.total
+                GROUP BY p.day
+            ),
+            per_day AS (
+                SELECT day,
+                       count(*)::int AS count,
+                       avg(lat) AS lat, avg(lon) AS lon,
+                       (ARRAY_AGG(id ORDER BY
+                            (derived_at IS NOT NULL) DESC,
+                            (camera_make IS NOT NULL) DESC,
+                            (burst_id IS NULL OR burst_pick) DESC,
+                            (media_type = 'photo') DESC,
+                            md5(id::text || '\(unsafeRaw: seed)')
+                        )) [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
+                FROM located GROUP BY day
+            )
+            SELECT p.day, p.count,
+                   COALESCE(m.places, ARRAY[]::text[]) AS places,
+                   p.cover AS "coverAssetIDs"
+            FROM per_day p
+            LEFT JOIN main_places m ON m.day = p.day
+            CROSS JOIN home h
+            WHERE h.lat IS NOT NULL
+              AND 6371 * acos(LEAST(1, GREATEST(-1,
+                    sin(radians(p.lat)) * sin(radians(h.lat))
+                  + cos(radians(p.lat)) * cos(radians(h.lat))
+                  * cos(radians(p.lon - h.lon))
+                  ))) > \(bind: Self.awayKilometres)
+            ORDER BY p.day DESC
+            LIMIT 400
+            """).all(decoding: TripDay.self)
+
+        return Self.tripRuns(from: rows)
+            .filter { $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems }
+            .prefix(8)
+            .map { Self.describeTrip($0) }
+    }
+
+    /// How far from home stops being an errand.
+    static let awayKilometres = 80
+
+    /// Groups consecutive days into trips. Rows arrive newest-first.
+    ///
+    /// A single missing day doesn't end a trip — there are days on any holiday
+    /// when nobody takes a photograph, and splitting a fortnight into two
+    /// because of one rainy Tuesday would be worse than useless.
+    static func tripRuns(from rows: [TripDay]) -> [[TripDay]] {
+        var runs: [[TripDay]] = []
+        for row in rows {
+            if let previous = runs.last?.last,
+               let earlier = parseDate(previous.day), let this = parseDate(row.day),
+               let gap = utc.dateComponents([.day], from: this, to: earlier).day,
+               gap >= 1, gap <= 2 {
+                runs[runs.count - 1].append(row)
+            } else {
+                runs.append([row])
+            }
+        }
+        return runs
+    }
+
+    /// "Six days in Nags Head", or the state when the trip moved around inside
+    /// one.
+    ///
+    /// A holiday on the Outer Banks touches Nags Head, Kill Devil Hills and
+    /// Duck, and naming it after whichever had the most photographs would be
+    /// arbitrary — the trip was to the coast. So several towns inside one region
+    /// are named by the region, and a trip that crosses regions says neither.
+    static func describeTrip(_ run: [TripDay]) -> CollectionSummary {
+        let ordered = run.reversed().map { $0 }        // oldest first
+        let count = run.reduce(0) { $0 + $1.count }
+        let places = run.flatMap(\.places)
+        let towns = Set(places.map { $0.split(separator: ",").first.map(String.init) ?? $0 })
+        let regions = Set(places.compactMap {
+            $0.split(separator: ",").dropFirst().first
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+        })
+
+        let where_: String?
+        if towns.count == 1 {
+            where_ = towns.first
+        } else if regions.count == 1 {
+            where_ = regions.first
+        } else {
+            where_ = nil
+        }
+
+        let weekdays = ordered.compactMap { parseDate($0.day) }
+            .map { utc.component(.weekday, from: $0) }
+        let phrase: String
+        if run.count == 2, weekdays.contains(1), weekdays.contains(7) {
+            phrase = "A weekend"
+        } else if run.count == 3, weekdays.contains(1) || weekdays.contains(7) {
+            phrase = "A long weekend"
+        } else {
+            phrase = "\(spelled(run.count).capitalized) days"
+        }
+
+        let title = where_.map { "\(phrase) in \($0)" } ?? "\(phrase) away"
+
+        var parts: [String] = []
+        if let from = ordered.first.flatMap({ parseDate($0.day) }),
+           let to = ordered.last.flatMap({ parseDate($0.day) }) {
+            let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
+            let left = stampFormatter(sameMonth ? "d" : "d MMM").string(from: from)
+            parts.append("\(left)–\(stampFormatter("d MMMM yyyy").string(from: to))")
+        }
+        parts.append(count == 1 ? "1 photo" : "\(count) photos")
+
+        return CollectionSummary(
+            kind: .trip,
+            key: (ordered.first?.day ?? "") + ".." + (ordered.last?.day ?? ""),
+            title: title,
+            subtitle: parts.joined(separator: " · "),
+            count: count,
+            coverAssetIDs: Array(run.flatMap(\.coverAssetIDs).prefix(Self.coverDepth))
+        )
+    }
+
     // MARK: - Days worth keeping
 
     /// Everything a day can say about itself, gathered in one pass.
@@ -160,7 +363,8 @@ struct CollectionsController: RouteCollection {
     /// arrive as separate cards are a weekend the app failed to notice — so the
     /// grouping happens after the query and the limit applies to the *runs*.
     private func busyDays(
-        spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, seed: String, userID: UUID,
+        excluding claimed: Set<String>, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
 
@@ -225,7 +429,7 @@ struct CollectionsController: RouteCollection {
             LIMIT 60
             """).all(decoding: DayRow.self)
 
-        return Self.runs(from: rows).prefix(6).map {
+        return Self.runs(from: rows.filter { !claimed.contains($0.day) }).prefix(6).map {
             Self.describe($0, holidays: holidays, named: named, recurring: recurring)
         }
     }
@@ -354,6 +558,21 @@ struct CollectionsController: RouteCollection {
             isNamed: userName != nil,
             recursAnnually: run.days.contains { recurring.contains(monthDay($0.day)) }
         )
+    }
+
+    /// Every date a run key spans, so a trip can claim its own days.
+    static func days(inKey key: String) -> [String] {
+        let ends = key.components(separatedBy: "..")
+        guard let first = ends.first.flatMap(parseDate),
+              let last = ends.last.flatMap(parseDate) else { return ends }
+        var result: [String] = []
+        var cursor = first
+        while cursor <= last, result.count < 400 {
+            result.append(stampFormatter("yyyy-MM-dd").string(from: cursor))
+            guard let next = utc.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return result
     }
 
     /// `"2026-08-14"` → `"08-14"`.
@@ -673,12 +892,17 @@ struct CollectionsController: RouteCollection {
                 AND EXTRACT(MONTH FROM \(unsafeRaw: TimelineController.localTime)) = \(bind: parts.month ?? 1)
                 AND EXTRACT(DAY   FROM \(unsafeRaw: TimelineController.localTime)) = \(bind: parts.day ?? 1)
                 """
-        case .day:
+        case .day, .trip:
+            // Both carry a run key: a single date, or "first..last". Matching on
+            // the range rather than the enumerated days keeps the query one
+            // comparison wide however long the holiday was.
+            let ends = key.components(separatedBy: "..")
+            let from = ends.first ?? key
+            let to = ends.last ?? key
             filter = """
-                AND to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD') = \(bind: key)
+                AND to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD')
+                    BETWEEN \(bind: from) AND \(bind: to)
                 """
-        case .trip:
-            throw Abort(.notImplemented, reason: "Trips aren't built yet.")
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
         }

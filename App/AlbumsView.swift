@@ -197,6 +197,26 @@ struct AlbumsView: View {
             .padding(.horizontal, spacing)
         }
 
+        // Trips before days: a fortnight away is a bigger thing than a busy
+        // Saturday, and the page should be ordered by what mattered rather than
+        // by what happened most recently.
+        if !found.trips.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("Trips")
+                ForEach(found.trips) { trip in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: trip)
+                    } label: {
+                        CollectionRowCard(collection: trip, loader: session.loader)
+                            .padding(.horizontal, spacing)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .nameable(trip) { naming = $0 }
+                }
+            }
+        }
+
         if !found.days.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 sectionHeader("Days worth keeping")
