@@ -949,23 +949,47 @@ Synology's single "Deletion Settings" screen conflates them:
 
 ### Where a removed file goes
 
-Two different destinations, and the difference is deliberate:
+*Revised 2026-09-01.* Deleting is now **one column write** — `deleted_at` — and
+two background passes read it:
 
-- **Uploaded media removed from a space** goes to the **recycle bin inside File
-  Station** — DSM's own. `AssetController.moveToRecycleBin` already moves the
-  file to `#recycle` beside it and soft-deletes the placement. Recovery is
-  DSM's job, which means it is already familiar, already has retention
-  settings, and does not need a second implementation.
-- **Recently Deleted, in the app,** is only for a user's **own media backup** —
-  their personal space. Not built yet.
+1. **The browse-tree reconciler** withdraws the copy from every member's home on
+   its next sweep. That is what makes the photograph deleted as far as File
+   Station is concerned, and it is the same stale pass that handles somebody
+   leaving a shared space.
+2. **`RetentionWorker`** purges the blob and its derivatives at
+   `Retention.days` (29), hourly, and only once **no other placement still
+   wants those bytes**.
 
-That split is why "who can restore in a shared space" is not a question this
-app has to answer: shared-space recovery happens in File Station.
+That last clause is load-bearing. `assets.sha256` is **not unique** — sharing a
+photograph makes a second asset row over the same blob — so a purge that
+unlinked on expiry alone would blank the photograph everywhere else it still
+legitimately lives.
 
-**Watch when building Recently Deleted:** `#recycle` is DSM's own folder name
-and DSM can empty it on a schedule the app knows nothing about. Correct for
-shared removals, a hazard for a 30-day promise on personal ones — that
-retention must not depend on a DSM setting nobody remembers.
+**What this replaced, and why.** Deleting used to call
+`AssetController.moveToRecycleBin`, moving the file into `#recycle` beside
+itself at the moment you pressed delete. Three things were wrong with it:
+
+- Nothing ever aged anything out. Recently Deleted was a room with no exit.
+- It moved the **blob**, so bytes other copies depended on went into a bin.
+- It left the copies in people's homes untouched, so a "deleted" photograph was
+  still sitting in File Station for every member.
+
+The section this replaces warned that `#recycle` is DSM's own folder name and
+DSM empties it on a schedule the app knows nothing about — *"a hazard for a
+30-day promise… retention must not depend on a DSM setting nobody remembers."*
+That was right, and it is why the bytes now stay in the blob store, where only
+FrameStation touches them, and why the 29 days is a number the app can keep.
+`recycled_path` remains on the table as a record of where the old path put
+files; nothing reads it.
+
+Day 29 is **deletion, not a hand-off to DSM's bin** — decided deliberately. The
+container is mounted at `/volume1/docker/framestation`, one level *below* the
+share root, so `/volume1/docker/#recycle` is not reachable from inside it. The
+29 days is the safety net; DSM snapshots are the backstop behind it.
+
+**Shared spaces still recover through File Station,** which is why "who may
+restore whose deletion in a shared space" is not a question this app answers.
+Recently Deleted is personal-space only.
 
 ---
 
@@ -1050,7 +1074,7 @@ of watching progress bars before anything is evaluable.
 | **M10** ✅ | Offline | Timeline manifest and loaded buckets persist to Application Support, and the last `/v1/me` is remembered so a valid token no longer needs a round trip to render — launching out of range used to show a **sign-in form**. Image cache is finally bounded: a real LRU with a 250 MB/500 MB/1 GB/2 GB cap, plus the Cache Management screen. A 401 clears all three. |
 | **M11** ✅ | Search: place | `/places` and `/search`, the search screen, and the magnifier left of `+`. Verified against real geocoded coordinates — typing "California" matched two different place names. |
 | **M12** ✅ | Video continuation | "Play All Videos" removed in favour of an Auto Play setting. **Auto-advance works**: a finished clip rolls into the next one from the same day and plays. The cause of the old failure was `TabView(.page)` — it builds pages lazily and silently ignores a programmatic selection to a page it has not built, so the destination never existed. Replaced with a `UIPageViewController` representable, which also gives the preload hook. Next videos are prepared while the current one plays (`VideoPreloader`), so arriving costs no round trip. Skip-to-next is a button in the viewer chrome; macOS and tvOS get Previous/Next. Horizontal paging works both ways, video to photo to video, verified on device. |
-| **M13** | Recently Deleted | Personal-space backups only — see §9a. Shared removals already go to File Station |
+| **M13** ✅ | Recently Deleted | Personal-space backups only — see §9a. 29-day window owned by `RetentionWorker`, per-tile countdown, restore via the reconciler. Shared removals still go to File Station |
 | **M14** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 | — | ~~Free Up Space~~ | **Dropped** 2026-08-10, was M7. See §8 |
 

@@ -76,6 +76,24 @@ struct TimelineView: View {
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
+
+    /// Whether there is room for a labelled rail rather than a bare scrubber.
+    ///
+    /// Size class rather than idiom: an iPad in a narrow split view is a phone
+    /// as far as available width is concerned, and a rail that eats sixty
+    /// points of a third-width column would be taking them from the grid.
+    private var wantsRail: Bool {
+        #if os(macOS)
+        return true
+        #elseif os(iOS)
+        return sizeClass == .regular
+        #else
+        return false
+        #endif
+    }
     /// Ties a tapped tile to the viewer it grows into. Both ends must name the
     /// same namespace or the system falls back to a push without saying so.
     @Namespace private var photoTransition
@@ -1087,17 +1105,34 @@ struct TimelineView: View {
             #if !os(tvOS)
             .overlay(alignment: .trailing) {
                 if store.buckets.count > 1 {
-                    FastScroller(
-                        buckets: store.buckets,
-                        progress: scrollProgress
-                    ) { bucket in
-                        // No animation: an animated scroll per drag update
-                        // queues up and the grid slides on after your finger
-                        // has already stopped.
-                        scroller.scrollTo(bucket.key, anchor: .top)
-                        Task { await store.loadBucket(bucket.key) }
-                    } onScrubEnd: {}
-                    .padding(.vertical, 6)
+                    // A phone gets the scrubber that stays out of the way; a
+                    // Mac or an iPad gets the rail that says something while
+                    // nobody is touching it. The difference is available width,
+                    // not preference — a labelled rail costs horizontal space a
+                    // phone has already given to photographs.
+                    //
+                    // No animation on the scroll in either: an animated scroll
+                    // per drag update queues up and the grid slides on after
+                    // your finger has already stopped.
+                    if wantsRail {
+                        TimelineRail(
+                            buckets: store.buckets,
+                            progress: scrollProgress
+                        ) { bucket in
+                            scroller.scrollTo(bucket.key, anchor: .top)
+                            Task { await store.loadBucket(bucket.key) }
+                        } onScrubEnd: {}
+                        .padding(.vertical, 6)
+                    } else {
+                        FastScroller(
+                            buckets: store.buckets,
+                            progress: scrollProgress
+                        ) { bucket in
+                            scroller.scrollTo(bucket.key, anchor: .top)
+                            Task { await store.loadBucket(bucket.key) }
+                        } onScrubEnd: {}
+                        .padding(.vertical, 6)
+                    }
                 }
             }
             #endif

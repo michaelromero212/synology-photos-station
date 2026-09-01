@@ -24,6 +24,16 @@ struct TimelineController: RouteCollection {
     /// Local wall-clock capture time, falling back to when we first saw the file.
     static let localTime = "COALESCE(a.local_captured_at, a.created_at AT TIME ZONE 'UTC')"
 
+    /// Rows that are a thing somebody photographed, rather than a part of one.
+    ///
+    /// A Live Photo's paired video carries a `live_group_id` and nothing else
+    /// does, so this is the whole test. Every query that counts or lists media
+    /// needs it: without it a Live Photo is two tiles in the grid, two in the
+    /// bucket count, two in a collection's total, and two in the rail's
+    /// density — one thing, counted twice, in four places that then disagree
+    /// with each other.
+    static let visible = "NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)"
+
     private static func format(for zoom: TimelineZoom) -> String {
         switch zoom {
         case .year: return "YYYY"
@@ -60,6 +70,7 @@ struct TimelineController: RouteCollection {
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: Self.visible)
             GROUP BY 1
             ORDER BY 1 DESC
             """).all(decoding: BucketRow.self)
@@ -89,6 +100,11 @@ struct TimelineController: RouteCollection {
         let uploadedBy: UUID
         let isDerived: Bool
         let orientation: Int?
+        var isBurst: Bool = false
+        var liveVideoAssetID: UUID?
+        /// Only ever set by the Recently Deleted query; every other caller
+        /// leaves it nil, because nothing else in the library is on a clock.
+        var purgeAt: Date?
 
         func toItem() -> TimelineItem {
             // Orientation is applied here rather than baked into the stored
@@ -114,7 +130,10 @@ struct TimelineController: RouteCollection {
                 thumbHash: thumbHash?.base64EncodedString(),
                 isFavorite: isFavorite,
                 uploadedBy: uploadedBy,
-                isDerived: isDerived
+                isDerived: isDerived,
+                isBurst: isBurst,
+                liveVideoAssetID: liveVideoAssetID,
+                purgeAt: purgeAt
             )
         }
     }
@@ -145,11 +164,18 @@ struct TimelineController: RouteCollection {
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                    ) AS "isFavorite",
                    COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                   (a.derived_at IS NOT NULL) AS "isDerived"
+                   (a.derived_at IS NOT NULL) AS "isDerived",
+                   (a.burst_id IS NOT NULL) AS "isBurst",
+                   -- The paired half of a Live Photo, so the viewer can play it
+                   -- from the still rather than from a tile of its own.
+                   (SELECT v.id FROM assets v
+                    WHERE v.live_group_id = a.live_group_id
+                      AND v.media_type = 'video' LIMIT 1) AS "liveVideoAssetID"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: Self.visible)
               AND to_char(\(unsafeRaw: Self.localTime), \(bind: pattern)) = \(bind: key)
             ORDER BY \(unsafeRaw: Self.localTime) DESC, sa.id
             """).all(decoding: ItemRow.self)
@@ -209,10 +235,17 @@ struct TimelineController: RouteCollection {
                            WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                        ) AS "isFavorite",
                        COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                       (a.derived_at IS NOT NULL) AS "isDerived"
+                       (a.derived_at IS NOT NULL) AS "isDerived",
+                   (a.burst_id IS NOT NULL) AS "isBurst",
+                   -- The paired half of a Live Photo, so the viewer can play it
+                   -- from the still rather than from a tile of its own.
+                   (SELECT v.id FROM assets v
+                    WHERE v.live_group_id = a.live_group_id
+                      AND v.media_type = 'video' LIMIT 1) AS "liveVideoAssetID"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.id = ANY(\(bind: needsItem)) AND sa.deleted_at IS NULL
+                  AND \(unsafeRaw: Self.visible)
                 """).all(decoding: ItemRow.self)
             for row in hydrated { itemsByID[row.id] = row.toItem() }
         }

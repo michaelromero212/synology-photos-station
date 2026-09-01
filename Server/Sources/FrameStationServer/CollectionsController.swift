@@ -1042,18 +1042,18 @@ struct CollectionsController: RouteCollection {
         let coverAssetID: UUID?
     }
 
-    /// Removals still sitting in `#recycle`, for a personal space only.
+    /// Removals inside their retention window, for a personal space only.
     ///
     /// Shared-space removals are recovered through File Station rather than
     /// here — see ARCHITECTURE.md. Offering a restore in a shared space would
     /// mean deciding who is allowed to undo whose deletion, and DSM already has
     /// an answer for that.
     ///
-    /// **`recycled_path` is not proof the file is there.** The bin carries
-    /// DSM's own name, deliberately, so File Station treats it as a recycle bin
-    /// — which means DSM's scheduled emptying can reclaim the bytes underneath
-    /// us. Rows whose file has gone are excluded rather than offered and then
-    /// failing on tap, which is the one way this feature could actively lie.
+    /// This used to read `recycled_path` and stat the file, because the bytes
+    /// sat in a bin DSM could empty from under us and a row was no proof the
+    /// file was there. Retention moved the bytes back into the blob store,
+    /// where nothing else reclaims them, so `purged_at` is now the whole
+    /// answer — one column, no filesystem round trip per row.
     private func recentlyDeleted(
         spaceID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
@@ -1063,30 +1063,23 @@ struct CollectionsController: RouteCollection {
             """).first(decoding: KindRow.self)
         guard space?.kind == "personal" else { return nil }
 
-        struct Candidate: Decodable {
-            let assetID: UUID
-            let recycledPath: String?
-        }
-        let candidates = try await sql.raw("""
-            SELECT sa.asset_id AS "assetID", sa.recycled_path AS "recycledPath"
+        struct CountRow: Decodable { let count: Int }
+        let row = try await sql.raw("""
+            SELECT count(*) AS count
             FROM space_assets sa
-            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NOT NULL
-            ORDER BY sa.deleted_at DESC
-            LIMIT 500
-            """).all(decoding: Candidate.self)
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NOT NULL
+              AND sa.purged_at IS NULL
+            """).first(decoding: CountRow.self)
 
-        let present = candidates.filter { candidate in
-            guard let path = candidate.recycledPath else { return false }
-            return FileManager.default.fileExists(atPath: path)
-        }
-        guard !present.isEmpty else { return nil }
+        guard let count = row?.count, count > 0 else { return nil }
 
         return CollectionSummary(
             kind: .recentlyDeleted,
             key: "all",
             title: "Recently Deleted",
             subtitle: nil,
-            count: present.count,
+            count: count,
             coverAssetIDs: []
         )
     }
@@ -1189,10 +1182,6 @@ struct CollectionsController: RouteCollection {
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
 
-        struct Row: Decodable {
-            let item: TimelineController.ItemRow
-            let recycledPath: String?
-        }
         let rows = try await req.sql.raw("""
             SELECT sa.id,
                    sa.space_id   AS "spaceID",
@@ -1205,19 +1194,20 @@ struct CollectionsController: RouteCollection {
                    false         AS "isFavorite",
                    COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                    (a.derived_at IS NOT NULL) AS "isDerived",
-                   sa.recycled_path AS "recycledPath"
+                   -- The day this becomes unrecoverable, computed here so the
+                   -- client never has to know the window to count down to it.
+                   (sa.deleted_at + \(unsafeRaw: Retention.interval)) AT TIME ZONE 'UTC'
+                       AS "purgeAt"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NOT NULL
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NOT NULL
+              AND sa.purged_at IS NULL
             ORDER BY sa.deleted_at DESC
             LIMIT 500
             """).all(decoding: DeletedItemRow.self)
 
-        let present = rows.filter { row in
-            guard let path = row.recycledPath else { return false }
-            return FileManager.default.fileExists(atPath: path)
-        }
-        let items = present.map { $0.item.toItem() }
+        let items = rows.map { $0.item.toItem() }
         return SearchResults(items: items, total: items.count, nextOffset: nil)
     }
 
@@ -1235,24 +1225,29 @@ struct CollectionsController: RouteCollection {
         let uploadedBy: UUID
         let isDerived: Bool
         let orientation: Int?
-        let recycledPath: String?
+        let purgeAt: Date
 
         var item: TimelineController.ItemRow {
             TimelineController.ItemRow(
                 id: id, spaceID: spaceID, assetID: assetID, capturedAt: capturedAt,
                 width: width, height: height, mediaType: mediaType, durationMs: durationMs,
                 thumbHash: thumbHash, isFavorite: isFavorite, uploadedBy: uploadedBy,
-                isDerived: isDerived, orientation: orientation
+                isDerived: isDerived, orientation: orientation, purgeAt: purgeAt
             )
         }
     }
 
-    /// Puts photographs back where they were.
+    /// Puts photographs back.
     ///
-    /// The file comes out of `#recycle` first and the row is cleared after. The
-    /// other order can leave the library showing a photograph whose bytes are
-    /// still in the bin — and if the move fails there is nothing to show at all,
-    /// so a failure has to leave the removal standing rather than half-undo it.
+    /// Clearing `deleted_at` is the whole of it. This used to move a file out of
+    /// `#recycle` and undo the delete only if that move succeeded — necessary
+    /// then, because deleting had moved the bytes somewhere restoring had to
+    /// find them again. Nothing moves the bytes now: they never left the blob
+    /// store, and the browse-tree reconciler puts the copy back in each member's
+    /// home on its next sweep, exactly as it would for a new upload.
+    ///
+    /// Rows past their window are excluded. `purged_at` means the bytes are
+    /// gone, so restoring one would return a photograph that could never load.
     @Sendable
     func restore(req: Request) async throws -> MediaEditResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -1265,41 +1260,21 @@ struct CollectionsController: RouteCollection {
         struct Row: Decodable {
             let id: UUID
             let assetID: UUID
-            let recycledPath: String?
-            let storagePath: String?
         }
 
         var restored = 0
         for assetID in input.assetIDs.prefix(500) {
             guard let row = try await req.sql.raw("""
-                SELECT sa.id, sa.asset_id AS "assetID",
-                       sa.recycled_path AS "recycledPath", a.storage_path AS "storagePath"
+                SELECT sa.id, sa.asset_id AS "assetID"
                 FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
                   AND sa.deleted_at IS NOT NULL
+                  AND sa.purged_at IS NULL
                 """).first(decoding: Row.self) else { continue }
-
-            if let from = row.recycledPath, let to = row.storagePath,
-               FileManager.default.fileExists(atPath: from) {
-                do {
-                    try FileManager.default.createDirectory(
-                        atPath: (to as NSString).deletingLastPathComponent,
-                        withIntermediateDirectories: true
-                    )
-                    if FileManager.default.fileExists(atPath: to) {
-                        try FileManager.default.removeItem(atPath: to)
-                    }
-                    try FileManager.default.moveItem(atPath: from, toPath: to)
-                } catch {
-                    req.logger.warning("restore failed for \(assetID): \(error)")
-                    continue
-                }
-            }
 
             try await req.sql.raw("""
                 UPDATE space_assets
-                SET deleted_at = NULL, deleted_by = NULL, recycled_path = NULL
+                SET deleted_at = NULL, deleted_by = NULL
                 WHERE id = \(bind: row.id)
                 """).run()
             _ = try? await ChangeLog.append(

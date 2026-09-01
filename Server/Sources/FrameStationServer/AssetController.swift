@@ -72,27 +72,33 @@ struct AssetController: RouteCollection {
 
         struct PlacementRow: Decodable {
             let id: UUID
-            let storagePath: String?
         }
         guard let placement = try await req.sql.raw("""
-            SELECT sa.id, a.storage_path AS "storagePath"
+            SELECT sa.id
             FROM space_assets sa
-            JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
               AND sa.deleted_at IS NULL
             """).first(decoding: PlacementRow.self) else {
             throw Abort(.notFound, reason: "No such asset in this space.")
         }
 
-        var recycled: String?
-        if let path = placement.storagePath, FileManager.default.fileExists(atPath: path) {
-            recycled = Self.moveToRecycleBin(path, logger: req.logger)
-        }
-
+        // Recording the removal is the whole of deleting, now.
+        //
+        // This used to move the file into `#recycle` here, which was wrong in
+        // both directions once photographs started living in each member's
+        // home. It moved the *blob*, so the bytes every other copy of that
+        // photograph depends on went into a bin; and it left the copies in
+        // people's homes exactly where they were, so a deleted photograph was
+        // still sitting in File Station.
+        //
+        // The reconciler already does the right thing from this one column: its
+        // stale pass withdraws the copy from every home on its next sweep, and
+        // the retention sweeper takes the bytes at day \(Retention.days). Both
+        // read state rather than being told, so a delete that races either of
+        // them still comes out correct.
         try await req.sql.raw("""
             UPDATE space_assets
-            SET deleted_at = now(), deleted_by = \(bind: device.userID),
-                recycled_path = \(bind: recycled)
+            SET deleted_at = now(), deleted_by = \(bind: device.userID)
             WHERE id = \(bind: placement.id)
             """).run()
 
@@ -101,30 +107,6 @@ struct AssetController: RouteCollection {
             op: "delete", on: req.sql
         )
         return .noContent
-    }
-
-    /// `…/2025/03/IMG_7001.jpg` → `…/2025/03/#recycle/IMG_7001.jpg`.
-    ///
-    /// Best effort: failing to move the file must not stop the removal being
-    /// recorded, or the app would show a photo the user already deleted.
-    static func moveToRecycleBin(_ path: String, logger: Logger) -> String? {
-        let directory = (path as NSString).deletingLastPathComponent
-        let name = (path as NSString).lastPathComponent
-        let bin = "\(directory)/#recycle"
-        let destination = "\(bin)/\(name)"
-        do {
-            try FileManager.default.createDirectory(
-                atPath: bin, withIntermediateDirectories: true
-            )
-            if FileManager.default.fileExists(atPath: destination) {
-                try FileManager.default.removeItem(atPath: destination)
-            }
-            try FileManager.default.moveItem(atPath: path, toPath: destination)
-            return destination
-        } catch {
-            logger.warning("could not recycle \(path): \(error.localizedDescription)")
-            return nil
-        }
     }
 
     // MARK: - Playback

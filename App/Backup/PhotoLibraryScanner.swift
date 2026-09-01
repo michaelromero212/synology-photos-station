@@ -50,6 +50,15 @@ enum PhotoLibraryScanner {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.includeHiddenAssets = false
+        // Every frame of a burst, not just the one iOS puts on the cover.
+        //
+        // PhotoKit defaults this to false, which hands back the burst's
+        // representative and hides the other nine — so a timer burst arrived as
+        // a single photograph. Keeping them all means each frame is its own
+        // photo you can open, compare and choose between, which is the whole
+        // reason for taking a burst; the tile carries a badge so it still reads
+        // as one moment rather than ten near-identical accidents.
+        options.includeAllBurstAssets = true
         options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
         let fetched = PHAsset.fetchAssets(with: options)

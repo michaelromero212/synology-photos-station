@@ -108,11 +108,40 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// True once thumbnails exist. While false the client should keep showing
     /// the ThumbHash rather than requesting an image that will 202.
     public let isDerived: Bool
+    /// One frame of a burst. The tile says so, because ten near-identical
+    /// photographs in a row otherwise read as a mistake rather than a moment.
+    public let isBurst: Bool
+    /// A Live Photo: this still has a paired video. The paired video is not a
+    /// row of its own — it would sit beside its own still as a three-second
+    /// silent clip, which is two tiles for one thing somebody photographed once.
+    public let liveVideoAssetID: UUID?
+    /// When this becomes unrecoverable. Set only for items in Recently Deleted;
+    /// nil everywhere else, because nothing else is on a clock.
+    ///
+    /// A date rather than a number of days, so the retention window lives in
+    /// one place on the server. A client subtracting its own constant would go
+    /// on counting down to the old day if that window ever changed.
+    public let purgeAt: Date?
+
+    public var isLive: Bool { liveVideoAssetID != nil }
+
+    /// Whole days left, rounded up, floored at zero.
+    ///
+    /// Up rather than down: something deleted twenty minutes ago has 28 days
+    /// and change left, and "28 days" reads as a day already lost. Rounding up
+    /// says 29 on the day you delete it, which is the number the app promised.
+    public var daysUntilPurge: Int? {
+        guard let purgeAt else { return nil }
+        let seconds = purgeAt.timeIntervalSinceNow
+        guard seconds > 0 else { return 0 }
+        return Int((seconds / 86_400).rounded(.up))
+    }
 
     public init(
         id: UUID, spaceID: UUID, assetID: UUID, capturedAt: Date, aspectRatio: Double,
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
-        isFavorite: Bool, uploadedBy: UUID, isDerived: Bool
+        isFavorite: Bool, uploadedBy: UUID, isDerived: Bool,
+        isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil
     ) {
         self.id = id
         self.spaceID = spaceID
@@ -124,7 +153,10 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         self.thumbHash = thumbHash
         self.isFavorite = isFavorite
         self.uploadedBy = uploadedBy
+        self.isBurst = isBurst
+        self.liveVideoAssetID = liveVideoAssetID
         self.isDerived = isDerived
+        self.purgeAt = purgeAt
     }
 
     public var thumbHashBytes: [UInt8]? {

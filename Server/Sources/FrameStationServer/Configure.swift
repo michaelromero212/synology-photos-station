@@ -110,6 +110,10 @@ func configure(_ app: Application) async throws {
         let sweeper = ActivitySweeper(app: app, apns: apns)
         app.storage[ActivitySweeperKey.self] = sweeper
         await sweeper.start()
+
+        let retention = RetentionWorker(app: app)
+        app.storage[RetentionWorkerKey.self] = retention
+        await retention.start()
     }
 
     app.logger.info("framestation \(Build.version) configured")

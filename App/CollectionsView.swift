@@ -561,6 +561,36 @@ extension View {
 /// Station, which is why the bin carries DSM's own name. Anything DSM has
 /// already reclaimed is absent rather than offered, so the list never promises
 /// a restore it cannot perform.
+/// How long this photograph has left, on the photograph.
+///
+/// On every tile rather than only the urgent ones. A badge that appears at some
+/// threshold is a badge whose absence means two different things — plenty of
+/// time, or nobody computed it — and the day count is the entire reason this
+/// screen is a waiting room rather than a bin.
+///
+/// The last week turns amber. Not red: nothing has gone wrong, and the photo is
+/// still one tap from coming back. Red is for damage, and this is a deadline.
+private struct DaysRemainingBadge: View {
+    let days: Int
+
+    private var isUrgent: Bool { days <= 7 }
+
+    var body: some View {
+        Text(days == 1 ? "1 day" : "\(days) days")
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(isUrgent ? AnyShapeStyle(.orange) : AnyShapeStyle(.white))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.black.opacity(0.55), in: Capsule())
+            .accessibilityLabel(
+                days == 1
+                    ? "Deleted forever in 1 day"
+                    : "Deleted forever in \(days) days"
+            )
+    }
+}
+
 struct RecentlyDeletedView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
@@ -581,7 +611,10 @@ struct RecentlyDeletedView: View {
                 ContentUnavailableView {
                     Label("Nothing Removed", systemImage: "trash")
                 } description: {
-                    Text("Photos you remove from \(space.name) wait here before they go for good.")
+                    Text(
+                        "Photos you remove from \(space.name) wait here for "
+                        + "\(Retention.days) days before they go for good."
+                    )
                 }
             } else {
                 grid
@@ -615,10 +648,14 @@ struct RecentlyDeletedView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 12).padding(.vertical, 8)
                     }
-                    // No countdown. The bin is DSM's, emptied on its schedule,
-                    // and a number this app cannot enforce would be a promise
-                    // it has no way to keep.
-                    Text("Tap to choose what to put back.")
+                    // A countdown, now that there is one to state.
+                    //
+                    // This deliberately said nothing about time while the bin
+                    // was DSM's and emptied on DSM's schedule — a number the
+                    // app could not enforce would have been a promise it had no
+                    // way to keep. FrameStation owns the window now and the
+                    // sweeper holds it, so the days on these tiles are real.
+                    Text("Photos are kept for \(Retention.days) days. Tap to choose what to put back.")
                         .font(.footnote)
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 12).padding(.bottom, 6)
@@ -633,6 +670,15 @@ struct RecentlyDeletedView: View {
                         if case .item(let item) = entry {
                             PhotoCell(item: item, loader: session.loader, size: size)
                                 .opacity(selection.contains(item.assetID) ? 1 : 0.55)
+                                // Both badges sit outside the dimming, so the
+                                // number stays readable on a tile that is
+                                // deliberately faded for not being selected.
+                                .overlay(alignment: .bottomLeading) {
+                                    if let days = item.daysUntilPurge {
+                                        DaysRemainingBadge(days: days)
+                                            .padding(5)
+                                    }
+                                }
                                 .overlay(alignment: .bottomTrailing) {
                                     if selection.contains(item.assetID) {
                                         Image(systemName: "checkmark.circle.fill")
