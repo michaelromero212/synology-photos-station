@@ -73,6 +73,39 @@ extension FrameStationClient {
         )
     }
 
+    // MARK: - Collections
+
+    /// The whole Albums page in one request.
+    ///
+    /// The device's own date goes up with it. "On this day" means the day the
+    /// person is having, and a NAS in another timezone — or simply a request
+    /// made at one in the morning — would otherwise answer for the wrong one.
+    public func collections(spaceID: UUID, on date: Date = Date()) async throws -> CollectionsResponse {
+        try await get("v1/spaces/\(spaceID)/collections?date=\(Self.dayStamp(date))")
+    }
+
+    /// The photos inside one collection, opened with the key its card carried.
+    public func collectionItems(
+        spaceID: UUID, kind: CollectionKind, key: String, on date: Date = Date()
+    ) async throws -> SearchResults {
+        let encodedKey = key.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryValue
+        ) ?? ""
+        return try await get(
+            "v1/spaces/\(spaceID)/collections/items"
+            + "?kind=\(kind.rawValue)&key=\(encodedKey)&date=\(Self.dayStamp(date))"
+        )
+    }
+
+    /// The calendar day as the *device* reckons it, which is the only reckoning
+    /// that matters for a collection built around "today".
+    static func dayStamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
     // MARK: - Media URLs
 
     /// Built rather than fetched so a grid cell can hand a URL straight to the

@@ -50,20 +50,45 @@ final class AlbumStore {
     }
 }
 
-/// Albums — collections you build by hand, cutting across dates.
+/// Albums — what the library noticed, and what you filed by hand.
+///
+/// Two halves. Above: collections the server worked out from dates and
+/// coordinates — today in earlier years, days that stood out. Below: the albums
+/// you made yourself.
+///
+/// The ordering is the argument. Apple's Albums tab reaches roughly twenty-five
+/// rows before your own albums, most of them media types, and it reads as a
+/// filing cabinet — organised by what a file *is* rather than by what happened.
+/// So this opens on one hero, keeps the automatic sections few, drops any that
+/// would be thin, and puts your own albums above the file-shaped stuff rather
+/// than below it.
 struct AlbumsView: View {
     @Bindable var session: AppSession
 
     @State private var store: AlbumStore?
+    @State private var collections: CollectionsStore?
     @State private var showCreate = false
 
     private let columns = 2
     private let spacing: CGFloat = 14
 
+    /// Whether there is genuinely nothing to draw.
+    ///
+    /// "Nothing" and "not yet" are different answers and this has to tell them
+    /// apart: treating an unanswered collections request as empty put the "no
+    /// albums yet" screen over a library that had plenty, every time the
+    /// request was slow or failed. So both halves must have actually reported
+    /// before this is allowed to be true.
+    private var hasNothing: Bool {
+        guard let store, !store.isLoading else { return false }
+        guard let collections, collections.hasLoaded else { return false }
+        return store.albums.isEmpty && (collections.page?.isEmpty ?? true)
+    }
+
     var body: some View {
         Group {
             if let store {
-                if store.albums.isEmpty && !store.isLoading {
+                if hasNothing {
                     ContentUnavailableView {
                         Label("No albums yet", systemImage: "rectangle.stack")
                     } description: {
@@ -73,7 +98,7 @@ struct AlbumsView: View {
                             .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    grid(store)
+                    page(store)
                 }
             } else {
                 ProgressView()
@@ -99,12 +124,74 @@ struct AlbumsView: View {
             store = created
             await created.refresh()
         }
+        // Keyed on the space so switching personal libraries rebuilds it, and
+        // separate from the albums load because either can fail alone.
+        .task(id: session.personalSpace?.id) {
+            guard let space = session.personalSpace else { return }
+            let created = CollectionsStore(session: session, spaceID: space.id)
+            collections = created
+            await created.refresh()
+        }
     }
 
-    private func grid(_ store: AlbumStore) -> some View {
+    /// The page: what the library noticed, then what you filed.
+    @ViewBuilder
+    private func page(_ store: AlbumStore) -> some View {
         GeometryReader { proxy in
             let side = (proxy.size.width - spacing * CGFloat(columns + 1)) / CGFloat(columns)
             ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if let space = session.personalSpace, let found = collections?.page {
+                        automatic(found, space: space)
+                    }
+                    manual(store, side: side)
+                }
+                .padding(.vertical, spacing)
+            }
+            .refreshable {
+                await store.refresh()
+                await collections?.refresh()
+            }
+        }
+    }
+
+    /// Everything the server worked out. Each section is absent rather than
+    /// empty when it found nothing — a heading with nothing under it is worse
+    /// than no heading.
+    @ViewBuilder
+    private func automatic(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if let hero = found.hero {
+            NavigationLink {
+                CollectionDetailView(session: session, space: space, collection: hero)
+            } label: {
+                CollectionHeroCard(collection: hero, loader: session.loader)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, spacing)
+        }
+
+        if !found.days.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("Days worth keeping")
+                ForEach(found.days) { day in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: day)
+                    } label: {
+                        CollectionRowCard(collection: day, loader: session.loader)
+                            .padding(.horizontal, spacing)
+                            .padding(.vertical, 7)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func manual(_ store: AlbumStore, side: CGFloat) -> some View {
+        if !store.albums.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("Your Albums")
                 LazyVGrid(
                     columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
                     spacing: spacing
@@ -125,11 +212,18 @@ struct AlbumsView: View {
                         }
                     }
                 }
-                .padding(spacing)
+                .padding(.horizontal, spacing)
             }
-            .refreshable { await store.refresh() }
         }
     }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.title3.weight(.bold))
+            .padding(.horizontal, spacing)
+            .padding(.bottom, 8)
+    }
+
 }
 
 private struct AlbumCard: View {

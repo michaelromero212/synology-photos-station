@@ -69,6 +69,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: PushController())
     try app.grouped("v1").register(collection: ActivityController())
     try app.grouped("v1").register(collection: AlbumController())
+    try app.grouped("v1").register(collection: CollectionsController())
 
     // Only the long-running server drains the queue.
     //
