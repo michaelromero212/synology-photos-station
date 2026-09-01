@@ -302,6 +302,51 @@ than leaving two.
 
 ---
 
+**The browse tree's two defaults disagree.** `BrowseTree.Configuration`
+falls back to `"0"` in Swift; `docker-compose.yml` sets
+`FRAMESTATION_BROWSE_TREE: ${FRAMESTATION_BROWSE_TREE:-1}`. Compose wins, so
+the tree is **on** unless `.env` says otherwise — reading the Swift default
+alone gives you the opposite answer, which cost an hour of reasoning from the
+wrong premise. Check what is actually in effect:
+
+```bash
+ssh -t nas 'sudo grep -E "BROWSE_TREE|FRAMESTATION_(DATA|MEDIA|HOMES)=" /volume1/docker/framestation/.env'
+```
+
+Absent means the compose default applies, not the Swift one.
+
+**Reflink works across shared folders on this NAS; hardlink does not.**
+Measured, not assumed:
+
+```
+cp --reflink=always /volume1/docker/... /volume1/homes/...   → OK
+ln                  /volume1/docker/... /volume1/homes/...   → FAILED
+```
+
+Each DSM shared folder is its own Btrfs subvolume, so hardlinks cannot cross
+between them — but reflinks can. `BrowseTree.link` tries reflink first, so tree
+entries share extents with the blob store and cost close to nothing on disk.
+That is the assumption the whole layout rests on: if a future DSM or volume
+change breaks reflink, `link` falls through to `copyItem` and every tree entry
+silently becomes a second full copy. It logs `browse tree: copied … this
+duplicates the file on disk` when that happens — worth grepping for after any
+volume work.
+
+Disk usage is one copy. Whether Synology's *per-user quota* accounting also
+counts shared extents once is not established; watch `homes` usage after the
+first large batch rather than assuming.
+
+**Never let a group grant access to media shares.** The `docker` share was
+found granting Read Only to a group that every household account belongs to,
+which meant every member — and every member added in future — could read
+`/volume1/docker/framestation/blobs` directly and browse the entire library,
+personal spaces included. Group grants are inherited by accounts that do not
+exist yet, so they are correct on the day they are set and wrong the moment
+somebody joins. Access to `docker`, `FrameStation` and `homes` is per-user or
+by home directory only.
+
+---
+
 ## Checking what's deployed without touching the NAS
 
 ```bash
