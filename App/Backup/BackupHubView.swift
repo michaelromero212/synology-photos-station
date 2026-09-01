@@ -17,39 +17,89 @@ struct BackupHubView: View {
     /// stays disabled after the user grants permission until something else
     /// happens to redraw the view.
     @State private var access = PhotoLibraryScanner.access
+    @State private var showFocused = false
 
     var body: some View {
         NavigationStack {
+            list
+        }
+        .fullScreenCover(isPresented: $showFocused) {
+            FocusedBackupView(engine: engine) { showFocused = false }
+        }
+    }
+
+    private var list: some View {
+        Group {
             List {
-                Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Back Up Now")
-                            .font(.headline)
-                        Text("Uploads as fast as the network allows while FrameStation is open. Backup also runs on its own in the background.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                // What backup is doing, not another way to start it.
+                //
+                // This screen used to open on a "Back Up Now" card with a Start
+                // button, directly above a "Focused Backup" card with a Start
+                // button — two controls that, to anyone who hasn't read the
+                // code, do the same thing. Ordinary backup is a service that is
+                // already running; what it needs here is a status and a way to
+                // pause it, and the *one* action on this screen should be the
+                // one you actually choose to take.
+                Section("Backup Details") {
+                    HStack(spacing: 12) {
+                        Image(systemName: statusIcon)
+                            .font(.title3)
+                            .foregroundStyle(statusTint)
+                            .frame(width: 26)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(statusTitle)
+                                .font(.subheadline.weight(.medium))
+                            Text(statusDetail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 8)
+
                         if access != .authorized {
-                            Button("Allow Access to Photos") {
+                            Button("Allow") {
                                 Task { access = await PhotoLibraryScanner.requestAccess() }
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.bordered)
                         } else if engine.isRunning {
                             Button("Pause") { engine.stop() }
                                 .buttonStyle(.bordered)
-                        } else {
-                            Button("Start") {
+                        } else if settings.enabled, engine.progress.pending > 0 {
+                            Button("Resume") {
                                 Task {
                                     await engine.scanLibrary()
                                     await engine.start()
                                 }
                             }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(access != .authorized)
+                            .buttonStyle(.bordered)
                         }
                     }
-                    .padding(.vertical, 4)
-                } header: {
-                    Text("Focused Backup")
+                    .padding(.vertical, 2)
+                }
+
+                // Absent when there is nothing to focus on. A Start button over
+                // an empty queue is a control that cannot do anything, and this
+                // app drops those rather than greying them out.
+                if access == .authorized, settings.enabled, engine.progress.pending > 0 {
+                    Section {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(
+                                "Works through the backlog in one sitting. FrameStation "
+                                + "stays open with the screen dark, so the upload keeps "
+                                + "going instead of waiting for iOS to hand it a moment."
+                            )
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            Button("Start Focused Backup") { showFocused = true }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        .padding(.vertical, 4)
+                    } header: {
+                        Text("Focused Backup")
+                    } footer: {
+                        Text("Best on Wi‑Fi and a charger. Leaving the app stops it.")
+                    }
                 }
 
                 Section("Backup Management") {
@@ -95,6 +145,40 @@ struct BackupHubView: View {
                 }
             }
         }
+    }
+
+    // MARK: - What backup is doing
+
+    private var statusIcon: String {
+        if access != .authorized { return "lock.circle" }
+        if !settings.enabled { return "icloud.slash" }
+        if engine.progress.pending == 0 { return "checkmark.icloud" }
+        return engine.isRunning ? "arrow.triangle.2.circlepath.icloud" : "pause.circle"
+    }
+
+    private var statusTint: Color {
+        if access != .authorized || !settings.enabled { return .orange }
+        return engine.progress.pending == 0 ? .green : .accentColor
+    }
+
+    /// Off is a status too. Hiding the row when backup is disabled leaves "is
+    /// my phone backed up?" unanswered, which is the question this screen
+    /// exists to answer.
+    private var statusTitle: String {
+        if access != .authorized { return "Photos Access Needed" }
+        if !settings.enabled { return "Photo Backup Off" }
+        if engine.progress.pending == 0 { return "Everything Backed Up" }
+        return engine.isRunning ? "Backing Up" : "Backup Paused"
+    }
+
+    private var statusDetail: String {
+        if access != .authorized {
+            return "FrameStation needs to see your library to back it up."
+        }
+        if !settings.enabled { return "Turn it on in Backup Settings." }
+        let pending = engine.progress.pending
+        if pending == 0 { return "Nothing waiting to upload." }
+        return pending == 1 ? "1 item waiting" : "\(pending) items waiting"
     }
 }
 

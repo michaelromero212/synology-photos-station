@@ -98,6 +98,7 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var dismissedBackupPrompt = false
     @State private var showBackupSettings = false
+    @State private var showFocusedBackup = false
     @State private var showPicker = false
     @State private var showSearch = false
     @State private var showMoveTo = false
@@ -312,6 +313,11 @@ struct TimelineView: View {
             Button("OK") { moveError = nil }
         } message: {
             Text(moveError ?? "")
+        }
+        .fullScreenCover(isPresented: $showFocusedBackup) {
+            if let engine {
+                FocusedBackupView(engine: engine) { showFocusedBackup = false }
+            }
         }
         .sheet(isPresented: $showBackupSettings) {
             if let engine {
@@ -1228,6 +1234,29 @@ struct TimelineView: View {
                 }
 
                 Spacer()
+
+                // Reachable from the bar itself, not only from inside the hub.
+                //
+                // The moment somebody wants to force a backlog through is the
+                // moment they are looking at this bar and seeing a number that
+                // is not moving fast enough — whether the backup is running,
+                // paused, or suspended because the NAS was unreachable an hour
+                // ago. Making them open Photo Backup first to find it puts two
+                // taps between the impulse and the thing.
+                if backupSettings.enabled, engine.progress.pending > 0 {
+                    Button {
+                        showFocusedBackup = true
+                    } label: {
+                        Text("Focus")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5)
+                            .background(.tint.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.tint)
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
