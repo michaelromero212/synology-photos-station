@@ -98,13 +98,32 @@ struct AlbumsView: View {
         Group {
             if let store {
                 if hasNothing {
-                    ContentUnavailableView {
-                        Label("No albums yet", systemImage: "rectangle.stack")
-                    } description: {
-                        Text("Group photos by trip, person, or occasion — separate from the timeline.")
-                    } actions: {
-                        Button("New Album") { showCreate = true }
-                            .buttonStyle(.borderedProminent)
+                    // Says what the page is *for*, not just that it is empty.
+                    // "No albums yet" over a library that has plenty of photos
+                    // reads as a fault; the truth is that trips and occasions
+                    // need a few months of photographs behind them before there
+                    // is anything to notice.
+                    VStack(spacing: 0) {
+                        ContentUnavailableView {
+                            Label("Nothing to show yet", systemImage: "sparkles.rectangle.stack")
+                        } description: {
+                            Text(
+                                "Trips, holidays and the days worth keeping appear here on "
+                                + "their own as your library grows. You can also make an album "
+                                + "by hand at any time."
+                            )
+                        } actions: {
+                            Button("New Album") { showCreate = true }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        // The utilities stay reachable. They are the one thing
+                        // that works on day one, and burying them behind an
+                        // empty state would make Recently Deleted unreachable
+                        // exactly when somebody has just deleted something.
+                        if let space = session.personalSpace, let found = collections?.page {
+                            utilities(found, space: space)
+                                .padding(.bottom, spacing)
+                        }
                     }
                 } else {
                     page(store)
@@ -327,9 +346,13 @@ struct AlbumsView: View {
                 NavigationLink {
                     MediaTypesView(session: session, space: space, types: found.mediaTypes)
                 } label: {
+                    // The photographs behind them, not how many categories
+                    // there are. "Media Types · 6" meaning six kinds sits in the
+                    // same column as "Recently Deleted · 3" meaning three
+                    // photos, and one of those readings has to win.
                     utilityRow(
                         "Media Types", systemImage: "square.grid.2x2",
-                        count: found.mediaTypes.count
+                        count: found.mediaTypes.reduce(0) { $0 + $1.count }
                     )
                 }
                 .buttonStyle(.plain)

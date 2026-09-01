@@ -140,12 +140,16 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.recentlyDeleted = recentlyDeleted
     }
 
-    /// Whether the page has anything automatic to show at all. A library of
-    /// scans with no dates and no coordinates legitimately has none of this,
-    /// and should fall back to manual albums rather than to empty headings.
+    /// Whether the page has anything to *show* — as opposed to anything at all.
+    ///
+    /// Media types and Recently Deleted are deliberately excluded. They are
+    /// always-on utilities rather than things that happened, and counting them
+    /// meant a young library rendered as two grey rows over a screen of black
+    /// while the page insisted it wasn't empty. A library of scans with no
+    /// dates and no coordinates legitimately has none of this, and deserves to
+    /// be told so.
     public var isEmpty: Bool {
         hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
-            && recentlyDeleted == nil
     }
 }
 
