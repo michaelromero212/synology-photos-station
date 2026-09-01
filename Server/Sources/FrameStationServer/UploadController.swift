@@ -247,13 +247,16 @@ struct UploadController: RouteCollection {
             throw Abort(.unprocessableEntity, reason: String(describing: error))
         }
 
-        // Move the assembled file to where a person would look for it. Best
-        // effort by design: if the library layout is off, or this account has no
-        // DSM home, the file stays in the content-addressed store and
-        // storage_path stays NULL. Both models read the same way.
-        let storagePath = try await Self.placeInLibrary(
-            blob: blob, session: session, input: input, device: device, req: req
-        )
+        // The blob store is where the file lives; the browsable tree is a
+        // mirror, and `BrowseTreeWorker` is now the only thing that writes it.
+        //
+        // Placing eagerly here used to save the twenty seconds until the next
+        // sweep, and it was worth it while a photo went to exactly one folder.
+        // A shared photograph now goes to one folder per member, and that set
+        // changes as people join and leave — so there is a reconciler for it,
+        // and a second implementation racing the reconciler at commit time
+        // would only be a way for the two to disagree.
+        let storagePath: String? = nil
 
         let result = try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
@@ -374,65 +377,6 @@ struct UploadController: RouteCollection {
     }
 
 
-    /// Puts the committed file where File Station will show it, and returns the
-    /// path recorded on the asset.
-    ///
-    /// Returns nil rather than throwing when the layout can't place the file:
-    /// an upload must never fail because a folder couldn't be chosen.
-    private static func placeInLibrary(
-        blob: URL,
-        session: SessionRow,
-        input: CommitUploadRequest,
-        device: AuthenticatedDevice,
-        req: Request
-    ) async throws -> String? {
-        let configuration = BrowseTree.Configuration.fromEnvironment()
-        guard configuration.enabled else { return nil }
-
-        struct ContextRow: Decodable {
-            let spaceKind: String
-            let spaceName: String
-            let dsmUsername: String?
-            let dsmUID: Int?
-        }
-        guard let context = try? await req.sql.raw("""
-            SELECT s.kind AS "spaceKind", s.name AS "spaceName",
-                   u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
-            FROM spaces s
-            JOIN users u ON u.id = \(bind: device.userID)
-            WHERE s.id = \(bind: input.spaceID)
-            """).first(decoding: ContextRow.self) else { return nil }
-
-        let placement = BrowseTree.Placement(
-            id: UUID(), sha256: session.sha256,
-            blobExt: BlobStore.fileExtension(for: session.filename),
-            filename: session.filename, capturedAt: input.capturedAt,
-            spaceKind: context.spaceKind, spaceName: context.spaceName,
-            dsmUsername: context.dsmUsername, dsmUID: context.dsmUID
-        )
-        guard let intended = BrowseTree.destination(
-            for: placement, configuration: configuration
-        ) else { return nil }
-
-        // Two photos can share a name -- every phone starts at IMG_0001 -- so a
-        // collision suffixes rather than overwrites.
-        let destination = BrowseTreeWorker.deduplicated(intended, sha256: session.sha256)
-        do {
-            let kind = try await BrowseTree.link(
-                from: blob.path, to: destination, logger: req.logger
-            )
-            if let uid = context.dsmUID {
-                await BrowseTree.chown(destination, uid: uid, logger: req.logger)
-            }
-            req.logger.debug("library: \(kind.rawValue) \(destination)")
-            return destination
-        } catch {
-            req.logger.warning("library placement failed, keeping blob: \(error)")
-            return nil
-        }
-    }
-
-
     /// Copies a photo into a space and returns the new asset row's id.
     ///
     /// Adding to a shared library copies the file, the way Synology Photos
@@ -487,24 +431,7 @@ struct UploadController: RouteCollection {
         guard let sourcePath = source.storagePath,
               FileManager.default.fileExists(atPath: sourcePath)
         else { return nil }
-
-        let placement = BrowseTree.Placement(
-            id: UUID(), sha256: source.sha256, blobExt: source.blobExt,
-            filename: source.filename, capturedAt: source.capturedAt,
-            spaceKind: target.spaceKind, spaceName: target.spaceName,
-            dsmUsername: target.dsmUsername, dsmUID: target.dsmUID
-        )
-        guard let intended = BrowseTree.destination(
-            for: placement, configuration: configuration
-        ) else { return nil }
-
-        let destination = BrowseTreeWorker.deduplicated(intended, sha256: source.sha256)
-        _ = try await BrowseTree.link(
-            from: sourcePath, to: destination, logger: req.logger
-        )
-        if let uid = target.dsmUID {
-            await BrowseTree.chown(destination, uid: uid, logger: req.logger)
-        }
+        _ = sourcePath
 
         // A copy of the row to go with the copy of the file. derived_at comes
         // along so the worker doesn't redo work whose output is already on disk
@@ -523,7 +450,7 @@ struct UploadController: RouteCollection {
                    lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
                    shutter, focal_len, exposure_bias, dynamic_range, orientation,
                    is_raw, live_group_id, burst_id, burst_pick, thumbhash, exif,
-                   derived_at, \(bind: destination)
+                   derived_at, NULL
             FROM assets WHERE id = \(bind: assetID)
             RETURNING id
             """).first(decoding: NewID.self) else { return nil }
