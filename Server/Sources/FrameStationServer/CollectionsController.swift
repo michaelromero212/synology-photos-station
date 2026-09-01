@@ -160,6 +160,32 @@ struct CollectionsController: RouteCollection {
         spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
+
+        // The years the library actually holds, so the holiday table is built
+        // for those and no others.
+        struct YearRow: Decodable { let year: Int }
+        let years = try await sql.raw("""
+            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: local))::int AS year
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+            """).all(decoding: YearRow.self).map(\.year)
+        let holidays = Holidays.table(forYears: years)
+
+        // A named day clears a much lower bar than an ordinary one.
+        //
+        // The busy-day test asks "is this day unusual for this library?", which
+        // is the right question when nothing else is known about it. Christmas
+        // is not unusual — it is *expected* — and a quiet Christmas with six
+        // photographs is still Christmas and still worth a card. Holding it to
+        // three times the median would drop exactly the days people most want
+        // back.
+        //
+        // Joined and split rather than interpolated: these strings are
+        // machine-generated dates, but a query that builds its own IN list is a
+        // habit worth not having.
+        let holidayKeys = holidays.keys.sorted().joined(separator: ",")
+
         let rows = try await sql.raw("""
             WITH per_day AS (
                 SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
@@ -184,12 +210,16 @@ struct CollectionsController: RouteCollection {
             SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
                    p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetID"
             FROM per_day p, baseline b
-            WHERE p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2))
+            WHERE p.count >= CASE
+                    WHEN p.day = ANY(string_to_array(\(bind: holidayKeys), ','))
+                    THEN \(bind: Self.minimumItems)
+                    ELSE GREATEST(b.median * 3, \(bind: Self.minimumItems * 2))
+                 END
             ORDER BY p.day DESC
             LIMIT 60
             """).all(decoding: DayRow.self)
 
-        return Self.runs(from: rows).prefix(6).map { Self.describe($0) }
+        return Self.runs(from: rows).prefix(6).map { Self.describe($0, holidays: holidays) }
     }
 
     /// A stretch of consecutive busy days, treated as one occasion.
@@ -253,7 +283,7 @@ struct CollectionsController: RouteCollection {
     /// The generic weekday remains as the last resort, because a day that is
     /// simply busy is a real thing and deserves an honest name rather than a
     /// stretched one.
-    static func describe(_ run: Run) -> CollectionSummary {
+    static func describe(_ run: Run, holidays: [String: String] = [:]) -> CollectionSummary {
         let place = run.place
         let title: String
         // Whether the title already names where this happened, so the subtitle
@@ -261,7 +291,20 @@ struct CollectionsController: RouteCollection {
         // doesn't contradict a title that just said so.
         var titleNamedPlace = place != nil
 
-        if run.span > 1 {
+        // A named day wins over everything. "Christmas Day" is a better answer
+        // than "An afternoon in Culpeper" even though both are true, and it is
+        // the answer somebody scanning the page is actually looking for.
+        //
+        // Where a run covers two named days — Christmas Eve into Christmas
+        // morning — the busier one names it, because that is the one people
+        // mean.
+        if let named = run.days
+            .filter({ holidays[$0.day] != nil })
+            .max(by: { $0.count < $1.count })
+            .flatMap({ holidays[$0.day] }) {
+            title = named
+            titleNamedPlace = false
+        } else if run.span > 1 {
             title = runTitle(run, place: place)
         } else if run.placeCount >= 3 {
             title = "\(spelled(run.placeCount).capitalized) places in one day"
