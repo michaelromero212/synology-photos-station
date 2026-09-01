@@ -5,6 +5,7 @@ import Vapor
 
 extension CollectionsResponse: @retroactive Content {}
 extension NameOccasionRequest: @retroactive Content {}
+extension RestoreAssetsRequest: @retroactive Content {}
 
 /// The Albums page, assembled from what the library already knows.
 ///
@@ -29,6 +30,8 @@ struct CollectionsController: RouteCollection {
         protected.get("spaces", ":spaceID", "collections", use: page)
         protected.get("spaces", ":spaceID", "collections", "items", use: items)
         protected.put("spaces", ":spaceID", "collections", "name", use: name)
+        protected.get("spaces", ":spaceID", "collections", "deleted", use: deletedItems)
+        protected.post("spaces", ":spaceID", "collections", "deleted", "restore", use: restore)
     }
 
     /// Below this a collection isn't worth a card. Three photos from one day is
@@ -70,15 +73,60 @@ struct CollectionsController: RouteCollection {
             excluding: claimed, on: req.sql
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
+        let away = try await revisits(spaceID: spaceID, seed: seed, on: req.sql)
+        let season = try await lastSeason(
+            spaceID: spaceID, today: today, seed: seed, on: req.sql
+        )
+        let anniversaries = Self.anniversaries(of: found, today: today)
+        let types = try await mediaTypes(spaceID: spaceID, seed: seed, on: req.sql)
+
+        // Anything anchored to *today* outranks everything else: this day in an
+        // earlier year, or the week you were away in one. Those are answers to
+        // "why open this now", and the rest are answers to "what else is here".
+        let anchored = ([onThisDay.first] + anniversaries).compactMap { $0 }
+
+        // The rest is a pool, and the pool is the point. A page that always
+        // opens on the same card stops being looked at — so on a day with
+        // nothing anchored to it, the hero moves: the latest trip, somewhere
+        // you haven't been in years, last season, the best day recently. Turned
+        // by the date, so it holds still while you are looking and has changed
+        // by tomorrow.
+        let pool = ([found.first, away.first, season, days.first]).compactMap { $0 }
+
+        let turn = Self.utc.ordinality(of: .day, in: .year, for: today) ?? 0
+        let hero: CollectionSummary?
+        if !anchored.isEmpty {
+            hero = anchored[turn % anchored.count]
+        } else if !pool.isEmpty {
+            hero = pool[turn % pool.count]
+        } else {
+            hero = nil
+        }
+
+        // Whatever became the hero is not also listed below it. Matched on the
+        // *key* rather than the id: an anniversary is a trip wearing a
+        // different sentence, so comparing ids let "Two years ago you were in
+        // Nags Head" sit directly above "Six days in Nags Head" — the same
+        // photographs, twice, on one screen.
+        let heroKey = hero?.key
+        let heroPlace = hero?.kind == .revisit ? hero?.key : nil
+
+        // A place you haven't visited in years that was also a trip is likewise
+        // one thing said two ways. The trip is the better card of the two — it
+        // has the dates — so the revisit gives way.
+        let tripPlaces = Set(found.flatMap { trip in
+            trip.title.range(of: " in ").map { [String(trip.title[$0.upperBound...])] } ?? []
+        })
 
         return CollectionsResponse(
-            // On This Day when there is one — the most recent year first,
-            // because "last year today" beats "eleven years ago today" as a
-            // thing to open a page with. Otherwise the latest trip, which is
-            // the next most likely reason anybody came here.
-            hero: onThisDay.first ?? found.first,
-            trips: found,
-            days: days,
+            hero: hero,
+            trips: found.filter { $0.key != heroKey },
+            days: days.filter { $0.key != heroKey },
+            revisits: away.filter { place in
+                guard place.key != heroPlace else { return false }
+                return !tripPlaces.contains(place.title)
+            },
+            mediaTypes: types,
             recentlyDeleted: deleted
         )
     }
@@ -128,8 +176,7 @@ struct CollectionsController: RouteCollection {
                 kind: .onThisDay,
                 key: String(row.year),
                 title: ago == 1 ? "A year ago today" : "\(ago) years ago today",
-                subtitle: Self.dayLabel(month: month, day: day, year: row.year)
-                    + " · " + Self.photoCount(row.count),
+                subtitle: Self.dayLabel(month: month, day: day, year: row.year),
                 count: row.count,
                 coverAssetIDs: row.coverAssetIDs
             )
@@ -313,10 +360,13 @@ struct CollectionsController: RouteCollection {
         if let from = ordered.first.flatMap({ parseDate($0.day) }),
            let to = ordered.last.flatMap({ parseDate($0.day) }) {
             let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
-            let left = stampFormatter(sameMonth ? "d" : "d MMM").string(from: from)
-            parts.append("\(left)–\(stampFormatter("d MMMM yyyy").string(from: to))")
+            // "12–16 August 2026" inside one month, "28 August – 2 September
+            // 2024" across two. Abbreviating only the left-hand end read as a
+            // mistake rather than as concision.
+            let left = stampFormatter(sameMonth ? "d" : "d MMMM").string(from: from)
+            let dash = sameMonth ? "–" : " – "
+            parts.append("\(left)\(dash)\(stampFormatter("d MMMM yyyy").string(from: to))")
         }
-        parts.append(count == 1 ? "1 photo" : "\(count) photos")
 
         return CollectionSummary(
             kind: .trip,
@@ -628,8 +678,9 @@ struct CollectionsController: RouteCollection {
         } else if let from = parseDate(run.first.day), let to = parseDate(run.last.day) {
             // "12–16 August 2026", collapsing the month when it doesn't change.
             let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
-            let left = stampFormatter(sameMonth ? "d" : "d MMM").string(from: from)
-            parts.append("\(left)–\(stampFormatter("d MMMM yyyy").string(from: to))")
+            let left = stampFormatter(sameMonth ? "d" : "d MMMM").string(from: from)
+            let dash = sameMonth ? "–" : " – "
+            parts.append("\(left)\(dash)\(stampFormatter("d MMMM yyyy").string(from: to))")
         }
         // The caller passes nil when the title already named the place, so a
         // card never reads "An evening in Culpeper · Culpeper, Virginia" — nor
@@ -803,6 +854,187 @@ struct CollectionsController: RouteCollection {
         return .noContent
     }
 
+    // MARK: - Anniversaries
+
+    /// The trip you were on this week, in an earlier year.
+    ///
+    /// Costs nothing beyond the trips already computed: a trip whose span
+    /// covers today's date in a previous year is an anniversary of itself. It
+    /// is also the single most direct thing this page can say — "a year ago you
+    /// were in North Carolina" needs no explanation and lands immediately.
+    static func anniversaries(
+        of trips: [CollectionSummary], today: Date
+    ) -> [CollectionSummary] {
+        let parts = utc.dateComponents([.year, .month, .day], from: today)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else {
+            return []
+        }
+
+        return trips.compactMap { trip -> CollectionSummary? in
+            let ends = trip.key.components(separatedBy: "..")
+            guard let from = ends.first.flatMap(parseDate),
+                  let to = ends.last.flatMap(parseDate) else { return nil }
+            let tripYear = utc.component(.year, from: from)
+            let ago = year - tripYear
+            guard ago >= 1 else { return nil }
+
+            // Does today's date, moved back to the trip's year, land inside it?
+            var probe = DateComponents()
+            probe.year = tripYear
+            probe.month = month
+            probe.day = day
+            guard let anchor = utc.date(from: probe), anchor >= from, anchor <= to else {
+                return nil
+            }
+
+            // "in North Carolina" from "Seven days in North Carolina".
+            let place = trip.title.range(of: " in ").map {
+                String(trip.title[$0.upperBound...])
+            }
+            let title = place.map { "\(agoPhrase(ago)) you were in \($0)" }
+                ?? "\(agoPhrase(ago)) you were away"
+
+            return CollectionSummary(
+                kind: .anniversary,
+                key: trip.key,
+                title: title,
+                subtitle: trip.subtitle,
+                count: trip.count,
+                coverAssetIDs: trip.coverAssetIDs
+            )
+        }
+    }
+
+    private static func agoPhrase(_ years: Int) -> String {
+        years == 1 ? "A year ago" : "\(spelled(years).capitalized) years ago"
+    }
+
+    // MARK: - Somewhere you haven't been
+
+    private struct RevisitRow: Decodable {
+        let place: String
+        let count: Int
+        let lastSeen: String
+        let coverAssetIDs: [UUID]
+    }
+
+    /// A place the library knows well and hasn't seen in years.
+    ///
+    /// Quietly one of the better things a library can notice about itself. It
+    /// needs no cleverness — a place with a decent number of photographs whose
+    /// most recent one is old — and it surfaces exactly the corners that a
+    /// timeline buries, because the only way to reach 2021 by scrolling is to
+    /// scroll through everything since.
+    private func revisits(
+        spaceID: UUID, seed: String, on sql: any SQLDatabase
+    ) async throws -> [CollectionSummary] {
+        let local = TimelineController.localTime
+        let rows = try await sql.raw("""
+            SELECT a.place_name AS place,
+                   count(*)::int AS count,
+                   to_char(max(\(unsafeRaw: local)), 'YYYY-MM-DD') AS "lastSeen",
+                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                       [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND a.place_name IS NOT NULL
+            GROUP BY a.place_name
+            HAVING count(*) >= \(bind: Self.minimumItems * 3)
+               AND max(\(unsafeRaw: local)) < now() - interval '2 years'
+            ORDER BY max(\(unsafeRaw: local)) DESC
+            LIMIT 4
+            """).all(decoding: RevisitRow.self)
+
+        return rows.map { row in
+            let town = row.place.split(separator: ",").first.map(String.init) ?? row.place
+            let when = Self.parseDate(row.lastSeen)
+                .map { Self.stampFormatter("MMMM yyyy").string(from: $0) }
+            return CollectionSummary(
+                kind: .revisit,
+                key: row.place,
+                title: town,
+                subtitle: when.map { "Last there in \($0)" },
+                count: row.count,
+                coverAssetIDs: row.coverAssetIDs
+            )
+        }
+    }
+
+    // MARK: - Seasons
+
+    private struct SeasonRow: Decodable {
+        let count: Int
+        let coverAssetIDs: [UUID]
+    }
+
+    /// The most recent season that has finished.
+    ///
+    /// Only a completed one: "last winter" while it is still February is a
+    /// season you are standing in, and a page offering to reminisce about this
+    /// morning is a page that has run out of things to say.
+    private func lastSeason(
+        spaceID: UUID, today: Date, seed: String, on sql: any SQLDatabase
+    ) async throws -> CollectionSummary? {
+        guard let season = Self.completedSeason(before: today) else { return nil }
+        let local = TimelineController.localTime
+        let row = try await sql.raw("""
+            SELECT count(*)::int AS count,
+                   COALESCE(
+                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                           [1:\(unsafeRaw: String(Self.coverDepth))],
+                       ARRAY[]::uuid[]
+                   ) AS "coverAssetIDs"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD')
+                  BETWEEN \(bind: season.from) AND \(bind: season.to)
+            """).first(decoding: SeasonRow.self)
+
+        guard let row, row.count >= Self.minimumItems * 4 else { return nil }
+        return CollectionSummary(
+            kind: .season,
+            key: "\(season.from)..\(season.to)",
+            title: season.name,
+            subtitle: season.span,
+            count: row.count,
+            coverAssetIDs: row.coverAssetIDs
+        )
+    }
+
+    struct Season {
+        let name: String
+        let span: String
+        let from: String
+        let to: String
+    }
+
+    /// Northern-hemisphere seasons, matching the household this is for and the
+    /// same assumption the holiday table already makes.
+    static func completedSeason(before today: Date) -> Season? {
+        let year = utc.component(.year, from: today)
+        let month = utc.component(.month, from: today)
+
+        // Each entry: the season that has most recently *ended* by this month.
+        switch month {
+        case 3...5:
+            return Season(name: "Last winter", span: "December \(year - 1) – February \(year)",
+                          from: "\(year - 1)-12-01", to: "\(year)-02-29")
+        case 6...8:
+            return Season(name: "Last spring", span: "March – May \(year)",
+                          from: "\(year)-03-01", to: "\(year)-05-31")
+        case 9...11:
+            return Season(name: "Last summer", span: "June – August \(year)",
+                          from: "\(year)-06-01", to: "\(year)-08-31")
+        default:
+            return Season(name: "Last autumn", span: "September – November \(year)",
+                          from: "\(year)-09-01", to: "\(year)-11-30")
+        }
+    }
+
     // MARK: - Recently deleted
 
     private struct DeletedRow: Decodable {
@@ -859,6 +1091,226 @@ struct CollectionsController: RouteCollection {
         )
     }
 
+    // MARK: - Media types
+
+    private struct TypeRow: Decodable {
+        let count: Int
+        let coverAssetIDs: [UUID]
+    }
+
+    /// The file-shaped collections, each behind its own count.
+    ///
+    /// Every one of these is a `WHERE` clause over columns that already exist —
+    /// there is no detection here and nothing to get wrong. They are listed
+    /// last and behind one heading because that is what they are worth: a way
+    /// to find every video you have, not a way to remember a holiday.
+    ///
+    /// A type with nothing in it is absent rather than shown as zero, which is
+    /// the same rule the rest of the page follows.
+    private func mediaTypes(
+        spaceID: UUID, seed: String, on sql: any SQLDatabase
+    ) async throws -> [CollectionSummary] {
+        // (key, title, predicate)
+        let kinds: [(String, String, SQLQueryString)] = [
+            ("video", "Videos", "a.media_type = 'video'"),
+            ("live", "Live Photos", "a.live_group_id IS NOT NULL"),
+            ("burst", "Bursts", "a.burst_id IS NOT NULL"),
+            // Wider than it is tall by two to one. The same test Apple uses,
+            // and the only one available without looking at the picture.
+            ("panorama", "Panoramas", "a.width IS NOT NULL AND a.height > 0 AND a.width::float / a.height >= 2"),
+            // How a screenshot identifies itself: no camera took it.
+            ("screenshot", "Screenshots", "a.camera_make IS NULL AND a.media_type = 'photo' AND a.mime = 'image/png'"),
+            ("raw", "RAW", "a.is_raw"),
+        ]
+
+        var result: [CollectionSummary] = []
+        for (key, title, predicate) in kinds {
+            let row = try await sql.raw("""
+                SELECT count(*)::int AS count,
+                       -- ARRAY_AGG over nothing is NULL, not an empty array, and
+                       -- a media type with no photographs is the normal case
+                       -- rather than the exception — most libraries hold no RAW
+                       -- and no panoramas at all. Decoding ran before the count
+                       -- check could skip the row, so one absent type failed the
+                       -- whole page with a 500.
+                       COALESCE(
+                           (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                               [1:\(unsafeRaw: String(Self.coverDepth))],
+                           ARRAY[]::uuid[]
+                       ) AS "coverAssetIDs"
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID)
+                  AND sa.deleted_at IS NULL
+                  AND \(predicate)
+                """).first(decoding: TypeRow.self)
+            guard let row, row.count >= 1 else { continue }
+            result.append(CollectionSummary(
+                kind: .mediaType,
+                key: key,
+                title: title,
+                subtitle: nil,
+                count: row.count,
+                coverAssetIDs: row.coverAssetIDs
+            ))
+        }
+        return result
+    }
+
+    /// The `WHERE` clause behind one media type, for opening it.
+    static func mediaTypeFilter(_ key: String) -> SQLQueryString? {
+        switch key {
+        case "video": return "AND a.media_type = 'video'"
+        case "live": return "AND a.live_group_id IS NOT NULL"
+        case "burst": return "AND a.burst_id IS NOT NULL"
+        case "panorama":
+            return "AND a.width IS NOT NULL AND a.height > 0 AND a.width::float / a.height >= 2"
+        case "screenshot":
+            return "AND a.camera_make IS NULL AND a.media_type = 'photo' AND a.mime = 'image/png'"
+        case "raw": return "AND a.is_raw"
+        default: return nil
+        }
+    }
+
+    // MARK: - Recently deleted, opened
+
+    /// What is still in the bin and still on disk.
+    ///
+    /// Every row is checked against the filesystem before it is offered. The bin
+    /// carries DSM's own name so File Station treats it as a recycle bin, which
+    /// means DSM's scheduled emptying can reclaim the bytes underneath us — and
+    /// a list that offered a restore which then failed on tap would be the one
+    /// way this feature could actively lie.
+    @Sendable
+    func deletedItems(req: Request) async throws -> SearchResults {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        struct Row: Decodable {
+            let item: TimelineController.ItemRow
+            let recycledPath: String?
+        }
+        let rows = try await req.sql.raw("""
+            SELECT sa.id,
+                   sa.space_id   AS "spaceID",
+                   a.id          AS "assetID",
+                   \(unsafeRaw: TimelineController.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+                   a.width, a.height, a.orientation,
+                   a.media_type  AS "mediaType",
+                   a.duration_ms AS "durationMs",
+                   a.thumbhash   AS "thumbHash",
+                   false         AS "isFavorite",
+                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
+                   (a.derived_at IS NOT NULL) AS "isDerived",
+                   sa.recycled_path AS "recycledPath"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NOT NULL
+            ORDER BY sa.deleted_at DESC
+            LIMIT 500
+            """).all(decoding: DeletedItemRow.self)
+
+        let present = rows.filter { row in
+            guard let path = row.recycledPath else { return false }
+            return FileManager.default.fileExists(atPath: path)
+        }
+        let items = present.map { $0.item.toItem() }
+        return SearchResults(items: items, total: items.count, nextOffset: nil)
+    }
+
+    struct DeletedItemRow: Decodable {
+        let id: UUID
+        let spaceID: UUID
+        let assetID: UUID
+        let capturedAt: Date
+        let width: Int?
+        let height: Int?
+        let mediaType: String
+        let durationMs: Int?
+        let thumbHash: Data?
+        let isFavorite: Bool
+        let uploadedBy: UUID
+        let isDerived: Bool
+        let orientation: Int?
+        let recycledPath: String?
+
+        var item: TimelineController.ItemRow {
+            TimelineController.ItemRow(
+                id: id, spaceID: spaceID, assetID: assetID, capturedAt: capturedAt,
+                width: width, height: height, mediaType: mediaType, durationMs: durationMs,
+                thumbHash: thumbHash, isFavorite: isFavorite, uploadedBy: uploadedBy,
+                isDerived: isDerived, orientation: orientation
+            )
+        }
+    }
+
+    /// Puts photographs back where they were.
+    ///
+    /// The file comes out of `#recycle` first and the row is cleared after. The
+    /// other order can leave the library showing a photograph whose bytes are
+    /// still in the bin — and if the move fails there is nothing to show at all,
+    /// so a failure has to leave the removal standing rather than half-undo it.
+    @Sendable
+    func restore(req: Request) async throws -> MediaEditResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let input = try req.content.decode(RestoreAssetsRequest.self)
+        try await SpaceAccess.requireContributor(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        struct Row: Decodable {
+            let id: UUID
+            let assetID: UUID
+            let recycledPath: String?
+            let storagePath: String?
+        }
+
+        var restored = 0
+        for assetID in input.assetIDs.prefix(500) {
+            guard let row = try await req.sql.raw("""
+                SELECT sa.id, sa.asset_id AS "assetID",
+                       sa.recycled_path AS "recycledPath", a.storage_path AS "storagePath"
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
+                  AND sa.deleted_at IS NOT NULL
+                """).first(decoding: Row.self) else { continue }
+
+            if let from = row.recycledPath, let to = row.storagePath,
+               FileManager.default.fileExists(atPath: from) {
+                do {
+                    try FileManager.default.createDirectory(
+                        atPath: (to as NSString).deletingLastPathComponent,
+                        withIntermediateDirectories: true
+                    )
+                    if FileManager.default.fileExists(atPath: to) {
+                        try FileManager.default.removeItem(atPath: to)
+                    }
+                    try FileManager.default.moveItem(atPath: from, toPath: to)
+                } catch {
+                    req.logger.warning("restore failed for \(assetID): \(error)")
+                    continue
+                }
+            }
+
+            try await req.sql.raw("""
+                UPDATE space_assets
+                SET deleted_at = NULL, deleted_by = NULL, recycled_path = NULL
+                WHERE id = \(bind: row.id)
+                """).run()
+            _ = try? await ChangeLog.append(
+                spaceID: spaceID, entity: "space_asset", entityID: row.id,
+                op: "insert", on: req.sql
+            )
+            restored += 1
+        }
+        return MediaEditResponse(updated: restored)
+    }
+
     // MARK: - Contents
 
     /// The photos in one collection, decoded from the key the summary carried.
@@ -903,6 +1355,22 @@ struct CollectionsController: RouteCollection {
                 AND to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD')
                     BETWEEN \(bind: from) AND \(bind: to)
                 """
+        case .anniversary, .season:
+            // Both are date ranges, like a trip.
+            let ends = key.components(separatedBy: "..")
+            filter = """
+                AND to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD')
+                    BETWEEN \(bind: ends.first ?? key) AND \(bind: ends.last ?? key)
+                """
+        case .revisit:
+            // Keyed by place rather than by date — the whole point of it is
+            // everything from somewhere, whenever that was.
+            filter = "AND a.place_name = \(bind: key)"
+        case .mediaType:
+            guard let predicate = Self.mediaTypeFilter(key) else {
+                throw Abort(.badRequest, reason: "No such media type.")
+            }
+            filter = predicate
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
         }

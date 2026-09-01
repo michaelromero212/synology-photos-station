@@ -120,6 +120,20 @@ extension FrameStationClient {
         )
     }
 
+    /// What is still in the bin and still on disk.
+    public func deletedItems(spaceID: UUID) async throws -> SearchResults {
+        try await get("v1/spaces/\(spaceID)/collections/deleted")
+    }
+
+    /// Puts removed photographs back where they were.
+    @discardableResult
+    public func restore(spaceID: UUID, assetIDs: [UUID]) async throws -> MediaEditResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/collections/deleted/restore",
+            body: RestoreAssetsRequest(assetIDs: assetIDs)
+        )
+    }
+
     // MARK: - Media URLs
 
     /// Built rather than fetched so a grid cell can hand a URL straight to the

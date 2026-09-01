@@ -171,6 +171,9 @@ struct AlbumsView: View {
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
+                    if let space = session.personalSpace, let found = collections?.page {
+                        utilities(found, space: space)
+                    }
                 }
                 .padding(.vertical, spacing)
             }
@@ -213,6 +216,22 @@ struct AlbumsView: View {
                     }
                     .buttonStyle(.plain)
                     .nameable(trip) { naming = $0 }
+                }
+            }
+        }
+
+        if !found.revisits.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("You haven't been in a while")
+                ForEach(found.revisits) { place in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: place)
+                    } label: {
+                        CollectionRowCard(collection: place, loader: session.loader)
+                            .padding(.horizontal, spacing)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -268,6 +287,60 @@ struct AlbumsView: View {
     /// Set with a little more care than a list header usually gets: tighter
     /// tracking and a touch more weight, because these are the only words on
     /// the page that aren't either a photograph or a fact about one.
+    /// The file-shaped things, at the bottom, behind one door each.
+    ///
+    /// Apple gives media types a section apiece and the page becomes a filing
+    /// cabinet. They are a filter over what you already have, not a thing that
+    /// happened, so they sit below everything that did.
+    @ViewBuilder
+    private func utilities(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        VStack(spacing: 0) {
+            if !found.mediaTypes.isEmpty {
+                NavigationLink {
+                    MediaTypesView(session: session, space: space, types: found.mediaTypes)
+                } label: {
+                    utilityRow(
+                        "Media Types", systemImage: "square.grid.2x2",
+                        count: found.mediaTypes.count
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            if let deleted = found.recentlyDeleted {
+                NavigationLink {
+                    RecentlyDeletedView(session: session, space: space)
+                } label: {
+                    utilityRow("Recently Deleted", systemImage: "trash", count: deleted.count)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, spacing)
+    }
+
+    private func utilityRow(_ title: String, systemImage: String, count: Int) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+            Text(title)
+                .font(.system(.body, design: .default, weight: .medium))
+                .foregroundStyle(.primary)
+            Spacer()
+            Text("\(count)")
+                .font(.footnote)
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 13)
+        .padding(.horizontal, 14)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(Rectangle())
+    }
+
     private func sectionHeader(_ text: String) -> some View {
         Text(text)
             .font(.system(.title3, design: .default, weight: .bold))

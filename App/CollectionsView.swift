@@ -175,12 +175,16 @@ struct CollectionHeroCard: View {
                             .foregroundStyle(.white)
                             .lineLimit(2)
                             .minimumScaleFactor(0.8)
-                        if let subtitle = collection.subtitle {
-                            Text(subtitle)
-                                .font(.subheadline)
-                                .monospacedDigit()
-                                .foregroundStyle(.white.opacity(0.8))
-                        }
+                        // The hero is the one card with no count badge beside
+                        // it, so it carries the count in its own line. The rows
+                        // show it on the right, which is why the server stopped
+                        // putting it in the subtitle — a trip that said its
+                        // count twice was also the trip whose dates got
+                        // truncated to make room.
+                        Text(detail)
+                            .font(.subheadline)
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.8))
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -197,11 +201,22 @@ struct CollectionHeroCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
+    private var detail: String {
+        let counted = collection.count == 1 ? "1 photo" : "\(collection.count) photos"
+        return [collection.subtitle, counted].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// Says what *kind* of thing you are looking at, so a hero that changes
+    /// daily never leaves you guessing why this card is the one.
     private var kicker: String {
         switch collection.kind {
         case .onThisDay: return "ON THIS DAY"
-        case .trip: return "TRIP"
+        case .anniversary: return "THIS WEEK, BACK THEN"
+        case .trip: return "A TRIP"
         case .day: return "THAT DAY"
+        case .revisit: return "YOU HAVEN'T BEEN IN A WHILE"
+        case .mediaType: return "EVERYTHING OF ONE KIND"
+        case .season: return "LOOKING BACK"
         case .recentlyDeleted: return "REMOVED"
         }
     }
@@ -503,6 +518,150 @@ extension View {
                 )
             }
         }
+        #endif
+    }
+}
+
+/// What was removed, and the way back.
+///
+/// Personal space only — shared-space removals are recovered through File
+/// Station, which is why the bin carries DSM's own name. Anything DSM has
+/// already reclaimed is absent rather than offered, so the list never promises
+/// a restore it cannot perform.
+struct RecentlyDeletedView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+
+    @State private var items: [TimelineItem] = []
+    @State private var isLoading = true
+    @State private var selection: Set<UUID> = []
+    @State private var isRestoring = false
+    @State private var notice: String?
+
+    private let spacing: CGFloat = PhotoGridMetrics.spacing
+
+    var body: some View {
+        Group {
+            if isLoading, items.isEmpty {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if items.isEmpty {
+                ContentUnavailableView {
+                    Label("Nothing Removed", systemImage: "trash")
+                } description: {
+                    Text("Photos you remove from \(space.name) wait here before they go for good.")
+                }
+            } else {
+                grid
+            }
+        }
+        .navigationTitle("Recently Deleted")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            if !selection.isEmpty {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isRestoring ? "Restoring…" : "Restore \(selection.count)") {
+                        restore()
+                    }
+                    .disabled(isRestoring)
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .task { await load() }
+    }
+
+    private var grid: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if let notice {
+                        Text(notice)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                    }
+                    // No countdown. The bin is DSM's, emptied on its schedule,
+                    // and a number this app cannot enforce would be a promise
+                    // it has no way to keep.
+                    Text("Tap to choose what to put back.")
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 12).padding(.bottom, 6)
+
+                    PhotoGridSection(
+                        entries: items.map { GridEntry.item($0) },
+                        width: proxy.size.width,
+                        targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
+                        spacing: spacing,
+                        columns: TimelineZoom.day.columns
+                    ) { entry, size in
+                        if case .item(let item) = entry {
+                            PhotoCell(item: item, loader: session.loader, size: size)
+                                .opacity(selection.contains(item.assetID) ? 1 : 0.55)
+                                .overlay(alignment: .bottomTrailing) {
+                                    if selection.contains(item.assetID) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.white, .tint)
+                                            .padding(5)
+                                    }
+                                }
+                                .onTapGesture {
+                                    if selection.contains(item.assetID) {
+                                        selection.remove(item.assetID)
+                                    } else {
+                                        selection.insert(item.assetID)
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.horizontal, spacing)
+                }
+            }
+        }
+    }
+
+    private func load() async {
+        guard let client = session.client else { return }
+        isLoading = true
+        defer { isLoading = false }
+        items = (try? await client.deletedItems(spaceID: space.id).items) ?? []
+    }
+
+    private func restore() {
+        guard let client = session.client, !selection.isEmpty else { return }
+        isRestoring = true
+        let chosen = Array(selection)
+        Task {
+            defer { isRestoring = false }
+            let result = try? await client.restore(spaceID: space.id, assetIDs: chosen)
+            let n = result?.updated ?? 0
+            notice = n == 1 ? "1 photo put back." : "\(n) photos put back."
+            selection.removeAll()
+            await load()
+        }
+    }
+}
+
+/// Everything of one shape. Behind one door, not twelve.
+struct MediaTypesView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let types: [CollectionSummary]
+
+    var body: some View {
+        List(types) { type in
+            NavigationLink {
+                CollectionDetailView(session: session, space: space, collection: type)
+            } label: {
+                CollectionRowCard(collection: type, loader: session.loader)
+                    .padding(.vertical, 4)
+            }
+        }
+        .navigationTitle("Media Types")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 }

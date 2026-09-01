@@ -14,6 +14,14 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     case day
     /// Removed from a personal space and still recoverable.
     case recentlyDeleted
+    /// This week, in the year you were somewhere else.
+    case anniversary
+    /// Somewhere the library hasn't been in years.
+    case revisit
+    /// A whole season, looked back on.
+    case season
+    /// Everything of one shape — videos, panoramas, bursts.
+    case mediaType
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -105,6 +113,14 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     public let hero: CollectionSummary?
     public let trips: [CollectionSummary]
     public let days: [CollectionSummary]
+    /// Places the library knows well and hasn't seen in years.
+    public let revisits: [CollectionSummary]
+    /// Videos, panoramas, bursts and the rest — the file-shaped things.
+    ///
+    /// One row on the page, not twelve. Apple gives these a section each and
+    /// the result is a filing cabinet; they are a filter, and a filter belongs
+    /// behind a single door.
+    public let mediaTypes: [CollectionSummary]
     /// Present only for a personal space, and only when something is in it.
     public let recentlyDeleted: CollectionSummary?
 
@@ -112,11 +128,15 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         hero: CollectionSummary?,
         trips: [CollectionSummary],
         days: [CollectionSummary],
+        revisits: [CollectionSummary] = [],
+        mediaTypes: [CollectionSummary] = [],
         recentlyDeleted: CollectionSummary?
     ) {
         self.hero = hero
         self.trips = trips
         self.days = days
+        self.revisits = revisits
+        self.mediaTypes = mediaTypes
         self.recentlyDeleted = recentlyDeleted
     }
 
@@ -124,6 +144,16 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// scans with no dates and no coordinates legitimately has none of this,
     /// and should fall back to manual albums rather than to empty headings.
     public var isEmpty: Bool {
-        hero == nil && trips.isEmpty && days.isEmpty && recentlyDeleted == nil
+        hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
+            && recentlyDeleted == nil
+    }
+}
+
+/// Puts removed photographs back where they were.
+public struct RestoreAssetsRequest: Codable, Sendable, Hashable {
+    public let assetIDs: [UUID]
+
+    public init(assetIDs: [UUID]) {
+        self.assetIDs = assetIDs
     }
 }
