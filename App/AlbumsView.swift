@@ -68,6 +68,14 @@ struct AlbumsView: View {
     @State private var store: AlbumStore?
     @State private var collections: CollectionsStore?
     @State private var showCreate = false
+    /// The card being named, if any. Held here rather than per-card so only one
+    /// sheet can ever be up.
+    ///
+    /// Declared on every platform even though only iOS and macOS can present the
+    /// sheet: the call sites that assign it sit inside shared layout code, and
+    /// gating the property alone left tvOS with closures referring to something
+    /// that wasn't there. An unused optional is cheaper than a fourth `#if`.
+    @State private var naming: CollectionSummary?
 
     private let columns = 2
     private let spacing: CGFloat = 14
@@ -119,6 +127,21 @@ struct AlbumsView: View {
                 NewAlbumSheet(session: session, store: store) { showCreate = false }
             }
         }
+        #if !os(tvOS)
+        .sheet(item: $naming) { collection in
+            if let space = session.personalSpace {
+                NameOccasionSheet(
+                    session: session, spaceID: space.id, collection: collection
+                ) { changed in
+                    naming = nil
+                    // Re-read rather than patch: the server decides what a day
+                    // ends up called, and an annual name changes every year of
+                    // it at once — not just the card that was tapped.
+                    if changed { Task { await collections?.refresh() } }
+                }
+            }
+        }
+        #endif
         .task {
             let created = store ?? AlbumStore(session: session)
             store = created
@@ -167,6 +190,7 @@ struct AlbumsView: View {
                 CollectionHeroCard(collection: hero, loader: session.loader)
             }
             .buttonStyle(.plain)
+            .nameable(hero) { naming = $0 }
             .padding(.horizontal, spacing)
         }
 
@@ -182,6 +206,7 @@ struct AlbumsView: View {
                             .padding(.vertical, 7)
                     }
                     .buttonStyle(.plain)
+                    .nameable(day) { naming = $0 }
                 }
             }
         }

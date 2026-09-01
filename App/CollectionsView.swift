@@ -259,3 +259,165 @@ struct CollectionDetailView: View {
         }
     }
 }
+
+#if !os(tvOS)
+/// Giving a day the name it actually had.
+///
+/// The library can work out that a day was busy, where it happened and how much
+/// of it was video. It cannot work out that it was an engagement party — nothing
+/// in a photograph's metadata says so, and a model guessing from faces and
+/// scenery would land on "Saturday Afternoon" and be confidently beside the
+/// point.
+///
+/// So the app finds the occasion and the person supplies the meaning, once. That
+/// is the thing a library you own can do that a guessing one cannot: be right,
+/// and stay right every year afterwards.
+struct NameOccasionSheet: View {
+    let session: AppSession
+    let spaceID: UUID
+    let collection: CollectionSummary
+    let onFinished: (Bool) -> Void
+
+    @State private var name: String
+    @State private var everyYear: Bool
+    @State private var isSaving = false
+    @State private var failure: String?
+
+    init(
+        session: AppSession, spaceID: UUID, collection: CollectionSummary,
+        onFinished: @escaping (Bool) -> Void
+    ) {
+        self.session = session
+        self.spaceID = spaceID
+        self.collection = collection
+        self.onFinished = onFinished
+        // Pre-filled when renaming, so correcting a typo isn't retyping.
+        _name = State(initialValue: collection.isNamed ? collection.title : "")
+        // Suggested, not assumed. A date that comes round every year is usually
+        // a birthday or an anniversary, and that is worth defaulting to — but a
+        // party on the same date once is still a party, so it stays a switch.
+        _everyYear = State(initialValue: collection.recursAnnually && !collection.isNamed)
+    }
+
+    /// The first day of the run, which is what the server keys a name to.
+    private var day: String {
+        collection.key.components(separatedBy: "..").first ?? collection.key
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Sarah's engagement", text: $name)
+                        .autocorrectionDisabled(false)
+                        .submitLabel(.done)
+                        .onSubmit(save)
+                } header: {
+                    Text("What was this?")
+                } footer: {
+                    if let subtitle = collection.subtitle {
+                        Text(subtitle)
+                    }
+                }
+
+                Section {
+                    Toggle("Every year on this date", isOn: $everyYear)
+                } footer: {
+                    if collection.recursAnnually {
+                        Text(
+                            "You have photographs on this date most years — so this "
+                            + "is probably a birthday or an anniversary."
+                        )
+                    } else {
+                        Text(
+                            "On for a birthday or an anniversary. Off for something "
+                            + "that happened once."
+                        )
+                    }
+                }
+
+                if collection.isNamed {
+                    Section {
+                        Button(role: .destructive) {
+                            name = ""
+                            save()
+                        } label: {
+                            Text("Remove Name")
+                        }
+                    } footer: {
+                        Text("The day goes back to whatever the library works out for it.")
+                    }
+                }
+
+                if let failure {
+                    Section {
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .disabled(isSaving)
+            .navigationTitle(collection.isNamed ? "Rename" : "Name This Day")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onFinished(false) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: save)
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard let client = session.client else { return }
+        isSaving = true
+        failure = nil
+        Task {
+            defer { isSaving = false }
+            do {
+                try await client.nameOccasion(
+                    spaceID: spaceID, day: day, name: name, everyYear: everyYear
+                )
+                onFinished(true)
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+    }
+}
+#endif
+
+extension View {
+    /// Adds "Name this day" to a card, without adding anything to the card.
+    ///
+    /// A context menu rather than a visible button: the page's whole argument is
+    /// that it shows few things, and hanging a control off every row to support
+    /// an action most people take once would undo that. Long-press is where iOS
+    /// keeps secondary actions, and it costs the layout nothing.
+    @ViewBuilder
+    func nameable(
+        _ collection: CollectionSummary,
+        onName: @escaping (CollectionSummary) -> Void
+    ) -> some View {
+        #if os(tvOS)
+        self
+        #else
+        contextMenu {
+            Button {
+                onName(collection)
+            } label: {
+                Label(
+                    collection.isNamed ? "Rename" : "Name This Day",
+                    systemImage: collection.isNamed ? "pencil" : "textformat"
+                )
+            }
+        }
+        #endif
+    }
+}

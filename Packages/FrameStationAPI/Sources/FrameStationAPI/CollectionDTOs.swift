@@ -35,12 +35,23 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The photo to draw on the card. Nil only when the collection is empty,
     /// which the page treats as a reason not to show it at all.
     public let coverAssetID: UUID?
+    /// True when `title` is what somebody typed rather than what the library
+    /// worked out. Lets the card offer "Rename" instead of "Name this", and
+    /// lets it offer to take the name back off again.
+    public let isNamed: Bool
+    /// Whether the same date is busy in several earlier years.
+    ///
+    /// The app can't know a date is a birthday, but it can notice you have
+    /// photographs on it most years — which is exactly when "name this every
+    /// year" is the offer worth making rather than a question out of nowhere.
+    public let recursAnnually: Bool
 
     public var id: String { "\(kind.rawValue):\(key)" }
 
     public init(
         kind: CollectionKind, key: String, title: String,
-        subtitle: String?, count: Int, coverAssetID: UUID?
+        subtitle: String?, count: Int, coverAssetID: UUID?,
+        isNamed: Bool = false, recursAnnually: Bool = false
     ) {
         self.kind = kind
         self.key = key
@@ -48,6 +59,29 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         self.subtitle = subtitle
         self.count = count
         self.coverAssetID = coverAssetID
+        self.isNamed = isNamed
+        self.recursAnnually = recursAnnually
+    }
+}
+
+// MARK: - Naming an occasion
+
+/// Gives a day a name, or takes the name away.
+///
+/// `everyYear` is the whole of the birthday-versus-party distinction: a
+/// birthday is this date in every year, an engagement party is this date once.
+/// One answer in a sheet rather than two separate features.
+public struct NameOccasionRequest: Codable, Sendable, Hashable {
+    /// The day being named, `YYYY-MM-DD`. For a run of days it is the first.
+    public let day: String
+    /// Nil clears whichever name applies.
+    public let name: String?
+    public let everyYear: Bool
+
+    public init(day: String, name: String?, everyYear: Bool) {
+        self.day = day
+        self.name = name
+        self.everyYear = everyYear
     }
 }
 

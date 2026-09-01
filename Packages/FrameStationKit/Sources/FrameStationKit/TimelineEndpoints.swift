@@ -106,6 +106,20 @@ extension FrameStationClient {
         return formatter.string(from: date)
     }
 
+    /// Names a day, or clears the name.
+    ///
+    /// `everyYear` is the birthday-versus-party distinction: a birthday is this
+    /// date in every year, an engagement party is this date once. Passing a nil
+    /// or empty name forgets whichever one applies.
+    public func nameOccasion(
+        spaceID: UUID, day: String, name: String?, everyYear: Bool
+    ) async throws {
+        try await sendBodyNoContent(
+            .put, "v1/spaces/\(spaceID)/collections/name",
+            body: NameOccasionRequest(day: day, name: name, everyYear: everyYear)
+        )
+    }
+
     // MARK: - Media URLs
 
     /// Built rather than fetched so a grid cell can hand a URL straight to the

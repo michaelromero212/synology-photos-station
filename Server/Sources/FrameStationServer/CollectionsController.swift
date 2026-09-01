@@ -4,6 +4,7 @@ import SQLKit
 import Vapor
 
 extension CollectionsResponse: @retroactive Content {}
+extension NameOccasionRequest: @retroactive Content {}
 
 /// The Albums page, assembled from what the library already knows.
 ///
@@ -27,6 +28,7 @@ struct CollectionsController: RouteCollection {
 
         protected.get("spaces", ":spaceID", "collections", use: page)
         protected.get("spaces", ":spaceID", "collections", "items", use: items)
+        protected.put("spaces", ":spaceID", "collections", "name", use: name)
     }
 
     /// Below this a collection isn't worth a card. Three photos from one day is
@@ -171,6 +173,8 @@ struct CollectionsController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
             """).all(decoding: YearRow.self).map(\.year)
         let holidays = Holidays.table(forYears: years)
+        let named = try await occasionNames(spaceID: spaceID, userID: userID, on: sql)
+        let recurring = try await recurringDates(spaceID: spaceID, on: sql)
 
         // A named day clears a much lower bar than an ordinary one.
         //
@@ -219,7 +223,9 @@ struct CollectionsController: RouteCollection {
             LIMIT 60
             """).all(decoding: DayRow.self)
 
-        return Self.runs(from: rows).prefix(6).map { Self.describe($0, holidays: holidays) }
+        return Self.runs(from: rows).prefix(6).map {
+            Self.describe($0, holidays: holidays, named: named, recurring: recurring)
+        }
     }
 
     /// A stretch of consecutive busy days, treated as one occasion.
@@ -283,7 +289,12 @@ struct CollectionsController: RouteCollection {
     /// The generic weekday remains as the last resort, because a day that is
     /// simply busy is a real thing and deserves an honest name rather than a
     /// stretched one.
-    static func describe(_ run: Run, holidays: [String: String] = [:]) -> CollectionSummary {
+    static func describe(
+        _ run: Run,
+        holidays: [String: String] = [:],
+        named: [String: String] = [:],
+        recurring: Set<String> = []
+    ) -> CollectionSummary {
         let place = run.place
         let title: String
         // Whether the title already names where this happened, so the subtitle
@@ -298,11 +309,20 @@ struct CollectionsController: RouteCollection {
         // Where a run covers two named days — Christmas Eve into Christmas
         // morning — the busier one names it, because that is the one people
         // mean.
-        if let named = run.days
+        // What somebody typed beats everything the library worked out, including
+        // the holiday table. If a person renamed the 25th "Christmas at the
+        // lake", that is the better answer and it is not the app's place to
+        // argue.
+        let userName = run.days.compactMap { named[$0.day] }.first
+
+        if let userName {
+            title = userName
+            titleNamedPlace = false
+        } else if let holiday = run.days
             .filter({ holidays[$0.day] != nil })
             .max(by: { $0.count < $1.count })
             .flatMap({ holidays[$0.day] }) {
-            title = named
+            title = holiday
             titleNamedPlace = false
         } else if run.span > 1 {
             title = runTitle(run, place: place)
@@ -328,8 +348,15 @@ struct CollectionsController: RouteCollection {
             title: title,
             subtitle: subtitle(run, place: titleNamedPlace ? nil : place),
             count: run.count,
-            coverAssetID: run.days.compactMap(\.coverAssetID).first
+            coverAssetID: run.days.compactMap(\.coverAssetID).first,
+            isNamed: userName != nil,
+            recursAnnually: run.days.contains { recurring.contains(monthDay($0.day)) }
         )
+    }
+
+    /// `"2026-08-14"` → `"08-14"`.
+    static func monthDay(_ day: String) -> String {
+        String(day.dropFirst(5))
     }
 
     /// Names a stretch of days. A weekend is worth recognising by name; four
@@ -399,6 +426,160 @@ struct CollectionsController: RouteCollection {
         let words = ["zero", "one", "two", "three", "four", "five",
                      "six", "seven", "eight", "nine"]
         return n < words.count ? words[n] : String(n)
+    }
+
+    // MARK: - What the person called it
+
+    /// Every name this person has given a day in this space, keyed by
+    /// `YYYY-MM-DD` for the years the library holds.
+    ///
+    /// Expanded here rather than matched in SQL because an annual name applies
+    /// to a date in *every* year, and the alternative is a join with an OR
+    /// across two shapes on every day row. Fetching the handful of rows a person
+    /// has actually written and expanding them in memory is both cheaper and
+    /// far easier to be sure about.
+    ///
+    /// A name for a specific year beats the annual one, so "Christmas at the
+    /// lake" can apply to 2024 while "Christmas" carries on for every other.
+    private func occasionNames(
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> [String: String] {
+        struct NameRow: Decodable {
+            let month: Int
+            let day: Int
+            let year: Int?
+            let name: String
+        }
+        let rows = try await sql.raw("""
+            SELECT month, day, year, name FROM occasion_names
+            WHERE user_id = \(bind: userID) AND space_id = \(bind: spaceID)
+            """).all(decoding: NameRow.self)
+        guard !rows.isEmpty else { return [:] }
+
+        struct YearRow: Decodable { let year: Int }
+        let years = try await sql.raw("""
+            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+            """).all(decoding: YearRow.self).map(\.year)
+
+        var table: [String: String] = [:]
+        // Annual first so a year-specific name written afterwards overwrites it.
+        for row in rows where row.year == nil {
+            for year in years {
+                table[Self.key(year: year, month: row.month, day: row.day)] = row.name
+            }
+        }
+        for row in rows {
+            guard let year = row.year else { continue }
+            table[Self.key(year: year, month: row.month, day: row.day)] = row.name
+        }
+        return table
+    }
+
+    /// Dates that are busy in three or more separate years.
+    ///
+    /// The app cannot know a date is a birthday. It can notice that you have
+    /// photographs on it most years, which is the moment "name this, every year"
+    /// stops being a question out of nowhere and becomes an observation the
+    /// person will recognise. Three years rather than two: two is a coincidence
+    /// often enough to make the prompt feel wrong.
+    private func recurringDates(
+        spaceID: UUID, on sql: any SQLDatabase
+    ) async throws -> Set<String> {
+        struct Row: Decodable { let monthDay: String }
+        let local = TimelineController.localTime
+        let rows = try await sql.raw("""
+            WITH per_day AS (
+                SELECT to_char(\(unsafeRaw: local), 'MM-DD') AS "monthDay",
+                       EXTRACT(YEAR FROM \(unsafeRaw: local))::int AS year,
+                       count(*)::int AS count
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+                GROUP BY 1, 2
+            )
+            SELECT "monthDay" FROM per_day
+            WHERE count >= \(bind: Self.minimumItems)
+            GROUP BY "monthDay"
+            HAVING count(DISTINCT year) >= 3
+            """).all(decoding: Row.self)
+        return Set(rows.map(\.monthDay))
+    }
+
+    static func key(year: Int, month: Int, day: Int) -> String {
+        String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    /// Names a day, or takes the name back off.
+    ///
+    /// Per user, always: two people in the same household remember the same
+    /// afternoon differently, and neither should be able to rename it for the
+    /// other.
+    @Sendable
+    func name(req: Request) async throws -> HTTPStatus {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let input = try req.content.decode(NameOccasionRequest.self)
+
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        guard let date = Self.parseDate(input.day) else {
+            throw Abort(.badRequest, reason: "That isn't a date.")
+        }
+        let parts = Self.utc.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else {
+            throw Abort(.badRequest, reason: "That isn't a date.")
+        }
+
+        let trimmed = input.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // An empty name is a request to forget, not a name of no characters.
+        guard let trimmed, !trimmed.isEmpty else {
+            if input.everyYear {
+                try await req.sql.raw("""
+                    DELETE FROM occasion_names
+                    WHERE user_id = \(bind: device.userID) AND space_id = \(bind: spaceID)
+                      AND month = \(bind: month) AND day = \(bind: day) AND year IS NULL
+                    """).run()
+            } else {
+                try await req.sql.raw("""
+                    DELETE FROM occasion_names
+                    WHERE user_id = \(bind: device.userID) AND space_id = \(bind: spaceID)
+                      AND month = \(bind: month) AND day = \(bind: day) AND year = \(bind: year)
+                    """).run()
+            }
+            return .noContent
+        }
+
+        guard trimmed.count <= 80 else {
+            throw Abort(.badRequest, reason: "That name is too long for a card.")
+        }
+
+        // Two statements rather than one with a nullable conflict target: the
+        // unique indexes are partial, so each shape needs the index that
+        // actually covers it.
+        if input.everyYear {
+            try await req.sql.raw("""
+                INSERT INTO occasion_names (user_id, space_id, month, day, year, name)
+                VALUES (\(bind: device.userID), \(bind: spaceID), \(bind: month),
+                        \(bind: day), NULL, \(bind: trimmed))
+                ON CONFLICT (user_id, space_id, month, day) WHERE year IS NULL
+                DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+                """).run()
+        } else {
+            try await req.sql.raw("""
+                INSERT INTO occasion_names (user_id, space_id, month, day, year, name)
+                VALUES (\(bind: device.userID), \(bind: spaceID), \(bind: month),
+                        \(bind: day), \(bind: year), \(bind: trimmed))
+                ON CONFLICT (user_id, space_id, month, day, year) WHERE year IS NOT NULL
+                DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+                """).run()
+        }
+        return .noContent
     }
 
     // MARK: - Recently deleted
