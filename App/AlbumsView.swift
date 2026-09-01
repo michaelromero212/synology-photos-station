@@ -163,7 +163,10 @@ struct AlbumsView: View {
         GeometryReader { proxy in
             let side = (proxy.size.width - spacing * CGFloat(columns + 1)) / CGFloat(columns)
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                // Generous, and deliberately so. The page holds few things;
+                // letting them sit apart is most of what stops it reading as a
+                // list of settings.
+                VStack(alignment: .leading, spacing: 30) {
                     if let space = session.personalSpace, let found = collections?.page {
                         automatic(found, space: space)
                     }
@@ -203,7 +206,7 @@ struct AlbumsView: View {
                     } label: {
                         CollectionRowCard(collection: day, loader: session.loader)
                             .padding(.horizontal, spacing)
-                            .padding(.vertical, 7)
+                            .padding(.vertical, 9)
                     }
                     .buttonStyle(.plain)
                     .nameable(day) { naming = $0 }
@@ -242,11 +245,15 @@ struct AlbumsView: View {
         }
     }
 
+    /// Set with a little more care than a list header usually gets: tighter
+    /// tracking and a touch more weight, because these are the only words on
+    /// the page that aren't either a photograph or a fact about one.
     private func sectionHeader(_ text: String) -> some View {
         Text(text)
-            .font(.title3.weight(.bold))
+            .font(.system(.title3, design: .default, weight: .bold))
+            .tracking(-0.3)
             .padding(.horizontal, spacing)
-            .padding(.bottom, 8)
+            .padding(.bottom, 10)
     }
 
 }

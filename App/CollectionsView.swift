@@ -43,33 +43,91 @@ final class CollectionsStore {
     }
 }
 
-/// One collection's cover.
+/// One collection's cover, or several of them cycling.
 ///
 /// Falls back to a flat fill rather than a spinner: a card that is briefly
-/// plain reads as a photo still arriving, where a spinner in a grid of
+/// plain reads as a photograph still arriving, where a spinner in a grid of
 /// photographs reads as something being wrong.
+///
+/// Cycling is opt-in and only the hero asks for it. One card carrying motion
+/// reads as alive; a shelf of them crossfading at different offsets reads as a
+/// screensaver, and each rotating card costs five thumbnails where a still one
+/// costs a single.
 struct CollectionCover: View {
-    let assetID: UUID?
+    let assetIDs: [UUID]
     let loader: ThumbnailLoader?
     var size: Int = 512
+    /// Seconds each photograph holds before the next fades in. Nil holds on the
+    /// first and never moves.
+    var cycle: Double?
 
-    @State private var image: PlatformImage?
+    @State private var images: [PlatformImage] = []
+    @State private var index = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var isCycling: Bool { cycle != nil && !reduceMotion && images.count > 1 }
 
     var body: some View {
-        ZStack {
-            Rectangle().fill(.quaternary)
-            if let image {
-                #if canImport(UIKit)
-                Image(uiImage: image).resizable().scaledToFill()
-                #else
-                Image(nsImage: image).resizable().scaledToFill()
-                #endif
+        // The photographs go in an `overlay` on a plain fill rather than beside
+        // it in a `ZStack`, and this is not a stylistic choice.
+        //
+        // `scaledToFill` makes an image *larger* than the space it was offered,
+        // which is what cropping means. A ZStack then sizes itself to its
+        // largest child — the oversized image — so the card grew past its own
+        // bounds and everything anchored to its bottom edge, the whole title
+        // block, was pushed outside the clip and thrown away. Overlay content
+        // is measured against the view it covers and never resizes it.
+        // `PhotoCell` carries a comment about the same trap; this is the second
+        // time it has cost a layout.
+        Rectangle()
+            .fill(.quaternary)
+            .overlay {
+                ForEach(Array(images.enumerated()), id: \.offset) { position, image in
+                    picture(image)
+                        .opacity(position == index ? 1 : 0)
+                }
+            }
+            .clipped()
+        // Long and eased: a crossfade you can see happening is a transition,
+        // where one you only notice afterwards is atmosphere. This wants the
+        // second.
+        .animation(.easeInOut(duration: 1.4), value: index)
+        .animation(.easeOut(duration: 0.3), value: images.count)
+        .task(id: assetIDs) { await load() }
+        .task(id: isCycling) {
+            guard let cycle, isCycling else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(cycle * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                index = (index + 1) % images.count
             }
         }
-        .task(id: assetID) {
-            guard let assetID, let loader else { return }
-            if let loaded = await loader.thumbnail(assetID: assetID, size: size) {
-                withAnimation(.easeOut(duration: 0.2)) { image = loaded }
+    }
+
+    @ViewBuilder
+    private func picture(_ platformImage: PlatformImage) -> some View {
+        #if canImport(UIKit)
+        Image(uiImage: platformImage).resizable().scaledToFill()
+        #else
+        Image(nsImage: platformImage).resizable().scaledToFill()
+        #endif
+    }
+
+    /// The first photograph is fetched on its own and drawn as soon as it
+    /// lands; the rest follow behind it. Asking for five at once would make
+    /// every card wait for the slowest of five before showing anything.
+    private func load() async {
+        guard let loader, let first = assetIDs.first else { return }
+        images = []
+        index = 0
+        if let cover = await loader.thumbnail(assetID: first, size: size) {
+            images = [cover]
+        }
+        guard cycle != nil else { return }
+        for assetID in assetIDs.dropFirst() {
+            guard !Task.isCancelled else { return }
+            if let next = await loader.thumbnail(assetID: assetID, size: size) {
+                images.append(next)
             }
         }
     }
@@ -85,44 +143,58 @@ struct CollectionHeroCard: View {
     let loader: ThumbnailLoader?
 
     var body: some View {
-        // A clear spacer sets the shape and the content overlays it. Putting
-        // `.aspectRatio(_:contentMode: .fill)` on the stack itself made the card
-        // grow past the screen edge instead: `fill` preserves the ratio by
-        // expanding in *both* directions, so a full-width card became a
-        // wider-than-full-width one and dragged the rows below it along.
         Color.clear
             .aspectRatio(5 / 4, contentMode: .fit)
             .overlay {
                 ZStack(alignment: .bottomLeading) {
-                    CollectionCover(assetID: collection.coverAssetID, loader: loader)
+                    CollectionCover(
+                        assetIDs: collection.coverAssetIDs, loader: loader, cycle: 5.5
+                    )
 
-                    // A scrim, not a shadow. White text with a drop shadow
-                    // disappears over a bright photograph, which is most of them.
+                    // Three stops rather than two. A straight black-to-clear ramp
+                    // greys the middle of the photograph to hold text that only
+                    // sits at the bottom; weighting it low keeps the picture and
+                    // still carries white type.
                     LinearGradient(
-                        colors: [.black.opacity(0.78), .black.opacity(0.15), .clear],
+                        stops: [
+                            .init(color: .black.opacity(0.85), location: 0),
+                            .init(color: .black.opacity(0.45), location: 0.22),
+                            .init(color: .clear, location: 0.58),
+                        ],
                         startPoint: .bottom, endPoint: .top
                     )
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 5) {
                         Text(kicker)
-                            .font(.caption2.weight(.bold))
-                            .tracking(1.2)
+                            .font(.caption2.weight(.heavy))
+                            .tracking(1.4)
                             .foregroundStyle(.tint)
                         Text(collection.title)
-                            .font(.title2.weight(.bold))
+                            .font(.system(.title, design: .default, weight: .bold))
+                            .tracking(-0.4)
                             .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.8)
                         if let subtitle = collection.subtitle {
                             Text(subtitle)
-                                .font(.footnote)
-                                .foregroundStyle(.white.opacity(0.75))
+                                .font(.subheadline)
+                                .monospacedDigit()
+                                .foregroundStyle(.white.opacity(0.8))
                         }
                     }
-                    .padding(16)
+                    .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .contentShape(RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            // A hairline, not a border. Photographs meeting a black ground with
+            // no edge look like holes cut in the page rather than prints on it.
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(.white.opacity(0.09), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private var kicker: String {
@@ -145,24 +217,37 @@ struct CollectionRowCard: View {
     let loader: ThumbnailLoader?
 
     var body: some View {
-        HStack(spacing: 12) {
-            CollectionCover(assetID: collection.coverAssetID, loader: loader, size: 256)
-                .frame(width: 54, height: 54)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
+        HStack(spacing: 14) {
+            // Large enough to be a photograph rather than an icon. At the 54pt
+            // it started out, every cover read as a coloured square and the row
+            // looked like a settings screen.
+            CollectionCover(
+                assetIDs: collection.coverAssetIDs, loader: loader, size: 256
+            )
+            .frame(width: 76, height: 76)
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(collection.title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(.body, design: .default, weight: .semibold))
+                    .tracking(-0.2)
                     .foregroundStyle(.primary)
+                    .lineLimit(2)
                 if let subtitle = collection.subtitle {
                     Text(subtitle)
-                        .font(.caption)
+                        .font(.footnote)
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 10)
 
             Text("\(collection.count)")
                 .font(.footnote)

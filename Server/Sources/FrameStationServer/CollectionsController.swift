@@ -77,7 +77,7 @@ struct CollectionsController: RouteCollection {
     private struct OnThisDayRow: Decodable {
         let year: Int
         let count: Int
-        let coverAssetID: UUID?
+        let coverAssetIDs: [UUID]
     }
 
     /// The same calendar day, in every earlier year that has photos.
@@ -97,7 +97,8 @@ struct CollectionsController: RouteCollection {
         let rows = try await sql.raw("""
             SELECT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year,
                    count(*)::int AS count,
-                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed)))) [1] AS "coverAssetID"
+                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                       [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
@@ -119,7 +120,7 @@ struct CollectionsController: RouteCollection {
                 subtitle: Self.dayLabel(month: month, day: day, year: row.year)
                     + " · " + Self.photoCount(row.count),
                 count: row.count,
-                coverAssetID: row.coverAssetID
+                coverAssetIDs: row.coverAssetIDs
             )
         }
     }
@@ -140,7 +141,7 @@ struct CollectionsController: RouteCollection {
         let firstHour: Int
         let lastHour: Int
         let peopleCount: Int
-        let coverAssetID: UUID?
+        let coverAssetIDs: [UUID]
     }
 
     /// Days that stand out against *this* library's own baseline.
@@ -201,7 +202,8 @@ struct CollectionsController: RouteCollection {
                        max(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "lastHour",
                        count(DISTINCT COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id))::int
                            AS "peopleCount",
-                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed)))) [1] AS cover
+                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                           [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.space_id = \(bind: spaceID)
@@ -212,7 +214,7 @@ struct CollectionsController: RouteCollection {
                 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY count) AS median FROM per_day
             )
             SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
-                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetID"
+                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs"
             FROM per_day p, baseline b
             WHERE p.count >= CASE
                     WHEN p.day = ANY(string_to_array(\(bind: holidayKeys), ','))
@@ -348,7 +350,7 @@ struct CollectionsController: RouteCollection {
             title: title,
             subtitle: subtitle(run, place: titleNamedPlace ? nil : place),
             count: run.count,
-            coverAssetID: run.days.compactMap(\.coverAssetID).first,
+            coverAssetIDs: Array(run.days.flatMap(\.coverAssetIDs).prefix(Self.coverDepth)),
             isNamed: userName != nil,
             recursAnnually: run.days.contains { recurring.contains(monthDay($0.day)) }
         )
@@ -634,7 +636,7 @@ struct CollectionsController: RouteCollection {
             title: "Recently Deleted",
             subtitle: nil,
             count: present.count,
-            coverAssetID: nil
+            coverAssetIDs: []
         )
     }
 
@@ -727,6 +729,13 @@ struct CollectionsController: RouteCollection {
     /// The seed is the current date, so covers hold still all day and differ
     /// tomorrow. Rotating them *while someone is looking* would defeat the one
     /// job a cover has, which is to make a card recognisable.
+    /// How many photographs to send for a card.
+    ///
+    /// Five is what the hero cycles through. Sending them costs nothing — they
+    /// are ids in a response that was being built anyway — and only the hero
+    /// actually fetches beyond the first.
+    static let coverDepth = 5
+
     static func coverOrder(seed: String) -> String {
         """
         (a.derived_at IS NOT NULL) DESC,

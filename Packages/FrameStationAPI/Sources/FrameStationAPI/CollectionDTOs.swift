@@ -32,9 +32,16 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     /// everything.
     public let subtitle: String?
     public let count: Int
-    /// The photo to draw on the card. Nil only when the collection is empty,
-    /// which the page treats as a reason not to show it at all.
-    public let coverAssetID: UUID?
+    /// The photographs worth putting on the card, best first.
+    ///
+    /// Several rather than one because the hero cycles through them. The rows
+    /// take `coverAssetID` and hold still — eight tiles crossfading at
+    /// different offsets is the noise this page exists to avoid, and a rotating
+    /// tile costs five thumbnails where a still one costs a single.
+    public let coverAssetIDs: [UUID]
+
+    /// The one to use where only one is wanted.
+    public var coverAssetID: UUID? { coverAssetIDs.first }
     /// True when `title` is what somebody typed rather than what the library
     /// worked out. Lets the card offer "Rename" instead of "Name this", and
     /// lets it offer to take the name back off again.
@@ -50,7 +57,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
 
     public init(
         kind: CollectionKind, key: String, title: String,
-        subtitle: String?, count: Int, coverAssetID: UUID?,
+        subtitle: String?, count: Int, coverAssetIDs: [UUID],
         isNamed: Bool = false, recursAnnually: Bool = false
     ) {
         self.kind = kind
@@ -58,7 +65,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         self.title = title
         self.subtitle = subtitle
         self.count = count
-        self.coverAssetID = coverAssetID
+        self.coverAssetIDs = coverAssetIDs
         self.isNamed = isNamed
         self.recursAnnually = recursAnnually
     }
