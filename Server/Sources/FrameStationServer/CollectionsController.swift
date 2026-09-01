@@ -124,10 +124,20 @@ struct CollectionsController: RouteCollection {
 
     // MARK: - Days worth keeping
 
-    private struct DayRow: Decodable {
+    /// Everything a day can say about itself, gathered in one pass.
+    ///
+    /// These are the raw facts the title is written from. Reading them costs
+    /// nothing extra — the day is already being grouped and counted — and
+    /// without them every occasion in the library is called "A busy Saturday".
+    struct DayRow: Decodable {
         let day: String
         let count: Int
         let place: String?
+        let placeCount: Int
+        let videoCount: Int
+        let firstHour: Int
+        let lastHour: Int
+        let peopleCount: Int
         let coverAssetID: UUID?
     }
 
@@ -141,14 +151,26 @@ struct CollectionsController: RouteCollection {
     /// The median is taken over days that *have* photos rather than over the
     /// calendar — empty days would drag it to zero and make every day
     /// exceptional.
+    ///
+    /// Deliberately fetches far more days than it returns. Consecutive busy days
+    /// are one occasion rather than several, and a Saturday and Sunday that
+    /// arrive as separate cards are a weekend the app failed to notice — so the
+    /// grouping happens after the query and the limit applies to the *runs*.
     private func busyDays(
         spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
+        let local = TimelineController.localTime
         let rows = try await sql.raw("""
             WITH per_day AS (
-                SELECT to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD') AS day,
+                SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
                        count(*)::int AS count,
                        mode() WITHIN GROUP (ORDER BY a.place_name) AS place,
+                       count(DISTINCT a.place_name)::int AS "placeCount",
+                       count(*) FILTER (WHERE a.media_type = 'video')::int AS "videoCount",
+                       min(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "firstHour",
+                       max(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "lastHour",
+                       count(DISTINCT COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id))::int
+                           AS "peopleCount",
                        (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed)))) [1] AS cover
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
@@ -159,24 +181,181 @@ struct CollectionsController: RouteCollection {
             baseline AS (
                 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY count) AS median FROM per_day
             )
-            SELECT p.day, p.count, p.place, p.cover AS "coverAssetID"
+            SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
+                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetID"
             FROM per_day p, baseline b
             WHERE p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2))
             ORDER BY p.day DESC
-            LIMIT 6
+            LIMIT 60
             """).all(decoding: DayRow.self)
 
-        return rows.map { row in
-            CollectionSummary(
-                kind: .day,
-                key: row.day,
-                title: Self.weekdayTitle(row.day),
-                subtitle: [Self.longDay(row.day), row.place]
-                    .compactMap { $0 }.joined(separator: " · "),
-                count: row.count,
-                coverAssetID: row.coverAssetID
-            )
+        return Self.runs(from: rows).prefix(6).map { Self.describe($0) }
+    }
+
+    /// A stretch of consecutive busy days, treated as one occasion.
+    struct Run {
+        var days: [DayRow]
+
+        var count: Int { days.reduce(0) { $0 + $1.count } }
+        var videoCount: Int { days.reduce(0) { $0 + $1.videoCount } }
+        var first: DayRow { days.last! }   // rows arrive newest-first
+        var last: DayRow { days.first! }
+        var span: Int { days.count }
+
+        /// The place most of the run happened in, or nil when it moved about.
+        ///
+        /// Weighted by photographs rather than by days: an afternoon somewhere
+        /// with sixty pictures says more about where you were than a morning
+        /// somewhere else with five.
+        var place: String? {
+            var weights: [String: Int] = [:]
+            for day in days {
+                guard let place = day.place else { continue }
+                weights[place, default: 0] += day.count
+            }
+            guard let best = weights.max(by: { $0.value < $1.value }) else { return nil }
+            // Only claim a place if most of the run actually happened there.
+            return best.value * 2 >= count ? best.key : nil
         }
+
+        var peopleCount: Int { days.map(\.peopleCount).max() ?? 1 }
+        var placeCount: Int { days.map(\.placeCount).max() ?? 0 }
+    }
+
+    /// Groups consecutive days into runs. Rows arrive newest-first.
+    static func runs(from rows: [DayRow]) -> [Run] {
+        var runs: [Run] = []
+        for row in rows {
+            if var current = runs.last,
+               let previous = current.days.last.flatMap({ parseDate($0.day) }),
+               let this = parseDate(row.day),
+               utc.dateComponents([.day], from: this, to: previous).day == 1 {
+                current.days.append(row)
+                runs[runs.count - 1] = current
+            } else {
+                runs.append(Run(days: [row]))
+            }
+        }
+        return runs
+    }
+
+    // MARK: - Naming an occasion
+
+    /// Writes a title from what the media actually is.
+    ///
+    /// Every rule here has to be *true* before it fires, and they are tried
+    /// most-specific first. That ordering is the whole design: a title picked
+    /// from a bag of phrases reads as decoration and people spot the repetition
+    /// anyway, where a title that is earned — three places, an evening, mostly
+    /// video — tells you something you would otherwise have to open the
+    /// collection to find out.
+    ///
+    /// The generic weekday remains as the last resort, because a day that is
+    /// simply busy is a real thing and deserves an honest name rather than a
+    /// stretched one.
+    static func describe(_ run: Run) -> CollectionSummary {
+        let place = run.place
+        let title: String
+        // Whether the title already names where this happened, so the subtitle
+        // doesn't say it twice — and, for a run that visited several places,
+        // doesn't contradict a title that just said so.
+        var titleNamedPlace = place != nil
+
+        if run.span > 1 {
+            title = runTitle(run, place: place)
+        } else if run.placeCount >= 3 {
+            title = "\(spelled(run.placeCount).capitalized) places in one day"
+            titleNamedPlace = true
+        } else if run.videoCount * 2 > run.count {
+            title = inPlace("\(timeOfDay(run.first)) of video", place)
+        } else if run.peopleCount >= 3 {
+            title = inPlace("Everyone's photographs", place)
+        } else if run.first.lastHour - run.first.firstHour >= 9 {
+            title = inPlace("All day", place)
+        } else if let phrase = narrowWindow(run.first) {
+            title = inPlace(phrase, place)
+        } else {
+            title = "A busy \(stampFormatter("EEEE").string(from: parseDate(run.first.day) ?? Date()))"
+            titleNamedPlace = false
+        }
+
+        return CollectionSummary(
+            kind: .day,
+            key: run.days.map(\.day).reversed().joined(separator: ".."),
+            title: title,
+            subtitle: subtitle(run, place: titleNamedPlace ? nil : place),
+            count: run.count,
+            coverAssetID: run.days.compactMap(\.coverAssetID).first
+        )
+    }
+
+    /// Names a stretch of days. A weekend is worth recognising by name; four
+    /// days in a row is worth counting.
+    private static func runTitle(_ run: Run, place: String?) -> String {
+        let weekdays = run.days.compactMap { parseDate($0.day) }
+            .map { utc.component(.weekday, from: $0) }   // 1 = Sunday, 7 = Saturday
+        let isWeekendPair = run.span == 2 && weekdays.contains(1) && weekdays.contains(7)
+        let touchesWeekend = weekdays.contains(1) || weekdays.contains(7)
+
+        let phrase: String
+        if isWeekendPair {
+            phrase = "A weekend"
+        } else if run.span == 3, touchesWeekend {
+            phrase = "A long weekend"
+        } else {
+            phrase = "\(spelled(run.span).capitalized) days"
+        }
+        return inPlace(phrase, place)
+    }
+
+    /// "An evening in Culpeper" — and just "An evening" where there is no
+    /// location to name, rather than a sentence with a hole in it.
+    private static func inPlace(_ phrase: String, _ place: String?) -> String {
+        guard let place else { return phrase }
+        // The stored name is "Culpeper, Virginia"; a title wants the town.
+        let town = place.split(separator: ",").first.map(String.init) ?? place
+        return "\(phrase) in \(town)"
+    }
+
+    /// A day that happened inside one part of it.
+    private static func narrowWindow(_ day: DayRow) -> String? {
+        if day.lastHour < 11 { return "A morning" }
+        if day.firstHour >= 17 { return "An evening" }
+        if day.firstHour >= 12, day.lastHour < 18 { return "An afternoon" }
+        return nil
+    }
+
+    private static func timeOfDay(_ day: DayRow) -> String {
+        narrowWindow(day) ?? "A day"
+    }
+
+    /// Dates and counts go here, so the title never has to carry them.
+    private static func subtitle(_ run: Run, place: String?) -> String {
+        var parts: [String] = []
+        if run.span == 1 {
+            parts.append(longDay(run.first.day) ?? run.first.day)
+        } else if let from = parseDate(run.first.day), let to = parseDate(run.last.day) {
+            // "12–16 August 2026", collapsing the month when it doesn't change.
+            let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
+            let left = stampFormatter(sameMonth ? "d" : "d MMM").string(from: from)
+            parts.append("\(left)–\(stampFormatter("d MMMM yyyy").string(from: to))")
+        }
+        // The caller passes nil when the title already named the place, so a
+        // card never reads "An evening in Culpeper · Culpeper, Virginia" — nor
+        // "Three places in one day · Asheville", which is worse, because it
+        // contradicts the line above it.
+        if let place { parts.append(place) }
+        if run.videoCount > 0, run.videoCount * 2 <= run.count {
+            parts.append(run.videoCount == 1 ? "1 video" : "\(run.videoCount) videos")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Small numbers read better as words in a title.
+    private static func spelled(_ n: Int) -> String {
+        let words = ["zero", "one", "two", "three", "four", "five",
+                     "six", "seven", "eight", "nine"]
+        return n < words.count ? words[n] : String(n)
     }
 
     // MARK: - Recently deleted
