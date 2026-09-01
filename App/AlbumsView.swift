@@ -76,6 +76,7 @@ struct AlbumsView: View {
     /// gating the property alone left tvOS with closures referring to something
     /// that wasn't there. An unused optional is cheaper than a fourth `#if`.
     @State private var naming: CollectionSummary?
+    @Environment(\.scenePhase) private var scenePhase
 
     private let columns = 2
     private let spacing: CGFloat = 14
@@ -154,6 +155,33 @@ struct AlbumsView: View {
             let created = CollectionsStore(session: session, spaceID: space.id)
             collections = created
             await created.refresh()
+        }
+        // Coming back to the tab, or to the app, should not mean coming back to
+        // a page somebody else changed an hour ago on a different device. The
+        // collections are computed on the NAS from one library, so every
+        // platform already agrees about *what* they are — this is what makes
+        // them agree about *when*.
+        .onAppear {
+            Task { await collections?.refreshIfStale() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await collections?.refreshIfStale() }
+        }
+        // The backstop, for a device that is simply left on the page — an Apple
+        // TV, or a Mac in a corner. It has no pull-to-refresh to reach for, and
+        // half of what this page shows depends on what day it is.
+        //
+        // Ten minutes rather than the timeline's fifteen seconds: this is a
+        // handful of aggregate queries where `/changes` is a cursor comparison,
+        // and nothing here is urgent enough to be worth asking more often.
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 600_000_000_000)
+                guard !Task.isCancelled else { return }
+                await collections?.refreshIfStale()
+            }
         }
     }
 

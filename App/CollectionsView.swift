@@ -21,10 +21,41 @@ final class CollectionsStore {
 
     private weak var session: AppSession?
     private let spaceID: UUID
+    /// When the page was last answered, and for which calendar day.
+    private var fetchedAt: Date?
+    private var fetchedFor: String?
 
     init(session: AppSession, spaceID: UUID) {
         self.session = session
         self.spaceID = spaceID
+    }
+
+    /// Whether it is worth asking again.
+    ///
+    /// Two reasons it can be. The library may have changed — somebody named an
+    /// occasion on another device, or a backup finished — and the answer is
+    /// only ever as fresh as the last request. And the *day* may have changed,
+    /// which matters more here than anywhere else in the app: half this page is
+    /// built from what today is, so a device left on overnight would go on
+    /// offering yesterday's "on this day" until somebody touched it. An Apple
+    /// TV is exactly that device, and it has no pull-to-refresh to fall back on.
+    var isStale: Bool {
+        guard let fetchedAt, fetchedFor == Self.dayStamp() else { return true }
+        return Date().timeIntervalSince(fetchedAt) > 60
+    }
+
+    static func dayStamp(_ date: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    /// Asks again only when it is worth it, so switching tabs back and forth
+    /// doesn't put a run of identical queries on a J4125.
+    func refreshIfStale() async {
+        guard isStale else { return }
+        await refresh()
     }
 
     func refresh() async {
@@ -39,6 +70,8 @@ final class CollectionsStore {
         if let fresh = try? await client.collections(spaceID: spaceID) {
             page = fresh
             hasLoaded = true
+            fetchedAt = Date()
+            fetchedFor = Self.dayStamp()
         }
     }
 }
