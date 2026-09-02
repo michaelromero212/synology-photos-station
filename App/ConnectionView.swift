@@ -166,11 +166,72 @@ struct SignInButtonStyle: ButtonStyle {
 }
 
 /// Port, and the other way in.
+///
+/// Two layouts rather than one, because the iOS one does not survive the trip.
+/// A `Form` in a `NavigationStack` is right on a phone, where it fills the
+/// screen and the navigation bar carries the title and Done. Presented as a Mac
+/// sheet the same code has no size to fill, so it collapses to a cramped box
+/// with a navigation bar the platform doesn't draw — the title vanishes and the
+/// rows sit in a strip. A Mac sheet has to state its own width, title itself,
+/// and put its buttons along the bottom.
 struct AdvancedConnectionSheet: View {
     @Bindable var session: AppSession
     let onDone: () -> Void
 
     var body: some View {
+        #if os(macOS)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Connection Settings")
+                .font(.title2.weight(.semibold))
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+                .padding(.bottom, 16)
+
+            Form {
+                Section {
+                    TextField("Port", text: $session.port)
+                } footer: {
+                    Text(
+                        "FrameStation listens on port \(String(AppSession.defaultPort)) "
+                        + "by default. This is its own port, not DSM's."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Section {
+                    Picker("Sign in with", selection: $session.useDSMLogin) {
+                        Text("DSM Account").tag(true)
+                        Text("Invite Code").tag(false)
+                    }
+                    .pickerStyle(.radioGroup)
+                } footer: {
+                    Text(
+                        "Family members without a DSM account sign in with an "
+                        + "invite code instead."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Done", action: onDone)
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        // Stated, because a sheet has no parent to inherit a sensible size
+        // from and will otherwise shrink to its tightest content.
+        .frame(width: 460)
+        #else
         NavigationStack {
             Form {
                 Section {
@@ -204,6 +265,7 @@ struct AdvancedConnectionSheet: View {
                 }
             }
         }
+        #endif
     }
 }
 #endif

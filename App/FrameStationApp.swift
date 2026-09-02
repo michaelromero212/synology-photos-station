@@ -111,6 +111,19 @@ struct FrameStationApp: App {
         #if os(macOS)
         .defaultSize(width: 1100, height: 800)
         #endif
+
+        #if os(macOS)
+        // Preferences behind ⌘, rather than as a destination in the app.
+        //
+        // They were a "More" tab, which is where a phone has to put them — a
+        // tab bar is the only chrome it has. A Mac has a menu bar and a
+        // Settings panel, and a fifth sidebar row competing with your library
+        // for attention is a row you read past every day to reach the photos.
+        Settings {
+            MacSettingsView(session: session)
+                .preferredColorScheme(appearance.colorScheme)
+        }
+        #endif
     }
 }
 

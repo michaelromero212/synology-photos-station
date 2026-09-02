@@ -12,7 +12,9 @@ import SwiftUI
 /// only visible buckets are ever materialised. ARCHITECTURE.md §9a still calls
 /// for a `UICollectionView` before this meets a 100k library — one flat lazy
 /// grid at that size stutters, and prefetching needs real control.
-#if os(iOS)
+// Shared with macOS since the Mac grid stopped using NavigationLink: a hold
+// has to mean "select" there, so navigation is driven from state on both.
+#if !os(tvOS)
 /// A tapped photo together with the context the viewer needs.
 ///
 /// The three used to be separate `@State` properties, with the destination
@@ -157,7 +159,7 @@ struct TimelineView: View {
     /// scroll — once per section boundary crossed — which is why this can be
     /// ordinary `@State` where `ScrollProgress.fraction` could not be.
     @State private var topBucket: String?
-    #if os(iOS)
+    #if !os(tvOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
     /// know what "that day" contained — and everything currently loaded, which
     /// is what the viewer swipes through.
@@ -202,6 +204,12 @@ struct TimelineView: View {
         #endif
         .toolbar { toolbar }
         #if os(macOS)
+        .navigationDestination(item: $openItem) { opened in
+            AssetDetailView(
+                item: opened.item, space: space, session: session,
+                dayItems: opened.dayItems, pageItems: opened.pageItems
+            )
+        }
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: MacUploads.acceptedTypes,
@@ -579,22 +587,26 @@ struct TimelineView: View {
                 }
                 .photoTransitionSource(id: item.id, in: photoTransition)
             #else
-            NavigationLink {
-                AssetDetailView(
-                    item: item, space: space, session: session,
-                    // So the next/previous video controls have a day to
-                    // walk. There is no pager on these platforms.
-                    dayItems: dayItems
-                )
-            } label: {
-                PhotoCell(item: item, loader: session.loader, size: size)
-            }
-            .buttonStyle(.plain)
-            // A Mac has no long press. Right-click starts a selection already
-            // holding this photo, which is the same bargain the long press
-            // makes on a phone, and the Select button in the toolbar is there
-            // for people who look for a button.
-            .contextMenu {
+            // Not a NavigationLink, for the same reason as the phone: a link
+            // takes the press and pushes the detail view, so pressing and
+            // holding would open the photo *and* start a selection. Driving
+            // navigation from state lets a click and a hold mean two things.
+            PhotoCell(item: item, loader: session.loader, size: size)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    openItem = OpenedPhoto(
+                        item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
+                    )
+                }
+                // Press and hold, as on the phone: no mode to find first, and
+                // the photo you held is already picked. A trackpad reports this
+                // perfectly well — it is only uncommon as a Mac idiom, which is
+                // why right-click still offers the same thing to anyone who
+                // reaches for a menu.
+                .onLongPressGesture(minimumDuration: 0.35) {
+                    selection.begin(with: item)
+                }
+                .contextMenu {
                 Button {
                     selection.begin(with: item)
                 } label: {
@@ -899,7 +911,7 @@ struct TimelineView: View {
         #endif
     }
 
-    #if os(iOS)
+    #if !os(tvOS)
     /// Every item the grid has actually loaded, in the order they're drawn.
     ///
     /// Not the whole library — buckets load as they scroll into view, and that
@@ -1460,15 +1472,11 @@ struct TimelineView: View {
                 MacUploadStatusButton(uploads: macUploads, isPresented: $showUploadQueue)
             }
         }
+        // No Select button. Pressing and holding a photo starts a selection
+        // that already holds it, which is both fewer steps and the same gesture
+        // the phone uses. A button that only put you *into* a mode, leaving you
+        // to then go and pick something, was the longer road to the same place.
         if !selection.isActive {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    selection.isActive = true
-                } label: {
-                    Label("Select", systemImage: "checkmark.circle")
-                }
-            }
-
             // The Mac's answer to the phone's zoom pill. A capsule floating over
             // the photos is a touch idiom — it exists because a phone has no
             // window furniture to put anything in — and a Mac emphatically does,

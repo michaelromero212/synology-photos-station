@@ -40,6 +40,16 @@ struct RootTabView: View {
     private enum Tabs: Hashable { case photos, albums, shared, more }
 
     var body: some View {
+        #if os(macOS)
+        // A Mac gets a sidebar, not a tab bar — see MacSidebar.swift.
+        MacRootView(session: session)
+        #else
+        tabs
+        #endif
+    }
+
+    #if !os(macOS)
+    private var tabs: some View {
         // `.tabItem` rather than the iOS 18 `Tab` builder: the deployment
         // target is 17, and this form behaves identically on both.
         TabView(selection: $tab) {
@@ -144,6 +154,7 @@ struct RootTabView: View {
     }
 
     private var engineIfReady: BackupEngine? { engine }
+    #endif
     #endif
 }
 
@@ -309,73 +320,7 @@ struct MoreView: View {
     #endif
 
     var body: some View {
-        List {
-            Section {
-                HStack(spacing: 14) {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 42))
-                        .foregroundStyle(.tint)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(session.displayName).font(.headline)
-                        if let host = session.serverHost {
-                            Text(host).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(.vertical, 6)
-            }
-
-            Section {
-                #if os(iOS)
-                Button {
-                    showBackup = true
-                } label: {
-                    Label(backupStatus, systemImage: backupIcon)
-                }
-                .tint(.primary)
-                #endif
-                NavigationLink {
-                    SpacesView(session: session) {}
-                } label: {
-                    Label("Manage Spaces", systemImage: "person.2.badge.gearshape")
-                }
-            }
-
-            Section {
-                AutoPlayToggle()
-            } header: {
-                Text("Playback")
-            } footer: {
-                Text(
-                    "When a video ends, continue to the next video from the "
-                    + "same day. Turn this off to play only the video you opened."
-                )
-            }
-
-            Section("Offline") {
-                NavigationLink {
-                    CacheManagementView(session: session)
-                } label: {
-                    Label("Cache Management", systemImage: "internaldrive")
-                }
-            }
-
-            Section {
-                AppearancePicker()
-            } footer: {
-                Text("Dark keeps the interface out of the way of your photos.")
-            }
-
-            Section {
-                Button(role: .destructive) {
-                    session.signOut()
-                } label: {
-                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-            } footer: {
-                Text("FrameStation \(Bundle.appVersion)")
-            }
-        }
+        container
         .navigationTitle("More")
         #if os(iOS)
         .sheet(isPresented: $showBackup) {
@@ -390,6 +335,85 @@ struct MoreView: View {
             }
         }
         #endif
+    }
+
+    /// Kept as a `List` — this view is the phone's and the TV's now.
+    ///
+    /// It briefly grew a grouped-`Form` branch for the Mac, when the Mac still
+    /// had a More tab to put it in. macOS settings moved behind ⌘, in
+    /// `MacSettingsView`, so that branch became a macOS layout nothing on macOS
+    /// could reach.
+    @ViewBuilder
+    private var container: some View {
+        List { sections }
+    }
+
+    @ViewBuilder
+    private var sections: some View {
+        Section {
+            HStack(spacing: 14) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 42))
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.displayName).font(.headline)
+                    if let host = session.serverHost {
+                        Text(host).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        Section {
+            #if os(iOS)
+            Button {
+                showBackup = true
+            } label: {
+                Label(backupStatus, systemImage: backupIcon)
+            }
+            .tint(.primary)
+            #endif
+            NavigationLink {
+                SpacesView(session: session) {}
+            } label: {
+                Label("Manage Spaces", systemImage: "person.2.badge.gearshape")
+            }
+        }
+
+        Section {
+            AutoPlayToggle()
+        } header: {
+            Text("Playback")
+        } footer: {
+            Text(
+                "When a video ends, continue to the next video from the "
+                + "same day. Turn this off to play only the video you opened."
+            )
+        }
+
+        Section("Offline") {
+            NavigationLink {
+                CacheManagementView(session: session)
+            } label: {
+                Label("Cache Management", systemImage: "internaldrive")
+            }
+        }
+
+        Section {
+            AppearancePicker()
+        } footer: {
+            Text("Dark keeps the interface out of the way of your photos.")
+        }
+
+        Section {
+            Button(role: .destructive) {
+                session.signOut()
+            } label: {
+                Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+        } footer: {
+            Text("FrameStation \(Bundle.appVersion)")
+        }
     }
 
     #if os(iOS)

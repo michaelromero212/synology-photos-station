@@ -223,8 +223,17 @@ if let image = drawIcon(size: 1024) {
     write(image, to: outputDirectory.appendingPathComponent("AppIcon-iOS-1024.png"))
 }
 
-// macOS: pre-rounded with margin, per the HIG.
-if let image = drawIcon(size: 1024, inset: 0.10, cornerFraction: 0.225) {
+// macOS: pre-rounded with margin, per the HIG — and *transparent* outside the
+// plate.
+//
+// `transparentBackground` existed from the start and was never passed here, so
+// every macOS size shipped as a black square with a red plate painted on it.
+// In the Dock that reads as a dark tile among icons that float, which is what
+// "looks weird" turned out to be. iOS is the opposite case and still opts out:
+// full bleed, no alpha, masked by the system.
+if let image = drawIcon(
+    size: 1024, inset: 0.10, cornerFraction: 0.225, transparentBackground: true
+) {
     write(image, to: outputDirectory.appendingPathComponent("AppIcon-macOS-1024.png"))
 }
 
@@ -278,9 +287,12 @@ if let image = drawIcon(size: 1024) {
     ))
 }
 
-// macOS: pre-rounded with margin, at every size the catalog declares.
+// macOS: pre-rounded with margin, at every size the catalog declares, each one
+// transparent outside the plate.
 for entry in macOSSizes {
-    if let image = drawIcon(size: entry.pixels, inset: 0.10, cornerFraction: 0.225) {
+    if let image = drawIcon(
+        size: entry.pixels, inset: 0.10, cornerFraction: 0.225, transparentBackground: true
+    ) {
         write(image, to: appRoot.appendingPathComponent(
             "macOS/Assets.xcassets/AppIcon.appiconset/\(entry.name).png"
         ))
