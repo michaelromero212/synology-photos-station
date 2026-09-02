@@ -33,7 +33,15 @@ struct SearchView: View {
     /// How many distinct places exist, which is usually far more than `places`
     /// holds. What the "All Places" row counts.
     @State private var placeTotal = 0
+    /// On a Mac the window owns the query, because the field lives in the
+    /// window's toolbar and is there whether or not you are looking at search
+    /// results — so the text has to outlive this view. Everywhere else this
+    /// screen *is* the search, and owns it.
+    #if os(macOS)
+    @Binding var query: String
+    #else
     @State private var query = ""
+    #endif
     @State private var selected: String?
     @State private var showAllPlaces = false
     @State private var results: [TimelineItem] = []
@@ -70,8 +78,12 @@ struct SearchView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        // Not on macOS: the window put the field in its toolbar already, and a
+        // second `.searchable` inside the detail pane would draw a second one.
+        #if !os(macOS)
         .searchable(text: $query, placement: Self.searchPlacement, prompt: "Places")
         .onSubmit(of: .search) { choose(query) }
+        #endif
         .onChange(of: query) { _, new in
             // Clearing the field comes back to the list rather than stranding
             // you on results for something you just deleted.

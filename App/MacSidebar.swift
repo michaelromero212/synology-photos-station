@@ -31,6 +31,9 @@ struct MacRootView: View {
     /// outlives whatever is in the detail pane — these rows have to be there
     /// before you have visited anything.
     @State private var mediaTypes: [CollectionSummary] = []
+    /// The toolbar's search field. Owned here because the field is part of the
+    /// window rather than of whatever the detail pane happens to be showing.
+    @State private var query = ""
 
     var body: some View {
         NavigationSplitView {
@@ -41,6 +44,10 @@ struct MacRootView: View {
             // a detail view that belongs to somewhere you have left.
             NavigationStack { detail }
         }
+        // In the toolbar, always — the way Photos does it. It was briefly a
+        // sidebar row, which made searching a *place you go* rather than
+        // something you do to whatever you are already looking at.
+        .searchable(text: $query, placement: .toolbar, prompt: "Search Places")
         .task(id: session.personalSpace?.id) { await loadMediaTypes() }
     }
 
@@ -53,13 +60,6 @@ struct MacRootView: View {
                     .tag(MacDestination.library)
                 Label("Albums", systemImage: "rectangle.stack")
                     .tag(MacDestination.albums)
-                // A row rather than a permanent toolbar field, because
-                // `SearchView` carries its own `.searchable` — and on macOS
-                // that placement is `.automatic`, which lands the field in the
-                // window toolbar exactly where Photos keeps it. Selecting this
-                // row *is* how the toolbar search appears.
-                Label("Search", systemImage: "magnifyingglass")
-                    .tag(MacDestination.search)
             }
 
             // Each space by name, rather than a "Shared" row that asks again.
@@ -151,6 +151,18 @@ struct MacRootView: View {
 
     @ViewBuilder
     private var detail: some View {
+        // Typing shows results over whatever was selected, and clearing the
+        // field puts you back exactly where you were — the sidebar selection is
+        // never disturbed, so search is a lens rather than a detour.
+        if !query.isEmpty, let personal = session.personalSpace {
+            SearchView(session: session, space: personal, query: $query)
+        } else {
+            destination
+        }
+    }
+
+    @ViewBuilder
+    private var destination: some View {
         switch selection ?? .library {
         case .library:
             if let personal = session.personalSpace {
@@ -161,13 +173,6 @@ struct MacRootView: View {
 
         case .albums:
             AlbumsView(session: session)
-
-        case .search:
-            if let personal = session.personalSpace {
-                SearchView(session: session, space: personal)
-            } else {
-                ProgressView()
-            }
 
         case .space(let id):
             if let space = session.spaces.first(where: { $0.id == id }) {
@@ -240,7 +245,6 @@ struct MacRootView: View {
 enum MacDestination: Hashable {
     case library
     case albums
-    case search
     case space(UUID)
     case mediaType(String)
     case recentlyDeleted
