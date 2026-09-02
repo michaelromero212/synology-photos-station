@@ -171,7 +171,9 @@ targets:
         product: FrameStationKit
 
   # ---------------------------------------------------------------------------
-  # macOS — view-only. No Photos backup path at all.
+  # macOS — upload, but no backup. No Photos library to sweep and nothing to
+  # be suspended mid-transfer, so it gets the file picker and drag-and-drop
+  # and neither automatic backup nor Focused Backup.
   # ---------------------------------------------------------------------------
   FrameStation-macOS:
     type: application
