@@ -214,6 +214,29 @@ on Btrfs.
 
 ## Gotchas, each one earned
 
+### A green local build is not a green CI build
+
+CI runs **Xcode 16.4 (iOS SDK 18.5)** on `macos-15`. This Mac runs **Xcode
+26.6 (SDK 26.5)**. That gap is wide enough to matter, and it fails in the
+direction that wastes the most time: the local build passes, the push looks
+safe, and the runner rejects it fifteen minutes later.
+
+The way it bites is not obvious. Apple sometimes annotates a constant
+`API_AVAILABLE(ios(13))` — meaning the OS has set that bit since iOS 13 — while
+only *exposing* the name in a much newer SDK header.
+`PHAssetMediaSubtypeVideoScreenRecording` is exactly that: available since iOS
+13, absent from SDK 18.5, present in SDK 26. Xcode 26 compiles
+`.videoScreenRecording` happily; Xcode 16.4 says the type has no such member.
+
+When it happens, the fix is usually the raw bit value rather than the name —
+the bits are public and ABI-stable, only the spelling is unportable. See
+`PhotoLibraryScanner.subtypes(of:)`.
+
+The cheap habit that avoids the round trip: when reaching for a PhotoKit or
+SwiftUI symbol that looks recent, check its line in the SDK header. Constants
+clustered at the *end* of an enum are the late additions, and the late
+additions are the ones CI will not have.
+
 **The NAS is on DHCP, so its address moves.** It was `192.168.4.83` and is now
 `192.168.1.17`. The symptom is not an error you can read: `ssh` sits there and
 eventually times out, and because the session never opens, `sudo` never prompts —

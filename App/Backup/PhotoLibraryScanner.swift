@@ -107,13 +107,31 @@ enum PhotoLibraryScanner {
         var result: [MediaSubtype] = []
         if subtypes.contains(.photoScreenshot) { result.append(.screenshot) }
         if subtypes.contains(.photoPanorama) { result.append(.panorama) }
-        if subtypes.contains(.videoScreenRecording) { result.append(.screenRecording) }
+        // These two by raw value, because the *names* are newer than the SDK
+        // this is built against even though the bits are not.
+        //
+        // `PHAssetMediaSubtypeVideoScreenRecording` is `1UL << 19` and annotated
+        // `API_AVAILABLE(ios(13))`; `PHAssetMediaSubtypeVideoCinematic` is
+        // `1UL << 21` and `ios(15)`. Both bits have been set by the OS for
+        // years, but Apple only exposed the constants in a recent SDK header —
+        // they are the last two entries in it. CI builds on Xcode 16.4 (iOS SDK
+        // 18.5), where the symbols do not exist and the build fails; Xcode 26
+        // compiles them without complaint, which is how this reached CI green
+        // locally and red on the runner.
+        //
+        // The bits are public, documented and ABI-stable, so reading them
+        // directly is correct against any SDK. Only the spelling is unportable.
+        if subtypes.contains(PHAssetMediaSubtype(rawValue: 1 << 19)) {
+            result.append(.screenRecording)
+        }
         // Apple's own name for slow motion is "high frame rate" — the slowing
         // happens on playback, not in the file.
         if subtypes.contains(.videoHighFrameRate) { result.append(.slomo) }
         if subtypes.contains(.videoTimelapse) { result.append(.timelapse) }
         if subtypes.contains(.photoDepthEffect) { result.append(.portrait) }
-        if subtypes.contains(.videoCinematic) { result.append(.cinematic) }
+        if subtypes.contains(PHAssetMediaSubtype(rawValue: 1 << 21)) {
+            result.append(.cinematic)
+        }
         return result
     }
 
