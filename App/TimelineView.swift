@@ -833,6 +833,18 @@ struct TimelineView: View {
     /// Without this, zooming out to find 2012 and back in to look at it landed
     /// you in 2026, which made the whole control useless for the one thing
     /// people zoom out to do.
+    #if os(macOS)
+    /// Reads the store's zoom, writes through `apply` so the scroll anchor is
+    /// carried across — assigning `store.zoom` directly would change the grid
+    /// under you and drop you at the top of the library.
+    private var zoomBinding: Binding<TimelineZoom> {
+        Binding(
+            get: { store?.zoom ?? .day },
+            set: { apply($0) }
+        )
+    }
+    #endif
+
     private func apply(_ newZoom: TimelineZoom?) {
         guard let newZoom, let store else { return }
         let anchor = topBucket
@@ -1477,31 +1489,28 @@ struct TimelineView: View {
         // the phone uses. A button that only put you *into* a mode, leaving you
         // to then go and pick something, was the longer road to the same place.
         if !selection.isActive {
-            // The Mac's answer to the phone's zoom pill. A capsule floating over
-            // the photos is a touch idiom — it exists because a phone has no
-            // window furniture to put anything in — and a Mac emphatically does,
-            // so the same two steps go where a Mac keeps its view controls, with
-            // the ⌘+ / ⌘− every Mac app has trained people to reach for first.
+            // The three zoom levels as one control, the way Photos does it.
             //
-            // Declared out-then-in so they read left to right the way the pill
-            // does, and disabled at the ends for the same reason it is.
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    apply(store?.zoom.zoomedOut)
-                } label: {
-                    Label("Zoom Out", systemImage: "minus.magnifyingglass")
+            // These were a pair of ⌘+ / ⌘− buttons, which is a *relative*
+            // control for what is really a choice between three named things:
+            // going from years to days meant pressing the same button twice
+            // and watching to see where you ended up. A segmented control
+            // shows all three, says which one you are on, and reaches any of
+            // them in one click.
+            //
+            // The labels are Apple's — "All Photos" rather than "Days" —
+            // because that is the wording anyone who has used Photos already
+            // has, and our `.day` zoom is the same thing it names.
+            ToolbarItem(placement: .principal) {
+                Picker("Zoom", selection: zoomBinding) {
+                    Text("Years").tag(TimelineZoom.year)
+                    Text("Months").tag(TimelineZoom.month)
+                    Text("All Photos").tag(TimelineZoom.day)
                 }
-                .disabled(store?.zoom.zoomedOut == nil)
-                .keyboardShortcut("-", modifiers: .command)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    apply(store?.zoom.zoomedIn)
-                } label: {
-                    Label("Zoom In", systemImage: "plus.magnifyingglass")
-                }
-                .disabled(store?.zoom.zoomedIn == nil)
-                .keyboardShortcut("+", modifiers: .command)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 260)
+                .disabled(store == nil)
             }
         }
         #endif

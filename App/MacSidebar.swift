@@ -48,6 +48,13 @@ struct MacRootView: View {
                     .tag(MacDestination.library)
                 Label("Albums", systemImage: "rectangle.stack")
                     .tag(MacDestination.albums)
+                // A row rather than a permanent toolbar field, because
+                // `SearchView` carries its own `.searchable` — and on macOS
+                // that placement is `.automatic`, which lands the field in the
+                // window toolbar exactly where Photos keeps it. Selecting this
+                // row *is* how the toolbar search appears.
+                Label("Search", systemImage: "magnifyingglass")
+                    .tag(MacDestination.search)
             }
 
             // Each space by name, rather than a "Shared" row that asks again.
@@ -130,6 +137,13 @@ struct MacRootView: View {
         case .albums:
             AlbumsView(session: session)
 
+        case .search:
+            if let personal = session.personalSpace {
+                SearchView(session: session, space: personal)
+            } else {
+                ProgressView()
+            }
+
         case .space(let id):
             if let space = session.spaces.first(where: { $0.id == id }) {
                 TimelineView(session: session, space: space)
@@ -201,6 +215,7 @@ struct MacRootView: View {
 enum MacDestination: Hashable {
     case library
     case albums
+    case search
     case space(UUID)
     case mediaType(String)
     case recentlyDeleted
