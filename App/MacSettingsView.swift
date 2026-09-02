@@ -11,6 +11,7 @@ import SwiftUI
 /// nobody finds it.
 struct MacSettingsView: View {
     @Bindable var session: AppSession
+    @State private var showCache = false
 
     var body: some View {
         TabView {
@@ -59,8 +60,11 @@ struct MacSettingsView: View {
             }
 
             Section {
-                NavigationLink {
-                    CacheManagementView(session: session)
+                // A sheet, not a NavigationLink. A Settings scene has no
+                // navigation stack, so the link rendered as a row that looked
+                // tappable and did nothing at all.
+                Button {
+                    showCache = true
                 } label: {
                     Label("Cache Management", systemImage: "internaldrive")
                 }
@@ -73,6 +77,20 @@ struct MacSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showCache) {
+            VStack(spacing: 0) {
+                CacheManagementView(session: session)
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Done") { showCache = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            }
+            .frame(width: 460, height: 420)
+        }
     }
 }
 #endif

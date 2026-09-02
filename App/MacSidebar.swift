@@ -19,6 +19,11 @@ import SwiftUI
 struct MacRootView: View {
     @Bindable var session: AppSession
 
+    /// Opens the ⌘, panel from inside the window. Without this the only route
+    /// to Settings is the menu bar, which is where a Mac keeps preferences but
+    /// is *not* where anyone looks for "sign me out".
+    @Environment(\.openSettings) private var openSettings
+
     @State private var selection: MacDestination? = .library
     /// The personal library's media types, for the pinned rows.
     ///
@@ -92,30 +97,50 @@ struct MacRootView: View {
         .safeAreaInset(edge: .bottom) { account }
     }
 
-    /// Who you are and where you're connected, along the bottom.
+    /// Who you are, where you're connected, and what you can do about it.
     ///
     /// The old More tab opened onto this; with settings behind ⌘, there was
     /// nowhere left to say which NAS you are looking at — which matters most to
     /// exactly the person who has more than one.
+    ///
+    /// It is a menu rather than a label because the first thing that happened
+    /// when settings moved to ⌘, was that Sign Out became unreachable. A Mac
+    /// genuinely does keep preferences in the menu bar, but nobody hunts the
+    /// menu bar to sign out — they look at their own name, which is here. So
+    /// the row states both and offers both, and ⌘, still works for anyone who
+    /// reaches for it.
     private var account: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "person.crop.circle.fill")
-                .font(.title3)
-                .foregroundStyle(.tint)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.displayName)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                if let host = session.serverHost {
-                    Text(host)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+        Menu {
+            Button("Settings…") { openSettings() }
+                .keyboardShortcut(",", modifiers: .command)
+            Divider()
+            Button("Sign Out", role: .destructive) { session.signOut() }
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(session.displayName)
+                        .font(.callout.weight(.medium))
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                    if let host = session.serverHost {
+                        Text(host)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
-            Spacer(minLength: 0)
+            .contentShape(Rectangle())
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(.bar)
