@@ -109,6 +109,15 @@ struct TimelineView: View {
     @State private var activity: ActivityStore?
     @State private var showActivity = false
     @State private var showSpaces = false
+    #if os(macOS)
+    /// Files on their way up from this Mac. No automatic backup and no Focused
+    /// Backup here — a Mac is not suspended out from under a transfer, and it
+    /// has no photo library of its own to sweep.
+    @State private var macUploads = MacUploads()
+    @State private var showFileImporter = false
+    @State private var isDropTargeted = false
+    @State private var showUploadQueue = false
+    #endif
     #if os(iOS)
     @State private var showBackup = false
     /// Dismissing the "not enabled" card lasts for the session, not forever:
@@ -192,6 +201,34 @@ struct TimelineView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
+        #if os(macOS)
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: MacUploads.acceptedTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            guard case .success(let urls) = result, let client = session.client else { return }
+            macUploads.add(urls, to: space.id, client: client)
+        }
+        // Dropping onto the library is the gesture a Mac user reaches for
+        // first, and it is the same action as the toolbar button — same queue,
+        // same code path, so the two cannot behave differently.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let client = session.client else { return false }
+            macUploads.add(urls, to: space.id, client: client)
+            return true
+        } isTargeted: { isDropTargeted = $0 }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(.tint, lineWidth: 3)
+                    .padding(6)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+        #endif
         #if os(iOS)
         // Scrolling into the library stands the whole bar down — title and
         // icons both — leaving the pinned date as the only thing across the
@@ -1402,9 +1439,27 @@ struct TimelineView: View {
         }
         #endif
         #if os(macOS)
-        // A Mac has no long press to start a selection with, so the way in has
-        // to be visible. Right-clicking a photo works too, but a button is what
-        // people look for.
+        // Adding from a Mac is choosing files, not backing up a library. The
+        // drop target on the grid does the same job for people who drag; this
+        // is the same action where a Mac keeps its actions.
+        if !selection.isActive {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showFileImporter = true
+                } label: {
+                    Label("Add Photos", systemImage: "plus")
+                }
+                .keyboardShortcut("i", modifiers: .command)
+            }
+        }
+        // Only while there is something to report. A permanently parked
+        // progress ring is furniture; one that appears when an upload starts is
+        // information.
+        if macUploads.pending > 0 || macUploads.completed > 0 {
+            ToolbarItem(placement: .primaryAction) {
+                MacUploadStatusButton(uploads: macUploads, isPresented: $showUploadQueue)
+            }
+        }
         if !selection.isActive {
             ToolbarItem(placement: .primaryAction) {
                 Button {
