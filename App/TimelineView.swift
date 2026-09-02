@@ -433,6 +433,19 @@ struct TimelineView: View {
             Task { await store?.refresh() }
         }
         #endif
+        #if os(macOS)
+        // The same courtesy for a Mac upload, which had none.
+        //
+        // iOS announces its own arrivals twice over — a finished backup run and
+        // a finished share batch each nudge the grid — and the Mac relied on
+        // the fifteen-second poll instead. So a photo you had just dragged in
+        // sat invisible until the next tick, and leaving the page and coming
+        // back looked like the only way to see it. Something this app did
+        // itself should never wait to be discovered.
+        .onChange(of: macUploads.completed) { _, _ in
+            Task { await store?.refresh() }
+        }
+        #endif
         .task(id: space.id) {
             let newStore = session.timelineStore(for: space)
             store = newStore
@@ -1479,7 +1492,7 @@ struct TimelineView: View {
         // Only while there is something to report. A permanently parked
         // progress ring is furniture; one that appears when an upload starts is
         // information.
-        if macUploads.pending > 0 || macUploads.completed > 0 {
+        if macUploads.pending > 0 || macUploads.completed > 0 || macUploads.failed > 0 {
             ToolbarItem(placement: .primaryAction) {
                 MacUploadStatusButton(uploads: macUploads, isPresented: $showUploadQueue)
             }

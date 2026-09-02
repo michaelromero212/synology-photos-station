@@ -185,8 +185,17 @@ enum FileUpload {
             // is written once here and the platforms differ only in who carries
             // it. It has to outlive the call, which it does — the defer runs
             // after the await.
-            let part = file.deletingLastPathComponent()
-                .appendingPathComponent("\(file.lastPathComponent).\(index)")
+            //
+            // Into the temporary directory, *not* beside the source. This used
+            // to write `IMG_4021.jpg.0` next to the original, which was merely
+            // untidy on iOS — the source there is always a scratch export this
+            // code made itself — and broken on a Mac, where the source is the
+            // user's own file wherever they picked it. The sandbox grants
+            // access to the *file* the user chose, not to the folder holding
+            // it, so creating a sibling threw; the throw was caught upstream,
+            // the queue drained, and the upload appeared to do nothing at all.
+            let part = FileManager.default.temporaryDirectory
+                .appendingPathComponent("fs-chunk-\(uploadID)-\(index)")
             try data.write(to: part, options: .atomic)
             defer { try? FileManager.default.removeItem(at: part) }
 

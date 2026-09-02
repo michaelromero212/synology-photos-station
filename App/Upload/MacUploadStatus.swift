@@ -35,9 +35,9 @@ struct MacUploadStatusButton: View {
                     .rotationEffect(.degrees(-90))
                     .animation(.easeOut(duration: 0.25), value: uploads.overallFraction)
 
-                Image(systemName: uploads.pending > 0 ? "arrow.up" : "checkmark")
+                Image(systemName: symbol)
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(uploads.failed > 0 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                     .contentTransition(.symbolEffect(.replace))
             }
             .frame(width: 18, height: 18)
@@ -51,7 +51,17 @@ struct MacUploadStatusButton: View {
         }
     }
 
+    /// A tick over a batch that failed would be a lie told quietly.
+    private var symbol: String {
+        if uploads.pending > 0 { return "arrow.up" }
+        return uploads.failed > 0 ? "exclamationmark" : "checkmark"
+    }
+
     private var helpText: String {
+        if uploads.failed > 0 {
+            return uploads.failed == 1
+                ? "1 item failed to upload" : "\(uploads.failed) items failed to upload"
+        }
         if uploads.pending == 0 {
             return uploads.completed == 1
                 ? "1 item uploaded" : "\(uploads.completed) items uploaded"
@@ -77,13 +87,21 @@ struct MacUploadQueueView: View {
 
             if uploads.queue.isEmpty {
                 ContentUnavailableView {
-                    Label("Nothing Uploading", systemImage: "checkmark.circle")
-                } description: {
-                    Text(
-                        uploads.completed > 0
-                            ? "Everything you added has been uploaded."
-                            : "Choose Add Photos, or drop files onto the library."
+                    Label(
+                        uploads.failed > 0 ? "Upload Failed" : "Nothing Uploading",
+                        systemImage: uploads.failed > 0
+                            ? "exclamationmark.triangle" : "checkmark.circle"
                     )
+                } description: {
+                    if uploads.failed > 0 {
+                        Text(uploads.lastError ?? "Something went wrong.")
+                    } else {
+                        Text(
+                            uploads.completed > 0
+                                ? "Everything you added has been uploaded."
+                                : "Choose Add Photos, or drop files onto the library."
+                        )
+                    }
                 }
                 .frame(height: 180)
             } else {
