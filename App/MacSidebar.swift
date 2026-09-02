@@ -42,12 +42,21 @@ struct MacRootView: View {
             // A stack per destination, so pushing into a photo from the Videos
             // row and then switching to Library does not leave you looking at
             // a detail view that belongs to somewhere you have left.
-            NavigationStack { detail }
+            NavigationStack {
+                detail
+                    // On the stack's *root*, not on the split view.
+                    //
+                    // Applied outside, the field stayed in the toolbar after
+                    // you opened a photograph — so a viewer showing one image
+                    // carried a "Search Places" box wedged against its rotate
+                    // and favourite buttons. Searching a library you are not
+                    // looking at is not a thing anyone wants, and it crowded
+                    // the controls that were.
+                    .searchable(
+                        text: $query, placement: .toolbar, prompt: "Search Places"
+                    )
+            }
         }
-        // In the toolbar, always — the way Photos does it. It was briefly a
-        // sidebar row, which made searching a *place you go* rather than
-        // something you do to whatever you are already looking at.
-        .searchable(text: $query, placement: .toolbar, prompt: "Search Places")
         .task(id: session.personalSpace?.id) { await loadMediaTypes() }
     }
 

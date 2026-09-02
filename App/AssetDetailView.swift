@@ -161,6 +161,9 @@ struct AssetDetailView: View {
     /// through. It runs past the end of a day on purpose: a photo shouldn't
     /// feel like the last one in the library just because midnight happened.
     var pageItems: [TimelineItem] = []
+    /// Set by "Get Info" in the grid, which means "open this showing its
+    /// details" rather than "open this".
+    var showsInfoInitially = false
 
     @State private var cache = ViewerModelCache()
     /// Outlives any one page, which is the point: a video prepared as a
@@ -199,13 +202,15 @@ struct AssetDetailView: View {
         space: SpaceDTO,
         session: AppSession,
         dayItems: [TimelineItem] = [],
-        pageItems: [TimelineItem] = []
+        pageItems: [TimelineItem] = [],
+        showsInfoInitially: Bool = false
     ) {
         self.item = item
         self.space = space
         self.session = session
         self.dayItems = dayItems
         self.pageItems = pageItems
+        self.showsInfoInitially = showsInfoInitially
         #if os(iOS)
         self._focus = State(initialValue: PagerFocus(currentID: item.id))
         #else
@@ -320,6 +325,29 @@ struct AssetDetailView: View {
                 isZoomed: .constant(false)
             )
         }
+        #if os(macOS)
+        // Actions in the toolbar, and Information as an inspector.
+        //
+        // Both were a floating bar across the bottom of the picture with a
+        // sheet behind the info button — a phone's arrangement, because a phone
+        // has no window chrome to put anything in. A Mac does, and Photos uses
+        // it: the verbs live along the top, and Get Info slides a panel in from
+        // the right that the same button closes again. A sheet took the whole
+        // window over to show a caption and a map.
+        .toolbar { detailToolbar }
+        .inspector(isPresented: $showInfo) {
+            InformationSheet(
+                model: cache.model(for: displayedItem, spaceID: space.id),
+                session: session,
+                isInspector: true
+            ) { showInfo = false }
+            .inspectorColumnWidth(min: 280, ideal: 320, max: 440)
+        }
+        .onAppear { if showsInfoInitially { showInfo = true } }
+        #else
+        // tvOS keeps the bar across the bottom. There is no toolbar to move
+        // these into and no pointer to open an inspector with — a remote walks
+        // a row of buttons, which is exactly what this is.
         .safeAreaInset(edge: .bottom) { actionBar }
         .sheet(isPresented: $showInfo) {
             InformationSheet(
@@ -327,7 +355,121 @@ struct AssetDetailView: View {
                 session: session
             ) { showInfo = false }
         }
+        #endif
     }
+
+    #if os(macOS)
+
+    /// Turns the photo on screen. The NAS regenerates the thumbnail and drops
+    /// the cached preview, so the grid catches up over delta sync and the open
+    /// view re-renders the right way up.
+    ///
+    /// A second copy of the iOS one, which lives inside `#if os(iOS)` along
+    /// with the whole pager — widening that block to reach one function would
+    /// drag the swipe machinery onto a platform that cannot swipe.
+    private func rotateDisplayed(_ rotation: MediaRotation) {
+        Task { [asset = displayedItem] in
+            _ = try? await session.client?.rotate(
+                spaceID: space.id, assetIDs: [asset.assetID], rotation
+            )
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        let model = cache.model(for: displayedItem, spaceID: space.id)
+
+        // Only while watching a video — on a photo they would have nothing to
+        // say. A Mac has no swipe, so what a phone does with a flick needs a
+        // button.
+        if displayedItem.mediaType == .video {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    goToAdjacentVideo(forward: false)
+                } label: {
+                    Label("Previous Video", systemImage: "backward.end")
+                }
+                .disabled(adjacentVideo(forward: false) == nil)
+                .help("Previous video from this day")
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+            }
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    goToAdjacentVideo(forward: true)
+                } label: {
+                    Label("Next Video", systemImage: "forward.end")
+                }
+                .disabled(adjacentVideo(forward: true) == nil)
+                .help("Next video from this day")
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+            }
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                rotateDisplayed(.left)
+            } label: {
+                Label("Rotate Left", systemImage: "rotate.left")
+            }
+            .help("Rotate left")
+            .disabled(displayedItem.mediaType == .video)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                rotateDisplayed(.right)
+            } label: {
+                Label("Rotate Right", systemImage: "rotate.right")
+            }
+            .help("Rotate right")
+            .disabled(displayedItem.mediaType == .video)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                Task { await model.toggleFavorite(session.client) }
+            } label: {
+                Label(
+                    model.isFavorite ? "Unfavourite" : "Favourite",
+                    systemImage: model.isFavorite ? "heart.fill" : "heart"
+                )
+            }
+            .help(model.isFavorite ? "Remove from favourites" : "Add to favourites")
+        }
+
+        // The action neither reference app has: put this photo in a shared
+        // space. A row, not a copy — the bytes are already on the NAS.
+        if !session.sharedSpaces.isEmpty {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
+                        Button {
+                            Task { await model.addTo(target, client: session.client) }
+                        } label: {
+                            Label(target.name, systemImage: "person.2")
+                        }
+                    }
+                } label: {
+                    Label("Add to Shared Space", systemImage: model.addedTo.isEmpty
+                          ? "rectangle.stack.badge.plus"
+                          : "rectangle.stack.badge.person.crop.fill")
+                }
+                .help("Add to a shared space")
+            }
+        }
+
+        // Last, and a toggle: it is the only one of these that leaves something
+        // on screen, so it reads as a state rather than an action.
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showInfo.toggle()
+            } label: {
+                Label("Information", systemImage: "info.circle")
+            }
+            .help("Show information")
+            .keyboardShortcut("i", modifiers: .command)
+        }
+    }
+    #endif
     #endif
 
     // MARK: - Paging
@@ -950,12 +1092,25 @@ private struct ViewerGlyph: View {
 private struct InformationSheet: View {
     let model: AssetDetailModel
     let session: AppSession
+    /// Rendered as a Mac inspector rather than a sheet: no navigation stack, no
+    /// Done button, no stated size. The toolbar's info button is what opens and
+    /// closes it, so a second dismissal inside the panel would be a control that
+    /// competes with the one the user just pressed.
+    var isInspector = false
     let onDone: () -> Void
 
     @State private var showCreditEditor = false
     @State private var showLocationEditor = false
 
     var body: some View {
+        if isInspector {
+            content
+        } else {
+            sheetBody
+        }
+    }
+
+    private var sheetBody: some View {
         NavigationStack {
             content
                 .navigationTitle("Information")

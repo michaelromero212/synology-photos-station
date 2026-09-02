@@ -1,3 +1,6 @@
+#if os(macOS)
+import AppKit
+#endif
 import FrameStationAPI
 import FrameStationKit
 import SwiftUI
@@ -30,6 +33,10 @@ struct OpenedPhoto: Identifiable, Hashable {
     let item: TimelineItem
     let dayItems: [TimelineItem]
     let pageItems: [TimelineItem]
+    /// Opens with the Information inspector already showing. "Get Info" in the
+    /// grid's menu means exactly that, and asking someone to open the photo and
+    /// then press a second button would be two steps for one intention.
+    var showsInfo = false
 
     var id: UUID { item.id }
 }
@@ -204,38 +211,7 @@ struct TimelineView: View {
         #endif
         .toolbar { toolbar }
         #if os(macOS)
-        .navigationDestination(item: $openItem) { opened in
-            AssetDetailView(
-                item: opened.item, space: space, session: session,
-                dayItems: opened.dayItems, pageItems: opened.pageItems
-            )
-        }
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: MacUploads.acceptedTypes,
-            allowsMultipleSelection: true
-        ) { result in
-            guard case .success(let urls) = result, let client = session.client else { return }
-            macUploads.add(urls, to: space.id, client: client)
-        }
-        // Dropping onto the library is the gesture a Mac user reaches for
-        // first, and it is the same action as the toolbar button — same queue,
-        // same code path, so the two cannot behave differently.
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let client = session.client else { return false }
-            macUploads.add(urls, to: space.id, client: client)
-            return true
-        } isTargeted: { isDropTargeted = $0 }
-        .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.tint, lineWidth: 3)
-                    .padding(6)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+        .modifier(macChrome)
         #endif
         #if os(iOS)
         // Scrolling into the library stands the whole bar down — title and
@@ -541,7 +517,50 @@ struct TimelineView: View {
     private func gridCell(
         _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = []
     ) -> some View {
-        #if !os(tvOS)
+        #if os(macOS)
+        // One branch, always. There used to be two — a selecting cell and a
+        // browsing cell — and on a Mac that was the bug: the first click turned
+        // selection on, the cell swapped to the other branch, and double-click
+        // and right-click both vanished with it. You could select and then do
+        // nothing but select more.
+        //
+        // A Mac tile answers all three gestures at once and always has.
+        PhotoCell(item: item, loader: session.loader, size: size)
+            .overlay(alignment: .topLeading) {
+                if selection.contains(item) {
+                    SelectionMark(isPicked: true).padding(5)
+                }
+            }
+            .overlay {
+                if selection.contains(item) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .strokeBorder(Color.accentColor, lineWidth: 3)
+                }
+            }
+            .contentShape(Rectangle())
+            // Double before single. Both are needed and the order matters, but
+            // neither was ever the reason clicks did nothing — that was an
+            // empty `.safeAreaInset` covering the grid, above.
+            .onTapGesture(count: 2) {
+                selection.clear()
+                openItem = OpenedPhoto(
+                    item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
+                )
+            }
+            .onTapGesture {
+                // ⌘-click adds to what is picked; a plain click replaces it.
+                // Read from the event rather than through a second gesture,
+                // which would compete with these two for the click.
+                if NSEvent.modifierFlags.contains(.command) {
+                    selection.isActive = true
+                    selection.toggle(item)
+                } else {
+                    selection.clear()
+                    selection.begin(with: item)
+                }
+            }
+            .contextMenu { macCellMenu(for: item) }
+        #elseif !os(tvOS)
         if selection.isActive {
             // Identical on every platform: once you're selecting, a click and a
             // tap mean the same thing.
@@ -599,48 +618,6 @@ struct TimelineView: View {
                     selection.begin(with: item)
                 }
                 .photoTransitionSource(id: item.id, in: photoTransition)
-            #else
-            // Not a NavigationLink, for the same reason as the phone: a link
-            // takes the press and pushes the detail view, so pressing and
-            // holding would open the photo *and* start a selection. Driving
-            // navigation from state lets a click and a hold mean two things.
-            PhotoCell(item: item, loader: session.loader, size: size)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    openItem = OpenedPhoto(
-                        item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
-                    )
-                }
-                // Press and hold, as on the phone: no mode to find first, and
-                // the photo you held is already picked. A trackpad reports this
-                // perfectly well — it is only uncommon as a Mac idiom, which is
-                // why right-click still offers the same thing to anyone who
-                // reaches for a menu.
-                .onLongPressGesture(minimumDuration: 0.35) {
-                    selection.begin(with: item)
-                }
-                .contextMenu {
-                Button {
-                    selection.begin(with: item)
-                } label: {
-                    Label("Select", systemImage: "checkmark.circle")
-                }
-                Divider()
-                Button {
-                    editingItems = [item]
-                    showDateEditor = true
-                } label: {
-                    Label("Edit Date & Time…", systemImage: "calendar")
-                }
-                if item.mediaType != .video {
-                    Button { rotateOne(item, .left) } label: {
-                        Label("Rotate Left", systemImage: "rotate.left")
-                    }
-                    Button { rotateOne(item, .right) } label: {
-                        Label("Rotate Right", systemImage: "rotate.right")
-                    }
-                }
-            }
             #endif
         }
         #else
@@ -659,6 +636,157 @@ struct TimelineView: View {
     }
 
     #if os(macOS)
+    /// Everything the Mac window adds around the grid: where a photo opens,
+    /// the file picker, the drop target and its border.
+    ///
+    /// Lifted out of `body` because the type-checker gave up on it inline —
+    /// "unable to type-check this expression in reasonable time". A view
+    /// builder is one enormous generic expression, and each `#if` branch adds
+    /// to the same one.
+    private var macChrome: some ViewModifier {
+        MacTimelineChrome(
+            openItem: $openItem,
+            showFileImporter: $showFileImporter,
+            isDropTargeted: $isDropTargeted,
+            space: space,
+            session: session,
+            uploads: macUploads
+        )
+    }
+
+    /// What right-click offers, over whatever is actually picked.
+    ///
+    /// The rule that makes this behave: right-clicking a photo that is *not*
+    /// in the selection acts on that photo alone and replaces the selection
+    /// with it — the way the Finder does. Right-clicking one that is already
+    /// picked acts on the whole set. Without that, a menu raised over an
+    /// unpicked tile would silently act on forty photos somewhere else.
+    ///
+    /// Delete says how many it will take, because "Delete" over a selection you
+    /// cannot see all of is the one item here you cannot undo by repeating it.
+    @ViewBuilder
+    private func macCellMenu(for item: TimelineItem) -> some View {
+        let targets: [TimelineItem] = selection.contains(item) ? selection.picked : [item]
+        let n = targets.count
+        let noun = n == 1 ? "Photo" : "Photos"
+
+        Button {
+            focus(item)
+            openItem = OpenedPhoto(
+                item: item, dayItems: dayItems(containing: item),
+                pageItems: loadedItemsInOrder(), showsInfo: true
+            )
+        } label: {
+            Label("Get Info", systemImage: "info.circle")
+        }
+
+        Divider()
+
+        Button {
+            focus(item)
+            Task {
+                shareFiles = await selection.downloadOriginals(
+                    from: space, client: session.client
+                )
+                if !shareFiles.isEmpty { showShare = true }
+            }
+        } label: {
+            Label("Share…", systemImage: "square.and.arrow.up")
+        }
+
+        Divider()
+
+        // Videos carry rotation in the container rather than in EXIF, so the
+        // server declines them — offering the verb anyway would be a menu item
+        // that reports failure every time.
+        if targets.allSatisfy({ $0.mediaType != .video }) {
+            Button {
+                focus(item)
+                for target in targets { rotateOne(target, .left) }
+            } label: {
+                Label("Rotate Counterclockwise", systemImage: "rotate.left")
+            }
+            Button {
+                focus(item)
+                for target in targets { rotateOne(target, .right) }
+            } label: {
+                Label("Rotate Clockwise", systemImage: "rotate.right")
+            }
+            Divider()
+        }
+
+        Button {
+            focus(item)
+            showAddToAlbum = true
+        } label: {
+            Label("Add to Album…", systemImage: "rectangle.stack.badge.plus")
+        }
+
+        if !session.sharedSpaces.isEmpty {
+            Menu {
+                ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
+                    Button(target.name) {
+                        focus(item)
+                        Task {
+                            _ = try? await session.client?.share(
+                                spaceID: space.id,
+                                assetIDs: targets.map(\.assetID),
+                                to: target.id
+                            )
+                            await store?.refresh()
+                        }
+                    }
+                }
+            } label: {
+                Label("Add to Shared Space", systemImage: "person.2")
+            }
+        }
+
+        Button {
+            focus(item)
+            editingItems = targets
+            showDateEditor = true
+        } label: {
+            Label("Edit Date & Time…", systemImage: "calendar")
+        }
+
+        Divider()
+
+        // Counted, like Photos. "Delete" over a selection you cannot see all of
+        // is the one item here that repeating will not undo.
+        Button(role: .destructive) {
+            focus(item)
+            confirmDelete = true
+        } label: {
+            Label("Delete \(n) \(noun)", systemImage: "trash")
+        }
+    }
+
+    /// The day a photo belongs to, for the viewer's next/previous walk.
+    ///
+    /// Found by searching what is loaded rather than by recomputing the bucket
+    /// key: the store's key derivation is private, and duplicating it here
+    /// would be a second implementation of the one rule that decides which day
+    /// a photo belongs to.
+    private func dayItems(containing item: TimelineItem) -> [TimelineItem] {
+        guard let store else { return [item] }
+        for (_, bucket) in store.items where bucket.contains(where: { $0.id == item.id }) {
+            return bucket
+        }
+        return [item]
+    }
+
+    /// Points the selection at what the menu is about to act on.
+    ///
+    /// A right-click on an unpicked photo means "this one", so the selection
+    /// becomes exactly that — otherwise every action below would read a set the
+    /// user was not looking at.
+    private func focus(_ item: TimelineItem) {
+        guard !selection.contains(item) else { return }
+        selection.clear()
+        selection.begin(with: item)
+    }
+
     /// Turns one photo. The regenerated thumbnail arrives over delta sync.
     private func rotateOne(_ item: TimelineItem, _ rotation: MediaRotation) {
         Task {
@@ -1088,6 +1216,18 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
+            // Skipped entirely on macOS rather than applied with nothing in
+            // it. An inset whose content is empty still lays out, and it
+            // covered the grid: every click on a photograph went into an
+            // invisible zero-height bar instead of the tile under it, so
+            // nothing selected, nothing opened, and right-click raised no menu.
+            // The `#if` belongs outside the modifier.
+            //
+            // Selecting on a Mac is not a *mode* you enter and leave — it is a
+            // state a tile is in, the way a file in the Finder is. The bar, the
+            // "1 item selected" title and the X to escape were a phone's modal
+            // selection transplanted; right-click carries these actions there.
+            #if !os(macOS)
             .safeAreaInset(edge: .bottom) {
                 #if !os(tvOS)
                 if selection.isActive {
@@ -1168,6 +1308,7 @@ struct TimelineView: View {
                 zoomBar(store)
                 #endif
             }
+            #endif
             .refreshable {
                 await store.refresh()
                 #if os(iOS)
@@ -1590,7 +1731,9 @@ struct TimelineView: View {
     /// referred to it directly and compiled fine on iOS while breaking the tvOS
     /// build, which is the failure mode this exists to remove.
     private var isSelecting: Bool {
-        #if os(tvOS)
+        #if os(tvOS) || os(macOS)
+        // macOS has no selection *mode* — see the bottom-bar note. Reporting
+        // false keeps the toolbar and the space name where they were.
         return false
         #else
         return selection.isActive
@@ -1599,7 +1742,7 @@ struct TimelineView: View {
 
     /// Where you are, or what you've picked — never both at once.
     private var selectionTitle: String {
-        #if os(tvOS)
+        #if os(tvOS) || os(macOS)
         return space.name
         #else
         guard selection.isActive else { return space.name }
@@ -1659,3 +1802,55 @@ private struct TopEdgeClip: Shape {
         ))
     }
 }
+
+
+#if os(macOS)
+/// The Mac grid's window furniture, as a modifier rather than more lines of
+/// `body`. See `TimelineView.macChrome`.
+private struct MacTimelineChrome: ViewModifier {
+    @Binding var openItem: OpenedPhoto?
+    @Binding var showFileImporter: Bool
+    @Binding var isDropTargeted: Bool
+    let space: SpaceDTO
+    @Bindable var session: AppSession
+    let uploads: MacUploads
+
+    func body(content: Content) -> some View {
+        content
+            .navigationDestination(item: $openItem) { opened in
+                AssetDetailView(
+                    item: opened.item, space: space, session: session,
+                    dayItems: opened.dayItems, pageItems: opened.pageItems,
+                    showsInfoInitially: opened.showsInfo
+                )
+            }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: MacUploads.acceptedTypes,
+                allowsMultipleSelection: true
+            ) { result in
+                guard case .success(let urls) = result,
+                      let client = session.client else { return }
+                uploads.add(urls, to: space.id, client: client)
+            }
+            // Dropping onto the library is the gesture a Mac user reaches for
+            // first, and it is the same action as the toolbar button — same
+            // queue, same code path, so the two cannot behave differently.
+            .dropDestination(for: URL.self) { urls, _ in
+                guard let client = session.client else { return false }
+                uploads.add(urls, to: space.id, client: client)
+                return true
+            } isTargeted: { isDropTargeted = $0 }
+            .overlay {
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(.tint, lineWidth: 3)
+                        .padding(6)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+    }
+}
+#endif
