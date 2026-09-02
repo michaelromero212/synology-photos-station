@@ -38,6 +38,15 @@ final class BackupItem {
     var isRaw: Bool
     var burstID: String?
     var burstPick: Bool
+    /// `MediaSubtype` raw values, stored as strings because the queue is
+    /// persisted and an enum's cases are easier to add than a stored type is to
+    /// migrate. Recorded at scan time with everything else, so an item uploads
+    /// with what the library said when it was queued.
+    ///
+    /// Defaulted so an existing on-device queue migrates without losing its
+    /// backlog — items queued before this shipped simply carry none, and fall
+    /// back to the server's heuristics like any Mac upload.
+    var subtypesRaw: [String] = []
     /// Shared by a Live Photo's still and its paired video.
     var liveGroupID: UUID?
 
@@ -71,6 +80,7 @@ final class BackupItem {
         isRaw: Bool = false,
         burstID: String? = nil,
         burstPick: Bool = false,
+        subtypes: [MediaSubtype] = [],
         liveGroupID: UUID? = nil
     ) {
         self.localIdentifier = localIdentifier
@@ -89,6 +99,7 @@ final class BackupItem {
         self.isRaw = isRaw
         self.burstID = burstID
         self.burstPick = burstPick
+        self.subtypesRaw = subtypes.map(\.rawValue)
         self.liveGroupID = liveGroupID
         self.stateRaw = State.pending.rawValue
         self.attempts = 0
@@ -161,6 +172,7 @@ extension BackupItem {
             liveGroupID: liveGroupID,
             burstID: burstID,
             burstPick: burstPick,
+            subtypes: subtypesRaw.compactMap(MediaSubtype.init(rawValue:)),
             sourceLocalID: localIdentifier
         )
     }

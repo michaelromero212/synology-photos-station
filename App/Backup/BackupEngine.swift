@@ -204,6 +204,7 @@ final class BackupEngine {
                 burstID: asset.burstIdentifier,
                 burstPick: asset.burstSelectionTypes.contains(.userPick)
                     || asset.burstSelectionTypes.contains(.autoPick),
+                subtypes: candidate.subtypes,
                 liveGroupID: liveGroupID
             )
             context.insert(item)
