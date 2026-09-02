@@ -1104,17 +1104,20 @@ struct CollectionsController: RouteCollection {
         spaceID: UUID, seed: String, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         // (key, title, predicate)
-        let kinds: [(String, String, SQLQueryString)] = [
+        var kinds: [(String, String, SQLQueryString)] = [
             ("video", "Videos", "a.media_type = 'video'"),
             ("live", "Live Photos", "a.live_group_id IS NOT NULL"),
             ("burst", "Bursts", "a.burst_id IS NOT NULL"),
-            // Wider than it is tall by two to one. The same test Apple uses,
-            // and the only one available without looking at the picture.
-            ("panorama", "Panoramas", "a.width IS NOT NULL AND a.height > 0 AND a.width::float / a.height >= 2"),
-            // How a screenshot identifies itself: no camera took it.
-            ("screenshot", "Screenshots", "a.camera_make IS NULL AND a.media_type = 'photo' AND a.mime = 'image/png'"),
-            ("raw", "RAW", "a.is_raw"),
         ]
+        // Everything the device told us about itself. Ordered by how much of a
+        // library each usually accounts for, so the common ones lead.
+        for subtype in [
+            MediaSubtype.screenshot, .panorama, .portrait,
+            .slomo, .timelapse, .screenRecording, .cinematic,
+        ] {
+            kinds.append((subtype.rawValue, subtype.title, Self.subtypeFilter(subtype)))
+        }
+        kinds.append(("raw", "RAW", "a.is_raw"))
 
         var result: [CollectionSummary] = []
         for (key, title, predicate) in kinds {
@@ -1150,16 +1153,48 @@ struct CollectionsController: RouteCollection {
         return result
     }
 
+    /// What makes an asset one of these types.
+    ///
+    /// The device's own answer where there is one, and the old guess only for
+    /// assets that have none — anything uploaded before subtypes existed, or
+    /// imported from disk by the `import` CLI, which has no PhotoKit to ask.
+    ///
+    /// The `media_subtypes = '{}'` guard is what keeps the fallback from
+    /// undoing the fix. Without it a photograph the device explicitly did *not*
+    /// call a screenshot would still be caught by "PNG, no camera", and being
+    /// precise about the new rows would have bought nothing.
+    static func subtypeFilter(_ subtype: MediaSubtype) -> SQLQueryString {
+        let tag = SQLQueryString(stringLiteral: "'\(subtype.rawValue)'")
+        guard let guess = Self.legacyGuess(subtype) else {
+            return "\(tag) = ANY(a.media_subtypes)"
+        }
+        return "(\(tag) = ANY(a.media_subtypes) OR (a.media_subtypes = '{}' AND \(guess)))"
+    }
+
+    /// How the server used to infer a subtype, kept only for rows recorded
+    /// before the device started telling us. Nil where there was never a guess
+    /// worth making — a screen recording is indistinguishable from any other
+    /// video on disk, so claiming otherwise would invent data.
+    private static func legacyGuess(_ subtype: MediaSubtype) -> SQLQueryString? {
+        switch subtype {
+        case .screenshot:
+            return "a.camera_make IS NULL AND a.media_type = 'photo' AND a.mime = 'image/png'"
+        case .panorama:
+            return "a.width IS NOT NULL AND a.height > 0 AND a.width::float / a.height >= 2"
+        case .screenRecording, .slomo, .timelapse, .portrait, .cinematic:
+            return nil
+        }
+    }
+
     /// The `WHERE` clause behind one media type, for opening it.
     static func mediaTypeFilter(_ key: String) -> SQLQueryString? {
+        if let subtype = MediaSubtype(rawValue: key) {
+            return "AND \(subtypeFilter(subtype))"
+        }
         switch key {
         case "video": return "AND a.media_type = 'video'"
         case "live": return "AND a.live_group_id IS NOT NULL"
         case "burst": return "AND a.burst_id IS NOT NULL"
-        case "panorama":
-            return "AND a.width IS NOT NULL AND a.height > 0 AND a.width::float / a.height >= 2"
-        case "screenshot":
-            return "AND a.camera_make IS NULL AND a.media_type = 'photo' AND a.mime = 'image/png'"
         case "raw": return "AND a.is_raw"
         default: return nil
         }

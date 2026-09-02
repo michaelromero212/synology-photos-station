@@ -270,7 +270,7 @@ struct UploadController: RouteCollection {
                         (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                          captured_at, captured_tz_off, tz_off_fallback,
                          local_captured_at, lat, lon, is_raw,
-                         live_group_id, burst_id, burst_pick, storage_path)
+                         live_group_id, burst_id, burst_pick, media_subtypes, storage_path)
                     VALUES
                         (\(bind: session.sha256), \(bind: session.byteSize),
                          \(bind: input.mediaType.rawValue), \(bind: input.mime),
@@ -283,7 +283,8 @@ struct UploadController: RouteCollection {
                             AT TIME ZONE 'UTC',
                          \(bind: input.latitude), \(bind: input.longitude), \(bind: input.isRaw),
                          \(bind: input.liveGroupID), \(bind: input.burstID),
-                         \(bind: input.burstPick), \(bind: storagePath))
+                         \(bind: input.burstPick),
+                         \(bind: input.subtypes.map(\.rawValue)), \(bind: storagePath))
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "Could not record asset.")
@@ -443,13 +444,13 @@ struct UploadController: RouteCollection {
                  captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
                  lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
                  shutter, focal_len, exposure_bias, dynamic_range, orientation,
-                 is_raw, live_group_id, burst_id, burst_pick, thumbhash, exif,
+                 is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
                  derived_at, storage_path)
             SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                    captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
                    lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
                    shutter, focal_len, exposure_bias, dynamic_range, orientation,
-                   is_raw, live_group_id, burst_id, burst_pick, thumbhash, exif,
+                   is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
                    derived_at, NULL
             FROM assets WHERE id = \(bind: assetID)
             RETURNING id

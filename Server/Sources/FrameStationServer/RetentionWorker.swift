@@ -36,11 +36,12 @@ actor RetentionWorker {
 
     func start() {
         guard task == nil else { return }
+        let every = interval
         task = Task { [weak self] in
-            guard let self else { return }
             while !Task.isCancelled {
+                guard let self else { return }
                 await self.sweep()
-                try? await Task.sleep(for: await self.interval)
+                try? await Task.sleep(for: every)
             }
         }
     }

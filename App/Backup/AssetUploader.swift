@@ -29,6 +29,9 @@ struct UploadDescriptor {
     var liveGroupID: UUID?
     var burstID: String?
     var burstPick: Bool
+    /// What the device says this is — screenshot, panorama, slo-mo. Empty for
+    /// anything not read off a `PHAsset`, such as a Live Photo's motion half.
+    var subtypes: [MediaSubtype] = []
     var sourceLocalID: String?
 
     func commitRequest(spaceID: UUID) -> CommitUploadRequest {
@@ -48,6 +51,7 @@ struct UploadDescriptor {
             liveGroupID: liveGroupID,
             burstID: burstID,
             burstPick: burstPick,
+            mediaSubtypes: subtypes,
             sourceLocalID: sourceLocalID
         )
     }
@@ -77,6 +81,7 @@ extension UploadDescriptor {
         burstID = asset.burstIdentifier
         burstPick = asset.burstSelectionTypes.contains(.userPick)
             || asset.burstSelectionTypes.contains(.autoPick)
+        subtypes = candidate.subtypes
         sourceLocalID = asset.localIdentifier
     }
 }

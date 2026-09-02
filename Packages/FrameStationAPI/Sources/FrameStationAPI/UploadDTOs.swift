@@ -131,6 +131,19 @@ public struct CommitUploadRequest: Codable, Sendable {
     /// `PHAsset.burstIdentifier`, drives grid stacks.
     public let burstID: String?
     public let burstPick: Bool
+    /// `PHAsset.mediaSubtypes`, normalised. Screenshot, panorama, slo-mo and
+    /// the rest — facts the device recorded at capture, which the server used
+    /// to infer from pixel dimensions and the absence of a camera make.
+    ///
+    /// Optional because Swift's synthesized `Decodable` does not fall back to a
+    /// property's default value for a missing key: it throws. A build that
+    /// predates this field would fail every upload commit with a 400, which is
+    /// exactly the silent-on-device failure `CodingContractTests` exists to
+    /// catch. Read it through `subtypes`.
+    public let mediaSubtypes: [MediaSubtype]?
+
+    /// `mediaSubtypes`, with a missing value read as "none recorded".
+    public var subtypes: [MediaSubtype] { mediaSubtypes ?? [] }
     /// `PHAsset.localIdentifier` — a device-local hint only. Not stable across
     /// restores or migrations, so it is never used as identity.
     public let sourceLocalID: String?
@@ -151,6 +164,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         liveGroupID: UUID? = nil,
         burstID: String? = nil,
         burstPick: Bool = false,
+        mediaSubtypes: [MediaSubtype] = [],
         sourceLocalID: String? = nil
     ) {
         self.spaceID = spaceID
@@ -168,6 +182,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         self.liveGroupID = liveGroupID
         self.burstID = burstID
         self.burstPick = burstPick
+        self.mediaSubtypes = mediaSubtypes
         self.sourceLocalID = sourceLocalID
     }
 }

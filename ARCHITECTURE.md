@@ -788,6 +788,39 @@ compositional layout wrapped in `UIViewControllerRepresentable`:
   `kCGImageSourceThumbnailMaxPixelSize` — never decode full-size into memory.
 - Cancel in-flight requests on cell reuse. HTTP/2 keep-alive to the NAS.
 
+### Media types come from the device, not from the file
+
+*Added 2026-09-01.* The Media Types row on the Albums page originally decided
+two of its categories by inference — a screenshot was "a PNG no camera took", a
+panorama was "twice as wide as it is tall". Both are wrong in both directions:
+anything *saved* rather than photographed is a PNG no camera took, a screenshot
+marked up and re-saved as JPEG falls out, a cropped panorama stops being one,
+and a screen recording could never appear at all because the predicate only
+looked at photos.
+
+`PHAsset.mediaSubtypes` has carried the real answer since capture, and
+`PhotoLibraryScanner` was already reading that exact property to pair Live
+Photos. It now travels on `CommitUploadRequest.mediaSubtypes` into
+`assets.media_subtypes` (a `text[]`, GIN-indexed — see migration 0020), which
+made Screenshots and Panoramas exact and added Screen Recordings, Slo-mo,
+Time-lapse, Portrait and Cinematic for free.
+
+Two things worth remembering:
+
+- **Nothing is backfilled.** The information does not exist server-side, so the
+  only available backfill would freeze the old guesses into a column that reads
+  as authoritative. Rows with an empty array fall back to the old heuristic,
+  and *only* those rows — `CollectionsController.subtypeFilter` guards the
+  fallback with `media_subtypes = '{}'`. Without that guard, a photograph the
+  device explicitly did not call a screenshot would still be caught by the
+  guess, and the fix would have bought nothing.
+- **Live Photo and burst stay out of the array.** They already travel as
+  `live_group_id` and `burst_id`, which carry the grouping a flag cannot.
+
+`MediaSubtype` raw values are written into the database and matched by SQL
+string literals, so renaming a case silently empties an album rather than
+failing to build. `MediaSubtypeTests` pins them.
+
 ### Search v1 — place, built
 
 Metadata only, and it's nearly free. **Place is done**; date ranges,

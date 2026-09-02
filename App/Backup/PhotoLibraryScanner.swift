@@ -43,6 +43,7 @@ enum PhotoLibraryScanner {
         let mediaType: MediaType
         let mime: String
         let isRaw: Bool
+        let subtypes: [MediaSubtype]
     }
 
     /// Every photo and video in the library, newest first.
@@ -86,8 +87,34 @@ enum PhotoLibraryScanner {
             byteSize: byteSize(of: primary),
             mediaType: asset.mediaType == .video ? .video : .photo,
             mime: mimeType(for: ext, uti: primary.uniformTypeIdentifier),
-            isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext)
+            isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext),
+            subtypes: subtypes(of: asset)
         )
+    }
+
+    /// What the device recorded about this asset at capture.
+    ///
+    /// The server used to work these out from the file: a screenshot was "a PNG
+    /// no camera took", a panorama "twice as wide as it is tall". Both guesses
+    /// misfire in both directions, and neither could see a screen recording at
+    /// all. PhotoKit has known since the shutter, and this class was already
+    /// reading `mediaSubtypes` a few lines below to pair Live Photos.
+    ///
+    /// `.photoLive` and bursts are deliberately absent: they already travel as
+    /// `liveGroupID` and `burstID`, which carry the grouping a flag could not.
+    static func subtypes(of asset: PHAsset) -> [MediaSubtype] {
+        let subtypes = asset.mediaSubtypes
+        var result: [MediaSubtype] = []
+        if subtypes.contains(.photoScreenshot) { result.append(.screenshot) }
+        if subtypes.contains(.photoPanorama) { result.append(.panorama) }
+        if subtypes.contains(.videoScreenRecording) { result.append(.screenRecording) }
+        // Apple's own name for slow motion is "high frame rate" — the slowing
+        // happens on playback, not in the file.
+        if subtypes.contains(.videoHighFrameRate) { result.append(.slomo) }
+        if subtypes.contains(.videoTimelapse) { result.append(.timelapse) }
+        if subtypes.contains(.photoDepthEffect) { result.append(.portrait) }
+        if subtypes.contains(.videoCinematic) { result.append(.cinematic) }
+        return result
     }
 
     /// The resource holding the bytes we actually want to archive.
@@ -157,7 +184,13 @@ enum PhotoLibraryScanner {
                 for: (resource.originalFilename as NSString).pathExtension.lowercased(),
                 uti: resource.uniformTypeIdentifier
             ),
-            isRaw: false
+            isRaw: false,
+            // None, deliberately. The subtypes on a Live Photo describe the
+            // photograph — a portrait Live Photo is a portrait — and they
+            // belong to the still, which is the half the timeline shows. Copying
+            // them here would file the same moment under Portrait twice, once
+            // for a video nobody can see.
+            subtypes: []
         )
     }
 
