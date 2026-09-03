@@ -64,8 +64,14 @@ final class ConnectionMonitor {
             let satisfied = update.status == .satisfied
             let expensive = update.isExpensive
             Task { @MainActor [weak self] in
-                self?.isExpensive = expensive
-                self?.pathChanged(satisfied: satisfied)
+                // Strongify before touching properties. The optional-chained
+                // writes this replaced (`self?.isExpensive = …`) are what Swift 6
+                // flags as "reference to captured var 'self' in concurrently-
+                // executing code"; unwrapping first is the pattern the
+                // `observeOutcomes` hop below already uses.
+                guard let self else { return }
+                self.isExpensive = expensive
+                self.pathChanged(satisfied: satisfied)
             }
         }
         path.start(queue: DispatchQueue(label: "com.michaelromero.FrameStation.path"))
@@ -75,9 +81,14 @@ final class ConnectionMonitor {
         // simply nothing to send, the grid failing to load is the only sign
         // the NAS is gone.
         guard let client = client() else { return }
-        Task { [weak self] in
-            await client.observeOutcomes { failure in
-                Task { @MainActor [weak self] in
+        Task {
+            // The one weak capture lives on the long-lived observation closure,
+            // so the stream never retains the monitor; the outer Task holds no
+            // `self` at all, and the inner hop just unwraps it. Re-declaring
+            // `[weak self]` on nested Tasks is what tripped "reference to
+            // captured var 'self'".
+            await client.observeOutcomes { [weak self] failure in
+                Task { @MainActor in
                     guard let self else { return }
                     if let failure { self.noteFailure(failure) } else { self.noteSuccess() }
                 }
