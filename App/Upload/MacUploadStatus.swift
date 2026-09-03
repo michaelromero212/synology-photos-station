@@ -58,16 +58,20 @@ struct MacUploadStatusButton: View {
     }
 
     private var helpText: String {
+        if uploads.pending > 0 {
+            return uploads.pending == 1
+                ? "Uploading 1 item" : "Uploading \(uploads.pending) items"
+        }
         if uploads.failed > 0 {
             return uploads.failed == 1
                 ? "1 item failed to upload" : "\(uploads.failed) items failed to upload"
         }
-        if uploads.pending == 0 {
-            return uploads.completed == 1
-                ? "1 item uploaded" : "\(uploads.completed) items uploaded"
+        if uploads.skipped > 0, uploads.completed == 0 {
+            return uploads.skipped == 1
+                ? "1 item already in your library" : "\(uploads.skipped) items already in your library"
         }
-        return uploads.pending == 1
-            ? "Uploading 1 item" : "Uploading \(uploads.pending) items"
+        return uploads.completed == 1
+            ? "1 item uploaded" : "\(uploads.completed) items uploaded"
     }
 }
 
@@ -85,35 +89,30 @@ struct MacUploadQueueView: View {
 
             Divider()
 
-            if uploads.queue.isEmpty {
+            if uploads.queue.isEmpty, uploads.finished.isEmpty {
                 ContentUnavailableView {
-                    Label(
-                        uploads.failed > 0 ? "Upload Failed" : "Nothing Uploading",
-                        systemImage: uploads.failed > 0
-                            ? "exclamationmark.triangle" : "checkmark.circle"
-                    )
+                    Label("Nothing Uploading", systemImage: "checkmark.circle")
                 } description: {
-                    if uploads.failed > 0 {
-                        Text(uploads.lastError ?? "Something went wrong.")
-                    } else {
-                        Text(
-                            uploads.completed > 0
-                                ? "Everything you added has been uploaded."
-                                : "Choose Add Photos, or drop files onto the library."
-                        )
-                    }
+                    Text("Choose Add Photos, or drop files onto the library.")
                 }
                 .frame(height: 180)
             } else {
+                // What's moving now, above what's already finished — so a
+                // duplicate or a failure stays visible instead of the row simply
+                // disappearing when it's done.
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(uploads.queue.enumerated()), id: \.element.id) { index, item in
+                            if index > 0 { Divider() }
                             MacUploadRow(item: item, isActive: index == 0)
-                            if item.id != uploads.queue.last?.id { Divider() }
+                        }
+                        ForEach(Array(uploads.finished.enumerated()), id: \.element.id) { index, entry in
+                            if index > 0 || !uploads.queue.isEmpty { Divider() }
+                            MacFinishedRow(entry: entry)
                         }
                     }
                 }
-                .frame(maxHeight: 260)
+                .frame(maxHeight: 320)
             }
 
             if let error = uploads.lastError, uploads.failed > 0 {
@@ -154,6 +153,7 @@ struct MacUploadQueueView: View {
         var parts: [String] = []
         if uploads.pending > 0 { parts.append("\(uploads.pending) waiting") }
         if uploads.completed > 0 { parts.append("\(uploads.completed) done") }
+        if uploads.skipped > 0 { parts.append("\(uploads.skipped) skipped") }
         if uploads.failed > 0 { parts.append("\(uploads.failed) failed") }
         return parts.isEmpty ? "Nothing queued" : parts.joined(separator: " · ")
     }
@@ -206,6 +206,59 @@ private struct MacUploadRow: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: count)
+    }
+}
+
+/// A file the queue has finished with, and what became of it: uploaded, skipped
+/// as a duplicate, or failed. The duplicate line is the "already exists" feedback
+/// — a re-drop of photos already in the library reads as such instead of as a
+/// silent no-op.
+private struct MacFinishedRow: View {
+    let entry: MacUploads.Finished
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: glyph)
+                .foregroundStyle(tint)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.filename)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+    }
+
+    private var glyph: String {
+        switch entry.outcome {
+        case .uploaded: return "checkmark.circle.fill"
+        case .duplicate: return "doc.on.doc.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch entry.outcome {
+        case .uploaded: return .green
+        case .duplicate: return .secondary
+        case .failed: return .orange
+        }
+    }
+
+    private var label: String {
+        switch entry.outcome {
+        case .uploaded: return "Uploaded"
+        case .duplicate: return "Already in your library — skipped"
+        case .failed: return "Failed"
+        }
     }
 }
 #endif

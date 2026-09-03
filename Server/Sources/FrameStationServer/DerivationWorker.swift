@@ -273,6 +273,26 @@ actor DerivationWorker {
         if let latitude = metadata.latitude, let longitude = metadata.longitude {
             placeName = geocoder?.label(latitude: latitude, longitude: longitude)
         }
+
+        // The full dump for the `exif` jsonb column, as JSON text bound and
+        // cast below. Three states, from `Metadata.raw`:
+        //   • not attempted (nil)     → nil here, and the COALESCE leaves exif
+        //                                as it was, so the asset stays eligible
+        //                                for a later backfill pass.
+        //   • attempted, empty ([])   → "[]", written so the asset is no longer
+        //                                null and stops being re-probed.
+        //   • a real dump             → the encoded JSON, overwriting whatever
+        //                                was there (it's derived from the bytes).
+        let exifValue: String?
+        switch metadata.raw {
+        case .some(let groups) where !groups.isEmpty:
+            exifValue = (try? JSONEncoder().encode(groups)).map { String(decoding: $0, as: UTF8.self) }
+        case .some:
+            exifValue = "[]"
+        case .none:
+            exifValue = nil
+        }
+
         try await sql.raw("""
             UPDATE assets SET
                 width           = COALESCE(width, \(bind: metadata.width)),
@@ -297,7 +317,8 @@ actor DerivationWorker {
                 exposure_bias   = COALESCE(\(bind: metadata.exposureBias), exposure_bias),
                 dynamic_range   = COALESCE(\(bind: metadata.dynamicRange), dynamic_range),
                 orientation     = COALESCE(\(bind: metadata.orientation), orientation),
-                place_name      = COALESCE(\(bind: placeName), place_name)
+                place_name      = COALESCE(\(bind: placeName), place_name),
+                exif            = COALESCE(\(bind: exifValue)::jsonb, exif)
             WHERE id = \(bind: assetID)
             """).run()
 

@@ -39,9 +39,32 @@ final class MacUploads {
         }
     }
 
+    /// What became of a file the queue has finished with.
+    enum Outcome {
+        case uploaded
+        /// The bytes were already in this user's library, so the transfer was
+        /// skipped — the "duplicate detected" case. See `FileUpload.Result`.
+        case duplicate
+        case failed
+    }
+
+    /// One finished file, kept so the popover can show what happened rather than
+    /// the row simply vanishing. Newest first, capped so a thousand-file drop
+    /// doesn't grow this without bound.
+    struct Finished: Identifiable {
+        let id: UUID
+        let filename: String
+        let outcome: Outcome
+    }
+
     private(set) var queue: [Item] = []
     private(set) var isRunning = false
     private(set) var completed = 0
+    /// Files skipped because they were already in the library — surfaced so a
+    /// re-drop of photos already uploaded reads as "already have these" rather
+    /// than as nothing happening.
+    private(set) var skipped = 0
+    private(set) var finished: [Finished] = []
     private(set) var lastError: String?
 
     /// What a Mac may sensibly send. Anything else the picker or a drag offers
@@ -75,7 +98,15 @@ final class MacUploads {
         guard queue.isEmpty else { return }
         completed = 0
         failed = 0
+        skipped = 0
+        finished.removeAll()
         lastError = nil
+    }
+
+    /// Records the fate of a file the queue has finished with, newest first.
+    private func recordFinished(_ item: Item, _ outcome: Outcome) {
+        finished.insert(Finished(id: item.id, filename: item.filename, outcome: outcome), at: 0)
+        if finished.count > 100 { finished.removeLast(finished.count - 100) }
     }
 
     /// Adds files and starts working through them.
@@ -98,20 +129,31 @@ final class MacUploads {
 
         while let item = queue.first {
             do {
-                try await upload(item, to: spaceID, client: client)
-                completed += 1
+                let result = try await upload(item, to: spaceID, client: client)
+                // `deduplicated` is set only on the `.have` fast path, where the
+                // file was already in this user's library and nothing was sent —
+                // exactly the accidental re-upload to flag as a duplicate.
+                if result.deduplicated {
+                    skipped += 1
+                    recordFinished(item, .duplicate)
+                } else {
+                    completed += 1
+                    recordFinished(item, .uploaded)
+                }
             } catch {
                 // One unreadable file must not strand the rest of a drop.
                 lastError = error.localizedDescription
                 failed += 1
+                recordFinished(item, .failed)
             }
             if !queue.isEmpty { queue.removeFirst() }
         }
     }
 
+    @discardableResult
     private func upload(
         _ item: Item, to spaceID: UUID, client: FrameStationClient
-    ) async throws {
+    ) async throws -> FileUpload.Result {
         // Sandboxed: a dropped or chosen URL carries permission that has to be
         // opened explicitly, and reading without it fails with a bare
         // "no such file" that looks like the file moved.
@@ -147,7 +189,7 @@ final class MacUploads {
         )
 
         let id = item.id
-        _ = try await FileUpload.send(
+        return try await FileUpload.send(
             file: item.url, descriptor: descriptor, to: spaceID, client: client
         ) { [weak self] phase in
             Task { @MainActor in self?.record(phase, for: id) }

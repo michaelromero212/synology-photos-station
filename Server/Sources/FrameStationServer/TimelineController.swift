@@ -306,6 +306,10 @@ struct TimelineController: RouteCollection {
         let rating: Int?
         let isFavorite: Bool
         let onDevice: Bool
+        /// The `exif` jsonb column as text, decoded to `[MetadataGroup]` below.
+        /// Text rather than a jsonb-to-Codable decode so this one column can't
+        /// fail the whole detail row if its shape ever drifts.
+        let extendedMetadataJSON: String?
     }
 
     @Sendable
@@ -356,7 +360,8 @@ struct TimelineController: RouteCollection {
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
                    ) AS "isFavorite",
-                   sa.on_device AS "onDevice"
+                   sa.on_device AS "onDevice",
+                   a.exif::text AS "extendedMetadataJSON"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             -- The corrected credit when there is one, the uploader otherwise.
@@ -385,6 +390,12 @@ struct TimelineController: RouteCollection {
         let displayed = ExifOrientation.displaySize(
             width: row.width, height: row.height, orientation: row.orientation
         )
+
+        // The stored dump, decoded here rather than in the row so a shape
+        // mismatch degrades to "no extra sections" instead of a failed detail.
+        let extendedMetadata = row.extendedMetadataJSON
+            .flatMap { $0.data(using: .utf8) }
+            .flatMap { try? JSONDecoder().decode([MetadataGroup].self, from: $0) }
 
         return AssetDetail(
             id: row.id,
@@ -422,7 +433,8 @@ struct TimelineController: RouteCollection {
             onDevice: row.onDevice,
             mediaSubtypes: row.mediaSubtypes.compactMap(MediaSubtype.init(rawValue:)),
             isLive: row.isLive,
-            isBurst: row.isBurst
+            isBurst: row.isBurst,
+            extendedMetadata: extendedMetadata
         )
     }
 

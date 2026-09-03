@@ -120,6 +120,10 @@ func configure(_ app: Application) async throws {
         // metadata without a re-upload. One pass, in the background, off the
         // boot path.
         Task { await MetadataBackfill.run(on: app) }
+        // And re-probe already-stored files for the full technical dump the
+        // Information panel now shows — same "no re-upload" idea, but the work
+        // goes on the derivation queue rather than running inline.
+        Task { await MetadataBackfill.enqueueMissingExif(on: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")

@@ -87,4 +87,43 @@ enum MetadataBackfill {
             app.logger.error("metadata backfill failed: \(String(reflecting: error))")
         }
     }
+
+    /// Re-probes already-stored assets for the full metadata dump.
+    ///
+    /// The `exif` column existed from the first migration but was never filled;
+    /// the file's own bytes are the only source, and they are already on the
+    /// NAS — so nothing is re-uploaded. This just re-pends the `metadata`
+    /// derivation job, which reads the stored blob and now captures the dump
+    /// alongside the curated columns. `applyMetadata` COALESCEs those columns,
+    /// so re-running never disturbs a corrected capture date.
+    ///
+    /// Re-pending (not insert-if-absent) is the point: every existing asset
+    /// already has a `done` metadata job from its upload, so a plain insert
+    /// would conflict and skip it, and the column would stay null forever.
+    ///
+    /// Bounded per boot. `applyMetadata` writes at least `'[]'`, so an asset it
+    /// has processed is no longer null and drops out of the next pass — the
+    /// backlog drains over successive restarts without ever flooding the queue.
+    static func enqueueMissingExif(on app: Application) async {
+        do {
+            try await app.sql.raw("""
+                WITH todo AS (
+                    SELECT id FROM assets WHERE exif IS NULL LIMIT 5000
+                )
+                INSERT INTO derivation_jobs (asset_id, kind)
+                SELECT id, 'metadata' FROM todo
+                ON CONFLICT (asset_id, kind)
+                DO UPDATE SET state = 'pending', attempts = 0, last_error = NULL
+                """).run()
+
+            struct CountRow: Decodable { let remaining: Int }
+            if let row = try await app.sql.raw("""
+                SELECT count(*)::int AS remaining FROM assets WHERE exif IS NULL
+                """).first(decoding: CountRow.self), row.remaining > 0 {
+                app.logger.info("metadata dump backfill: \(row.remaining) asset(s) still to probe")
+            }
+        } catch {
+            app.logger.error("metadata dump backfill failed: \(String(reflecting: error))")
+        }
+    }
 }

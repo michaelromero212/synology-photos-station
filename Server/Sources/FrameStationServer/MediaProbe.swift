@@ -31,6 +31,18 @@ struct MediaProbe {
         var orientation: Int?
         var isRaw: Bool = false
         var mime: String?
+        /// The full technical dump for the Information panel's grouped sections,
+        /// already filtered, titled and formatted for display. Separate from the
+        /// typed fields above, which the timeline and the camera card read; this
+        /// is the "everything else the file records" the sidebar shows.
+        ///
+        /// Three states, and the difference matters to the backfill: `nil` means
+        /// no full dump was attempted (the batch import path, or a probe that
+        /// threw), so `exif` is left untouched and stays eligible for a later
+        /// pass; `[]` means a dump ran and the file genuinely records nothing,
+        /// which is written so the asset stops being re-probed; a non-empty
+        /// value is the dump itself.
+        var raw: [MetadataGroup]?
     }
 
     static func probe(url: URL, mediaType: MediaType) async throws -> Metadata {
@@ -64,7 +76,14 @@ struct MediaProbe {
         else {
             return Metadata()
         }
-        return metadata(from: fields)
+        var metadata = metadata(from: fields)
+        // Best-effort: a full dump that fails must not fail the upload it rides
+        // on. `try?` leaves `raw` nil on failure — "not attempted" — so a
+        // transient exiftool error is retried later rather than recorded as a
+        // file with no metadata. The typed fields above are what the timeline
+        // needs; this is only the reference section.
+        metadata.raw = try? await fullDump(url)
+        return metadata
     }
 
     /// Probes many photos in a single `exiftool` invocation.
@@ -214,6 +233,13 @@ struct MediaProbe {
         metadata.cameraMake = normalized["com.apple.quicktime.make"] as? String
         metadata.cameraModel = normalized["com.apple.quicktime.model"] as? String
 
+        // exiftool reads a video's container the way it reads a photo's EXIF —
+        // the QuickTime atoms Synology shows (handler, track dates, graphics
+        // mode, the com.apple.quicktime.* keys) all come out of the same pass,
+        // so one code path dumps every media type. ffprobe stays above for the
+        // curated columns it does better (rotation-aware dimensions, duration).
+        metadata.raw = try? await fullDump(url)
+
         return metadata
     }
 
@@ -255,6 +281,162 @@ struct MediaProbe {
         guard numbers.count >= 2,
               abs(numbers[0]) <= 90, abs(numbers[1]) <= 180 else { return nil }
         return (numbers[0], numbers[1])
+    }
+
+    // MARK: - Full dump (the sidebar's technical section)
+
+    /// Every meaningful tag the file records, grouped for the Information panel.
+    ///
+    /// One `exiftool -g1` pass — grouped by exiftool's own family-1 groups
+    /// (`ExifIFD`, `GPS`, `QuickTime`, `Track1`, …) — folded into a handful of
+    /// friendly sections. exiftool reads stills and video alike, so this covers
+    /// every media type; the curated typed columns come from the passes above.
+    ///
+    /// `-struct` is deliberately *off*: it nests structured tags into JSON
+    /// objects, and a flat scalar per row is exactly what a two-column panel
+    /// wants. `-c "%+.6f"` prints GPS as signed decimals rather than
+    /// "38 deg 44' 16.80\" N", which reads better and matches the map.
+    static func fullDump(_ url: URL) async throws -> [MetadataGroup] {
+        let result = try await Shell.runChecked(
+            "exiftool", ["-json", "-g1", "-c", "%+.6f", url.path], timeout: 60
+        )
+        guard
+            let array = try JSONSerialization.jsonObject(with: result.stdout) as? [[String: Any]],
+            let root = array.first
+        else {
+            return []
+        }
+        return groups(from: root)
+    }
+
+    /// exiftool family-1 groups, in display order, keyed to a friendly section
+    /// title. A group that maps to nil is dropped wholesale — pure filesystem
+    /// facts and exiftool's own bookkeeping, which no one browsing a photo wants.
+    private static func section(forGroup group: String) -> String? {
+        switch group {
+        case "System", "ExifTool": return nil
+        case "File", "Composite": return "General"
+        case "GPS": return "Location"
+        case "IFD0", "IFD1", "SubIFD", "ExifIFD", "InteropIFD", "MakerNotes", "Apple":
+            return "Camera"
+        case "PNG", "JFIF", "GIF", "BMP", "PSD": return "Image"
+        default:
+            if group.hasPrefix("Track") || group.hasPrefix("QuickTime")
+                || group.hasPrefix("Keys") || group.hasPrefix("ItemList")
+                || group.hasPrefix("UserData") || group.hasPrefix("Meta")
+                || group.hasPrefix("Matroska") || group.hasPrefix("RIFF")
+                || group.hasPrefix("H264") || group.hasPrefix("MPEG")
+                || group.hasPrefix("Flash") {
+                return "Media"
+            }
+            if group.hasPrefix("XMP") || group.hasPrefix("ICC")
+                || group.hasPrefix("IPTC") || group.hasPrefix("Photoshop")
+                || group.hasPrefix("APP") || group == "Adobe" {
+                return "Advanced"
+            }
+            // Anything unrecognised is kept under its own cleaned name rather
+            // than lost — a camera maker's private group is exactly the kind of
+            // thing someone digs into the panel to find.
+            return spaced(group)
+        }
+    }
+
+    /// The order sections appear in the panel. Titles not listed (an unknown
+    /// group's own name) follow, alphabetically.
+    private static let sectionOrder = ["General", "Camera", "Media", "Image", "Location", "Advanced"]
+
+    /// Filesystem and bookkeeping keys that survive their group — mostly from
+    /// `File` — and say nothing about the photograph.
+    private static let droppedKeys: Set<String> = [
+        "Directory", "FileName", "FilePermissions", "FileModifyDate",
+        "FileAccessDate", "FileInodeChangeDate", "FileTypeExtension",
+        "ExifByteOrder", "CurrentIPTCDigest", "SourceFile", "Warning",
+    ]
+
+    private static func groups(from root: [String: Any]) -> [MetadataGroup] {
+        var bySection: [String: [MetadataEntry]] = [:]
+        // Dedupe within a section: several exiftool groups fold into "Camera",
+        // and Make/Model turning up in both IFD0 and MakerNotes would show the
+        // same row twice.
+        var seen: [String: Set<String>] = [:]
+
+        for (group, value) in root {
+            guard let title = section(forGroup: group),
+                  let fields = value as? [String: Any] else { continue }
+            for (key, rawValue) in fields {
+                guard !droppedKeys.contains(key),
+                      let text = displayValue(rawValue),
+                      !isNoisy(text) else { continue }
+                let label = spaced(key)
+                if seen[title, default: []].contains(label) { continue }
+                seen[title, default: []].insert(label)
+                bySection[title, default: []].append(MetadataEntry(label: label, value: text))
+            }
+        }
+
+        // Known sections first in a fixed order, then any unrecognised group's
+        // own title alphabetically. Rows within a section are sorted so the
+        // panel is stable across probes rather than in hash order.
+        let known = sectionOrder.filter { bySection[$0] != nil }
+        let extra = bySection.keys.filter { !sectionOrder.contains($0) }.sorted()
+        return (known + extra).compactMap { title in
+            guard let entries = bySection[title], !entries.isEmpty else { return nil }
+            return MetadataGroup(
+                title: title,
+                entries: entries.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+            )
+        }
+    }
+
+    /// A JSON value as one line of display text, or nil to skip it.
+    private static func displayValue(_ value: Any) -> String? {
+        switch value {
+        case let string as String:
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case let number as NSNumber:
+            return number.stringValue
+        case let array as [Any]:
+            let parts = array.compactMap { displayValue($0) }
+            return parts.isEmpty ? nil : parts.joined(separator: ", ")
+        default:
+            // A nested object (rare without -struct) isn't a single line; drop it.
+            return nil
+        }
+    }
+
+    /// Binary blobs and over-long values exiftool emits for embedded thumbnails,
+    /// colour profiles and the like — a row of "(Binary data 20564 bytes …)" or
+    /// a 4 KB base64 string is noise, not information.
+    private static func isNoisy(_ text: String) -> Bool {
+        text.count > 160
+            || text.hasPrefix("(Binary data")
+            || text.hasPrefix("base64:")
+            || text.hasPrefix("use -b option")
+    }
+
+    /// `HandlerVendorID` → `Handler Vendor ID`, `MIMEType` → `MIME Type`,
+    /// `GPSLatitude` → `GPS Latitude`. A space before an uppercase that starts a
+    /// word (follows a lowercase, or ends an acronym before a lowercase), and
+    /// before a digit run, so the raw tag names read as labels.
+    static func spaced(_ identifier: String) -> String {
+        var out = ""
+        let chars = Array(identifier)
+        for index in chars.indices {
+            let char = chars[index]
+            if index > 0 {
+                let prev = chars[index - 1]
+                let startsWord = char.isUppercase && !prev.isUppercase
+                let endsAcronym = char.isUppercase && prev.isUppercase
+                    && index + 1 < chars.count && chars[index + 1].isLowercase
+                let startsNumber = char.isNumber && !prev.isNumber
+                if startsWord || endsAcronym || startsNumber {
+                    out.append(" ")
+                }
+            }
+            out.append(char)
+        }
+        return out
     }
 }
 

@@ -38,9 +38,57 @@ struct InformationPanel: View {
                 }
                 #endif
                 storageRow
+                // Everything the file itself records, below the curated card:
+                // grouped, filtered and formatted by the server so this is a
+                // plain column of sections rather than a wall of tags.
+                if !detail.groups.isEmpty {
+                    metadataSections
+                }
             }
             .padding(20)
         }
+    }
+
+    // MARK: - Extended metadata
+
+    /// The full technical dump, as a column of titled sections.
+    ///
+    /// A label column and a value column, the way Synology and Finder's Get Info
+    /// both lay it out — the labels scan down the left, the values read across.
+    /// Values are selectable so a coordinate or a serial number can be copied
+    /// out; the server has already dropped the binary blobs and filesystem noise
+    /// that would make this overwhelming.
+    private var metadataSections: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach(Array(detail.groups.enumerated()), id: \.offset) { _, group in
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(group.title.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .kerning(0.5)
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(group.entries.enumerated()), id: \.offset) { _, entry in
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text(entry.label)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 118, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(entry.value)
+                                    .font(.footnote)
+                                    #if !os(tvOS)
+                                    .textSelection(.enabled)
+                                    #endif
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
     }
 
     // MARK: - Caption

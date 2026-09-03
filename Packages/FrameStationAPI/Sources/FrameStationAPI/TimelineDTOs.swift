@@ -210,6 +210,39 @@ public struct SpaceChanges: Codable, Sendable, Hashable {
     }
 }
 
+// MARK: - Extended metadata
+
+/// One labelled value in the extended-metadata dump — a single row of the
+/// Information panel's technical section.
+public struct MetadataEntry: Codable, Sendable, Hashable {
+    /// A human label, e.g. "Focal Length" or "Handler Vendor ID".
+    public let label: String
+    /// Already formatted for display by the server, e.g. "24 mm" or "Apple".
+    public let value: String
+
+    public init(label: String, value: String) {
+        self.label = label
+        self.value = value
+    }
+}
+
+/// A titled group of metadata rows, e.g. "General", "Camera", "Video".
+///
+/// The server does the grouping, ordering, noise-filtering and value
+/// formatting, so the client is a dumb renderer: a column of sections, each a
+/// title over its rows. Keeping that on the server means one implementation
+/// decides what "well organized and not overwhelming" means, and every platform
+/// shows the same thing.
+public struct MetadataGroup: Codable, Sendable, Hashable {
+    public let title: String
+    public let entries: [MetadataEntry]
+
+    public init(title: String, entries: [MetadataEntry]) {
+        self.title = title
+        self.entries = entries
+    }
+}
+
 // MARK: - Detail
 
 /// Everything the Information panel shows. See ARCHITECTURE.md §9a.
@@ -270,8 +303,16 @@ public struct AssetDetail: Codable, Sendable, Hashable {
     public let isLive: Bool?
     /// One frame of a burst. Optional for the same reason; read via `isBurst`.
     public let isBurst: Bool?
+    /// The full technical dump — every meaningful tag exiftool and ffprobe read
+    /// out of the file, grouped and formatted for display. Optional for the
+    /// same decode-safety reason as the fields above, and nil until the server
+    /// has probed the file (older rows fill in over the metadata backfill).
+    /// Read via `groups`, which supplies the empty array a missing key cannot.
+    public let extendedMetadata: [MetadataGroup]?
 
     public var subtypes: [MediaSubtype] { mediaSubtypes ?? [] }
+    /// The extended metadata, with a missing value read as "none yet".
+    public var groups: [MetadataGroup] { extendedMetadata ?? [] }
     private var live: Bool { isLive ?? false }
     private var burst: Bool { isBurst ?? false }
 
@@ -330,7 +371,8 @@ public struct AssetDetail: Codable, Sendable, Hashable {
         uploadedBy: UserDTO, uploadedAt: Date, isSharedSpace: Bool,
         description: String?, rating: Int?, tags: [String],
         isFavorite: Bool, onDevice: Bool,
-        mediaSubtypes: [MediaSubtype]? = nil, isLive: Bool? = nil, isBurst: Bool? = nil
+        mediaSubtypes: [MediaSubtype]? = nil, isLive: Bool? = nil, isBurst: Bool? = nil,
+        extendedMetadata: [MetadataGroup]? = nil
     ) {
         self.id = id
         self.assetID = assetID
@@ -368,6 +410,7 @@ public struct AssetDetail: Codable, Sendable, Hashable {
         self.mediaSubtypes = mediaSubtypes
         self.isLive = isLive
         self.isBurst = isBurst
+        self.extendedMetadata = extendedMetadata
     }
 
     /// `24 MP` for the camera card.

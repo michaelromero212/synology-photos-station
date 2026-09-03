@@ -346,6 +346,12 @@ struct AssetDetailView: View {
                 session: session,
                 isInspector: true
             ) { showInfo = false }
+            // Keyed to the open photo so a swipe with the panel left open
+            // rebuilds it for the new item. Without this the inspector kept
+            // showing the photo it opened on while you scrolled past others —
+            // the content closure held its first model rather than following
+            // `displayedItem`.
+            .id(displayedItem.id)
             .inspectorColumnWidth(min: 280, ideal: 320, max: 440)
         }
         .onAppear { if showsInfoInitially { showInfo = true } }
@@ -392,9 +398,53 @@ struct AssetDetailView: View {
         }
     }
 
+    /// The capture stamp as the file recorded it, split into a day line and a
+    /// time line for the toolbar.
+    ///
+    /// Formatted in UTC on purpose: `capturedAt` is the local wall clock stored
+    /// as a UTC instant (the timeline's `local_captured_at AT TIME ZONE 'UTC'`),
+    /// so reading it back in UTC recovers the time the photo says it was taken —
+    /// matching the Information panel rather than shifting by the viewer's zone.
+    private static func macStamp(_ date: Date) -> (day: String, time: String) {
+        (macDayFormatter.string(from: date), macTimeFormatter.string(from: date))
+    }
+
+    private static let macDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter
+    }()
+
+    private static let macTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "h:mm a"
+        return formatter
+    }()
+
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
         let model = cache.model(for: displayedItem, spaceID: space.id)
+
+        // Capture date and time, centred — the one thing the Mac viewer had no
+        // room for before. The phone shows it in the bottom chrome; a window
+        // shows it in the title area, which is what `.principal` is. Follows the
+        // swipe because it reads `displayedItem`, and reads the item's own
+        // stamp rather than waiting on the detail fetch.
+        ToolbarItem(placement: .principal) {
+            let stamp = Self.macStamp(displayedItem.capturedAt)
+            VStack(spacing: 0) {
+                Text(stamp.day)
+                    .font(.subheadline.weight(.semibold))
+                Text(stamp.time)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .help("Taken \(stamp.day) at \(stamp.time)")
+        }
 
         // Only while watching a video — on a photo they would have nothing to
         // say. A Mac has no swipe, so what a phone does with a flick needs a
