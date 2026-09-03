@@ -349,27 +349,40 @@ struct UploadController: RouteCollection {
             logger: req.logger
         )
 
-        // Derivatives already exist for content we've seen before.
-        if !result.deduplicated {
-            // Metadata inline: it's ~50 ms and the timeline needs captured_at
-            // and dimensions immediately. Thumbnails are the slow part, so they
-            // go to the queue — an import of 100k assets has to be resumable.
-            do {
-                let metadata = try await MediaProbe.probe(url: blob, mediaType: input.mediaType)
-                try await DerivationWorker.applyMetadata(
-                    metadata, assetID: result.assetID, on: req.sql,
-                    geocoder: req.application.geocoder
-                )
-            } catch {
-                req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
-                try? await DerivationWorker.enqueue(
-                    assetID: result.assetID, kind: "metadata", on: req.sql
-                )
-            }
-            try await DerivationWorker.enqueue(
-                assetID: result.assetID, kind: "thumbnails", on: req.sql
+        // Derivation is keyed on what this row actually has, not on the dedup
+        // flag. `deduplicated` means the *bytes* were seen before — not that the
+        // thumbnails still exist (purge deletes content-addressed derivatives
+        // while leaving the asset row) and never that this fresh row carries its
+        // own derived_at/thumbhash. Keying the work on dedup left a re-upload of
+        // purged content grey forever, with no derivation job at all. So this
+        // runs for every commit; a genuine duplicate just regenerates identical
+        // thumbnails, which is rare because the .have fast path links instead.
+        do {
+            // Lean on purpose — `dumpExif: false`. The timeline needs
+            // captured_at and dimensions at once (a Mac upload sends no
+            // dimensions, so the grid can't lay it out until this fills them),
+            // but the full exif dump is a second exiftool spawn whose only
+            // reader is the Information panel. Blocking every one of a hundred
+            // commits on it is what made a burst crawl; it goes to the queue.
+            let metadata = try await MediaProbe.probe(
+                url: blob, mediaType: input.mediaType, dumpExif: false
             )
+            try await DerivationWorker.applyMetadata(
+                metadata, assetID: result.assetID, on: req.sql,
+                geocoder: req.application.geocoder
+            )
+        } catch {
+            req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
         }
+        // The exif dump in the background, and thumbnails too. Thumbnails outrank
+        // metadata in the worker's claim, so the tiles a person is watching fill
+        // before the deep metadata does.
+        try? await DerivationWorker.enqueue(
+            assetID: result.assetID, kind: "metadata", on: req.sql
+        )
+        try await DerivationWorker.enqueue(
+            assetID: result.assetID, kind: "thumbnails", on: req.sql
+        )
 
         req.logger.info(
             "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated))"

@@ -184,7 +184,19 @@ enum BrowseTree {
             return .hardlink
         }
 
-        try manager.copyItem(atPath: source, toPath: destination)
+        do {
+            try manager.copyItem(atPath: source, toPath: destination)
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+            // The file is already there — a previous sweep placed it, `cp`
+            // created it before failing, or two lanes raced. The destination is
+            // content-addressed (`deduplicated` suffixes different bytes by
+            // sha), so a file already at this path *is* the right file. Count it
+            // placed rather than throwing: throwing is what left every colliding
+            // file un-recorded and re-tried each 20-second sweep, the 516 flood
+            // that never converges under a big batch.
+            return .reflink
+        }
         logger.warning(
             "browse tree: copied \(destination) — this duplicates the file on disk"
         )

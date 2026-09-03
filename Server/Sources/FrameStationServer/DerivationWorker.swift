@@ -131,7 +131,11 @@ actor DerivationWorker {
                        OR (state = 'running'
                            AND started_at < now() - interval '15 minutes'
                            AND attempts < 3)
-                    ORDER BY created_at
+                    -- Thumbnails first: they are what someone watching the grid
+                    -- is waiting on, so a burst of uploads (and the exif-dump
+                    -- backfill sharing this queue) fills tiles before it spends
+                    -- lanes on the deep metadata behind them.
+                    ORDER BY (kind = 'thumbnails') DESC, created_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )

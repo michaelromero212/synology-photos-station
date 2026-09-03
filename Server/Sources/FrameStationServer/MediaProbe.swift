@@ -45,10 +45,16 @@ struct MediaProbe {
         var raw: [MetadataGroup]?
     }
 
-    static func probe(url: URL, mediaType: MediaType) async throws -> Metadata {
+    /// `dumpExif: false` skips the full `exiftool -g1` pass — a second exiftool
+    /// spawn whose only consumer is the Information panel's reference section.
+    /// The commit path passes false so a burst of uploads isn't each blocked on
+    /// it; the background metadata job (default true) fills `exif` shortly after.
+    static func probe(
+        url: URL, mediaType: MediaType, dumpExif: Bool = true
+    ) async throws -> Metadata {
         switch mediaType {
-        case .photo: return try await probePhoto(url)
-        case .video: return try await probeVideo(url)
+        case .photo: return try await probePhoto(url, dumpExif: dumpExif)
+        case .video: return try await probeVideo(url, dumpExif: dumpExif)
         }
     }
 
@@ -66,7 +72,7 @@ struct MediaProbe {
         "-HDRGainMapVersion", "-MPImageType", "-ProfileDescription",
     ]
 
-    private static func probePhoto(_ url: URL) async throws -> Metadata {
+    private static func probePhoto(_ url: URL, dumpExif: Bool) async throws -> Metadata {
         let result = try await Shell.runChecked(
             "exiftool", ["-json", "-q"] + exifTags + [url.path], timeout: 60
         )
@@ -81,8 +87,10 @@ struct MediaProbe {
         // on. `try?` leaves `raw` nil on failure — "not attempted" — so a
         // transient exiftool error is retried later rather than recorded as a
         // file with no metadata. The typed fields above are what the timeline
-        // needs; this is only the reference section.
-        metadata.raw = try? await fullDump(url)
+        // needs; this is only the reference section, and it is skipped entirely
+        // on the commit path (`dumpExif: false`) so an upload burst isn't each
+        // blocked on a second exiftool run.
+        if dumpExif { metadata.raw = try? await fullDump(url) }
         return metadata
     }
 
@@ -187,7 +195,7 @@ struct MediaProbe {
 
     // MARK: - Videos
 
-    private static func probeVideo(_ url: URL) async throws -> Metadata {
+    private static func probeVideo(_ url: URL, dumpExif: Bool) async throws -> Metadata {
         let result = try await Shell.runChecked(
             "ffprobe",
             ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", url.path],
@@ -238,7 +246,8 @@ struct MediaProbe {
         // mode, the com.apple.quicktime.* keys) all come out of the same pass,
         // so one code path dumps every media type. ffprobe stays above for the
         // curated columns it does better (rotation-aware dimensions, duration).
-        metadata.raw = try? await fullDump(url)
+        // Skipped on the commit path; the background metadata job fills it in.
+        if dumpExif { metadata.raw = try? await fullDump(url) }
 
         return metadata
     }

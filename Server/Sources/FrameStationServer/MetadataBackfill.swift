@@ -126,4 +126,35 @@ enum MetadataBackfill {
             app.logger.error("metadata dump backfill failed: \(String(reflecting: error))")
         }
     }
+
+    /// Enqueues thumbnails for live assets that have none.
+    ///
+    /// Heals rows that reached a live placement without derivatives — chiefly
+    /// the dedup/purge bug, where a re-upload of purged content was treated as
+    /// "already derived" and skipped derivation, so its tile stayed grey with no
+    /// job to fix it. `derived_at IS NULL` on a live, non-deleted placement is
+    /// exactly that state; enqueue re-pends any stale job or creates a fresh one.
+    ///
+    /// Only live placements, so purged/deleted rows aren't dragged back onto the
+    /// queue. Bounded per boot; `derived_at` is set once a thumbnail lands, so a
+    /// healed asset drops out of the next pass.
+    static func enqueueMissingThumbnails(on app: Application) async {
+        do {
+            try await app.sql.raw("""
+                WITH todo AS (
+                    SELECT DISTINCT a.id
+                    FROM assets a
+                    JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
+                    WHERE a.derived_at IS NULL
+                    LIMIT 5000
+                )
+                INSERT INTO derivation_jobs (asset_id, kind)
+                SELECT id, 'thumbnails' FROM todo
+                ON CONFLICT (asset_id, kind)
+                DO UPDATE SET state = 'pending', attempts = 0, last_error = NULL
+                """).run()
+        } catch {
+            app.logger.error("thumbnail heal failed: \(String(reflecting: error))")
+        }
+    }
 }

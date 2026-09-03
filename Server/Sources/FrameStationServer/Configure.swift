@@ -124,6 +124,11 @@ func configure(_ app: Application) async throws {
         // Information panel now shows — same "no re-upload" idea, but the work
         // goes on the derivation queue rather than running inline.
         Task { await MetadataBackfill.enqueueMissingExif(on: app) }
+        // Heal any live asset that reached the grid without a thumbnail — the
+        // dedup/purge bug left a handful grey with no job. Runs after the exif
+        // enqueue, but thumbnails outrank metadata in the worker, so these fill
+        // first regardless of order.
+        Task { await MetadataBackfill.enqueueMissingThumbnails(on: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")
