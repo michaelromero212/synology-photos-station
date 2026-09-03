@@ -27,9 +27,23 @@ struct PhotoCell: View {
         self.item = item
         self.loader = loader
         self.size = size
-        _image = State(initialValue: loader?.cachedThumbnail(
+        let cached = loader?.cachedThumbnail(
             assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
-        ))
+        )
+        _image = State(initialValue: cached)
+        // Decode the ThumbHash here too, so a tile with no cached picture opens
+        // on its blurred preview instead of a grey square. This is the whole of
+        // "thumbnails appear instantly": the sharp image still arrives over the
+        // network in `load`, but there is a recognisable picture from the first
+        // frame rather than grey → blur → sharp. The decode is 32px on bytes
+        // already in the item — no network, no actor hop — cheap enough to run
+        // as each lazy cell is created. Skipped when the sharp image is already
+        // in hand, since then there is nothing to stand in for.
+        _placeholder = State(
+            initialValue: cached == nil
+                ? item.thumbHashBytes.flatMap(ThumbnailLoader.placeholder(from:))
+                : nil
+        )
     }
 
     /// The picture is clipped to the tile *before* the overlay goes on.
@@ -145,10 +159,10 @@ struct PhotoCell: View {
         // nothing to animate.
         if image != nil { return }
 
-        if let bytes = item.thumbHashBytes {
-            placeholder = ThumbnailLoader.placeholder(from: bytes)
-        }
-        // 202 while the derivation queue is behind; keep the placeholder rather
+        // The ThumbHash placeholder was seeded in `init`, so it is already on
+        // screen — no decode here, and no grey frame before it.
+        //
+        // 202 while the derivation queue is behind: keep the placeholder rather
         // than requesting an image that isn't there yet. The grid is told when
         // that changes — see DerivationWorker — and this task is keyed on it.
         guard item.isDerived, let loader else { return }
