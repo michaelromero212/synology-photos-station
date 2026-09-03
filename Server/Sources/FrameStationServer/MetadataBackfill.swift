@@ -29,7 +29,12 @@ enum MetadataBackfill {
                         LIMIT 1) AS filename,
                        a.media_subtypes AS "mediaSubtypes"
                 FROM assets a
-                WHERE a.captured_at IS NULL
+                -- Missing a date, or carrying a non-zero offset a filename date
+                -- must not keep. The second half re-corrects rows an earlier
+                -- version mis-dated: it stored the filename wall clock but kept
+                -- a stale offset from the upload, so a 3:45 AM screenshot showed
+                -- 11:45 PM the day before and sorted into the wrong day.
+                WHERE (a.captured_at IS NULL OR a.captured_tz_off IS DISTINCT FROM 0)
                 LIMIT 2000
                 """).all(decoding: Row.self)
 
@@ -38,18 +43,22 @@ enum MetadataBackfill {
             for row in rows {
                 guard let filename = row.filename else { continue }
 
-                // The date, from the name, as a wall clock stored at zero
-                // offset — see FilenameMetadata. `local_captured_at` is kept in
-                // step, since the timeline sorts on it.
+                // A filename time is a bare wall clock with no zone, so it is
+                // stored at a *zero* offset — never a COALESCE that would keep a
+                // stale one — and `local_captured_at` is the same wall clock.
+                // Display and sort then both read the time written in the name.
+                //
+                // Overwrites unconditionally: a file whose name carries a date
+                // has no better source (a screenshot has no EXIF), and a camera
+                // file, whose name carries none, never reaches this branch — so
+                // this never overrides a real EXIF or device date.
                 if let date = FilenameMetadata.captureDate(from: filename) {
                     try await sql.raw("""
                         UPDATE assets
                         SET captured_at = \(bind: date),
-                            captured_tz_off = COALESCE(captured_tz_off, 0),
-                            local_captured_at =
-                                (\(bind: date) + COALESCE(captured_tz_off, 0) * interval '1 second')
-                                AT TIME ZONE 'UTC'
-                        WHERE id = \(bind: row.id) AND captured_at IS NULL
+                            captured_tz_off = 0,
+                            local_captured_at = \(bind: date) AT TIME ZONE 'UTC'
+                        WHERE id = \(bind: row.id)
                         """).run()
                     dated += 1
                 }
