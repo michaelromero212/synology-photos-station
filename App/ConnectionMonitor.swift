@@ -28,6 +28,14 @@ final class ConnectionMonitor {
 
     private(set) var state: State = .online
 
+    /// Whether the current network path is metered — cellular or a personal
+    /// hotspot, as opposed to Wi-Fi or wired. Drives the "Wi-Fi Only" backup
+    /// setting: an unattended backup must not spend the user's cellular data.
+    /// Defaults to false (assume Wi-Fi) so a probe that hasn't reported yet
+    /// doesn't wrongly block; `NWPathMonitor` reports within milliseconds of
+    /// starting.
+    private(set) var isExpensive = false
+
     /// Called on the edge back to `.online`, so backup picks up where the
     /// outage stopped it rather than waiting for the next background window.
     var onReconnect: (@MainActor () async -> Void)?
@@ -54,7 +62,11 @@ final class ConnectionMonitor {
     func start() {
         path.pathUpdateHandler = { [weak self] update in
             let satisfied = update.status == .satisfied
-            Task { @MainActor [weak self] in self?.pathChanged(satisfied: satisfied) }
+            let expensive = update.isExpensive
+            Task { @MainActor [weak self] in
+                self?.isExpensive = expensive
+                self?.pathChanged(satisfied: satisfied)
+            }
         }
         path.start(queue: DispatchQueue(label: "com.michaelromero.FrameStation.path"))
 

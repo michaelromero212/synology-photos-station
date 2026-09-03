@@ -308,6 +308,13 @@ final class BackupEngine {
 
     // MARK: - Uploading
 
+    /// False when "Wi-Fi Only" is on and the only path is metered (cellular or a
+    /// personal hotspot). The whole point of the setting is that an unattended
+    /// backup never spends the user's cellular data.
+    private var allowedOnCurrentNetwork: Bool {
+        !settings.wifiOnly || !connection.isExpensive
+    }
+
     func start() async {
         guard !isRunning else { return }
         guard let client = session.client, let space = settings.targetSpace(in: session.spaces) else {
@@ -322,6 +329,13 @@ final class BackupEngine {
         refreshProgress(context)
 
         while !cancelled {
+            // Wi-Fi gate, re-checked every iteration so a run also stops if
+            // Wi-Fi drops to cellular mid-backup. The next background window, or
+            // reopening the app on Wi-Fi, resumes from exactly here.
+            guard allowedOnCurrentNetwork else {
+                statusText = "Waiting for Wi‑Fi"
+                break
+            }
             guard let item = nextItem(context) else { break }
             let failure = await upload(
                 item, client: client, spaceID: space.id, context: context
@@ -343,15 +357,24 @@ final class BackupEngine {
 
     /// Oldest-first among retryable work. Items that failed three times are
     /// left alone so one bad asset can't stall everything behind it.
+    ///
+    /// A predicate rather than fetch-oldest-N-then-filter: `done` rows are never
+    /// removed (they are what keeps an asset from being re-queued), so a plain
+    /// oldest-N window fills with them and returns nil once the first N are up —
+    /// which stalled any backup of more than N items at exactly N. Selecting the
+    /// oldest *retryable* row directly finds the next one however much of the
+    /// queue is already done, so a library of thousands drains to the end.
     private func nextItem(_ context: ModelContext) -> BackupItem? {
+        let pending = BackupItem.State.pending.rawValue
+        let failed = BackupItem.State.failed.rawValue
         var descriptor = FetchDescriptor<BackupItem>(
+            predicate: #Predicate {
+                $0.stateRaw == pending || ($0.stateRaw == failed && $0.attempts < 3)
+            },
             sortBy: [SortDescriptor(\.queuedAt)]
         )
-        descriptor.fetchLimit = 200
-        let batch = (try? context.fetch(descriptor)) ?? []
-        return batch.first {
-            $0.state == .pending || ($0.state == .failed && $0.attempts < 3)
-        }
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
     }
 
     /// Returns why the item failed, or nil if it went up or was skipped.
@@ -519,25 +542,40 @@ final class BackupEngine {
     // MARK: - Helpers
 
     private func refreshProgress(_ context: ModelContext) {
-        let all = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
-        queued = all
-            .filter { $0.state == .pending || $0.state == .uploading }
-            .sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) }
-            .map {
-                ($0.localIdentifier, $0.capturedAt ?? Date(),
-                 $0.state == .uploading ? .uploading : .pending)
-            }
-        var next = BackupProgress()
-        for item in all {
-            switch item.state {
-            case .pending, .uploading:
-                next.pending += 1
-                next.bytesRemaining += item.byteSize
-            case .done: next.done += 1
-            case .failed: next.failed += 1
-            case .skipped: next.skipped += 1
-            }
+        // Counts come from `fetchCount`, which never builds objects — the old
+        // full-table fetch materialized every row after *every* upload, and the
+        // `done` pile grows without bound over a large backup, so that was
+        // O(n) work per item and O(n²) per run: the thing that would jank the
+        // UI at thousands. Only the outstanding rows are loaded, and only to sum
+        // their bytes and show the head of the queue.
+        func count(_ state: BackupItem.State) -> Int {
+            let raw = state.rawValue
+            return (try? context.fetchCount(
+                FetchDescriptor<BackupItem>(predicate: #Predicate { $0.stateRaw == raw })
+            )) ?? 0
         }
+
+        var next = BackupProgress()
+        next.done = count(.done)
+        next.failed = count(.failed)
+        next.skipped = count(.skipped)
+
+        let pending = BackupItem.State.pending.rawValue
+        let uploading = BackupItem.State.uploading.rawValue
+        let outstanding = FetchDescriptor<BackupItem>(
+            predicate: #Predicate { $0.stateRaw == pending || $0.stateRaw == uploading },
+            sortBy: [SortDescriptor(\.capturedAt, order: .reverse)]
+        )
+        let rows = (try? context.fetch(outstanding)) ?? []
+        next.pending = rows.count
+        next.bytesRemaining = rows.reduce(0) { $0 + $1.byteSize }
+        // The grid only shows the head of the queue; a thousand-item backlog
+        // doesn't need a thousand tiles laid out at once.
+        queued = rows.prefix(500).map {
+            ($0.localIdentifier, $0.capturedAt ?? Date(),
+             $0.state == .uploading ? .uploading : .pending)
+        }
+
         progress = next
     }
 
