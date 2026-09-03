@@ -126,6 +126,10 @@ struct TimelineView: View {
     @State private var showFileImporter = false
     @State private var isDropTargeted = false
     @State private var showUploadQueue = false
+    /// When and where the last click landed, so a second one on the same tile
+    /// can be read as a double-click without a gesture that delays the first.
+    @State private var lastClickAt = Date.distantPast
+    @State private var lastClickedID: UUID?
     #endif
     #if os(iOS)
     @State private var showBackup = false
@@ -538,20 +542,35 @@ struct TimelineView: View {
                 }
             }
             .contentShape(Rectangle())
-            // Double before single. Both are needed and the order matters, but
-            // neither was ever the reason clicks did nothing — that was an
-            // empty `.safeAreaInset` covering the grid, above.
-            .onTapGesture(count: 2) {
-                selection.clear()
-                openItem = OpenedPhoto(
-                    item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
-                )
-            }
+            // One gesture, and the second click recognised by timing.
+            //
+            // Any double-tap recogniser — competing *or* simultaneous — makes
+            // a single click wait to see whether a second one is coming, so
+            // the highlight always arrived a visible beat after the press.
+            // Measured: the ring was absent immediately after the click and
+            // present two seconds later.
+            //
+            // AppKit does not work that way and neither does the Finder: the
+            // first click selects at once, and a second one soon after means
+            // open. Deciding from the interval is that behaviour exactly, and
+            // it leaves one gesture on the tile, which fires immediately.
             .onTapGesture {
-                // ⌘-click adds to what is picked; a plain click replaces it.
-                // Read from the event rather than through a second gesture,
-                // which would compete with these two for the click.
-                if NSEvent.modifierFlags.contains(.command) {
+                let now = Date()
+                let isSecondClick = lastClickedID == item.id
+                    && now.timeIntervalSince(lastClickAt) <= NSEvent.doubleClickInterval
+                lastClickAt = now
+                lastClickedID = item.id
+
+                if isSecondClick {
+                    // Undo the selection the first click made — opening is what
+                    // the pair meant, not "select then open".
+                    lastClickedID = nil
+                    selection.clear()
+                    openItem = OpenedPhoto(
+                        item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
+                    )
+                } else if NSEvent.modifierFlags.contains(.command) {
+                    // ⌘-click adds to what is picked; a plain click replaces it.
                     selection.isActive = true
                     selection.toggle(item)
                 } else {

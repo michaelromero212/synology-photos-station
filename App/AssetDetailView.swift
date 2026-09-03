@@ -195,6 +195,12 @@ struct AssetDetailView: View {
     /// next/previous video controls have to be able to move it — there is no
     /// pager on these platforms to do that for them.
     @State private var displayedItem: TimelineItem
+    #if os(macOS)
+    /// Which page the scroll view has settled on. Separate from
+    /// `displayedItem` because the two drive each other in opposite
+    /// directions — a swipe moves this, a button moves that.
+    @State private var scrolledID: UUID?
+    #endif
     #endif
 
     init(
@@ -215,6 +221,12 @@ struct AssetDetailView: View {
         self._focus = State(initialValue: PagerFocus(currentID: item.id))
         #else
         self._displayedItem = State(initialValue: item)
+        #if os(macOS)
+        // Set here rather than in `onAppear`: a scroll position assigned after
+        // the first layout scrolls there visibly, so opening a photograph from
+        // the middle of a day would flick past the ones before it.
+        self._scrolledID = State(initialValue: item.id)
+        #endif
         #endif
     }
 
@@ -313,19 +325,12 @@ struct AssetDetailView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            AssetPage(
-                model: cache.model(for: displayedItem, spaceID: space.id),
-                session: session,
-                focus: PagerFocus(currentID: displayedItem.id),
-                preloader: preloader,
-                showsChrome: true,
-                onSingleTap: {},
-                isZoomed: .constant(false)
-            )
-        }
+        // One `#if` around the whole thing, content and modifiers together. Two
+        // — one choosing the content, another adding the modifiers — breaks the
+        // chain: the compiler closes the expression at the first `#endif` and
+        // reads `.toolbar` as a new statement.
         #if os(macOS)
+        macPager
         // Actions in the toolbar, and Information as an inspector.
         //
         // Both were a floating bar across the bottom of the picture with a
@@ -348,6 +353,18 @@ struct AssetDetailView: View {
         // tvOS keeps the bar across the bottom. There is no toolbar to move
         // these into and no pointer to open an inspector with — a remote walks
         // a row of buttons, which is exactly what this is.
+        ZStack {
+            Color.black.ignoresSafeArea()
+            AssetPage(
+                model: cache.model(for: displayedItem, spaceID: space.id),
+                session: session,
+                focus: PagerFocus(currentID: displayedItem.id),
+                preloader: preloader,
+                showsChrome: true,
+                onSingleTap: {},
+                isZoomed: .constant(false)
+            )
+        }
         .safeAreaInset(edge: .bottom) { actionBar }
         .sheet(isPresented: $showInfo) {
             InformationSheet(
@@ -589,6 +606,93 @@ struct AssetDetailView: View {
         // dismisses the viewer. Claiming those would cost two gestures people
         // already know to buy one this app invented. Skipping to the next clip
         // is a button in the chrome instead.
+    }
+    #endif
+
+    #if os(macOS)
+    /// What a swipe walks through: everything the grid had loaded, falling back
+    /// through the day to this one photograph. The same rule the phone's pager
+    /// uses, so a swipe covers the same run on both.
+    private var macPages: [TimelineItem] {
+        for candidate in [pageItems, dayItems]
+        where candidate.contains(where: { $0.id == item.id }) {
+            return candidate
+        }
+        return [item]
+    }
+
+    /// Two fingers, left or right.
+    ///
+    /// A paging `ScrollView` rather than a swipe gesture, because on a Mac a
+    /// two-finger swipe *is* a scroll: the trackpad sends scroll events, not
+    /// drags, so a `DragGesture` would never see one. Handing the run of
+    /// photographs to a horizontal scroll view lets AppKit's own momentum and
+    /// rubber-banding carry the motion — nothing is interpreted and
+    /// re-animated on top of the fingers, which is what makes it feel immediate.
+    ///
+    /// Lazy on purpose: a day of four hundred photographs would otherwise build
+    /// four hundred image views before showing the one you opened.
+    /// The black gap that opens between two photographs as you swipe — the wide
+    /// gutter in Apple's swipe frames. At rest a photograph fills the viewport
+    /// and this gap is off-screen; it only appears mid-swipe, between pages.
+    static let pageGap: CGFloat = 80
+
+    private var macPager: some View {
+        // Apple's carousel, replicated exactly from the swipe frames.
+        //
+        // At rest each photograph *fills* the viewport, edge to edge — no fat
+        // gutter around it. The large black gap only opens *between* two
+        // photographs as you swipe. So the gap is the spacing between pages,
+        // not padding inside them, which was my mistake before.
+        //
+        // No `GeometryReader` — that reported the full window width and let the
+        // pictures bleed under the sidebar. A bare `ScrollView` respects the
+        // safe area the way the grid does, and `containerRelativeFrame` measures
+        // that region, so a page is exactly one visible screen.
+        //
+        // `.paging`, and the gap *inside* each page rather than between them.
+        //
+        // `.viewAligned` with spacing between pages was wrong twice over: it is
+        // built to rest showing a sliver of the neighbour, and before the first
+        // swipe settled it it rested between two, so the next photograph crept
+        // in on the right until you moved. Paging cannot rest anywhere but on a
+        // page boundary, so exactly one photograph shows, first open included.
+        //
+        // The gap becomes horizontal padding within each page. Pages stay edge
+        // to edge and exactly one screen wide, so paging snaps cleanly with no
+        // drift; the gap opens between two pictures mid-swipe (a full `pageGap`)
+        // and leaves a `pageGap`-half margin at rest.
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(macPages) { page in
+                    AssetPage(
+                        model: cache.model(for: page, spaceID: space.id),
+                        session: session,
+                        focus: PagerFocus(currentID: page.id),
+                        preloader: preloader,
+                        showsChrome: true,
+                        onSingleTap: {},
+                        isZoomed: .constant(false)
+                    )
+                    .padding(.horizontal, Self.pageGap / 2)
+                    .containerRelativeFrame(.horizontal)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $scrolledID)
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
+        .background(Color.black)
+        .onChange(of: scrolledID) { _, new in
+            guard let new, new != displayedItem.id,
+                  let match = macPages.first(where: { $0.id == new }) else { return }
+            displayedItem = match
+        }
+        .onChange(of: displayedItem.id) { _, new in
+            if scrolledID != new { scrolledID = new }
+        }
     }
     #endif
 

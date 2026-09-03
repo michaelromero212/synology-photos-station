@@ -259,4 +259,5 @@ enum MacDestination: Hashable {
     case recentlyDeleted
     case spaces
 }
+
 #endif
