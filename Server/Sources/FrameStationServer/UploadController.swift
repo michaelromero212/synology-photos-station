@@ -268,7 +268,7 @@ struct UploadController: RouteCollection {
                 guard let asset = try await sql.raw("""
                     INSERT INTO assets
                         (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
-                         captured_at, captured_tz_off, tz_off_fallback,
+                         captured_at, captured_tz_off, tz_off_fallback, captured_at_fallback,
                          local_captured_at, lat, lon, is_raw,
                          live_group_id, burst_id, burst_pick, media_subtypes, storage_path)
                     VALUES
@@ -277,7 +277,7 @@ struct UploadController: RouteCollection {
                          \(bind: fileExtension),
                          \(bind: input.width), \(bind: input.height), \(bind: input.durationMs),
                          \(bind: input.capturedAt), \(bind: input.capturedTZOffset),
-                         \(bind: input.capturedTZOffsetFallback),
+                         \(bind: input.capturedTZOffsetFallback), \(bind: input.capturedAtFallback),
                          (\(bind: input.capturedAt)
                             + COALESCE(\(bind: input.capturedTZOffset), 0) * interval '1 second')
                             AT TIME ZONE 'UTC',

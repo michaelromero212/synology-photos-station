@@ -278,7 +278,10 @@ actor DerivationWorker {
                 width           = COALESCE(width, \(bind: metadata.width)),
                 height          = COALESCE(height, \(bind: metadata.height)),
                 duration_ms     = COALESCE(duration_ms, \(bind: metadata.durationMs)),
-                captured_at     = COALESCE(captured_at, \(bind: metadata.capturedAt)),
+                -- Client date first, then EXIF, then the file's own creation
+                -- date the client sent as a fallback (0021): a screenshot has
+                -- no EXIF date, so this is the only capture time there is.
+                captured_at     = COALESCE(captured_at, \(bind: metadata.capturedAt), captured_at_fallback),
                 captured_tz_off = COALESCE(
                     captured_tz_off, \(bind: metadata.capturedTZOffset), tz_off_fallback
                 ),

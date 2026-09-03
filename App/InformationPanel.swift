@@ -68,6 +68,7 @@ struct InformationPanel: View {
         }
     }
 
+
     // MARK: - Tags
 
     /// Absent entirely when there are none, rather than an empty row.
@@ -278,11 +279,18 @@ struct InformationPanel: View {
         return formatter.string(from: date)
     }
 
+    /// The camera that took it, or — when nothing did — what it is.
+    ///
+    /// Apple titles this card with the camera ("iPhone 15 Pro") and falls back
+    /// to the *kind* when there is no camera: a screenshot says "Screenshot", a
+    /// panorama "Panorama", a Live Photo "Live Photo". Falling back to a bare
+    /// "Photo" threw that away — the one useful thing a screenshot's card can
+    /// say is that it is a screenshot.
     static func cameraTitle(_ detail: AssetDetail) -> String {
         [detail.cameraMake, detail.cameraModel]
             .compactMap { $0 }
             .joined(separator: " ")
-            .ifEmpty(detail.mediaType == .video ? "Video" : "Photo")
+            .ifEmpty(detail.kind)
     }
 
     /// `Main Camera — 24 mm ƒ1.78`

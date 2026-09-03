@@ -114,6 +114,12 @@ func configure(_ app: Application) async throws {
         let retention = RetentionWorker(app: app)
         app.storage[RetentionWorkerKey.self] = retention
         await retention.start()
+
+        // Fill dates and the screenshot kind into already-stored assets from
+        // their filenames, so the library that predates this reading gains the
+        // metadata without a re-upload. One pass, in the background, off the
+        // boot path.
+        Task { await MetadataBackfill.run(on: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")

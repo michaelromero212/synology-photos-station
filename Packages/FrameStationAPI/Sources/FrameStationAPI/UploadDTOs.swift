@@ -123,6 +123,11 @@ public struct CommitUploadRequest: Codable, Sendable {
     /// The uploading device's offset. Used only if the file records none — see
     /// migration 0007. Never overrides `capturedTZOffset`.
     public let capturedTZOffsetFallback: Int?
+    /// The file's own creation date, sent by a client with no authoritative
+    /// capture time (a Mac dragging in a screenshot). The server uses it only
+    /// when EXIF yields nothing — see migration 0021 — so it never overrides a
+    /// real photo's date.
+    public let capturedAtFallback: Date?
     public let latitude: Double?
     public let longitude: Double?
     public let isRaw: Bool
@@ -158,6 +163,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         capturedAt: Date? = nil,
         capturedTZOffset: Int? = nil,
         capturedTZOffsetFallback: Int? = nil,
+        capturedAtFallback: Date? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil,
         isRaw: Bool = false,
@@ -176,6 +182,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         self.capturedAt = capturedAt
         self.capturedTZOffset = capturedTZOffset
         self.capturedTZOffsetFallback = capturedTZOffsetFallback
+        self.capturedAtFallback = capturedAtFallback
         self.latitude = latitude
         self.longitude = longitude
         self.isRaw = isRaw

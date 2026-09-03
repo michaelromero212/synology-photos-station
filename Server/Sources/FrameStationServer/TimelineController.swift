@@ -291,6 +291,9 @@ struct TimelineController: RouteCollection {
         let exposureBias: Double?
         let dynamicRange: String?
         let isRaw: Bool
+        let mediaSubtypes: [String]
+        let isLive: Bool
+        let isBurst: Bool
         let latitude: Double?
         let longitude: Double?
         let placeName: String?
@@ -298,6 +301,7 @@ struct TimelineController: RouteCollection {
         let uploadedByName: String
         let uploadedAt: Date
         let spaceKind: String
+        let filename: String?
         let description: String?
         let rating: Int?
         let isFavorite: Bool
@@ -335,6 +339,9 @@ struct TimelineController: RouteCollection {
                    a.exposure_bias AS "exposureBias",
                    a.dynamic_range AS "dynamicRange",
                    a.is_raw AS "isRaw",
+                   a.media_subtypes AS "mediaSubtypes",
+                   (a.live_group_id IS NOT NULL) AS "isLive",
+                   (a.burst_id IS NOT NULL) AS "isBurst",
                    a.lat AS latitude,
                    a.lon AS longitude,
                    a.place_name AS "placeName",
@@ -342,6 +349,7 @@ struct TimelineController: RouteCollection {
                    u.display_name AS "uploadedByName",
                    sa.uploaded_at AS "uploadedAt",
                    s.kind AS "spaceKind",
+                   sa.filename,
                    sa.description,
                    sa.rating::int AS rating,
                    EXISTS (
@@ -390,7 +398,7 @@ struct TimelineController: RouteCollection {
             durationMs: row.durationMs,
             capturedAt: row.capturedAt,
             capturedTZOffset: row.capturedTZOffset,
-            filename: nil,
+            filename: row.filename,
             cameraMake: row.cameraMake,
             cameraModel: row.cameraModel,
             lens: row.lens,
@@ -411,7 +419,10 @@ struct TimelineController: RouteCollection {
             rating: row.rating,
             tags: tags,
             isFavorite: row.isFavorite,
-            onDevice: row.onDevice
+            onDevice: row.onDevice,
+            mediaSubtypes: row.mediaSubtypes.compactMap(MediaSubtype.init(rawValue:)),
+            isLive: row.isLive,
+            isBurst: row.isBurst
         )
     }
 

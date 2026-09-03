@@ -121,11 +121,29 @@ final class MacUploads {
         let type = UTType(filenameExtension: item.url.pathExtension.lowercased())
         let isVideo = type?.conforms(to: .movie) ?? false
 
+        // The file's own creation date, as a last-resort capture time. A
+        // screenshot has no EXIF date, but this is when it was taken — the same
+        // date Finder's Get Info shows. Sent as a *fallback*: the server keeps
+        // EXIF's date when a real photo has one, and only uses this when it
+        // doesn't. The device's current offset comes along so the date reads in
+        // local time rather than UTC.
+        let created = (try? item.url.resourceValues(forKeys: [.creationDateKey]))?
+            .creationDate
+        // A screenshot names itself, and a Mac drag has no PhotoKit to ask, so
+        // the name is where the kind comes from. Sending it means the photo
+        // reads as "Screenshot" the moment it lands, rather than waiting for the
+        // server's filename backfill on its next boot.
+        let subtypes: [MediaSubtype] =
+            item.filename.lowercased().hasPrefix("screenshot") ? [.screenshot] : []
+
         let descriptor = UploadDescriptor(
             filename: item.filename,
             mime: type?.preferredMIMEType ?? "application/octet-stream",
             mediaType: isVideo ? .video : .photo,
-            isRaw: Self.rawExtensions.contains(item.url.pathExtension.lowercased())
+            capturedTZOffsetFallback: created.map { TimeZone.current.secondsFromGMT(for: $0) },
+            capturedAtFallback: created,
+            isRaw: Self.rawExtensions.contains(item.url.pathExtension.lowercased()),
+            subtypes: subtypes
         )
 
         let id = item.id

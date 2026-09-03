@@ -256,6 +256,68 @@ public struct AssetDetail: Codable, Sendable, Hashable {
     public let isFavorite: Bool
     /// False once the item is archived — on the NAS but no longer on the device.
     public let onDevice: Bool
+    /// What the device recorded this as — screenshot, panorama, slo-mo, and the
+    /// rest. Drives the "Kind" line in the Information panel. Optional so a
+    /// build that predates it, or a row with none recorded, still decodes.
+    public let mediaSubtypes: [MediaSubtype]?
+    /// A Live Photo — this still has a paired video. Optional for the same
+    /// reason as `mediaSubtypes`: synthesized `Decodable` throws on a missing
+    /// key rather than using a default, so a non-optional field here fails the
+    /// whole detail decode against any server that has not shipped it yet —
+    /// exactly the "data couldn't be read" the panel showed. The name matches
+    /// the server's JSON key so the value actually arrives; read it through
+    /// `isLive`, which supplies the false a missing key cannot.
+    public let isLive: Bool?
+    /// One frame of a burst. Optional for the same reason; read via `isBurst`.
+    public let isBurst: Bool?
+
+    public var subtypes: [MediaSubtype] { mediaSubtypes ?? [] }
+    private var live: Bool { isLive ?? false }
+    private var burst: Bool { isBurst ?? false }
+
+    /// One human label for what this is, the way Photos names it under a photo.
+    ///
+    /// A single primary kind, chosen by what a person would call it first: a
+    /// Live Photo is a Live Photo before it is anything else, a video's
+    /// treatment (slo-mo, time-lapse) beats the bare word "Video", and a
+    /// photo's nature (screenshot, panorama, portrait) beats "Photo". Burst and
+    /// RAW are the fallbacks that still say more than "Photo".
+    public var kind: String {
+        if live { return "Live Photo" }
+        let subtypes = self.subtypes
+        if mediaType == .video {
+            if subtypes.contains(.screenRecording) { return "Screen Recording" }
+            if subtypes.contains(.slomo) { return "Slo-mo" }
+            if subtypes.contains(.timelapse) { return "Time-lapse" }
+            if subtypes.contains(.cinematic) { return "Cinematic" }
+            return "Video"
+        }
+        if subtypes.contains(.screenshot) { return "Screenshot" }
+        if subtypes.contains(.panorama) { return "Panorama" }
+        if subtypes.contains(.portrait) { return "Portrait" }
+        if burst { return "Burst" }
+        if isRaw { return "RAW" }
+        return "Photo"
+    }
+
+    /// The SF Symbol that goes with `kind`.
+    public var kindSymbol: String {
+        if live { return "livephoto" }
+        let subtypes = self.subtypes
+        if mediaType == .video {
+            if subtypes.contains(.screenRecording) { return "record.circle" }
+            if subtypes.contains(.slomo) { return "slowmo" }
+            if subtypes.contains(.timelapse) { return "timelapse" }
+            if subtypes.contains(.cinematic) { return "film" }
+            return "video"
+        }
+        if subtypes.contains(.screenshot) { return "camera.viewfinder" }
+        if subtypes.contains(.panorama) { return "pano" }
+        if subtypes.contains(.portrait) { return "person.crop.square" }
+        if burst { return "square.stack.3d.down.right" }
+        if isRaw { return "camera.aperture" }
+        return "photo"
+    }
 
     public init(
         id: UUID, assetID: UUID, spaceID: UUID, mediaType: MediaType, mime: String,
@@ -267,7 +329,8 @@ public struct AssetDetail: Codable, Sendable, Hashable {
         latitude: Double?, longitude: Double?, placeName: String?,
         uploadedBy: UserDTO, uploadedAt: Date, isSharedSpace: Bool,
         description: String?, rating: Int?, tags: [String],
-        isFavorite: Bool, onDevice: Bool
+        isFavorite: Bool, onDevice: Bool,
+        mediaSubtypes: [MediaSubtype]? = nil, isLive: Bool? = nil, isBurst: Bool? = nil
     ) {
         self.id = id
         self.assetID = assetID
@@ -302,6 +365,9 @@ public struct AssetDetail: Codable, Sendable, Hashable {
         self.tags = tags
         self.isFavorite = isFavorite
         self.onDevice = onDevice
+        self.mediaSubtypes = mediaSubtypes
+        self.isLive = isLive
+        self.isBurst = isBurst
     }
 
     /// `24 MP` for the camera card.

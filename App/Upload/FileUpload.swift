@@ -36,6 +36,9 @@ struct UploadDescriptor {
     var capturedAt: Date?
     var capturedTZOffset: Int?
     var capturedTZOffsetFallback: Int?
+    /// The file's creation date, for a source with no authoritative capture
+    /// time. The server uses it only when EXIF has none.
+    var capturedAtFallback: Date?
     var latitude: Double?
     var longitude: Double?
     var isRaw: Bool = false
@@ -60,6 +63,7 @@ struct UploadDescriptor {
             capturedAt: capturedAt,
             capturedTZOffset: capturedTZOffset,
             capturedTZOffsetFallback: capturedTZOffsetFallback,
+            capturedAtFallback: capturedAtFallback,
             latitude: latitude,
             longitude: longitude,
             isRaw: isRaw,
