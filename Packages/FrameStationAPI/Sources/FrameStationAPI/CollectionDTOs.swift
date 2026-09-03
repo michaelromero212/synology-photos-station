@@ -161,3 +161,16 @@ public struct RestoreAssetsRequest: Codable, Sendable, Hashable {
         self.assetIDs = assetIDs
     }
 }
+
+/// Deletes removed photographs immediately, ahead of the 29-day sweep — the
+/// "Delete Permanently" action in Recently Deleted. Separate from
+/// `RestoreAssetsRequest` despite the identical shape, because a request that
+/// destroys bytes and one that puts them back should never be confused for each
+/// other at a call site.
+public struct PurgeAssetsRequest: Codable, Sendable, Hashable {
+    public let assetIDs: [UUID]
+
+    public init(assetIDs: [UUID]) {
+        self.assetIDs = assetIDs
+    }
+}

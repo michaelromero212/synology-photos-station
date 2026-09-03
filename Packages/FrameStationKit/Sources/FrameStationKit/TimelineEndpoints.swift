@@ -134,6 +134,16 @@ extension FrameStationClient {
         )
     }
 
+    /// Deletes removed photographs immediately, ahead of the 29-day sweep. The
+    /// bytes go; there is no putting these back. The caller confirms first.
+    @discardableResult
+    public func purge(spaceID: UUID, assetIDs: [UUID]) async throws -> MediaEditResponse {
+        try await post(
+            "v1/spaces/\(spaceID)/collections/deleted/purge",
+            body: PurgeAssetsRequest(assetIDs: assetIDs)
+        )
+    }
+
     // MARK: - Media URLs
 
     /// Built rather than fetched so a grid cell can hand a URL straight to the

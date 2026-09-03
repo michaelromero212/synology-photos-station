@@ -599,7 +599,11 @@ struct RecentlyDeletedView: View {
     @State private var isLoading = true
     @State private var selection: Set<UUID> = []
     @State private var isRestoring = false
+    @State private var isPurging = false
+    @State private var confirmPurge = false
     @State private var notice: String?
+
+    private var isWorking: Bool { isRestoring || isPurging }
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
 
@@ -626,14 +630,40 @@ struct RecentlyDeletedView: View {
         #endif
         .toolbar {
             if !selection.isEmpty {
+                // Recover on the right, the primary way out of this room; Delete
+                // to its left, destructive, the same arrangement Photos uses.
+                ToolbarItem(placement: .destructiveAction) {
+                    Button("Delete \(selection.count)", role: .destructive) {
+                        confirmPurge = true
+                    }
+                    .disabled(isWorking)
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isRestoring ? "Restoring…" : "Restore \(selection.count)") {
+                    Button(isRestoring ? "Recovering…" : "Recover \(selection.count)") {
                         restore()
                     }
-                    .disabled(isRestoring)
+                    .disabled(isWorking)
                     .fontWeight(.semibold)
                 }
             }
+        }
+        // Permanent delete skips the 29-day net, so it asks first. Recover
+        // doesn't — putting a photo back is safe and undoable by deleting again.
+        .confirmationDialog(
+            selection.count == 1
+                ? "Delete this photo permanently?"
+                : "Delete \(selection.count) photos permanently?",
+            isPresented: $confirmPurge,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Permanently", role: .destructive) { purge() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This can't be undone. "
+                + (selection.count == 1 ? "It's removed" : "They're removed")
+                + " from your NAS right away, without waiting out the \(Retention.days)-day window."
+            )
         }
         .task { await load() }
     }
@@ -655,7 +685,7 @@ struct RecentlyDeletedView: View {
                     // app could not enforce would have been a promise it had no
                     // way to keep. FrameStation owns the window now and the
                     // sweeper holds it, so the days on these tiles are real.
-                    Text("Photos are kept for \(Retention.days) days. Tap to choose what to put back.")
+                    Text("Photos are kept for \(Retention.days) days. Select to recover, or delete for good.")
                         .font(.footnote)
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 12).padding(.bottom, 6)
@@ -717,6 +747,20 @@ struct RecentlyDeletedView: View {
             let result = try? await client.restore(spaceID: space.id, assetIDs: chosen)
             let n = result?.updated ?? 0
             notice = n == 1 ? "1 photo put back." : "\(n) photos put back."
+            selection.removeAll()
+            await load()
+        }
+    }
+
+    private func purge() {
+        guard let client = session.client, !selection.isEmpty else { return }
+        isPurging = true
+        let chosen = Array(selection)
+        Task {
+            defer { isPurging = false }
+            let result = try? await client.purge(spaceID: space.id, assetIDs: chosen)
+            let n = result?.updated ?? 0
+            notice = n == 1 ? "1 photo deleted permanently." : "\(n) photos deleted permanently."
             selection.removeAll()
             await load()
         }

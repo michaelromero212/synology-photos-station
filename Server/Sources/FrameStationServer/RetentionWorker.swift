@@ -71,7 +71,12 @@ actor RetentionWorker {
                 LIMIT 200
                 """).all(decoding: Expired.self)
 
-            for row in expired { await purge(row, on: sql) }
+            for row in expired {
+                await Self.purge(
+                    placementID: row.id, sha256: row.sha256, blobExt: row.blobExt,
+                    on: sql, blobStore: app.blobStore, logger: app.logger
+                )
+            }
 
             if !expired.isEmpty {
                 app.logger.info("retention: purged \(expired.count) expired removals")
@@ -81,35 +86,48 @@ actor RetentionWorker {
         }
     }
 
-    /// Marks the row purged, and removes the bytes if nothing else wants them.
+    /// Marks one removed placement purged and removes its bytes if nothing else
+    /// wants them. The permanent end of a deletion.
+    ///
+    /// Static and shared: the hourly sweep runs it on everything past the
+    /// window, and the "Delete Permanently" endpoint runs it on the photographs
+    /// someone chose not to wait for. One implementation so the two can never
+    /// tear down differently.
     ///
     /// The order matters and is deliberate. The row is marked first, so a
-    /// failure to unlink cannot leave an item that has passed its window sitting
-    /// in Recently Deleted forever, offering a restore whose file may be half
-    /// gone. Leaving bytes behind wastes space; leaving the row behind lies to
-    /// the user, and of the two that is the one worth avoiding.
-    private func purge(_ row: Expired, on sql: any SQLDatabase) async {
+    /// failure to unlink cannot leave a purged item still sitting in Recently
+    /// Deleted, offering a restore whose file may be half gone. Leaving bytes
+    /// behind wastes space; leaving the row behind lies to the user, and of the
+    /// two that is the one worth avoiding.
+    static func purge(
+        placementID: UUID,
+        sha256: String,
+        blobExt: String,
+        on sql: any SQLDatabase,
+        blobStore: BlobStore,
+        logger: Logger
+    ) async {
         do {
             try await sql.raw("""
-                UPDATE space_assets SET purged_at = now() WHERE id = \(bind: row.id)
+                UPDATE space_assets SET purged_at = now() WHERE id = \(bind: placementID)
                 """).run()
         } catch {
-            app.logger.error("retention: could not mark \(row.id) purged: \(error)")
+            logger.error("purge: could not mark \(placementID) purged: \(error)")
             return
         }
 
         // Blobs are content-addressed and `assets.sha256` is *not* unique —
         // sharing a photograph into a space makes a second asset row over the
         // same bytes. So the bytes may not be this row's to remove: unlinking
-        // them because one copy expired would blank the photograph everywhere
-        // else it still legitimately lives.
+        // them because one copy went would blank the photograph everywhere else
+        // it still legitimately lives.
         do {
             struct Holder: Decodable { let count: Int }
             let holders = try await sql.raw("""
                 SELECT count(*) AS count
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
-                WHERE a.sha256 = \(bind: row.sha256)
+                WHERE a.sha256 = \(bind: sha256)
                   AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
                 """).first(decoding: Holder.self)
 
@@ -117,16 +135,15 @@ actor RetentionWorker {
         } catch {
             // Couldn't establish that the bytes are unwanted, so leave them.
             // A retained blob is recoverable; a wrongly deleted one is not.
-            app.logger.error("retention: could not check holders for \(row.sha256): \(error)")
+            logger.error("purge: could not check holders for \(sha256): \(error)")
             return
         }
 
         let fm = FileManager.default
-        let blob = app.blobStore.blobPath(sha256: row.sha256, fileExtension: row.blobExt)
-        try? fm.removeItem(at: blob)
+        try? fm.removeItem(at: blobStore.blobPath(sha256: sha256, fileExtension: blobExt))
         // Thumbnails, preview, poster and HLS all live under one directory per
         // blob, so the derivatives go with it rather than being enumerated.
-        try? fm.removeItem(at: app.blobStore.derivativeDirectory(sha256: row.sha256))
+        try? fm.removeItem(at: blobStore.derivativeDirectory(sha256: sha256))
     }
 }
 

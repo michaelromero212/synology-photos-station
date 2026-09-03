@@ -682,36 +682,35 @@ struct AssetDetailView: View {
     ///
     /// Lazy on purpose: a day of four hundred photographs would otherwise build
     /// four hundred image views before showing the one you opened.
-    /// The black gap that opens between two photographs as you swipe — the wide
-    /// gutter in Apple's swipe frames. At rest a photograph fills the viewport
-    /// and this gap is off-screen; it only appears mid-swipe, between pages.
-    static let pageGap: CGFloat = 80
+    /// The black gap between two photographs mid-swipe.
+    ///
+    /// Small on purpose. This is horizontal padding inside each page (see the
+    /// note on `macPager`), so half of it also shows as a resting inset — and a
+    /// wide one read as a cheap border sitting around the photo rather than a
+    /// clean full-bleed. At `24` the resting inset is 12 pt, enough to keep the
+    /// picture off the sidebar's glass and no more, while a swipe still parts
+    /// two pictures by a visible gutter.
+    static let pageGap: CGFloat = 24
 
     private var macPager: some View {
-        // Apple's carousel, replicated exactly from the swipe frames.
+        // Apple's viewer: the photograph fills the whole main area, and a small
+        // gap parts two pictures as you swipe.
         //
-        // At rest each photograph *fills* the viewport, edge to edge — no fat
-        // gutter around it. The large black gap only opens *between* two
-        // photographs as you swipe. So the gap is the spacing between pages,
-        // not padding inside them, which was my mistake before.
+        // Each page is sized to the visible region on *both* axes with
+        // `containerRelativeFrame` — width so paging snaps one screen at a time,
+        // and height so the picture fills top to bottom. Width alone was the
+        // bug: a horizontal `ScrollView` leaves the cross axis to the content,
+        // so each page collapsed to the image's fitted height and left a gulf of
+        // black beneath it — the single thing that made this look half-finished
+        // next to Photos. No `GeometryReader`: that measured the whole window
+        // and let pictures bleed under the sidebar.
         //
-        // No `GeometryReader` — that reported the full window width and let the
-        // pictures bleed under the sidebar. A bare `ScrollView` respects the
-        // safe area the way the grid does, and `containerRelativeFrame` measures
-        // that region, so a page is exactly one visible screen.
-        //
-        // `.paging`, and the gap *inside* each page rather than between them.
-        //
-        // `.viewAligned` with spacing between pages was wrong twice over: it is
-        // built to rest showing a sliver of the neighbour, and before the first
-        // swipe settled it it rested between two, so the next photograph crept
-        // in on the right until you moved. Paging cannot rest anywhere but on a
-        // page boundary, so exactly one photograph shows, first open included.
-        //
-        // The gap becomes horizontal padding within each page. Pages stay edge
-        // to edge and exactly one screen wide, so paging snaps cleanly with no
-        // drift; the gap opens between two pictures mid-swipe (a full `pageGap`)
-        // and leaves a `pageGap`-half margin at rest.
+        // The gap is horizontal padding *inside* each page, not spacing between
+        // them, because `.paging` snaps by the viewport and would drift by the
+        // spacing otherwise. So each page stays exactly one screen wide, paging
+        // lands cleanly on one picture (first open included, no neighbour
+        // creeping in), and the gap shows as `pageGap` of black between two
+        // pictures mid-swipe — a thin `pageGap`-half inset at rest.
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(macPages) { page in
@@ -725,7 +724,7 @@ struct AssetDetailView: View {
                         isZoomed: .constant(false)
                     )
                     .padding(.horizontal, Self.pageGap / 2)
-                    .containerRelativeFrame(.horizontal)
+                    .containerRelativeFrame([.horizontal, .vertical])
                 }
             }
             .scrollTargetLayout()
@@ -742,6 +741,34 @@ struct AssetDetailView: View {
         }
         .onChange(of: displayedItem.id) { _, new in
             if scrolledID != new { scrolledID = new }
+            warmNeighbours(around: new)
+        }
+        // Warm the pictures on either side of the one opened, so the very first
+        // swipe is smooth rather than the only rough one.
+        .onAppear { warmNeighbours(around: displayedItem.id) }
+    }
+
+    /// Decodes the photographs on either side of the one shown before a swipe
+    /// reaches them.
+    ///
+    /// The jank was image arrival, not the scroll: `LazyHStack` builds the next
+    /// page only as it slides in, so its `.task` fetched the 2048 px preview
+    /// mid-swipe and the picture popped from ThumbHash blur to sharp in the
+    /// middle of the transition. Loading the neighbours' models now — the same
+    /// models the pages will use, since `ViewerModelCache` hands back one per
+    /// item — means the image is already decoded and set when the page appears,
+    /// so it slides in whole.
+    ///
+    /// `load()` guards itself with `hasLoaded`, so warming a neighbour twice (or
+    /// warming one that is already the current page) costs nothing. A window of
+    /// two each way keeps a run of quick swipes ahead of the fingers.
+    private func warmNeighbours(around id: UUID) {
+        guard let index = macPages.firstIndex(where: { $0.id == id }) else { return }
+        for offset in [-2, -1, 1, 2] {
+            let neighbour = index + offset
+            guard macPages.indices.contains(neighbour) else { continue }
+            let model = cache.model(for: macPages[neighbour], spaceID: space.id)
+            Task { await model.load(loader: session.loader, client: session.client) }
         }
     }
     #endif

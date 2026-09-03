@@ -6,6 +6,7 @@ import Vapor
 extension CollectionsResponse: @retroactive Content {}
 extension NameOccasionRequest: @retroactive Content {}
 extension RestoreAssetsRequest: @retroactive Content {}
+extension PurgeAssetsRequest: @retroactive Content {}
 
 /// The Albums page, assembled from what the library already knows.
 ///
@@ -32,6 +33,7 @@ struct CollectionsController: RouteCollection {
         protected.put("spaces", ":spaceID", "collections", "name", use: name)
         protected.get("spaces", ":spaceID", "collections", "deleted", use: deletedItems)
         protected.post("spaces", ":spaceID", "collections", "deleted", "restore", use: restore)
+        protected.post("spaces", ":spaceID", "collections", "deleted", "purge", use: purge)
     }
 
     /// Below this a collection isn't worth a card. Three photos from one day is
@@ -1319,6 +1321,50 @@ struct CollectionsController: RouteCollection {
             restored += 1
         }
         return MediaEditResponse(updated: restored)
+    }
+
+    /// Deletes chosen removals now, ahead of the sweep — "Delete Permanently".
+    ///
+    /// Only rows that are already removed and not yet purged, and only in a
+    /// space the caller contributes to — the same gate as restore, since the
+    /// person who could put a photo back is the person who may finish deleting
+    /// it. Each teardown runs through the very code the retention sweeper uses,
+    /// so a photo deleted by hand and one that ran out its 29 days leave the
+    /// disk in exactly the same state. Irreversible past this point; the client
+    /// confirms before calling.
+    @Sendable
+    func purge(req: Request) async throws -> MediaEditResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let input = try req.content.decode(PurgeAssetsRequest.self)
+        try await SpaceAccess.requireContributor(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+
+        struct Row: Decodable {
+            let id: UUID
+            let sha256: String
+            let blobExt: String
+        }
+
+        var purged = 0
+        for assetID in input.assetIDs.prefix(500) {
+            guard let row = try await req.sql.raw("""
+                SELECT sa.id, a.sha256, a.blob_ext AS "blobExt"
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
+                  AND sa.deleted_at IS NOT NULL
+                  AND sa.purged_at IS NULL
+                """).first(decoding: Row.self) else { continue }
+
+            await RetentionWorker.purge(
+                placementID: row.id, sha256: row.sha256, blobExt: row.blobExt,
+                on: req.sql, blobStore: req.blobStore, logger: req.logger
+            )
+            purged += 1
+        }
+        return MediaEditResponse(updated: purged)
     }
 
     // MARK: - Contents
