@@ -273,11 +273,32 @@ public actor ThumbnailLoader {
     /// straight to the size we actually want.
     nonisolated static func decode(_ data: Data, targetPixels: Int) -> PlatformImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+
+        // `targetPixels` is the SHORT edge we need — it is the edge that fills a
+        // square grid tile under `scaledToFill`. But `ThumbnailMaxPixelSize`
+        // caps the *longest* edge, so passing it straight through shrinks the
+        // short edge by the aspect ratio: a 512×1111 thumbnail comes back
+        // 236×512, and the tile then upscales that 236 into a blur — which
+        // silently undid the server's short-edge sizing. Scale the cap up by the
+        // thumbnail's own long/short ratio so the short edge lands on
+        // `targetPixels`. (The server thumbnail is already oriented, so its
+        // stored pixel dimensions are the displayed ones — no transform to
+        // account for here.) `--size down` on the server means this only ever
+        // caps, never enlarges past what the derivative holds.
+        var maxPixel = targetPixels
+        if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight] as? Int {
+            maxPixel = maxPixelForShortEdge(
+                targetShortEdge: targetPixels, sourceWidth: width, sourceHeight: height
+            )
+        }
+
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: targetPixels,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         else { return nil }
@@ -287,6 +308,24 @@ public actor ThumbnailLoader {
         #elseif canImport(AppKit)
         return NSImage(cgImage: cgImage, size: .zero)
         #endif
+    }
+
+    /// The `ThumbnailMaxPixelSize` cap that lands a thumbnail's SHORT edge on
+    /// `targetShortEdge`.
+    ///
+    /// ImageIO caps the *longest* edge, but the short edge is the one that fills
+    /// a square grid tile under `scaledToFill` — so a 512px short edge on a
+    /// 512×1111 derivative has to ask ImageIO for an 1111px longest edge. Scale
+    /// the target up by the long/short ratio; the server's `--size down` keeps
+    /// this a cap, never an enlargement. Kept a pure function so the sizing is
+    /// unit-tested without decoding a real image.
+    nonisolated static func maxPixelForShortEdge(
+        targetShortEdge: Int, sourceWidth: Int, sourceHeight: Int
+    ) -> Int {
+        let longEdge = max(sourceWidth, sourceHeight)
+        let shortEdge = min(sourceWidth, sourceHeight)
+        guard shortEdge > 0 else { return targetShortEdge }
+        return Int((Double(targetShortEdge) * Double(longEdge) / Double(shortEdge)).rounded())
     }
 
     /// Renders a ThumbHash to a tiny image for the instant placeholder.
