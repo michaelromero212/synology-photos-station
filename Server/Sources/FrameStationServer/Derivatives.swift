@@ -13,6 +13,17 @@ enum Derivatives {
     static let eagerSizes = [256, 512]
     static let previewSize = 2048
 
+    /// Bumped when the thumbnail *sizing* changes, so already-generated
+    /// derivatives can be told apart from current ones and regenerated once.
+    /// v1: sized by the short edge (was the longest), so a square grid tile
+    /// never upscales an odd-aspect image into a blur. See migration 0022.
+    static let thumbnailVersion = 1
+
+    /// The widest aspect a thumbnail is sized for. Past this a panorama would
+    /// turn into an enormous strip for no gain — the square grid only ever shows
+    /// its centre — so the short edge is allowed to fall a little below target.
+    static let maxThumbnailAspect = 3.0
+
     /// Thumbnails are JPEG rather than HEIC: encoding HEIC needs an x265
     /// encoder in the container that JPEG does not, and at 256 px the size
     /// saving is a few KB per asset. Decoding HEIC *input* still works — that's
@@ -49,19 +60,9 @@ enum Derivatives {
 
         var output = Output()
 
-        for size in eagerSizes {
-            logger.debug("derive \(sha256.prefix(8)): thumb-\(size)")
-            let destination = directory.appendingPathComponent("thumb-\(size).jpg")
-            try await Shell.runChecked(
-                "vips",
-                ["thumbnail", imageSource.path, destination.path + jpegSuffix,
-                 String(size), "--size", "down"],
-                timeout: 120
-            )
-        }
-
-        // A ≤100 px render is both the ThumbHash input and a cheap way to learn
-        // the post-rotation aspect ratio, which the timeline layout needs.
+        // The ≤100 px render comes first now: it is both the ThumbHash input and
+        // where the aspect ratio comes from, and the eager thumbnails need that
+        // ratio to size by the short edge.
         logger.debug("derive \(sha256.prefix(8)): thumbhash render")
         let placeholder = directory.appendingPathComponent("thumbhash.ppm")
         defer { try? FileManager.default.removeItem(at: placeholder) }
@@ -71,6 +72,10 @@ enum Derivatives {
             timeout: 120
         )
 
+        // Long edge over short edge, ≥ 1. Defaults to 1 — the old fit-the-box
+        // behaviour — if the render can't be read, so a decode failure degrades
+        // to a square fit rather than sizing wrong.
+        var aspect = 1.0
         logger.debug("derive \(sha256.prefix(8)): encoding thumbhash")
         if let image = try? PPM.read(placeholder) {
             output.thumbHash = ThumbHash.encode(
@@ -78,8 +83,27 @@ enum Derivatives {
             )
             output.width = image.width
             output.height = image.height
+            aspect = Double(max(image.width, image.height))
+                / Double(max(min(image.width, image.height), 1))
         } else {
             logger.warning("could not read placeholder render for \(sha256)")
+        }
+
+        // Sized by the SHORT edge. vips fits the *longest* edge into the number
+        // it is given, so passing `size × aspect` lands the short edge on `size`
+        // — enough to fill a square grid tile without upscaling, whatever the
+        // shape. Capped so a panorama doesn't become a giant strip.
+        let ratio = min(aspect, maxThumbnailAspect)
+        for size in eagerSizes {
+            logger.debug("derive \(sha256.prefix(8)): thumb-\(size)")
+            let destination = directory.appendingPathComponent("thumb-\(size).jpg")
+            let longest = Int((Double(size) * ratio).rounded())
+            try await Shell.runChecked(
+                "vips",
+                ["thumbnail", imageSource.path, destination.path + jpegSuffix,
+                 String(longest), "--size", "down"],
+                timeout: 120
+            )
         }
 
         return output

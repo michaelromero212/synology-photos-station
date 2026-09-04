@@ -213,10 +213,11 @@ actor DerivationWorker {
                     do {
                         try await sql.raw("""
                             UPDATE assets
-                            SET thumbhash  = \(bind: thumbHash),
-                                width      = COALESCE(width, \(bind: width)),
-                                height     = COALESCE(height, \(bind: height)),
-                                derived_at = now()
+                            SET thumbhash     = \(bind: thumbHash),
+                                width         = COALESCE(width, \(bind: width)),
+                                height        = COALESCE(height, \(bind: height)),
+                                derived_at    = now(),
+                                thumb_version = \(bind: Derivatives.thumbnailVersion)
                             WHERE id = \(bind: assetID)
                             """).run()
 

@@ -127,17 +127,20 @@ enum MetadataBackfill {
         }
     }
 
-    /// Enqueues thumbnails for live assets that have none.
+    /// Enqueues thumbnails for live assets that need (re)generating.
     ///
-    /// Heals rows that reached a live placement without derivatives — chiefly
-    /// the dedup/purge bug, where a re-upload of purged content was treated as
-    /// "already derived" and skipped derivation, so its tile stayed grey with no
-    /// job to fix it. `derived_at IS NULL` on a live, non-deleted placement is
-    /// exactly that state; enqueue re-pends any stale job or creates a fresh one.
+    /// Two cases. `derived_at IS NULL` is a row that reached a live placement
+    /// without derivatives at all — chiefly the dedup/purge bug, where a
+    /// re-upload of purged content was treated as "already derived" and stayed
+    /// grey. `thumb_version < current` is a row whose thumbnails were built with
+    /// an older *sizing* — the long-edge fit that left odd-aspect images blurry
+    /// on the square grid — and wants rebuilding with the current short-edge
+    /// sizing. Either way this re-pends any stale job or creates a fresh one.
     ///
     /// Only live placements, so purged/deleted rows aren't dragged back onto the
-    /// queue. Bounded per boot; `derived_at` is set once a thumbnail lands, so a
-    /// healed asset drops out of the next pass.
+    /// queue. Bounded per boot; a rebuilt thumbnail stamps the current version,
+    /// so a healed asset drops out of the next pass and the regeneration doesn't
+    /// repeat every restart.
     static func enqueueMissingThumbnails(on app: Application) async {
         do {
             try await app.sql.raw("""
@@ -146,6 +149,7 @@ enum MetadataBackfill {
                     FROM assets a
                     JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
                     WHERE a.derived_at IS NULL
+                       OR a.thumb_version < \(bind: Derivatives.thumbnailVersion)
                     LIMIT 5000
                 )
                 INSERT INTO derivation_jobs (asset_id, kind)

@@ -1,0 +1,12 @@
+-- 0022_thumb_version — track which thumbnail-sizing generation an asset's
+-- derivatives were built with.
+--
+-- Thumbnails were sized to fit the *longest* edge into 256/512, which left the
+-- short edge tiny on odd aspect ratios (a 2:1 screenshot at 512 → 236 px short).
+-- The iPhone's square grid crops to fill by the short edge and upscaled that
+-- into a blur. Sizing by the short edge fixes it, but the already-generated
+-- thumbnails are the old shape — this column is how the startup heal knows which
+-- ones to regenerate, and how a future sizing change re-runs cleanly without a
+-- re-upload. 0 is "some earlier sizing"; the server writes the current version
+-- when it (re)builds an asset's thumbnails.
+ALTER TABLE assets ADD COLUMN thumb_version int NOT NULL DEFAULT 0;

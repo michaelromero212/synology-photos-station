@@ -56,13 +56,17 @@ enum PhotoGridMetrics {
 
     /// Which cached derivative a tile asks for.
     ///
-    /// 256 and 512 are both derived eagerly at ingest, so either is a cache
-    /// hit. 2048 is rendered on demand, and asking for it per tile would put a
-    /// full-size decode per photo on a J4125 — not an option. But 256 stretched
-    /// into a 260-point row on a television is visibly soft, so the bigger
-    /// screens take the 512 and the phone keeps the smaller one.
+    /// 256 and 512 are both derived eagerly at ingest, so either is a cache hit;
+    /// 2048 is rendered on demand and far too heavy to ask for per tile. Every
+    /// screen takes the 512: the phone's square tiles are ~270–390 px on a
+    /// Retina display, and a 256 stretched into that is visibly soft — worse on
+    /// an odd-aspect photo, whose short edge the square crop upscales hardest.
+    /// The 512 (now sized by the short edge server-side) fills the tile without
+    /// upscaling. It also sidesteps the old blur on a device that already cached
+    /// the 256: `?size=512` is a different URL, so it fetches the sharp one fresh
+    /// rather than serving the stale 256 from the immutable cache.
     static var thumbnailPixels: Int {
-        usesJustifiedRows ? 512 : 256
+        512
     }
 
     /// Roughly how tall a row comes out, before it's stretched to fit.
