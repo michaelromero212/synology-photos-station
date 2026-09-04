@@ -148,8 +148,13 @@ extension FrameStationClient {
 
     /// Built rather than fetched so a grid cell can hand a URL straight to the
     /// image loader without a round trip.
-    public func thumbnailURL(assetID: UUID, size: Int = 256) -> URL? {
-        URL(string: "v1/assets/\(assetID)/thumb?size=\(size)", relativeTo: baseURL)
+    /// `version` is `assets.thumb_version` (0 when unknown). The server ignores
+    /// it — it only makes the URL change when the server regenerates a
+    /// thumbnail, so the device stops serving the old bytes from its one-year
+    /// immutable cache and fetches the new ones. Adding it at all busts the
+    /// pre-versioning cache, since those entries had no `v`.
+    public func thumbnailURL(assetID: UUID, size: Int = 256, version: Int = 0) -> URL? {
+        URL(string: "v1/assets/\(assetID)/thumb?size=\(size)&v=\(version)", relativeTo: baseURL)
     }
 
     public func previewURL(assetID: UUID) -> URL? {

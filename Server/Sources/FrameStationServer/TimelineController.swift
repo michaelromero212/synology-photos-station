@@ -105,6 +105,9 @@ struct TimelineController: RouteCollection {
         /// Only ever set by the Recently Deleted query; every other caller
         /// leaves it nil, because nothing else in the library is on a clock.
         var purgeAt: Date?
+        /// The thumbnail generation, so the client can cache-bust to a
+        /// regenerated thumbnail. Nil where a query doesn't select it.
+        var thumbVersion: Int?
 
         func toItem() -> TimelineItem {
             // Orientation is applied here rather than baked into the stored
@@ -133,7 +136,8 @@ struct TimelineController: RouteCollection {
                 isDerived: isDerived,
                 isBurst: isBurst,
                 liveVideoAssetID: liveVideoAssetID,
-                purgeAt: purgeAt
+                purgeAt: purgeAt,
+                thumbVersion: thumbVersion
             )
         }
     }
@@ -166,6 +170,7 @@ struct TimelineController: RouteCollection {
                    COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                    (a.derived_at IS NOT NULL) AS "isDerived",
                    (a.burst_id IS NOT NULL) AS "isBurst",
+                   a.thumb_version AS "thumbVersion",
                    -- The paired half of a Live Photo, so the viewer can play it
                    -- from the still rather than from a tile of its own.
                    (SELECT v.id FROM assets v
@@ -237,6 +242,7 @@ struct TimelineController: RouteCollection {
                        COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
                        (a.derived_at IS NOT NULL) AS "isDerived",
                    (a.burst_id IS NOT NULL) AS "isBurst",
+                   a.thumb_version AS "thumbVersion",
                    -- The paired half of a Live Photo, so the viewer can play it
                    -- from the still rather than from a tile of its own.
                    (SELECT v.id FROM assets v

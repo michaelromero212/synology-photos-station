@@ -70,11 +70,17 @@ public actor ThumbnailLoader {
     }
 
     public func thumbnail(
-        assetID: UUID, size: Int = 256, isPrefetch: Bool = false
+        assetID: UUID, size: Int = 256, version: Int = 0, isPrefetch: Bool = false
     ) async -> PlatformImage? {
-        guard let url = await client.thumbnailURL(assetID: assetID, size: size) else { return nil }
+        guard let url = await client.thumbnailURL(
+            assetID: assetID, size: size, version: version
+        ) else { return nil }
+        // The version is in the key as well as the URL: a regenerated thumbnail
+        // is a different key, so the loader's own two-tier cache doesn't hand
+        // back the stale one either.
         return await image(
-            at: url, key: "\(assetID)-\(size)", targetPixels: size, isPrefetch: isPrefetch
+            at: url, key: "\(assetID)-\(size)-\(version)",
+            targetPixels: size, isPrefetch: isPrefetch
         )
     }
 
@@ -90,8 +96,10 @@ public actor ThumbnailLoader {
     /// The key is derivable from the asset and the size alone, so the lookup
     /// needs none of that. `NSCache` is its own lock, and this only ever reads,
     /// so it is safe to reach from outside the actor's isolation.
-    nonisolated public func cachedThumbnail(assetID: UUID, size: Int) -> PlatformImage? {
-        memory.object(forKey: "\(assetID)-\(size)" as NSString)?.image
+    nonisolated public func cachedThumbnail(
+        assetID: UUID, size: Int, version: Int = 0
+    ) -> PlatformImage? {
+        memory.object(forKey: "\(assetID)-\(size)-\(version)" as NSString)?.image
     }
 
     public func preview(assetID: UUID, targetPixels: Int = 2048) async -> PlatformImage? {
@@ -110,13 +118,17 @@ public actor ThumbnailLoader {
     /// Fire-and-forget, and deliberately lower priority than anything visible —
     /// see `acquire`. A prefetch that competed with the tiles someone is
     /// actually looking at would make scrolling worse, not better.
-    public func prefetch(assetIDs: [UUID], size: Int = 256) {
-        for assetID in assetIDs {
-            let key = "\(assetID)-\(size)" as NSString
+    public func prefetch(_ assets: [(id: UUID, version: Int)], size: Int = 256) {
+        for asset in assets {
+            let key = "\(asset.id)-\(size)-\(asset.version)" as NSString
             // Already decoded and resident: nothing to do, and checking here
             // keeps a re-scroll over warm content completely free.
             if memory.object(forKey: key) != nil { continue }
-            Task { _ = await self.thumbnail(assetID: assetID, size: size, isPrefetch: true) }
+            Task {
+                _ = await self.thumbnail(
+                    assetID: asset.id, size: size, version: asset.version, isPrefetch: true
+                )
+            }
         }
     }
 

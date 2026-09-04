@@ -28,7 +28,8 @@ struct PhotoCell: View {
         self.loader = loader
         self.size = size
         let cached = loader?.cachedThumbnail(
-            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
+            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+            version: item.thumbnailVersion
         )
         _image = State(initialValue: cached)
         // Decode the ThumbHash here too, so a tile with no cached picture opens
@@ -180,7 +181,8 @@ struct PhotoCell: View {
         // polls for work that hasn't been done yet.
         for attempt in 0..<3 {
             if let loaded = await loader.thumbnail(
-                assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels
+                assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                version: item.thumbnailVersion
             ) {
                 withAnimation(.easeOut(duration: 0.18)) { image = loaded }
                 return

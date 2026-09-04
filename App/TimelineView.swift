@@ -843,7 +843,7 @@ struct TimelineView: View {
     private func prefetchThumbnails(for key: String, in store: TimelineStore) async {
         guard let loader = session.loader, let items = store.items[key] else { return }
         await loader.prefetch(
-            assetIDs: items.prefix(60).map(\.assetID),
+            items.prefix(60).map { ($0.assetID, $0.thumbnailVersion) },
             size: PhotoGridMetrics.thumbnailPixels
         )
     }
@@ -1212,6 +1212,11 @@ struct TimelineView: View {
                 // the `Section`s — see the note above about wrapping those.
                 .scrollTargetLayout()
             }
+            // The grid has its own scrubber (`FastScroller` below), so the
+            // system indicator is the second bar that showed on the right while
+            // scrolling. Hidden here, leaving only the scrubber — the way Photos
+            // shows one, not two.
+            .scrollIndicators(.hidden)
             // Which section is at the top, maintained by SwiftUI in both
             // directions: it reports where you are as you scroll, and scrolls
             // when it's assigned to.

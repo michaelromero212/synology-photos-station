@@ -13,22 +13,37 @@ enum Derivatives {
     static let eagerSizes = [256, 512]
     static let previewSize = 2048
 
-    /// Bumped when the thumbnail *sizing* changes, so already-generated
-    /// derivatives can be told apart from current ones and regenerated once.
+    /// Bumped when thumbnail *output* changes, so already-generated derivatives
+    /// can be told apart from current ones and regenerated once (and the client
+    /// cache-busts to them — see `TimelineItem.thumbVersion`).
     /// v1: sized by the short edge (was the longest), so a square grid tile
-    /// never upscales an odd-aspect image into a blur. See migration 0022.
-    static let thumbnailVersion = 1
+    /// never upscales an odd-aspect image into a blur.
+    /// v2: an unsharp mask after the downscale, so detailed content (screenshots,
+    /// text, UI) reads crisp in a small tile instead of soft — the step Apple
+    /// and Synology use to make a grid look premium. See migration 0022.
+    static let thumbnailVersion = 2
 
     /// The widest aspect a thumbnail is sized for. Past this a panorama would
     /// turn into an enormous strip for no gain — the square grid only ever shows
     /// its centre — so the short edge is allowed to fall a little below target.
     static let maxThumbnailAspect = 3.0
 
+    /// Unsharp-mask parameters for the post-downscale sharpen, as vips `sharpen`
+    /// takes them. Downscaling always softens, most visibly on hard edges and
+    /// text; this restores the crispness. Conservative on purpose — too much and
+    /// edges halo — and gathered here because it is the dial to tune by eye.
+    /// `sigma` is the radius, `m1` the gain in flat areas (0 so noise isn't
+    /// amplified), `m2` the gain on edges (the real sharpening).
+    static let sharpenSigma = 0.8
+    static let sharpenFlatGain = 0.0
+    static let sharpenEdgeGain = 2.0
+
     /// Thumbnails are JPEG rather than HEIC: encoding HEIC needs an x265
-    /// encoder in the container that JPEG does not, and at 256 px the size
-    /// saving is a few KB per asset. Decoding HEIC *input* still works — that's
-    /// libheif, which vips has.
+    /// encoder in the container that JPEG does not. Sharpened edges want a
+    /// higher quality than a plain photo would — Q82 leaves mosquito noise
+    /// around text — so thumbnails encode at Q90; the 2048 preview stays at 82.
     private static let jpegSuffix = "[Q=82,strip,optimize_coding]"
+    private static let thumbnailJPEG = "[Q=90,strip,optimize_coding]"
 
     struct Output {
         var thumbHash: [UInt8]?
@@ -98,10 +113,25 @@ enum Derivatives {
             logger.debug("derive \(sha256.prefix(8)): thumb-\(size)")
             let destination = directory.appendingPathComponent("thumb-\(size).jpg")
             let longest = Int((Double(size) * ratio).rounded())
+
+            // Two steps, one JPEG encode: resize to a lossless intermediate,
+            // then sharpen straight into the final JPEG. Sharpening the encoded
+            // thumbnail instead would re-compress it; going through `.v` keeps
+            // the only lossy step the final write.
+            let intermediate = directory.appendingPathComponent("thumb-\(size).v")
+            defer { try? FileManager.default.removeItem(at: intermediate) }
             try await Shell.runChecked(
                 "vips",
-                ["thumbnail", imageSource.path, destination.path + jpegSuffix,
+                ["thumbnail", imageSource.path, intermediate.path,
                  String(longest), "--size", "down"],
+                timeout: 120
+            )
+            try await Shell.runChecked(
+                "vips",
+                ["sharpen", intermediate.path, destination.path + thumbnailJPEG,
+                 "--sigma", String(sharpenSigma),
+                 "--m1", String(sharpenFlatGain),
+                 "--m2", String(sharpenEdgeGain)],
                 timeout: 120
             )
         }

@@ -122,8 +122,17 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// one place on the server. A client subtracting its own constant would go
     /// on counting down to the old day if that window ever changed.
     public let purgeAt: Date?
+    /// Which thumbnail generation the server built for this asset. The client
+    /// puts it in the thumbnail URL and its cache key, so when the server
+    /// regenerates thumbnails (a new sizing or sharpen) the URL changes and the
+    /// device fetches the new one instead of serving the old bytes from its
+    /// one-year immutable cache. Optional and read as 0 so a payload without it
+    /// still decodes — see the `Bool?` fields on `AssetDetail` for why.
+    public let thumbVersion: Int?
 
     public var isLive: Bool { liveVideoAssetID != nil }
+    /// The thumbnail generation, with a missing value read as the baseline.
+    public var thumbnailVersion: Int { thumbVersion ?? 0 }
 
     /// Whole days left, rounded up, floored at zero.
     ///
@@ -141,7 +150,8 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         id: UUID, spaceID: UUID, assetID: UUID, capturedAt: Date, aspectRatio: Double,
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
         isFavorite: Bool, uploadedBy: UUID, isDerived: Bool,
-        isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil
+        isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil,
+        thumbVersion: Int? = nil
     ) {
         self.id = id
         self.spaceID = spaceID
@@ -157,6 +167,7 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         self.liveVideoAssetID = liveVideoAssetID
         self.isDerived = isDerived
         self.purgeAt = purgeAt
+        self.thumbVersion = thumbVersion
     }
 
     public var thumbHashBytes: [UInt8]? {
