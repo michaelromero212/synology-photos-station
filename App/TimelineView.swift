@@ -1124,6 +1124,22 @@ struct TimelineView: View {
     }
     #endif
 
+    /// The count of media in this grid, closing the scroll the way Photos and
+    /// Synology both do. Centred, quiet, and given real vertical room so it
+    /// reads as an ending rather than another row.
+    private func gridFooter(_ count: Int) -> some View {
+        Text("\(count.formatted(.number)) \(count == 1 ? "Item" : "Items")")
+            .font(.subheadline)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 30)
+            .padding(.bottom, 28)
+            .accessibilityLabel(
+                count == 1 ? "1 item in this library" : "\(count) items in this library"
+            )
+    }
+
     private func grid(_ store: TimelineStore) -> some View {
         GeometryReader { proxy in
             ScrollViewReader { scroller in
@@ -1178,6 +1194,17 @@ struct TimelineView: View {
                             // top of the screen, where the pinned one sits.
                             header(bucket).id(bucket.key)
                         }
+                    }
+
+                    // The library's floor: the count of everything in this
+                    // grid, and where the scroll stops. Last in the stack so
+                    // there is nothing to scroll past it, the way Photos and
+                    // Synology both end a library. `store.total` is the
+                    // manifest's own count, so it is known before the buckets
+                    // are — a person scrolling to the bottom always finds it
+                    // filled in.
+                    if store.total > 0 {
+                        gridFooter(store.total)
                     }
                 }
                 // Marks the sections as scroll targets, which is what lets
