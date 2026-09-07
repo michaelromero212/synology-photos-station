@@ -55,7 +55,19 @@ struct FastScroller: View {
                     .offset(y: y)
             }
             .frame(width: trackWidth, alignment: .trailing)
-            .contentShape(Rectangle())
+            // Only a band around the thumb starts a scrub. This gesture used to
+            // sit on the whole full-height strip with `minimumDistance: 0`, so
+            // any swipe that *began* anywhere in the trailing 44pt was captured
+            // as a scrub instead of a scroll — and on a short library a stray
+            // scrub flung the grid past its end into empty space, the "grid goes
+            // away" bug. Restricting the hit region to the thumb lets an ordinary
+            // swipe fall straight through to the scroll view, which stops at the
+            // last row on its own. `contentShape` governs only where a touch may
+            // *start*: a scrub already under way keeps tracking past the band, so
+            // the thumb still follows your finger the length of the track.
+            // Verified in an isolated simulator repro — a swipe off the band
+            // scrolls (and clamps), a swipe on it scrubs.
+            .contentShape(ScrubberGrab(thumbY: y, thumbHeight: thumbHeight, pad: 22))
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
@@ -112,6 +124,23 @@ struct FastScroller: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 .glassCapsule(interactive: false, fallback: .regularMaterial)
+        }
+    }
+
+    /// The band, centred on the thumb, where a touch may begin a scrub.
+    ///
+    /// Everything outside it falls through to the scroll view, which is what
+    /// keeps an ordinary swipe near the right edge from being hijacked into a
+    /// scrub. `pad` widens the thin thumb into a comfortable target without
+    /// making the whole strip greedy.
+    private struct ScrubberGrab: Shape {
+        let thumbY: CGFloat
+        let thumbHeight: CGFloat
+        let pad: CGFloat
+        func path(in rect: CGRect) -> Path {
+            let top = max(thumbY - pad, 0)
+            let bottom = min(thumbY + thumbHeight + pad, rect.height)
+            return Path(CGRect(x: 0, y: top, width: rect.width, height: max(bottom - top, 0)))
         }
     }
 
