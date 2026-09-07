@@ -73,6 +73,17 @@ struct FastScroller: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
+                            #if DEBUG
+                            let bandTop = max(y - 22, 0)
+                            let bandBottom = y + thumbHeight + 22
+                            let inBand = value.startLocation.y >= bandTop && value.startLocation.y <= bandBottom
+                            print(String(
+                                format: "🧭[SCRUB] begin startY=%.0f thumbY=%.0f band=[%.0f,%.0f] inBand=%@%@",
+                                value.startLocation.y, y, bandTop, bandBottom,
+                                inBand ? "YES" : "NO",
+                                inBand ? "" : "  ⚠️ off-band scrub — the hit-area limit is not holding on device"
+                            ))
+                            #endif
                             #if os(iOS)
                             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                             #endif
@@ -96,6 +107,9 @@ struct FastScroller: View {
                     .onEnded { _ in
                         isDragging = false
                         label = nil
+                        #if DEBUG
+                        print(String(format: "🧭[SCRUB] end fraction=%.2f", dragFraction))
+                        #endif
                         onScrubEnd()
                     }
             )

@@ -1254,6 +1254,11 @@ struct TimelineView: View {
             // through its own `scrollTo(_:anchor:.top)`, which clamps and cannot
             // overscroll into empty space.
             .scrollPosition(id: $topBucket)
+            #if DEBUG
+            .onChange(of: topBucket) { old, new in
+                print("🧭[SCROLL:timeline] topBucket \(old ?? "nil") -> \(new ?? "nil")  (a change here means scrollPosition is driving the scroll)")
+            }
+            #endif
             #if os(iOS)
             // Walks the grid to whichever moved item is being pointed at.
             //
@@ -1291,6 +1296,18 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
+            #if DEBUG
+            .scrollDebug("timeline")
+            .onAppear {
+                print("🧭[GRID:timeline] appear sections=\(sections(store).count) total=\(store.total) zoom=\(store.zoom) rowH=\(Int(PhotoGridMetrics.targetRowHeight(for: store.zoom)))")
+            }
+            .onChange(of: store.buckets.count) { _, n in
+                print("🧭[GRID:timeline] buckets=\(n) total=\(store.total)")
+            }
+            .onChange(of: store.state) { _, s in
+                print("🧭[GRID:timeline] state=\(s)")
+            }
+            #endif
             // Skipped entirely on macOS rather than applied with nothing in
             // it. An inset whose content is empty still lays out, and it
             // covered the grid: every click on a photograph went into an
