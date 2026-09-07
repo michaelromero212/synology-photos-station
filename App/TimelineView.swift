@@ -165,11 +165,17 @@ struct TimelineView: View {
     /// Held, not read. The grid hands this to the fast scroller and to the
     /// reporter and never touches `.fraction` itself — see `ScrollProgress`.
     @State private var scrollProgress = ScrollProgress()
-    /// The section currently at the top of the viewport, bound to the scroll
-    /// view so it both reports and drives. Written a handful of times per
-    /// scroll — once per section boundary crossed — which is why this can be
-    /// ordinary `@State` where `ScrollProgress.fraction` could not be.
-    @State private var topBucket: String?
+    /// A one-shot request to scroll a section to the top. Zoom re-anchoring and
+    /// moved-item review set it; an `.onChange` inside the `ScrollViewReader`
+    /// performs the jump with `scrollTo` and clears it.
+    ///
+    /// Deliberately *not* a `.scrollPosition(id:)` binding. That binding is
+    /// two-way: SwiftUI rewrote it on every content-size change, and each
+    /// rewrite re-scrolled the view, which re-realised rows in the lazy grid,
+    /// which changed the content size again — a feedback loop that never
+    /// settled and flung the grid past its end (see the 🧭 logs). Imperative
+    /// `scrollTo`, the way the scrubber already jumps, does not loop.
+    @State private var pendingJump: String?
     #if !os(tvOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
     /// know what "that day" contained — and everything currently loaded, which
@@ -981,11 +987,10 @@ struct TimelineView: View {
     ///
     /// Keeps your place across a density change.
     ///
-    /// `topBucket` is whatever section is at the top right now, so the anchor
-    /// costs nothing to read. It has to be read *before* the swap, though —
-    /// the moment the new manifest lands it describes a bucket that no longer
-    /// exists — and translated *after*, because the keys it translates into
-    /// don't exist until then.
+    /// The day at the top right now — read from the scrubber fraction — is the
+    /// anchor. It has to be read *before* the swap: the moment the new manifest
+    /// lands it describes a bucket that no longer exists, and it is translated
+    /// *after*, because the keys it translates into don't exist until then.
     ///
     /// Without this, zooming out to find 2012 and back in to look at it landed
     /// you in 2026, which made the whole control useless for the one thing
@@ -1004,18 +1009,17 @@ struct TimelineView: View {
 
     private func apply(_ newZoom: TimelineZoom?) {
         guard let newZoom, let store else { return }
-        let anchor = topBucket
+        // Which day is at the top right now, read from the scrubber fraction
+        // rather than a scroll binding — that is enough to return to it after
+        // the density changes.
+        let anchor = store.buckets.bucket(atFraction: scrollProgress.fraction)?.key
         Task {
             await store.setZoom(newZoom)
             guard let anchor, let target = store.buckets.counterpart(of: anchor) else { return }
-            // After the grid has settled, not before.
-            //
-            // Replacing every section resets the scroll to the top, and that
-            // reset writes to this very binding — so assigning first means
-            // SwiftUI overwrites the anchor a moment later with the new first
-            // section. One wait, then assign, and the binding sticks.
+            // After the grid has settled, not before: the manifest swap needs a
+            // beat to lay the new sections out, or `scrollTo` finds no target.
             try? await Task.sleep(nanoseconds: 100_000_000)
-            topBucket = target
+            pendingJump = target
         }
     }
 
@@ -1253,12 +1257,17 @@ struct TimelineView: View {
             // Photos ends a library. The scrubber still lands a day up top
             // through its own `scrollTo(_:anchor:.top)`, which clamps and cannot
             // overscroll into empty space.
-            .scrollPosition(id: $topBucket)
-            #if DEBUG
-            .onChange(of: topBucket) { old, new in
-                print("🧭[SCROLL:timeline] topBucket \(old ?? "nil") -> \(new ?? "nil")  (a change here means scrollPosition is driving the scroll)")
+            // Imperative jumps only — see `pendingJump`. No `.scrollPosition`
+            // binding: its two-way write-back turned every content-size wobble
+            // into a re-scroll, and the grid never stopped moving.
+            .onChange(of: pendingJump) { _, target in
+                guard let target else { return }
+                scroller.scrollTo(target, anchor: .top)
+                #if DEBUG
+                print("🧭[SCROLL:timeline] jump -> \(target)")
+                #endif
+                pendingJump = nil
             }
-            #endif
             #if os(iOS)
             // Walks the grid to whichever moved item is being pointed at.
             //
@@ -1271,7 +1280,7 @@ struct TimelineView: View {
                 guard let assetID = review?.current else { return }
                 Task {
                     if let key = await bucketKey(for: assetID, in: store) {
-                        topBucket = key
+                        pendingJump = key
                     }
                 }
             }
