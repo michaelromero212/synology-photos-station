@@ -1242,7 +1242,18 @@ struct TimelineView: View {
             // race that fights the layout is how the grid ended up frozen.
             // Binding the position lets SwiftUI resolve it once the section
             // actually exists, which is the whole difference.
-            .scrollPosition(id: $topBucket, anchor: .top)
+            //
+            // No `anchor: .top`. With it, the binding re-pinned whatever section
+            // it tracked to the very top on every layout pass — and in a library
+            // only a screen or so tall, pinning a late day to the top leaves the
+            // rest of the screen empty below it. That was the black void you
+            // could scroll into past the end of the grid. Without the anchor the
+            // position still tracks and still scrolls when assigned, but SwiftUI
+            // clamps to the content, so the last day rests at the bottom the way
+            // Photos ends a library. The scrubber still lands a day up top
+            // through its own `scrollTo(_:anchor:.top)`, which clamps and cannot
+            // overscroll into empty space.
+            .scrollPosition(id: $topBucket)
             #if os(iOS)
             // Walks the grid to whichever moved item is being pointed at.
             //
