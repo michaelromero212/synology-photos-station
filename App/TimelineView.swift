@@ -173,8 +173,8 @@ struct TimelineView: View {
     /// two-way: SwiftUI rewrote it on every content-size change, and each
     /// rewrite re-scrolled the view, which re-realised rows in the lazy grid,
     /// which changed the content size again — a feedback loop that never
-    /// settled and flung the grid past its end (see the 🧭 logs). Imperative
-    /// `scrollTo`, the way the scrubber already jumps, does not loop.
+    /// settled and flung the grid past its end (confirmed on device).
+    /// Imperative `scrollTo`, the way the scrubber already jumps, does not loop.
     @State private var pendingJump: String?
     #if !os(tvOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
@@ -1263,9 +1263,6 @@ struct TimelineView: View {
             .onChange(of: pendingJump) { _, target in
                 guard let target else { return }
                 scroller.scrollTo(target, anchor: .top)
-                #if DEBUG
-                print("🧭[SCROLL:timeline] jump -> \(target)")
-                #endif
                 pendingJump = nil
             }
             #if os(iOS)
@@ -1305,18 +1302,6 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
-            #if DEBUG
-            .scrollDebug("timeline")
-            .onAppear {
-                print("🧭[GRID:timeline] appear sections=\(sections(store).count) total=\(store.total) zoom=\(store.zoom) rowH=\(Int(PhotoGridMetrics.targetRowHeight(for: store.zoom)))")
-            }
-            .onChange(of: store.buckets.count) { _, n in
-                print("🧭[GRID:timeline] buckets=\(n) total=\(store.total)")
-            }
-            .onChange(of: store.state) { _, s in
-                print("🧭[GRID:timeline] state=\(s)")
-            }
-            #endif
             // Skipped entirely on macOS rather than applied with nothing in
             // it. An inset whose content is empty still lays out, and it
             // covered the grid: every click on a photograph went into an
