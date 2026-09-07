@@ -98,7 +98,15 @@ extension View {
     func glassTabBar() -> some View {
         #if os(iOS)
         if #available(iOS 26.0, *) {
-            self
+            // The tab bar recedes as you scroll down into the grid and swoops
+            // back the moment you scroll up — Apple's own gesture-tracked
+            // minimize. It replaced a custom offset toggle that flipped the
+            // bar's visibility mid-scroll; toggling `.tabBar` visibility resizes
+            // the scroll view's safe area, so the bar reappearing at the bottom
+            // bounce reflowed the grid and made the end of the library "trip".
+            // The system owns the show/hide here now — see TimelineView's
+            // `tabBarVisibility`, which steps aside on 26.
+            self.tabBarMinimizeBehavior(.onScrollDown)
         } else {
             self.toolbarBackground(.thinMaterial, for: .tabBar)
         }

@@ -249,10 +249,7 @@ struct TimelineView: View {
         // navigate to are not the question being asked. Which is also why this
         // one hides during selection where the navigation bar does not — that
         // bar is carrying the count and the way out.
-        .toolbar(
-            selection.isActive || scrollProgress.chromeHidden ? .hidden : .automatic,
-            for: .tabBar
-        )
+        .toolbar(tabBarVisibility, for: .tabBar)
         #endif
         .sheet(isPresented: $showSpaces) {
             SpacesView(session: session) { showSpaces = false }
@@ -1127,6 +1124,22 @@ struct TimelineView: View {
     /// The count of media in this grid, closing the scroll the way Photos and
     /// Synology both do. Centred, quiet, and given real vertical room so it
     /// reads as an ending rather than another row.
+    #if os(iOS)
+    /// How the bottom tab bar shows and hides.
+    ///
+    /// Hidden while selecting — the selection bar reuses that slot. Otherwise it
+    /// splits by OS: on iOS 26 the system's `tabBarMinimizeBehavior` owns the
+    /// scroll-driven recede, so we stay out of its way with `.automatic` and let
+    /// it track the gesture; below 26 there is no native minimize, so the chrome
+    /// flag still drives it — now safe at the end of the grid because
+    /// `ScrollProgress` freezes that flag through the bottom bounce.
+    private var tabBarVisibility: Visibility {
+        if selection.isActive { return .hidden }
+        if #available(iOS 26.0, *) { return .automatic }
+        return scrollProgress.chromeHidden ? .hidden : .automatic
+    }
+    #endif
+
     private func gridFooter(_ count: Int) -> some View {
         Text("\(count.formatted(.number)) \(count == 1 ? "Item" : "Items")")
             .font(.subheadline)

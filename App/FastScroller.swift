@@ -203,6 +203,10 @@ final class ScrollProgress {
     /// Near the top the chrome is always up, whatever the last direction was.
     /// Arriving at the top of your library with no title is disorienting.
     private let topZone: Double = 8
+    /// Near the bottom the chrome freezes, so the rubber-band recoil at the end
+    /// of the grid can't flip it and reflow the content as you land. A shade
+    /// wider than `threshold` so a hard flick's settle stays inside it.
+    private let bottomZone: Double = 24
 
     func apply(_ report: ScrollReport) {
         let next = report.scrollable > 1
@@ -216,6 +220,21 @@ final class ScrollProgress {
         guard report.offset > topZone else {
             pivot = report.offset
             if chromeHidden { chromeHidden = false }
+            return
+        }
+
+        // Symmetric to the top zone, and the fix for the grid "tripping out" at
+        // the bottom. A flick to the end overscrolls past `scrollable`, then the
+        // rubber-band settles back onto it — a move larger than `threshold` that
+        // would otherwise flip the chrome the instant you land. The bars coming
+        // back resize the scroll view's safe area and reflow the content
+        // mid-bounce, and that reflow is the trip. Freeze the flag through the
+        // bottom zone and any overscroll past it, re-anchoring `pivot` so the
+        // flick settles clean. `fraction` above still tracks — the scrubber is
+        // unaffected — and an intentional scroll back up leaves the zone and
+        // brings the chrome up normally.
+        if report.scrollable > 1, report.offset > report.scrollable - bottomZone {
+            pivot = report.offset
             return
         }
 
