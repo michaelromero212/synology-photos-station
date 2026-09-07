@@ -97,31 +97,16 @@ extension View {
     @ViewBuilder
     func glassTabBar() -> some View {
         #if os(iOS)
-        // `#if compiler(>=6.2)` guards the iOS 26 SDK symbol the same way
-        // `GlassGroup` does below: `tabBarMinimizeBehavior` doesn't exist in
-        // older SDKs, and `if #available` is only a *runtime* gate — the symbol
-        // still has to resolve at compile time. CI builds on Xcode 16.4 (iOS
-        // 18.5 SDK), so without this the App target fails to compile there even
-        // though a local iOS 26 toolchain is fine.
-        #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            // The tab bar recedes as you scroll down into the grid and swoops
-            // back the moment you scroll up — Apple's own gesture-tracked
-            // minimize. It replaced a custom offset toggle that flipped the
-            // bar's visibility mid-scroll; toggling `.tabBar` visibility resizes
-            // the scroll view's safe area, so the bar reappearing at the bottom
-            // bounce reflowed the grid and made the end of the library "trip".
-            // The system owns the show/hide here now — see TimelineView's
-            // `tabBarVisibility`, which steps aside on 26.
-            self.tabBarMinimizeBehavior(.onScrollDown)
+            // iOS 26's Liquid Glass tab bar, left static. It briefly carried
+            // `tabBarMinimizeBehavior(.onScrollDown)`, but the scroll-driven
+            // minimize resized the scroll view's safe area on every toggle and
+            // fed a layout feedback storm on a short library — the grid never
+            // settled and flung itself past its end. See `ScrollProgress`.
+            self
         } else {
             self.toolbarBackground(.thinMaterial, for: .tabBar)
         }
-        #else
-        // Pre-26 toolchain (e.g. CI on Xcode 16.4): the material tab bar, which
-        // is what the app shipped before the native minimize existed.
-        self.toolbarBackground(.thinMaterial, for: .tabBar)
-        #endif
         #else
         self
         #endif

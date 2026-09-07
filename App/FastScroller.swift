@@ -227,68 +227,21 @@ struct ScrollReport: Equatable {
 final class ScrollProgress {
     var fraction: Double = 0
 
-    /// True once the grid has been pushed far enough up that the title and the
-    /// toolbar have stood down, leaving the pinned date as the only thing
-    /// across the top.
-    var chromeHidden = false
-
-    /// The offset the current direction was measured from, re-anchored on every
-    /// flip so a reversal is judged from the turning point rather than from
-    /// wherever the scroll happened to begin.
-    ///
-    /// `@ObservationIgnored` is load-bearing: an observed write here would
-    /// invalidate the grid on every frame, which is the exact cost the rest of
-    /// this class is arranged to avoid.
-    @ObservationIgnored private var pivot: Double = 0
-
-    /// Enough travel to read as a decision rather than a wobble.
-    private let threshold: Double = 14
-    /// Near the top the chrome is always up, whatever the last direction was.
-    /// Arriving at the top of your library with no title is disorienting.
-    private let topZone: Double = 8
-    /// Near the bottom the chrome freezes, so the rubber-band recoil at the end
-    /// of the grid can't flip it and reflow the content as you land. A shade
-    /// wider than `threshold` so a hard flick's settle stays inside it.
-    private let bottomZone: Double = 24
+    /// Was true while the chrome "stood down" on scroll; a constant now. Hiding
+    /// a bar resizes the scroll view's safe area, and on a short library that
+    /// resize re-realised a grid row, which changed the content height, which
+    /// toggled the chrome again — a feedback loop that flung the grid past its
+    /// end (see the 🧭 logs). Static bars break it. Left in place, rather than
+    /// deleted from every reader, so the nav bar, tab bar and zoom pill just
+    /// stay up.
+    let chromeHidden = false
 
     func apply(_ report: ScrollReport) {
         let next = report.scrollable > 1
             ? (report.offset / report.scrollable).clamped(to: 0...1)
             : 0
-        // Guarded rather than assigned blindly: `@Observable` notifies on every
-        // set, equal value or not, so an unguarded write is a per-frame
-        // invalidation wearing a disguise.
+        // Guarded: `@Observable` notifies on every set, equal value or not.
         if fraction != next { fraction = next }
-
-        guard report.offset > topZone else {
-            pivot = report.offset
-            if chromeHidden { chromeHidden = false }
-            return
-        }
-
-        // Symmetric to the top zone, and the fix for the grid "tripping out" at
-        // the bottom. A flick to the end overscrolls past `scrollable`, then the
-        // rubber-band settles back onto it — a move larger than `threshold` that
-        // would otherwise flip the chrome the instant you land. The bars coming
-        // back resize the scroll view's safe area and reflow the content
-        // mid-bounce, and that reflow is the trip. Freeze the flag through the
-        // bottom zone and any overscroll past it, re-anchoring `pivot` so the
-        // flick settles clean. `fraction` above still tracks — the scrubber is
-        // unaffected — and an intentional scroll back up leaves the zone and
-        // brings the chrome up normally.
-        if report.scrollable > 1, report.offset > report.scrollable - bottomZone {
-            pivot = report.offset
-            return
-        }
-
-        let delta = report.offset - pivot
-        if delta > threshold {
-            pivot = report.offset
-            if !chromeHidden { chromeHidden = true }
-        } else if delta < -threshold {
-            pivot = report.offset
-            if chromeHidden { chromeHidden = false }
-        }
     }
 }
 
