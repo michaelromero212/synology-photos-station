@@ -324,6 +324,20 @@ struct AssetDetailView: View {
         displayedItem = target
     }
 
+    /// Autoplay's hop to the next clip — the non-iOS twin of the iOS
+    /// `advanceToNextVideo`. Same setting and same day scope (via
+    /// `adjacentVideo`), so the feature behaves identically on a Mac or a TV;
+    /// only *how* the view moves differs — `displayedItem` here, the pager's
+    /// focus there. Guarded on the finished clip still being the one on screen,
+    /// so a video that ends after you've already moved on doesn't drag the
+    /// viewer somewhere you didn't ask to go. Returns to nothing at the end of
+    /// the day's clips, leaving the last one where it finished.
+    private func advanceToNextVideo(after finished: TimelineItem) {
+        guard PlaybackSettings.autoPlayNextVideo, finished.id == displayedItem.id else { return }
+        guard let next = adjacentVideo(forward: true) else { return }
+        displayedItem = next
+    }
+
     var body: some View {
         // One `#if` around the whole thing, content and modifiers together. Two
         // — one choosing the content, another adding the modifiers — breaks the
@@ -368,6 +382,7 @@ struct AssetDetailView: View {
                 preloader: preloader,
                 showsChrome: true,
                 onSingleTap: {},
+                onFinished: { advanceToNextVideo(after: displayedItem) },
                 isZoomed: .constant(false)
             )
         }
@@ -721,6 +736,10 @@ struct AssetDetailView: View {
                         preloader: preloader,
                         showsChrome: true,
                         onSingleTap: {},
+                        // `page`, not `displayedItem`: a neighbour the pager built
+                        // ahead can finish off-screen, and `advanceToNextVideo`
+                        // ignores it because its id isn't the one on screen.
+                        onFinished: { advanceToNextVideo(after: page) },
                         isZoomed: .constant(false)
                     )
                     .padding(.horizontal, Self.pageGap / 2)
@@ -1182,6 +1201,7 @@ private struct AssetPage: View {
             assetID: model.item.assetID,
             client: session.client,
             poster: model.image ?? model.placeholder,
+            onFinished: onFinished,
             model: preloader.model(for: model.item.assetID)
         )
         #endif
