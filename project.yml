@@ -62,8 +62,9 @@ targets:
     info:
       path: App/Resources/iOS/Info.plist
       properties:
-        # Follows the configuration, so a Debug build is called FrameStation Dev
-        # on the home screen and cannot be mistaken for the real one.
+        # "FrameStation" in both configurations now. The Debug build is still a
+        # separate app — see its own bundle id in the Debug config below — but it
+        # is kept apart by identity, not by wearing a different name.
         CFBundleDisplayName: $(APP_DISPLAY_NAME)
         # Pinned to the app's own background rather than left as `{}`.
         #
@@ -165,7 +166,6 @@ targets:
         # stay shared precisely because the access group is what separates them.
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation.dev
-          APP_DISPLAY_NAME: FrameStation Dev
     dependencies:
       - package: FrameStationKit
         product: FrameStationKit
