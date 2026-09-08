@@ -68,6 +68,11 @@ final class BackupEngine {
     /// way — this is the backstop that eventually blames the item instead.
     private var stalled: (localIdentifier: String, runs: Int)?
 
+    /// Watches the photo library for new assets while the app runs, and the
+    /// task draining its stream into the queue. Both nil unless backup is on.
+    private var changeMonitor: PhotoLibraryChangeMonitor?
+    private var observationTask: Task<Void, Never>?
+
     init(
         container: ModelContainer,
         session: AppSession,
@@ -103,11 +108,48 @@ final class BackupEngine {
             }
         }
         BackupScheduler.schedule(requiresPower: settings.chargingOnly)
+        startObservingLibrary()
     }
 
     func disableBackgroundRuns() {
         Self.backgroundRunner = nil
         BackupScheduler.cancel()
+        stopObservingLibrary()
+    }
+
+    /// Starts watching the photo library so a photo taken with the app open is
+    /// discovered and queued the moment it lands — no waiting for a background
+    /// window or a manual "Back Up Now". Idempotent; safe to call again.
+    ///
+    /// The observer only covers changes while we're registered, which is the
+    /// live case. A cold launch's catch-up is still the full `scanLibrary` on
+    /// the existing triggers (background window, focused/manual backup) — this
+    /// adds live discovery on top rather than replacing that.
+    func startObservingLibrary() {
+        guard changeMonitor == nil, PhotoLibraryScanner.access == .authorized else { return }
+        let monitor = PhotoLibraryChangeMonitor(options: PhotoLibraryScanner.fetchOptions())
+        changeMonitor = monitor
+        PHPhotoLibrary.shared().register(monitor)
+
+        // Capture the stream, not the monitor: the stream is `Sendable`, so the
+        // task carries nothing that must not cross actors, and `enqueueNewAssets`
+        // hops back to the main actor on its own.
+        let inserted = monitor.inserted
+        observationTask = Task { @MainActor [weak self] in
+            for await ids in inserted {
+                await self?.enqueueNewAssets(withIdentifiers: ids)
+            }
+        }
+    }
+
+    func stopObservingLibrary() {
+        if let changeMonitor {
+            PHPhotoLibrary.shared().unregisterChangeObserver(changeMonitor)
+            changeMonitor.finish()
+        }
+        changeMonitor = nil
+        observationTask?.cancel()
+        observationTask = nil
     }
 
     // MARK: - Scanning
@@ -162,82 +204,7 @@ final class BackupEngine {
 
         var added = 0
         for candidate in candidates where !existing.contains(candidate.asset.localIdentifier) {
-            let asset = candidate.asset
-
-            // A Live Photo is one asset and two files, and only the pair is the
-            // Live Photo — the still alone arrives on the NAS as an ordinary
-            // photo with the motion silently gone. Both halves carry the same
-            // group id, which is how the server knows they belong together.
-            //
-            // Not under "Photos Only": that toggle is a deliberate choice to
-            // leave video on the phone, and three seconds of motion per photo is
-            // still video. The still goes up regardless, just without its pair.
-            let pairedVideo = settings.includeVideos
-                ? PhotoLibraryScanner.pairedVideoCandidate(for: asset)
-                : nil
-            let liveGroupID = pairedVideo.map { _ in UUID() }
-
-            let item = BackupItem(
-                localIdentifier: asset.localIdentifier,
-                filename: candidate.filename,
-                byteSize: candidate.byteSize,
-                mediaType: candidate.mediaType.rawValue,
-                mime: candidate.mime,
-                width: asset.pixelWidth,
-                height: asset.pixelHeight,
-                durationMs: asset.duration > 0 ? Int(asset.duration * 1000) : nil,
-                // PHAsset is authoritative for capture time: EXIF is frequently
-                // absent or timezone-naive, creationDate is not.
-                capturedAt: asset.creationDate,
-                // Left to the server. PHAsset records the capture *instant*,
-                // not the offset the photographer's clock was on, so the phone's
-                // current offset is not evidence about a photo from 2009 — it
-                // travels as a labelled fallback below and only applies when the
-                // file records no offset of its own.
-                capturedTZOffset: nil,
-                capturedTZOffsetFallback: asset.creationDate.map {
-                    TimeZone.current.secondsFromGMT(for: $0)
-                },
-                latitude: asset.location?.coordinate.latitude,
-                longitude: asset.location?.coordinate.longitude,
-                isRaw: candidate.isRaw,
-                burstID: asset.burstIdentifier,
-                burstPick: asset.burstSelectionTypes.contains(.userPick)
-                    || asset.burstSelectionTypes.contains(.autoPick),
-                subtypes: candidate.subtypes,
-                liveGroupID: liveGroupID
-            )
-            context.insert(item)
-            added += 1
-
-            if let pairedVideo, let liveGroupID {
-                // Width, height and duration are left at zero on purpose: the
-                // motion is a different size to the still, and `descriptor`
-                // reads zero as "ask the server" rather than as a measurement.
-                let video = BackupItem(
-                    localIdentifier: asset.localIdentifier
-                        + PhotoLibraryScanner.pairedVideoSuffix,
-                    filename: pairedVideo.filename,
-                    byteSize: pairedVideo.byteSize,
-                    mediaType: MediaType.video.rawValue,
-                    mime: pairedVideo.mime,
-                    width: 0,
-                    height: 0,
-                    // The same instant as the still, so the pair never lands in
-                    // two different days of the timeline.
-                    capturedAt: asset.creationDate,
-                    capturedTZOffset: nil,
-                    capturedTZOffsetFallback: asset.creationDate.map {
-                        TimeZone.current.secondsFromGMT(for: $0)
-                    },
-                    latitude: asset.location?.coordinate.latitude,
-                    longitude: asset.location?.coordinate.longitude,
-                    isRaw: false,
-                    liveGroupID: liveGroupID
-                )
-                context.insert(video)
-                added += 1
-            }
+            added += insertRows(for: candidate, into: context)
         }
 
         added += backfillLivePhotos(candidates, known: known, context: context)
@@ -245,6 +212,131 @@ final class BackupEngine {
         try? context.save()
         refreshProgress(context)
         statusText = added > 0 ? "Queued \(added) new item\(added == 1 ? "" : "s")" : "Up to date"
+    }
+
+    /// Turns one library asset into its queue rows — the still, and a paired
+    /// row for a Live Photo's motion half — and inserts them. The single place
+    /// an asset becomes queue rows, shared by the full scan and the incremental
+    /// change observer. Returns how many rows were added.
+    private func insertRows(
+        for candidate: PhotoLibraryScanner.Candidate,
+        into context: ModelContext
+    ) -> Int {
+        let asset = candidate.asset
+        var added = 0
+
+        // A Live Photo is one asset and two files, and only the pair is the
+        // Live Photo — the still alone arrives on the NAS as an ordinary photo
+        // with the motion silently gone. Both halves carry the same group id,
+        // which is how the server knows they belong together.
+        //
+        // Not under "Photos Only": that toggle is a deliberate choice to leave
+        // video on the phone, and three seconds of motion per photo is still
+        // video. The still goes up regardless, just without its pair.
+        let pairedVideo = settings.includeVideos
+            ? PhotoLibraryScanner.pairedVideoCandidate(for: asset)
+            : nil
+        let liveGroupID = pairedVideo.map { _ in UUID() }
+
+        let item = BackupItem(
+            localIdentifier: asset.localIdentifier,
+            filename: candidate.filename,
+            byteSize: candidate.byteSize,
+            mediaType: candidate.mediaType.rawValue,
+            mime: candidate.mime,
+            width: asset.pixelWidth,
+            height: asset.pixelHeight,
+            durationMs: asset.duration > 0 ? Int(asset.duration * 1000) : nil,
+            // PHAsset is authoritative for capture time: EXIF is frequently
+            // absent or timezone-naive, creationDate is not.
+            capturedAt: asset.creationDate,
+            // Left to the server. PHAsset records the capture *instant*, not the
+            // offset the photographer's clock was on, so the phone's current
+            // offset is not evidence about a photo from 2009 — it travels as a
+            // labelled fallback below and only applies when the file records no
+            // offset of its own.
+            capturedTZOffset: nil,
+            capturedTZOffsetFallback: asset.creationDate.map {
+                TimeZone.current.secondsFromGMT(for: $0)
+            },
+            latitude: asset.location?.coordinate.latitude,
+            longitude: asset.location?.coordinate.longitude,
+            isRaw: candidate.isRaw,
+            burstID: asset.burstIdentifier,
+            burstPick: asset.burstSelectionTypes.contains(.userPick)
+                || asset.burstSelectionTypes.contains(.autoPick),
+            subtypes: candidate.subtypes,
+            liveGroupID: liveGroupID
+        )
+        context.insert(item)
+        added += 1
+
+        if let pairedVideo, let liveGroupID {
+            // Width, height and duration are left at zero on purpose: the motion
+            // is a different size to the still, and `descriptor` reads zero as
+            // "ask the server" rather than as a measurement.
+            let video = BackupItem(
+                localIdentifier: asset.localIdentifier
+                    + PhotoLibraryScanner.pairedVideoSuffix,
+                filename: pairedVideo.filename,
+                byteSize: pairedVideo.byteSize,
+                mediaType: MediaType.video.rawValue,
+                mime: pairedVideo.mime,
+                width: 0,
+                height: 0,
+                // The same instant as the still, so the pair never lands in two
+                // different days of the timeline.
+                capturedAt: asset.creationDate,
+                capturedTZOffset: nil,
+                capturedTZOffsetFallback: asset.creationDate.map {
+                    TimeZone.current.secondsFromGMT(for: $0)
+                },
+                latitude: asset.location?.coordinate.latitude,
+                longitude: asset.location?.coordinate.longitude,
+                isRaw: false,
+                liveGroupID: liveGroupID
+            )
+            context.insert(video)
+            added += 1
+        }
+        return added
+    }
+
+    /// Queues assets the change observer just reported — the live path that
+    /// makes a photo you just took start backing up while the app is still
+    /// open, without re-enumerating the whole library.
+    ///
+    /// The identifiers cross from the observer as plain strings; the assets are
+    /// re-fetched here on the main actor. `start()` is re-entrant, so kicking it
+    /// is safe whether or not a run is already draining the queue.
+    func enqueueNewAssets(withIdentifiers ids: [String]) async {
+        guard PhotoLibraryScanner.access == .authorized, !ids.isEmpty else { return }
+
+        let includeVideos = settings.includeVideos
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var candidates: [PhotoLibraryScanner.Candidate] = []
+        fetched.enumerateObjects { asset, _, _ in
+            guard asset.mediaType == .image || (asset.mediaType == .video && includeVideos) else {
+                return
+            }
+            if let candidate = PhotoLibraryScanner.describe(asset) { candidates.append(candidate) }
+        }
+        guard !candidates.isEmpty else { return }
+
+        let context = ModelContext(container)
+        let known = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
+        let existing = Set(known.map(\.localIdentifier))
+
+        var added = 0
+        for candidate in candidates where !existing.contains(candidate.asset.localIdentifier) {
+            added += insertRows(for: candidate, into: context)
+        }
+        guard added > 0 else { return }
+
+        try? context.save()
+        refreshProgress(context)
+        statusText = "Queued \(added) new item\(added == 1 ? "" : "s")"
+        await start()
     }
 
     /// Gives the motion back to Live Photos queued before pairing existed.

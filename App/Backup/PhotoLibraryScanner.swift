@@ -46,23 +46,28 @@ enum PhotoLibraryScanner {
         let subtypes: [MediaSubtype]
     }
 
-    /// Every photo and video in the library, newest first.
-    static func scan(includeVideos: Bool) -> [Candidate] {
+    /// The fetch the full scan and the change observer both use, so "inserted"
+    /// means exactly the assets a scan would pick up — nothing hidden, every
+    /// burst frame, from the user's own library and shared/synced sources.
+    ///
+    /// `includeAllBurstAssets`: PhotoKit defaults this to false, which hands
+    /// back the burst's representative and hides the other nine — so a timer
+    /// burst arrived as a single photograph. Keeping them all means each frame
+    /// is its own photo you can open, compare and choose between, which is the
+    /// whole reason for taking a burst; the tile carries a badge so it still
+    /// reads as one moment rather than ten near-identical accidents.
+    static func fetchOptions() -> PHFetchOptions {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.includeHiddenAssets = false
-        // Every frame of a burst, not just the one iOS puts on the cover.
-        //
-        // PhotoKit defaults this to false, which hands back the burst's
-        // representative and hides the other nine — so a timer burst arrived as
-        // a single photograph. Keeping them all means each frame is its own
-        // photo you can open, compare and choose between, which is the whole
-        // reason for taking a burst; the tile carries a badge so it still reads
-        // as one moment rather than ten near-identical accidents.
         options.includeAllBurstAssets = true
         options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+        return options
+    }
 
-        let fetched = PHAsset.fetchAssets(with: options)
+    /// Every photo and video in the library, newest first.
+    static func scan(includeVideos: Bool) -> [Candidate] {
+        let fetched = PHAsset.fetchAssets(with: fetchOptions())
         var candidates: [Candidate] = []
         candidates.reserveCapacity(fetched.count)
 
@@ -260,5 +265,45 @@ enum PhotoLibraryScanner {
             }
         }
     }
+}
+
+/// Watches the photo library for new assets so backup discovers them the moment
+/// they appear, instead of only on a full rescan.
+///
+/// PhotoKit delivers `photoLibraryDidChange` on its own serial queue, off the
+/// main actor, with an incremental diff against a held fetch result — so a new
+/// photo costs one small callback, not a re-enumeration of the whole library.
+/// The new assets' local identifiers (the only thing that has to cross threads,
+/// and `Sendable`) are published on `inserted`; the engine consumes them on the
+/// main actor. Assets *removed* from the library are deliberately ignored here —
+/// a backed-up photo the user later deletes locally is a separate concern from
+/// discovery, not something to unqueue.
+final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
+    /// Local identifiers of assets added since the previous change.
+    let inserted: AsyncStream<[String]>
+
+    private var fetchResult: PHFetchResult<PHAsset>
+    private let continuation: AsyncStream<[String]>.Continuation
+
+    init(options: PHFetchOptions) {
+        let stream = AsyncStream<[String]>.makeStream()
+        self.inserted = stream.stream
+        self.continuation = stream.continuation
+        self.fetchResult = PHAsset.fetchAssets(with: options)
+        super.init()
+    }
+
+    func photoLibraryDidChange(_ changeInstance: PHChange) {
+        // Serial and off-main. Mutating `fetchResult` here is safe because
+        // PhotoKit never overlaps these calls; only `[String]` leaves the method.
+        guard let details = changeInstance.changeDetails(for: fetchResult) else { return }
+        fetchResult = details.fetchResultAfterChanges
+        let ids = details.insertedObjects.map(\.localIdentifier)
+        guard !ids.isEmpty else { return }
+        continuation.yield(ids)
+    }
+
+    /// Ends the `inserted` stream so its consumer's `for await` loop finishes.
+    func finish() { continuation.finish() }
 }
 #endif
