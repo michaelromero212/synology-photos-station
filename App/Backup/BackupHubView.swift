@@ -205,9 +205,11 @@ struct TaskQueueView: View {
                 }
             } else {
                 List {
-                    if let active = engine.active {
+                    if !engine.activeUploads.isEmpty {
                         Section("In progress") {
-                            ActiveRow(active: active)
+                            ForEach(engine.activeUploads, id: \.localIdentifier) { active in
+                                ActiveRow(active: active)
+                            }
                         }
                     }
                     Section(waitingTitle) {
@@ -223,7 +225,8 @@ struct TaskQueueView: View {
     }
 
     private var waiting: [(localIdentifier: String, capturedAt: Date, state: UploadState)] {
-        engine.queued.filter { $0.localIdentifier != engine.active?.localIdentifier }
+        let inFlight = Set(engine.activeUploads.map(\.localIdentifier))
+        return engine.queued.filter { !inFlight.contains($0.localIdentifier) }
     }
 
     private var waitingTitle: String {

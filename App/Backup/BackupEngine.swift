@@ -23,16 +23,47 @@ final class BackupEngine {
 
     /// Local items still to go, newest first, grouped for the grid.
     private(set) var queued: [(localIdentifier: String, capturedAt: Date, state: UploadState)] = []
-    /// The item on the wire right now, with byte progress. Only one at a time —
-    /// the engine uploads serially so a slow photo can't be lapped by a fast
-    /// one and confuse the queue.
-    private(set) var active: ActiveUpload?
+    /// The items on the wire right now, with byte progress — up to
+    /// `maxConcurrent` at once, keyed by local identifier. Concurrency is the
+    /// whole point: a 2 GB video takes one lane while the photos behind it drain
+    /// through the others, so a backup's speed no longer depends on the mix.
+    private(set) var activeUploads: [ActiveUpload] = []
+
+    /// The first in-flight upload, for the few readers that still want a single
+    /// one (the focused-backup progress line). The Task Queue lists them all.
+    var active: ActiveUpload? { activeUploads.first }
+
+    /// How many transfers run at once. Small on purpose: enough that photos
+    /// flow past a big video, not so many that a home uplink or the NAS is
+    /// saturated and every one crawls.
+    static let maxConcurrent = 3
     /// Assets this device uploaded since the badges were last cleared. Shown as
     /// a cloud on the tile until the user pulls to refresh, at which point the
     /// upload stops being news and becomes just another photo.
     private(set) var recentlyUploaded: Set<UUID> = []
 
     func clearUploadBadges() { recentlyUploaded.removeAll() }
+
+    /// Adds or replaces the in-flight entry for one item.
+    private func setActive(_ upload: ActiveUpload) {
+        if let i = activeUploads.firstIndex(where: { $0.localIdentifier == upload.localIdentifier }) {
+            activeUploads[i] = upload
+        } else {
+            activeUploads.append(upload)
+        }
+    }
+
+    /// Removes an item's in-flight entry once its lane is done with it.
+    private func clearActive(_ localIdentifier: String) {
+        activeUploads.removeAll { $0.localIdentifier == localIdentifier }
+    }
+
+    /// Mutates one in-flight entry in place — how the transfer's byte-progress
+    /// callback reaches the right lane's row without disturbing the others.
+    private func updateActive(_ localIdentifier: String, _ mutate: (inout ActiveUpload) -> Void) {
+        guard let i = activeUploads.firstIndex(where: { $0.localIdentifier == localIdentifier }) else { return }
+        mutate(&activeUploads[i])
+    }
 
     /// What the Task Queue draws a progress bar from.
     struct ActiveUpload: Equatable {
@@ -72,6 +103,11 @@ final class BackupEngine {
     /// task draining its stream into the queue. Both nil unless backup is on.
     private var changeMonitor: PhotoLibraryChangeMonitor?
     private var observationTask: Task<Void, Never>?
+
+    /// The one context a run's lanes share. They all run on the main actor, so
+    /// the claim step below is atomic and the shared context is never touched
+    /// from two threads — only interleaved cooperatively between `await`s.
+    private var runContext: ModelContext?
 
     init(
         container: ModelContainer,
@@ -409,53 +445,96 @@ final class BackupEngine {
 
     func start() async {
         guard !isRunning else { return }
-        guard let client = session.client, let space = settings.targetSpace(in: session.spaces) else {
+        guard session.client != nil, settings.targetSpace(in: session.spaces) != nil else {
             lastError = "Not signed in."
             return
         }
         isRunning = true
         cancelled = false
-        defer { isRunning = false }
 
         let context = ModelContext(container)
+        runContext = context
+        defer {
+            isRunning = false
+            runContext = nil
+            activeUploads.removeAll()
+        }
         refreshProgress(context)
 
-        while !cancelled {
-            // Wi-Fi gate, re-checked every iteration so a run also stops if
-            // Wi-Fi drops to cellular mid-backup. The next background window, or
-            // reopening the app on Wi-Fi, resumes from exactly here.
-            guard allowedOnCurrentNetwork else {
-                statusText = "Waiting for Wi‑Fi"
-                break
+        // A small pool of lanes rather than one serial loop. Each lane claims
+        // the next row atomically and uploads it; the slow part is the awaited
+        // network transfer, so while one lane holds a big video the others keep
+        // photos moving. State still mutates only on the main actor between
+        // those awaits, so nothing races.
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<Self.maxConcurrent {
+                group.addTask { @MainActor [weak self] in await self?.drainLane() }
             }
-            guard let item = nextItem(context) else { break }
-            let failure = await upload(
-                item, client: client, spaceID: space.id, context: context
-            )
-            refreshProgress(context)
-
-            // Stop the run rather than marching the rest of the queue into the
-            // same wall. Without this the banner would appear while the engine
-            // carried on failing three hundred more items against a server
-            // that is not there.
-            if failure == .unreachable || failure == .authentication { break }
         }
 
         statusText = progress.summary
         completedRuns += 1
     }
 
+    /// One upload lane: claim, send, repeat until the queue is empty, the Wi-Fi
+    /// gate closes, or a run-ending failure trips `cancelled`.
+    private func drainLane() async {
+        guard let context = runContext,
+              let client = session.client,
+              let space = settings.targetSpace(in: session.spaces) else { return }
+
+        while !cancelled {
+            // Re-checked each claim so a lane also stops if Wi-Fi drops to
+            // cellular mid-backup. The next background window, or reopening the
+            // app on Wi-Fi, resumes from exactly here.
+            guard allowedOnCurrentNetwork else {
+                statusText = "Waiting for Wi‑Fi"
+                break
+            }
+            guard let item = claimNext(context) else { break }
+            let failure = await upload(
+                item, client: client, spaceID: space.id, context: context
+            )
+            refreshProgress(context)
+
+            // Stop the whole run rather than marching the other lanes into the
+            // same wall — a server that isn't there fails every item the same
+            // way. Lanes already mid-transfer finish their item, then stop.
+            if failure == .unreachable || failure == .authentication {
+                cancelled = true
+            }
+        }
+    }
+
     func stop() { cancelled = true }
 
-    /// Oldest-first among retryable work. Items that failed three times are
-    /// left alone so one bad asset can't stall everything behind it.
+    /// Takes the next retryable row and marks it in-flight, atomically.
     ///
-    /// A predicate rather than fetch-oldest-N-then-filter: `done` rows are never
-    /// removed (they are what keeps an asset from being re-queued), so a plain
-    /// oldest-N window fills with them and returns nil once the first N are up —
-    /// which stalled any backup of more than N items at exactly N. Selecting the
-    /// oldest *retryable* row directly finds the next one however much of the
-    /// queue is already done, so a library of thousands drains to the end.
+    /// Synchronous and on the main actor, so the pool's lanes are serialised
+    /// through it and can never claim the same row: the `.uploading` mark lands
+    /// before any other lane's `nextItem` runs, and `nextItem` skips anything
+    /// already uploading.
+    private func claimNext(_ context: ModelContext) -> BackupItem? {
+        guard let item = nextItem(context) else { return nil }
+        item.state = .uploading
+        item.attempts += 1
+        try? context.save()
+        return item
+    }
+
+    /// The next retryable row, **newest capture first** — so the photo you just
+    /// took jumps ahead of a months-old backlog, and a first backup surfaces
+    /// recent memories before it works back through the years. `queuedAt` breaks
+    /// ties, which burst frames and a Live Photo's two halves share (one capture
+    /// instant). Items that failed three times are left alone so one bad asset
+    /// can't stall everything behind it.
+    ///
+    /// A predicate rather than fetch-N-then-filter: `done` rows are never removed
+    /// (they are what keeps an asset from being re-queued), so a plain top-N
+    /// window fills with them and returns nil once the first N are up — which
+    /// stalled any backup of more than N items at exactly N. Selecting the next
+    /// *retryable* row directly finds it however much of the queue is already
+    /// done, so a library of thousands drains to the end.
     private func nextItem(_ context: ModelContext) -> BackupItem? {
         let pending = BackupItem.State.pending.rawValue
         let failed = BackupItem.State.failed.rawValue
@@ -463,7 +542,7 @@ final class BackupEngine {
             predicate: #Predicate {
                 $0.stateRaw == pending || ($0.stateRaw == failed && $0.attempts < 3)
             },
-            sortBy: [SortDescriptor(\.queuedAt)]
+            sortBy: [SortDescriptor(\.capturedAt, order: .reverse), SortDescriptor(\.queuedAt)]
         )
         descriptor.fetchLimit = 1
         return try? context.fetch(descriptor).first
@@ -479,15 +558,14 @@ final class BackupEngine {
         spaceID: UUID,
         context: ModelContext
     ) async -> TransferFailure? {
-        item.state = .uploading
-        item.attempts += 1
-        try? context.save()
+        // The row is already `.uploading` — `claimNext` marked it so no other
+        // lane could take it. Here we only show it and send it.
         statusText = "Backing up \(item.filename)"
-        active = ActiveUpload(
+        setActive(ActiveUpload(
             localIdentifier: item.localIdentifier, filename: item.filename,
             byteSize: item.byteSize, sentBytes: 0, isPreparing: true
-        )
-        defer { active = nil }
+        ))
+        defer { clearActive(item.localIdentifier) }
 
         // A Live Photo's video half is queued under a suffixed id, because the
         // queue keys on a unique identifier and one asset holds both halves.
@@ -530,16 +608,18 @@ final class BackupEngine {
                 resource: resource, isAutomaticBackup: true
             ) { [weak self] phase in
                 Task { @MainActor in
-                    guard let self, self.active?.localIdentifier == localIdentifier else { return }
+                    guard let self else { return }
                     switch phase {
                     case .preparing:
-                        self.active?.isPreparing = true
+                        self.updateActive(localIdentifier) { $0.isPreparing = true }
                     case .sending(let sent, let total):
-                        self.active?.isPreparing = false
-                        self.active?.sentBytes = sent
-                        // The exported size is authoritative; the scan's
-                        // estimate can be stale or zero.
-                        self.active?.byteSize = total
+                        self.updateActive(localIdentifier) {
+                            $0.isPreparing = false
+                            $0.sentBytes = sent
+                            // The exported size is authoritative; the scan's
+                            // estimate can be stale or zero.
+                            $0.byteSize = total
+                        }
                     }
                 }
             }
