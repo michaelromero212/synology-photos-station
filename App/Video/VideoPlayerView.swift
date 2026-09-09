@@ -376,7 +376,10 @@ final class VideoPlaybackModel {
         ) { _ in print("🎬 PLAYBACK STALLED — buffer ran dry mid-play") }
     }
 
-    private static func bufferedAhead(_ item: AVPlayerItem) -> Double {
+    // `nonisolated`: the KVO callback above runs off the main actor, and this
+    // only reads the item handed to it — no main-actor state — so it is safe to
+    // call from there.
+    private nonisolated static func bufferedAhead(_ item: AVPlayerItem) -> Double {
         guard let range = item.loadedTimeRanges.last?.timeRangeValue else { return 0 }
         return (range.start + range.duration).seconds - item.currentTime().seconds
     }
