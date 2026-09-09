@@ -266,6 +266,11 @@ struct AssetDetailView: View {
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)
         .statusBarHidden(!showChrome)
+        // The one place the portrait app may turn landscape: a full-screen clip
+        // fills the screen sideways, and leaving the viewer rotates back to the
+        // portrait grid. See `OrientationGate`.
+        .onAppear { OrientationGate.openMedia() }
+        .onDisappear { OrientationGate.closeMedia() }
         .fullScreenCover(isPresented: $showSlideshow) {
             SlideshowView(
                 session: session,

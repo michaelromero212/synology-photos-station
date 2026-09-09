@@ -59,6 +59,52 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
     ) {
         MainActor.assumeIsolated { PushRegistrar.shared.didFailToRegister(error) }
     }
+
+    /// Portrait everywhere except the full-screen media viewer, which may turn
+    /// landscape so a video can fill the screen. `OrientationGate` holds the
+    /// current allowance; the viewer flips it as it opens and closes.
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        // iPad rotates freely — it multitasks and lives in every orientation.
+        // Only iPhone is held portrait except inside the viewer.
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : OrientationGate.mask
+    }
+}
+
+/// Which orientations the app allows right now.
+///
+/// The app is a portrait app — the grid and everything around it stay vertical.
+/// The one exception is the full-screen media viewer: while it is open the
+/// device may turn landscape so a video fills the screen, and leaving it snaps
+/// back to portrait. The app delegate reports `mask`; the viewer drives it
+/// through `openMedia` / `closeMedia`.
+enum OrientationGate {
+    /// Read by the delegate on the main thread and written from the main actor;
+    /// a plain static so the non-isolated delegate callback can read it.
+    static var mask: UIInterfaceOrientationMask = .portrait
+
+    /// The media viewer opened — let the device rotate to landscape.
+    @MainActor static func openMedia() { apply(.allButUpsideDown) }
+
+    /// Back to the grid — hold portrait, rotating a landscape video back.
+    @MainActor static func closeMedia() { apply(.portrait) }
+
+    @MainActor private static func apply(_ new: UIInterfaceOrientationMask) {
+        // iPad is left to rotate on its own — never forced by the viewer.
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+        mask = new
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })
+        else { return }
+        // Re-evaluate the window: this lets landscape in while the viewer is
+        // open and, on close, turns a landscape video back to the portrait grid.
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: new))
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
 }
 #endif
 
