@@ -1121,7 +1121,9 @@ struct TimelineView: View {
         let extra = queued.keys.filter { !known.contains($0) }
         guard !extra.isEmpty else { return buckets }
         buckets.append(contentsOf: extra.map { TimelineBucket(key: $0, count: 0, place: nil) })
-        return buckets.sorted { $0.key > $1.key }
+        // Ascending, to match the store's oldest-first order — the merged
+        // phone-only days slot in by date the same way the server buckets do.
+        return buckets.sorted { $0.key < $1.key }
     }
     #endif
 
@@ -1172,16 +1174,6 @@ struct TimelineView: View {
                 // quietly lose the pinning. The per-bucket `.task` and `.id`
                 // hang off the content and the header instead.
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    // Inside the scroll content, above the first date, so it
-                    // scrolls out of the way like Synology's does rather than
-                    // holding a strip of the screen forever.
-                    #if os(iOS)
-                    if let engine {
-                        backupBanner(engine)
-                            .animation(.easeOut(duration: 0.2), value: connection?.state)
-                    }
-                    #endif
-
                     ForEach(sections(store)) { bucket in
                         Section {
                             let items = store.items[bucket.key] ?? []
@@ -1213,6 +1205,18 @@ struct TimelineView: View {
                         }
                     }
 
+                    // At the bottom of the content now rather than the top: the
+                    // grid opens on the newest (the bottom), so this is the end
+                    // you land on — the banner is seen on open and scrolls up out
+                    // of the way as you move back into older photos, the same job
+                    // it did at the top before the library ran oldest→newest.
+                    #if os(iOS)
+                    if let engine {
+                        backupBanner(engine)
+                            .animation(.easeOut(duration: 0.2), value: connection?.state)
+                    }
+                    #endif
+
                     // The library's floor: the count of everything in this
                     // grid, and where the scroll stops. Last in the stack so
                     // there is nothing to scroll past it, the way Photos and
@@ -1229,6 +1233,14 @@ struct TimelineView: View {
                 // the `Section`s — see the note above about wrapping those.
                 .scrollTargetLayout()
             }
+            // Land on the newest — at the bottom — and scroll up for older, the
+            // way Apple's Library opens. The grid runs oldest→newest now (see
+            // `TimelineStore.buckets`), so the bottom is the most recent day;
+            // this anchors there on first layout and keeps the newest in view as
+            // the last day's real heights land. Proven in an isolated repro
+            // before it went in: it holds through placeholder→real resizing and
+            // clamps at both ends without the overscroll void.
+            .defaultScrollAnchor(.bottom)
             // The grid has its own scrubber (`FastScroller` below), so the
             // system indicator is the second bar that showed on the right while
             // scrolling. Hidden here, leaving only the scrubber — the way Photos

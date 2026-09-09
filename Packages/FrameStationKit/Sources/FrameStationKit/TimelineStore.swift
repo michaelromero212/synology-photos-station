@@ -38,7 +38,16 @@ public final class TimelineStore {
         self.zoom = zoom
     }
 
-    public var buckets: [TimelineBucket] { manifest?.buckets ?? [] }
+    /// Oldest first, newest last — the presentation order.
+    ///
+    /// The server sends the manifest newest-first (and still does, so older app
+    /// builds are untouched); the app reverses it here, in one place, so the
+    /// whole library reads the way Apple's does: you land on the newest at the
+    /// bottom and scroll up for older. Everything downstream — the sections, the
+    /// fast-scrubber's fraction→date mapping, the viewer's swipe and next-video
+    /// order — takes its order from this, so the flip lives here and nowhere
+    /// else. Within a day, `loadBucket` and `refresh` order items to match.
+    public var buckets: [TimelineBucket] { Array((manifest?.buckets ?? []).reversed()) }
     public var total: Int { manifest?.total ?? 0 }
 
     /// Whether anything on screen is still waiting for the NAS to render it.
@@ -168,7 +177,10 @@ public final class TimelineStore {
 
         do {
             let page = try await client.bucket(spaceID: spaceID, key: key, zoom: zoom)
-            items[key] = page.items
+            // Reversed to oldest-first, to match `buckets` and the way the grid
+            // now reads a day forward. The server still sends within-day
+            // newest-first; the flip is the client's, in one direction, here.
+            items[key] = Array(page.items.reversed())
             scheduleSnapshot()
         } catch {
             // Only claim the bucket is empty when the server said so. Writing
@@ -212,7 +224,8 @@ public final class TimelineStore {
                         if items[key] != nil { bucket.append(item) }
                     }
                     if items[key] != nil {
-                        items[key] = bucket.sorted { $0.capturedAt > $1.capturedAt }
+                        // Oldest-first, matching `loadBucket` and `buckets`.
+                        items[key] = bucket.sorted { $0.capturedAt < $1.capturedAt }
                     }
                 case .delete:
                     membershipMoved = true

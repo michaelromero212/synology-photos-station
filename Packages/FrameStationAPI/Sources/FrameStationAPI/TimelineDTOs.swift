@@ -56,9 +56,10 @@ extension Array where Element == TimelineBucket {
     /// the grid can be told to put it back under your eyes.
     ///
     /// Zooming out finds the shorter key that contains yours. Zooming in finds
-    /// the first longer key inside it — first, not any, because buckets run
-    /// newest-first, so that is the most recent day of the month or year you
-    /// were looking at, which is the edge you were nearest.
+    /// the first longer key inside it — first, not any, because these buckets
+    /// are held in the same order the grid draws them, so the first match is the
+    /// day at the top edge of that month or year's section: the edge the scroll
+    /// anchor was read from, and so the one to land back on.
     public func counterpart(of key: String) -> String? {
         if contains(where: { $0.key == key }) { return key }
         if let containing = first(where: { key.hasPrefix($0.key) }) { return containing.key }
