@@ -1200,6 +1200,14 @@ struct TimelineView: View {
                             .animation(.easeOut(duration: 0.2), value: connection?.state)
                     }
                     #endif
+
+                    // macOS rounds the window's bottom corners, which would clip
+                    // the newest row now that it rests at the very bottom — the
+                    // count footer used to hold this space before it moved to the
+                    // top. A little clearance keeps that last row off the curve.
+                    #if os(macOS)
+                    Color.clear.frame(height: 16)
+                    #endif
                 }
                 // Marks the sections as scroll targets, which is what lets
                 // `scrollPosition` below name one. On the stack rather than on

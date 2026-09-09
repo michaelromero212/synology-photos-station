@@ -183,11 +183,17 @@ public final class TimelineStore {
             items[key] = Array(page.items.reversed())
             scheduleSnapshot()
         } catch {
-            // Only claim the bucket is empty when the server said so. Writing
-            // `[]` after a network failure is what turns a restored snapshot
-            // into a grid of blank tiles: the day already has items from disk,
-            // and a failed fetch would throw them away and cache the loss.
-            if items[key] == nil, !isFromSnapshot { items[key] = [] }
+            // Leave the day unloaded on failure rather than caching an empty
+            // result. `items[key] == nil` is exactly what lets the section's
+            // `.task` fetch it again the next time it scrolls into view, so a
+            // one-off blip on a single day heals itself instead of stranding
+            // that day as blank tiles until the app relaunches — which is how
+            // the oldest day once sat empty on a phone while every other device
+            // had it. Only a successful fetch records items here; a genuinely
+            // empty day is the server saying so, not a dropped request. (A
+            // restored snapshot's items are untouched for the same reason —
+            // nothing overwrites them on a failed refetch.)
+            _ = error
         }
     }
 
