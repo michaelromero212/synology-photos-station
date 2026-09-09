@@ -338,7 +338,15 @@ struct CollectionDetailView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .task { await load() }
+        // Keyed to the collection, not a bare `.task`. On iOS every media type
+        // is a fresh push, so an unkeyed task ran once per screen and was fine.
+        // The Mac sidebar reuses this one view across every media-type row,
+        // handing it a new `collection` in place — and a bare `.task` never
+        // re-fires on an input change, only on appear. So the grid kept the
+        // previous type's photos until you left for Library and came back, which
+        // rebuilt the view. Keying the load to the collection restarts it the
+        // moment the row changes.
+        .task(id: collection.key) { await load() }
     }
 
     private var grid: some View {
@@ -381,12 +389,17 @@ struct CollectionDetailView: View {
     private func load() async {
         guard let client = session.client else { return }
         isLoading = true
+        // Drop the outgoing collection's photos before fetching, so switching
+        // sidebar rows shows *this* collection loading rather than the last
+        // one's grid sitting under the new title for a beat. On first appearance
+        // `items` is already empty, so this is a no-op there.
+        items = []
+        failure = nil
         defer { isLoading = false }
         do {
             items = try await client.collectionItems(
                 spaceID: space.id, kind: collection.kind, key: collection.key
             ).items
-            failure = nil
         } catch {
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
