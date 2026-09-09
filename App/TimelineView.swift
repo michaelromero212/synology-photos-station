@@ -1483,6 +1483,10 @@ struct TimelineView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
+                        // Pulled in toward the message so it clears the
+                        // fast-scroller riding the trailing edge — the X sat
+                        // close enough to the scrubber to fat-finger the wrong one.
+                        .padding(.trailing, 18)
                     }
 
                     Button("Set Up Now") { showBackupSettings = true }
