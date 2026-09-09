@@ -439,11 +439,17 @@ struct TimelineView: View {
         // Coming back to the app should not mean coming back to a stale
         // library. Photos this device didn't upload — from a phone, from
         // another person in a shared space — arrive with no local event to
-        // announce them, so without this the only way to see them was to know
-        // to pull down.
+        // announce them, and with pull-to-refresh gone this is the refresh that
+        // catches them: every return to the foreground, and a cold reopen.
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await store?.refresh() }
+            #if os(iOS)
+            // Returning to the app is the acknowledgement pull-to-refresh used
+            // to be — the "just uploaded" cloud badges are no longer news, so
+            // they retire.
+            engine?.clearUploadBadges()
+            #endif
         }
         // And while you're actually looking at it, keep it current.
         //
@@ -1390,14 +1396,13 @@ struct TimelineView: View {
                 #endif
             }
             #endif
-            .refreshable {
-                await store.refresh()
-                #if os(iOS)
-                // The cloud means "this just went up". After a deliberate
-                // refresh it isn't news any more, so it retires.
-                engine?.clearUploadBadges()
-                #endif
-            }
+            // No pull-to-refresh. With the library running oldest→newest and
+            // opening on the newest, a pull from the top would mean scrolling all
+            // the way to the oldest photo first — impossible in a library of
+            // thousands. Refresh is automatic instead: a cold open loads fresh,
+            // returning to the foreground refreshes (and clears the badges), and
+            // the poll keeps it current while you watch. Force-quit and reopen is
+            // the manual refresh.
             #if !os(tvOS)
             .overlay(alignment: .trailing) {
                 if store.buckets.count > 1 {
