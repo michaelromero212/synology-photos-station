@@ -70,6 +70,12 @@ final class VideoPlaybackModel {
     /// current before its buffer exists.
     @ObservationIgnored private var wantsPlayback = false
 
+    /// How far ahead a *preloaded* (not-yet-watched) video buffers. Small on
+    /// purpose: enough for an instant start when you reach it, not so much that
+    /// the two neighbours the pager warms starve the video actually on screen.
+    /// `start` lifts it to automatic once a page becomes current.
+    private static let preloadForwardBuffer: TimeInterval = 2
+
     /// Fetches the signed URL and starts buffering, without playing.
     ///
     /// Split from `start` so a video can be got ready before anyone is looking
@@ -91,6 +97,12 @@ final class VideoPlaybackModel {
         do {
             let playback = try await client.playbackURL(assetID: assetID)
             let item = AVPlayerItem(url: playback.url)
+            // Preloaded, so buffer only a little ahead. Both pages either side
+            // are warmed the moment the pager settles; left uncapped, each
+            // greedily downloads its forward buffer and three streams fight over
+            // one home link — which is what stutters the video on screen every
+            // few seconds. `start` lifts the cap when this page becomes current.
+            item.preferredForwardBufferDuration = Self.preloadForwardBuffer
             let player = AVPlayer(playerItem: item)
             self.player = player
             lastError = nil
@@ -110,6 +122,12 @@ final class VideoPlaybackModel {
         wantsPlayback = true
         guard let player else { return }
         configureAudioSession()
+        // On screen now: uncap the buffer (0 = automatic) so the playing clip
+        // builds as deep a cushion as it likes — the neighbours are capped low,
+        // so it isn't fighting them for the link — and let AVPlayer hold off
+        // starting until it has enough to play through without an immediate stall.
+        player.currentItem?.preferredForwardBufferDuration = 0
+        player.automaticallyWaitsToMinimizeStalling = true
         player.play()
         isPlaying = true
     }
@@ -119,6 +137,11 @@ final class VideoPlaybackModel {
     func pause() {
         wantsPlayback = false
         player?.pause()
+        // Re-cap: a clip scrolled off (or advanced past) must stop reading
+        // ahead, or it keeps pulling bytes in the background and starves the one
+        // now on screen. The buffer it already holds stays, so returning to it
+        // is still instant.
+        player?.currentItem?.preferredForwardBufferDuration = Self.preloadForwardBuffer
         isPlaying = false
     }
 
@@ -224,9 +247,13 @@ final class VideoPlaybackModel {
         let target = VideoTiming.skipTarget(from: position, by: delta, duration: duration)
         position = target
         hasFinished = false
-        // Exact, because a skip is a considered move to a specific moment — and
-        // one seek can afford the decode a hundred scrub updates cannot.
-        seek(to: target, exact: true)
+        // Tolerant, not exact. `gobackward.10` / `goforward.10` are "roughly
+        // here" jumps you tap over and over, and a frame-exact seek has to
+        // decode from the nearest keyframe forward to the precise frame — the
+        // pause you feel after a skip. Snapping to that keyframe lands within a
+        // moment of the target and returns instantly, which is what a skip
+        // should feel like.
+        seek(to: target, exact: false)
     }
 
     /// One frame, for finding the exact moment something happens.
