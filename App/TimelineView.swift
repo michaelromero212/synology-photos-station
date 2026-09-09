@@ -211,6 +211,13 @@ struct TimelineView: View {
             }
             .frame(maxHeight: .infinity)
         }
+        // The browsing controls, floated over the top of the grid so they can
+        // slide away on scroll (see `floatingTopBar`). An overlay, not an inset,
+        // so it never resizes the scroll view. iOS only — macOS keeps its window
+        // toolbar, tvOS its own chrome.
+        #if os(iOS)
+        .overlay(alignment: .top) { floatingTopBar }
+        #endif
         // The count takes the title while selecting. It used to sit in the
         // leading slot beside the space name, which left two pieces of text
         // competing for one bar and both of them truncated — "8…" next to
@@ -224,19 +231,14 @@ struct TimelineView: View {
         .modifier(macChrome)
         #endif
         #if os(iOS)
-        // Scrolling into the library stands the whole bar down — title and
-        // icons both — leaving the pinned date as the only thing across the
-        // top, and scrolling back brings it up. Deliberately un-animated: an
-        // explicit `.animation` on this drove the bar up past the status bar
-        // and lurched the grid with it. The navigation controller's own
-        // transition is the one that looks right.
-        //
-        // Never while selecting, though: the count and the cancel button live
-        // in that bar, and losing them mid-selection strands you.
-        .toolbar(
-            scrollProgress.chromeHidden && !selection.isActive ? .hidden : .automatic,
-            for: .navigationBar
-        )
+        // The system bar is for *selecting* now — it carries the count and the
+        // way out. While browsing it stays hidden and `floatingTopBar` carries
+        // the controls instead, as an overlay that can slide away on scroll for
+        // more grid. Crucially this toggles on selection, a discrete action,
+        // never on scroll: a scroll-driven bar toggle resized the scroll view's
+        // safe area and fed the storm this session already fought. The overlay
+        // moves without insetting anything, which is what keeps it safe.
+        .toolbar(selection.isActive ? .automatic : .hidden, for: .navigationBar)
         .navigationDestination(item: $openItem) { opened in
             AssetDetailView(
                 item: opened.item, space: space, session: session,
@@ -1669,6 +1671,80 @@ struct TimelineView: View {
         return Color(uiColor: .systemBackground)
         #endif
     }
+
+    #if os(iOS)
+    /// The browsing controls, floated over the top of the grid so they can
+    /// slide away on scroll without insetting the scroll view (the safe way —
+    /// see `ScrollProgress.topBarHidden`). Shown only while browsing; selection
+    /// hands the top back to the system bar, so this yields to it then. The grid
+    /// runs full height underneath, so what the bar slides off of is more grid.
+    @ViewBuilder
+    private var floatingTopBar: some View {
+        if !selection.isActive {
+            HStack(spacing: 8) {
+                Button { showActivity = true } label: {
+                    Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
+                        .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                        .font(.body.weight(.medium))
+                        .frame(width: 38, height: 38)
+                        .glassCircle(fallback: .regularMaterial)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    (activity?.unreadCount ?? 0) > 0
+                        ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                        : "Recent activity"
+                )
+
+                Spacer(minLength: 8)
+
+                if let spaceSwitcher {
+                    spaceSwitcher
+                } else {
+                    Text(space.name).font(.headline).lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                Button { showSearch = true } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.body.weight(.medium))
+                        .frame(width: 38, height: 38)
+                        .glassCircle(fallback: .regularMaterial)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search \(space.name)")
+
+                Button { showPicker = true } label: {
+                    Image(systemName: "plus")
+                        .font(.body.weight(.medium))
+                        .frame(width: 38, height: 38)
+                        .glassCircle(fallback: .regularMaterial)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(space.kind == .shared ? "Add to \(space.name)" : "Add Photos")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+            // Absorb taps across the whole bar so a tap on its empty middle
+            // doesn't fall through to a photo behind it — and stop intercepting
+            // once it has slid away.
+            .contentShape(Rectangle())
+            .allowsHitTesting(!scrollProgress.topBarHidden)
+            // The slide+fade. Offset alone can't fully clear a bar that begins at
+            // the safe-area top, so opacity carries it the rest of the way up.
+            .offset(y: scrollProgress.topBarHidden ? -120 : 0)
+            .opacity(scrollProgress.topBarHidden ? 0 : 1)
+            .animation(.easeOut(duration: 0.26), value: scrollProgress.topBarHidden)
+        }
+    }
+    #endif
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {

@@ -222,12 +222,46 @@ final class ScrollProgress {
     /// just stay up.
     let chromeHidden = false
 
+    /// Whether the floating top bar has slid away.
+    ///
+    /// Driven by scroll *direction* and read only by the overlay bar — never by
+    /// the scroll view's insets. That is the whole difference from `chromeHidden`
+    /// above: moving an overlay cannot resize the scroll view, so flipping this
+    /// can't feed the layout storm that toggling the real bar did. Scrolling up
+    /// into older photos slides the bar away for room; scrolling back down
+    /// toward the newest brings it back. Flips a handful of times per scroll
+    /// (never per frame), so the one view that reads it is cheap to invalidate.
+    var topBarHidden = false
+
+    private var lastOffset: Double = 0
+    private var haveOffset = false
+    /// One-way accumulated travel, so a decisive run flips the bar rather than a
+    /// stray pixel of jitter.
+    private var travel: Double = 0
+
     func apply(_ report: ScrollReport) {
         let next = report.scrollable > 1
             ? (report.offset / report.scrollable).clamped(to: 0...1)
             : 0
         // Guarded: `@Observable` notifies on every set, equal value or not.
         if fraction != next { fraction = next }
+        trackDirection(offset: report.offset)
+    }
+
+    /// Flips `topBarHidden` from the direction of travel, with a small deadband
+    /// and a threshold so an ordinary scroll — not jitter — moves the bar.
+    private func trackDirection(offset: Double) {
+        defer { lastOffset = offset }
+        guard haveOffset else { haveOffset = true; return }
+        let delta = offset - lastOffset
+        guard abs(delta) > 0.5 else { return }
+        if delta < 0 {                                   // toward older (up) → hide
+            travel = Swift.min(travel, 0) + delta
+            if travel < -24, !topBarHidden { travel = 0; topBarHidden = true }
+        } else {                                         // toward newer (down) → show
+            travel = Swift.max(travel, 0) + delta
+            if travel > 24, topBarHidden { travel = 0; topBarHidden = false }
+        }
     }
 }
 
