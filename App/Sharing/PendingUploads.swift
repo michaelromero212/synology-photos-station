@@ -52,10 +52,11 @@ final class PendingUploads {
 
     /// Uploads `assets` into `space`, keeping the grid informed as it goes.
     ///
-    /// Serial on purpose, matching the backup queue: a phone pushing six videos
-    /// at once over home wifi finishes all six later than it would have finished
-    /// them one at a time, and saturates the link for everything else in the
-    /// house while it does. See ARCHITECTURE.md §8.
+    /// Runs a bounded pool of `UploadConcurrency.maxLanes` lanes — the same pool
+    /// the backup queue uses now — so a share of several videos moves a few at a
+    /// time instead of single-file, while the bound keeps it from saturating
+    /// home wifi for the rest of the house. (It used to be serial "to match the
+    /// backup queue"; the backup queue went parallel, so this follows.)
     ///
     /// Returns the number that failed, for whoever wants to say so.
     @discardableResult
@@ -72,38 +73,61 @@ final class PendingUploads {
         }
         items.append(contentsOf: queued)
 
-        var failed = 0
-        for (index, asset) in assets.enumerated() {
-            let id = queued[index].id
-            setState(.uploading, for: id)
-            guard let candidate = PhotoLibraryScanner.describe(asset) else {
-                failed += 1
-                remove(id)
-                continue
+        let failed = await withTaskGroup(of: Int.self) { group -> Int in
+            for _ in 0..<UploadConcurrency.maxLanes {
+                group.addTask { @MainActor [weak self] in
+                    await self?.drainBatchLane(spaceID: space.id, client: client) ?? 0
+                }
             }
-            do {
-                _ = try await AssetUploader.send(
-                    asset,
-                    descriptor: UploadDescriptor(asset: asset, candidate: candidate),
-                    to: space.id,
-                    client: client
-                )
-            } catch {
-                failed += 1
-            }
-            // Removed either way. A landed photo is now the server's to draw,
-            // and a failed one has no business sitting in the grid pretending
-            // to be on its way — the picker reports the failure instead.
-            remove(id)
+            return await group.reduce(0, +)
         }
 
         completedBatches += 1
         return failed
     }
 
-    private func setState(_ state: UploadState, for id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index].state = state
+    /// One lane: claim the next pending row for this space, send it, repeat.
+    /// Returns how many it failed, which the pool sums into the batch total.
+    private func drainBatchLane(spaceID: UUID, client: FrameStationClient) async -> Int {
+        var failed = 0
+        while let claimed = claimNext(in: spaceID) {
+            // Removed either way. A landed photo is now the server's to draw,
+            // and a failed one has no business sitting in the grid pretending to
+            // be on its way — the picker reports the failure instead.
+            defer { remove(claimed.id) }
+            guard let asset = Self.asset(for: claimed.localIdentifier),
+                  let candidate = PhotoLibraryScanner.describe(asset) else {
+                failed += 1
+                continue
+            }
+            do {
+                _ = try await AssetUploader.send(
+                    asset,
+                    descriptor: UploadDescriptor(asset: asset, candidate: candidate),
+                    to: spaceID,
+                    client: client
+                )
+            } catch {
+                failed += 1
+            }
+        }
+        return failed
+    }
+
+    /// Marks the next pending row for this space in-flight and returns it —
+    /// atomic because it is synchronous on the main actor, so no two lanes take
+    /// the same row. The asset is refetched by local id inside the lane rather
+    /// than captured, so no `PHAsset` crosses a task boundary.
+    private func claimNext(in spaceID: UUID) -> Item? {
+        guard let index = items.firstIndex(where: {
+            $0.spaceID == spaceID && $0.state == .pending
+        }) else { return nil }
+        items[index].state = .uploading
+        return items[index]
+    }
+
+    private static func asset(for localIdentifier: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
     }
 
     private func remove(_ id: UUID) {

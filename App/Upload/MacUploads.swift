@@ -32,6 +32,8 @@ final class MacUploads {
         var sent: Int64 = 0
         var total: Int64 = 0
         var failure: String?
+        /// In flight in one of the pool's lanes, so no other lane claims it.
+        var isUploading = false
 
         var fraction: Double? {
             guard total > 0 else { return nil }
@@ -84,7 +86,10 @@ final class MacUploads {
         let done = Double(completed)
         let outstanding = Double(queue.count)
         guard done + outstanding > 0 else { return 0 }
-        let partial = queue.first?.fraction ?? 0
+        // Sum every in-flight lane's progress; waiting items contribute nothing
+        // (their fraction is nil), so this generalises the single-item case to
+        // the parallel pool.
+        let partial = queue.reduce(0.0) { $0 + ($1.fraction ?? 0) }
         return min(1, (done + partial) / (done + outstanding))
     }
 
@@ -127,7 +132,26 @@ final class MacUploads {
         isRunning = true
         defer { isRunning = false }
 
-        while let item = queue.first {
+        // A small pool of lanes rather than one serial pass, matching the backup
+        // engine: while one lane holds a big video the others keep photos
+        // moving, so a drop's speed no longer depends on the mix. Bounded to
+        // `UploadConcurrency.maxLanes`. The `repeat` picks up files dropped while
+        // the pool was draining its last items.
+        repeat {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<UploadConcurrency.maxLanes {
+                    group.addTask { @MainActor [weak self] in
+                        await self?.drainLane(spaceID: spaceID, client: client)
+                    }
+                }
+            }
+        } while queue.contains { !$0.isUploading }
+    }
+
+    /// One upload lane: claim the next waiting file, send it, repeat until there
+    /// is nothing left to claim.
+    private func drainLane(spaceID: UUID, client: FrameStationClient) async {
+        while let item = claimNext() {
             do {
                 let result = try await upload(item, to: spaceID, client: client)
                 // `deduplicated` is set only on the `.have` fast path, where the
@@ -146,8 +170,22 @@ final class MacUploads {
                 failed += 1
                 recordFinished(item, .failed)
             }
-            if !queue.isEmpty { queue.removeFirst() }
+            finish(item.id)
         }
+    }
+
+    /// Marks the next waiting file in-flight and returns it, atomically:
+    /// synchronous on the main actor, so two lanes can never claim the same file
+    /// — the mark lands before any other lane's claim runs.
+    private func claimNext() -> Item? {
+        guard let index = queue.firstIndex(where: { !$0.isUploading }) else { return nil }
+        queue[index].isUploading = true
+        return queue[index]
+    }
+
+    /// Drops a finished file from the queue — it lives in `finished` now.
+    private func finish(_ id: UUID) {
+        queue.removeAll { $0.id == id }
     }
 
     @discardableResult

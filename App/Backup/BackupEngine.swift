@@ -35,8 +35,9 @@ final class BackupEngine {
 
     /// How many transfers run at once. Small on purpose: enough that photos
     /// flow past a big video, not so many that a home uplink or the NAS is
-    /// saturated and every one crawls.
-    static let maxConcurrent = 3
+    /// saturated and every one crawls. Shared with the manual upload paths via
+    /// `UploadConcurrency` so backup and uploads move at the same cadence.
+    static let maxConcurrent = UploadConcurrency.maxLanes
     /// Assets this device uploaded since the badges were last cleared. Shown as
     /// a cloud on the tile until the user pulls to refresh, at which point the
     /// upload stops being news and becomes just another photo.
