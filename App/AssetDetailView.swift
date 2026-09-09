@@ -250,6 +250,18 @@ struct AssetDetailView: View {
         .overlay(alignment: .bottom) {
             if showChrome && !isZoomed { bottomChrome }
         }
+        // The video transport, at the viewer level rather than inside the pager
+        // page. The pager keeps each page's controller, so controls built into a
+        // page froze on the clip they were built for and disappeared the moment
+        // auto-play advanced to the next. Here they read the *current* clip's
+        // player, so they follow every advance and toggle with the rest of the
+        // chrome. The player still owns the double-tap skip zones.
+        .overlay {
+            if showChrome, !isZoomed, currentItem.mediaType == .video {
+                VideoControls(model: preloader.model(for: currentItem.assetID))
+                    .transition(.opacity)
+            }
+        }
         .overlay { toastLayer }
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)

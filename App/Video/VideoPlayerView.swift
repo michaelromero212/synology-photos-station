@@ -59,6 +59,13 @@ final class VideoPlaybackModel {
     @ObservationIgnored private var endObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var statusObserver: NSKeyValueObservation?
     @ObservationIgnored private var stallObserver: (any NSObjectProtocol)?
+    #if DEBUG
+    // Streaming diagnostics, console-only — see `diagnose`.
+    @ObservationIgnored private var diagBufferEmpty: NSKeyValueObservation?
+    @ObservationIgnored private var diagKeepUp: NSKeyValueObservation?
+    @ObservationIgnored private var diagTimeControl: NSKeyValueObservation?
+    @ObservationIgnored private var diagStalled: (any NSObjectProtocol)?
+    #endif
     /// The newest position asked for while a seek is already running.
     @ObservationIgnored private var pendingSeek: CMTime = .invalid
     @ObservationIgnored private var isSeeking = false
@@ -213,6 +220,10 @@ final class VideoPlaybackModel {
             }
         }
 
+        #if DEBUG
+        diagnose(player)
+        #endif
+
         stallObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
             object: player.currentItem, queue: .main
@@ -333,6 +344,44 @@ final class VideoPlaybackModel {
         }
     }
 
+    #if DEBUG
+    /// Streaming diagnostics, console-only — every line is prefixed 🎬 so you
+    /// can filter the Xcode log to it. Prints each stall, each buffer-empty /
+    /// likely-to-keep-up flip, and the reason the player is waiting, with how
+    /// many seconds are buffered ahead of the playhead. A stutter that logs
+    /// "buffer EMPTY" and "WAITING — evaluatingBufferingRate/toMinimizeStalls"
+    /// is the network under-running the buffer (contention or plain bandwidth);
+    /// a stutter with a healthy bufferedAhead points somewhere else.
+    private func diagnose(_ player: AVPlayer) {
+        guard let item = player.currentItem else { return }
+        diagBufferEmpty = item.observe(\.isPlaybackBufferEmpty, options: [.new]) { item, _ in
+            if item.isPlaybackBufferEmpty { print("🎬 buffer EMPTY (stalling)") }
+        }
+        diagKeepUp = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { item, _ in
+            print("🎬 likelyToKeepUp=\(item.isPlaybackLikelyToKeepUp) bufferedAhead=\(String(format: "%.1f", Self.bufferedAhead(item)))s")
+        }
+        diagTimeControl = player.observe(\.timeControlStatus, options: [.new]) { player, _ in
+            let status: String
+            switch player.timeControlStatus {
+            case .paused: status = "paused"
+            case .waitingToPlayAtSpecifiedRate:
+                status = "WAITING — \(player.reasonForWaitingToPlay?.rawValue ?? "unknown")"
+            case .playing: status = "playing"
+            @unknown default: status = "unknown"
+            }
+            print("🎬 \(status)")
+        }
+        diagStalled = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main
+        ) { _ in print("🎬 PLAYBACK STALLED — buffer ran dry mid-play") }
+    }
+
+    private static func bufferedAhead(_ item: AVPlayerItem) -> Double {
+        guard let range = item.loadedTimeRanges.last?.timeRangeValue else { return 0 }
+        return (range.start + range.duration).seconds - item.currentTime().seconds
+    }
+    #endif
+
     func stop() {
         if let observer { player?.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
@@ -342,6 +391,13 @@ final class VideoPlaybackModel {
         endObserver = nil
         stallObserver = nil
         statusObserver = nil
+        #if DEBUG
+        diagBufferEmpty = nil
+        diagKeepUp = nil
+        diagTimeControl = nil
+        if let diagStalled { NotificationCenter.default.removeObserver(diagStalled) }
+        diagStalled = nil
+        #endif
         player?.pause()
         player = nil
         isPlaying = false
@@ -385,13 +441,16 @@ struct VideoPlayerView: View {
                 #if os(iOS)
                 // A bare layer, so a tap anywhere reaches the viewer and
                 // toggles chrome instead of being eaten by AVKit.
+                // The transport (`VideoControls`) no longer lives here. The
+                // pager builds each page's hosting controller once and keeps it,
+                // so controls baked into a page froze on the clip they were built
+                // for and vanished when auto-play moved on. They hang off the
+                // viewer now (see AssetDetailView), reading the *current* clip so
+                // they follow every advance. The player keeps the double-tap skip
+                // zones, which are tied to this layer. (`showsControls` is now
+                // vestigial — kept only so the page's call sites stay unchanged.)
                 PlayerLayerView(player: player)
                     .overlay { skipZones }
-                    .overlay {
-                        if showsControls {
-                            VideoControls(model: model).transition(.opacity)
-                        }
-                    }
                 #else
                 // macOS and tvOS get AVKit's own transport, which is the right
                 // answer there: it is the control surface people already know,
@@ -531,6 +590,7 @@ struct VideoControls: View {
             Image(systemName: symbol)
                 .font(.system(size: 30, weight: .medium))
                 .frame(width: 56, height: 56)
+                .glassCircle(fallback: .ultraThinMaterial)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -544,7 +604,7 @@ struct VideoControls: View {
             Image(systemName: playSymbol)
                 .font(.system(size: 30, weight: .medium))
                 .frame(width: 78, height: 78)
-                .background(Circle().stroke(.white, lineWidth: 3))
+                .glassCircle(fallback: .ultraThinMaterial)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -579,7 +639,10 @@ struct VideoControls: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isMuted ? "Unmute" : "Mute")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .glassCapsule(fallback: .ultraThinMaterial)
+        .padding(.horizontal, 12)
         // Clear of the viewer's action bar, which floats at the very bottom.
         .padding(.bottom, 104)
         .onAppear { isMuted = model.player?.isMuted ?? false }
