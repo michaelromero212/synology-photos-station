@@ -906,32 +906,6 @@ struct TimelineView: View {
         .padding(.bottom, 6)
     }
 
-    /// The zoom pill, when there is a reason for it to be there.
-    ///
-    /// It stands down on the same signal as the two bars around it, so scrolling
-    /// into the library leaves nothing but photographs — which is the whole
-    /// point of a bar that a photo can pass behind. Coming back up brings all
-    /// three together.
-    ///
-    /// The `ZStack` is load-bearing. `.animation` has to hang off something that
-    /// survives the pill leaving, or there is nothing left to run the transition
-    /// on and the bar simply blinks out — and it collapses to nothing when empty,
-    /// so the inset gives its height back rather than leaving a gap.
-    ///
-    /// Not on macOS, where the same two steps live in the window toolbar.
-    @ViewBuilder
-    private func floatingZoom(_ store: TimelineStore) -> some View {
-        #if !os(macOS)
-        ZStack {
-            if !scrollProgress.chromeHidden {
-                zoomBar(store)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.easeOut(duration: 0.28), value: scrollProgress.chromeHidden)
-        #endif
-    }
-
     #if os(iOS)
     /// Which day a given asset sits in, loading buckets until it turns up.
     ///
@@ -1174,6 +1148,15 @@ struct TimelineView: View {
                 // quietly lose the pinning. The per-bucket `.task` and `.id`
                 // hang off the content and the header instead.
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    // The library's size, at the top — above the oldest photo,
+                    // the way Apple heads a library. The grid runs oldest→newest
+                    // and opens on the newest, so you meet this only by scrolling
+                    // all the way back. `store.total` is the manifest's own
+                    // count, known before any bucket loads.
+                    if store.total > 0 {
+                        gridFooter(store.total)
+                    }
+
                     ForEach(sections(store)) { bucket in
                         Section {
                             let items = store.items[bucket.key] ?? []
@@ -1205,28 +1188,18 @@ struct TimelineView: View {
                         }
                     }
 
-                    // At the bottom of the content now rather than the top: the
-                    // grid opens on the newest (the bottom), so this is the end
-                    // you land on — the banner is seen on open and scrolls up out
-                    // of the way as you move back into older photos, the same job
-                    // it did at the top before the library ran oldest→newest.
+                    // The very last thing in the stack, so — with the count
+                    // moved up top and the zoom pill gone — it rests right above
+                    // the tab bar when the library opens on the newest. Dismiss
+                    // it and the newest row of photos takes that spot instead,
+                    // straight above the bar. It still scrolls up out of the way
+                    // as you move back into older days.
                     #if os(iOS)
                     if let engine {
                         backupBanner(engine)
                             .animation(.easeOut(duration: 0.2), value: connection?.state)
                     }
                     #endif
-
-                    // The library's floor: the count of everything in this
-                    // grid, and where the scroll stops. Last in the stack so
-                    // there is nothing to scroll past it, the way Photos and
-                    // Synology both end a library. `store.total` is the
-                    // manifest's own count, so it is known before the buckets
-                    // are — a person scrolling to the bottom always finds it
-                    // filled in.
-                    if store.total > 0 {
-                        gridFooter(store.total)
-                    }
                 }
                 // Marks the sections as scroll targets, which is what lets
                 // `scrollPosition` below name one. On the stack rather than on
@@ -1382,20 +1355,20 @@ struct TimelineView: View {
                         }
                     }
                 } else {
-                    // Takes the pill's slot while a review is running: checking
-                    // what just arrived is the one job on screen, and two
-                    // floating bars stacked over the photos is one too many.
                     #if os(iOS)
+                    // A review bar when a batch has just landed and wants
+                    // checking; otherwise nothing. The zoom pill used to sit
+                    // here — density is a rare, deliberate change, not a bar
+                    // worth floating over every photo — so with it gone the
+                    // newest row (or the backup banner) meets the tab bar
+                    // directly, which is what the library opening on the newest
+                    // wants underneath it.
                     if let review, let onReviewDone {
                         MoveReviewBar(
                             review: review, onDone: onReviewDone,
                             onRemoveOriginals: onRemoveOriginals
                         )
-                    } else {
-                        floatingZoom(store)
                     }
-                    #else
-                    floatingZoom(store)
                     #endif
                 }
                 #else
