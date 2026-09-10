@@ -167,7 +167,9 @@ final class VideoPlaybackModel {
         #if DEBUG
         // Says plainly which clip got which policy, so "the cap is still on" is
         // a thing we can read rather than infer from the buffer's shape.
-        print("🎬 forwardBuffer → \(Int(target))s (\(freely ? "playing" : "preload"))")
+        if Self.verboseDiagnostics {
+            print("🎬 forwardBuffer → \(Int(target))s (\(freely ? "playing" : "preload"))")
+        }
         #endif
     }
 
@@ -387,11 +389,30 @@ final class VideoPlaybackModel {
     /// "buffer EMPTY" and "WAITING — evaluatingBufferingRate/toMinimizeStalls"
     /// is the network under-running the buffer (contention or plain bandwidth);
     /// a stutter with a healthy bufferedAhead points somewhere else.
+    /// Set true to get the full play/pause/buffer trace while working on
+    /// playback. Off by default: those fire constantly even when everything is
+    /// healthy, and a console that always chatters is a console nobody reads.
+    /// The two alarms below stay on regardless — they are silent unless
+    /// something is actually wrong.
+    private static let verboseDiagnostics = false
+
     private func diagnose(_ player: AVPlayer) {
         guard let item = player.currentItem else { return }
+
+        // Kept unconditionally. Smooth playback depends on reaching the NAS over
+        // the local path, and that rests on a DNS record rather than on any code
+        // here — so it can regress from outside the app entirely (the AAAA
+        // record going away, a new router, an ISP dropping IPv6). These two say
+        // so immediately instead of leaving it to be rediscovered.
         diagBufferEmpty = item.observe(\.isPlaybackBufferEmpty, options: [.new]) { item, _ in
             if item.isPlaybackBufferEmpty { print("🎬 buffer EMPTY (stalling)") }
         }
+        diagStalled = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main
+        ) { _ in print("🎬 PLAYBACK STALLED — buffer ran dry mid-play") }
+
+        guard Self.verboseDiagnostics else { return }
+
         diagKeepUp = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { item, _ in
             print("🎬 likelyToKeepUp=\(item.isPlaybackLikelyToKeepUp) bufferedAhead=\(String(format: "%.1f", Self.bufferedAhead(item)))s")
         }
@@ -406,9 +427,6 @@ final class VideoPlaybackModel {
             }
             print("🎬 \(status)")
         }
-        diagStalled = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main
-        ) { _ in print("🎬 PLAYBACK STALLED — buffer ran dry mid-play") }
     }
 
     // `nonisolated`: the KVO callback above runs off the main actor, and this
