@@ -25,6 +25,11 @@ final class VideoPreloader {
     /// Most recently asked for last.
     private var recency: [UUID] = []
 
+    /// Claims a model, creating one if this is the first ask.
+    ///
+    /// This *mutates* — it reorders the recency list and can evict, which tears
+    /// down another clip's player. Never call it from a view body; see
+    /// `existing(_:)` for the read-only lookup a body wants.
     func model(for assetID: UUID) -> VideoPlaybackModel {
         touch(assetID)
         if let existing = models[assetID] { return existing }
@@ -32,6 +37,19 @@ final class VideoPreloader {
         models[assetID] = created
         evictIfNeeded()
         return created
+    }
+
+    /// The model for a clip that has already been claimed, or nil.
+    ///
+    /// Exists because a view body must not mutate this cache. The viewer draws
+    /// the transport for whatever video is on screen, and reaching for it with
+    /// `model(for:)` made every body pass reorder the recency list — with the
+    /// viewer competing against the pager's own pages for `capacity` slots, the
+    /// two evicted each other in a loop, each eviction tearing down an
+    /// `AVPlayer` and the next pass rebuilding it. That pinned the main thread
+    /// the moment a video opened. The page owns claiming; the viewer only looks.
+    func existing(_ assetID: UUID) -> VideoPlaybackModel? {
+        models[assetID]
     }
 
     /// Fetches the URL and starts buffering, without playing.

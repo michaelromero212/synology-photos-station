@@ -256,9 +256,15 @@ struct AssetDetailView: View {
         // auto-play advanced to the next. Here they read the *current* clip's
         // player, so they follow every advance and toggle with the rest of the
         // chrome. The player still owns the double-tap skip zones.
+        //
+        // Strictly a *lookup*: the page on screen is what claims the model, and
+        // asking for it with `model(for:)` here mutated the cache on every body
+        // pass — viewer and pager evicting each other's players in a loop, which
+        // froze the app on opening any video.
         .overlay {
-            if showChrome, !isZoomed, currentItem.mediaType == .video {
-                VideoControls(model: preloader.model(for: currentItem.assetID))
+            if showChrome, !isZoomed, currentItem.mediaType == .video,
+               let player = preloader.existing(currentItem.assetID) {
+                VideoControls(model: player)
                     .transition(.opacity)
             }
         }
