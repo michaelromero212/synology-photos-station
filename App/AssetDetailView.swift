@@ -178,6 +178,8 @@ struct AssetDetailView: View {
     /// from a rebuilt root view.
     @State private var focus: PagerFocus
     private var currentID: UUID { focus.currentID }
+    /// Which way the phone is being held. The window never turns; the clip does.
+    private var tilt: MediaTilt { .shared }
     @State private var showChrome = true
     /// True while the open photo is zoomed past its resting size. The chrome
     /// gets out of the way when it is.
@@ -244,39 +246,52 @@ struct AssetDetailView: View {
         // lets the media run edge to edge underneath them.
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .overlay(alignment: .top) {
-            if showChrome && !isZoomed { topChrome }
-        }
-        .overlay(alignment: .bottom) {
-            if showChrome && !isZoomed { bottomChrome }
-        }
-        // The video transport, at the viewer level rather than inside the pager
-        // page. The pager keeps each page's controller, so controls built into a
-        // page froze on the clip they were built for and disappeared the moment
-        // auto-play advanced to the next. Here they read the *current* clip's
-        // player, so they follow every advance and toggle with the rest of the
-        // chrome. The player still owns the double-tap skip zones.
+        // Every piece of chrome in one layer, so it can turn with the clip.
+        //
+        // The window is locked portrait and a landscape video is rotated by hand
+        // (see `videoTilt`). Chrome left upright while the picture turned read as
+        // broken — the back button, the transport and the scrubber all lying on
+        // their side against a correctly-oriented video — so they travel
+        // together. Only for video: a photo doesn't rotate, so its chrome
+        // mustn't either.
+        //
+        // The transport lives here at the viewer level rather than inside the
+        // pager page. The pager keeps each page's controller, so controls built
+        // into a page froze on the clip they were built for and disappeared the
+        // moment auto-play advanced to the next. Here they read the *current*
+        // clip's player, so they follow every advance. The player still owns the
+        // double-tap skip zones.
         //
         // Strictly a *lookup*: the page on screen is what claims the model, and
         // asking for it with `model(for:)` here mutated the cache on every body
         // pass — viewer and pager evicting each other's players in a loop, which
         // froze the app on opening any video.
         .overlay {
-            if showChrome, !isZoomed, currentItem.mediaType == .video,
-               let player = preloader.existing(currentItem.assetID) {
-                VideoControls(model: player)
-                    .transition(.opacity)
+            if showChrome && !isZoomed {
+                ZStack {
+                    VStack(spacing: 0) {
+                        topChrome
+                        Spacer(minLength: 0)
+                        bottomChrome
+                    }
+                    if currentItem.mediaType == .video,
+                       let player = preloader.existing(currentItem.assetID) {
+                        VideoControls(model: player)
+                            .transition(.opacity)
+                    }
+                }
+                .videoTilt(currentItem.mediaType == .video)
             }
         }
         .overlay { toastLayer }
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)
         .statusBarHidden(!showChrome)
-        // The one place the portrait app may turn landscape: a full-screen clip
-        // fills the screen sideways, and leaving the viewer rotates back to the
-        // portrait grid. See `OrientationGate`.
-        .onAppear { OrientationGate.openMedia() }
-        .onDisappear { OrientationGate.closeMedia() }
+        // The window stays portrait; only the clip turns. Watching the tilt
+        // costs an accelerometer subscription, so it runs while the viewer is
+        // open and stops with it. See `MediaTilt`.
+        .onAppear { tilt.start() }
+        .onDisappear { tilt.stop() }
         .fullScreenCover(isPresented: $showSlideshow) {
             SlideshowView(
                 session: session,

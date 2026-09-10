@@ -496,6 +496,7 @@ struct VideoPlayerView: View {
                 // vestigial — kept only so the page's call sites stay unchanged.)
                 PlayerLayerView(player: player)
                     .overlay { skipZones }
+                    .videoTilt()
                 #else
                 // macOS and tvOS get AVKit's own transport, which is the right
                 // answer there: it is the control surface people already know,
@@ -748,6 +749,55 @@ private struct Scrubber: View {
             .animation(.easeOut(duration: 0.15), value: isDragging)
         }
         .frame(height: 28)
+    }
+}
+#endif
+
+#if os(iOS)
+/// Turns the clip — and only the clip — when the phone is held sideways.
+///
+/// The window is locked portrait so the grid, the chrome and the tab bar never
+/// lie on their side. Nothing therefore rotates on its own, which means filling
+/// the screen with a landscape video is something we have to do by hand: swap
+/// the box's width and height, spin it, then drop it back into the portrait
+/// bounds centred, so it pivots on the middle of the screen and lands on the
+/// glass rather than being cropped to the portrait box it was drawn into.
+private struct VideoTilt: ViewModifier {
+    // Shared rather than passed in: the pager keeps each page's controller, so
+    // a value handed to a page would freeze at what it was when the page was
+    // built. See `MediaTilt`.
+    private var tilt: MediaTilt { .shared }
+    /// Photos don't turn, so neither should the chrome drawn over them. Passing
+    /// this rather than reading the media type here keeps the modifier ignorant
+    /// of what it is rotating.
+    let active: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if active {
+            GeometryReader { geo in
+                let sideways = tilt.isSideways
+                content
+                    .frame(
+                        width: sideways ? geo.size.height : geo.size.width,
+                        height: sideways ? geo.size.width : geo.size.height
+                    )
+                    .rotationEffect(.degrees(tilt.angle))
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .animation(.easeInOut(duration: 0.28), value: tilt.angle)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// Turns with the phone. For the player layer and for the chrome drawn over
+    /// it — controls that stayed upright while the clip turned read as broken,
+    /// so the two travel together.
+    func videoTilt(_ active: Bool = true) -> some View {
+        modifier(VideoTilt(active: active))
     }
 }
 #endif

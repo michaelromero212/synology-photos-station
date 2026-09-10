@@ -60,50 +60,80 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         MainActor.assumeIsolated { PushRegistrar.shared.didFailToRegister(error) }
     }
 
-    /// Portrait everywhere except the full-screen media viewer, which may turn
-    /// landscape so a video can fill the screen. `OrientationGate` holds the
-    /// current allowance; the viewer flips it as it opens and closes.
+    /// The iPhone app is portrait, full stop.
+    ///
+    /// Letting the *window* turn landscape so a video could fill the screen was
+    /// the obvious way to do it, and it was wrong: the whole app came round with
+    /// it, so the grid, the chrome and the tab bar all lay on their side. Only
+    /// the picture should turn. `MediaTilt` rotates the clip inside a window
+    /// that never moves — see `VideoPlayerView`.
     func application(
         _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         // iPad rotates freely — it multitasks and lives in every orientation.
-        // Only iPhone is held portrait except inside the viewer.
-        UIDevice.current.userInterfaceIdiom == .pad ? .all : OrientationGate.mask
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
     }
 }
 
-/// Which orientations the app allows right now.
+/// Which way the phone is actually being held.
 ///
-/// The app is a portrait app — the grid and everything around it stay vertical.
-/// The one exception is the full-screen media viewer: while it is open the
-/// device may turn landscape so a video fills the screen, and leaving it snaps
-/// back to portrait. The app delegate reports `mask`; the viewer drives it
-/// through `openMedia` / `closeMedia`.
-enum OrientationGate {
-    /// Read by the delegate on the main thread and written from the main actor;
-    /// a plain static so the non-isolated delegate callback can read it.
-    static var mask: UIInterfaceOrientationMask = .portrait
+/// The window is locked portrait, so nothing in UIKit turns when you rotate the
+/// device — which is the point: the grid and its chrome must stay upright. But a
+/// video still wants to fill the screen when you turn the phone sideways, and
+/// the only way to do that in a window that never rotates is to rotate the clip
+/// ourselves. This reports the physical tilt so `VideoPlayerView` can.
+///
+/// Reads the accelerometer-backed device orientation rather than the interface
+/// orientation, because the interface orientation is now always portrait and
+/// would tell us nothing.
+@Observable
+@MainActor
+final class MediaTilt {
+    /// One reader for the app. The pager builds each page's controller once and
+    /// keeps it, so a tilt passed *in* would freeze at the value it had when the
+    /// page was built; reaching for a shared observable instead lets every page
+    /// body — whenever it was made — see the current one.
+    static let shared = MediaTilt()
 
-    /// The media viewer opened — let the device rotate to landscape.
-    @MainActor static func openMedia() { apply(.allButUpsideDown) }
+    /// Degrees to turn the picture so it looks upright to someone holding the
+    /// phone this way. Zero in portrait.
+    private(set) var angle: Double = 0
+    var isSideways: Bool { angle != 0 }
 
-    /// Back to the grid — hold portrait, rotating a landscape video back.
-    @MainActor static func closeMedia() { apply(.portrait) }
+    private var observer: (any NSObjectProtocol)?
 
-    @MainActor private static func apply(_ new: UIInterfaceOrientationMask) {
-        // iPad is left to rotate on its own — never forced by the viewer.
-        guard UIDevice.current.userInterfaceIdiom == .phone else { return }
-        mask = new
-        guard let scene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive })
-        else { return }
-        // Re-evaluate the window: this lets landscape in while the viewer is
-        // open and, on close, turns a landscape video back to the portrait grid.
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: new))
-        scene.keyWindow?.rootViewController?
-            .setNeedsUpdateOfSupportedInterfaceOrientations()
+    func start() {
+        guard observer == nil else { return }
+        let device = UIDevice.current
+        device.beginGeneratingDeviceOrientationNotifications()
+        read(device.orientation)
+        observer = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.read(UIDevice.current.orientation) }
+        }
+    }
+
+    func stop() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        angle = 0
+    }
+
+    /// `faceUp`, `faceDown` and `unknown` are deliberately ignored — a phone
+    /// lying on a table shouldn't spin the video, it should keep whatever it had.
+    private func read(_ orientation: UIDeviceOrientation) {
+        switch orientation {
+        // Home edge to the right: the device turned anticlockwise, so the
+        // picture turns clockwise by the same amount to meet the eye.
+        case .landscapeLeft: angle = 90
+        case .landscapeRight: angle = -90
+        case .portrait: angle = 0
+        default: break
+        }
     }
 }
 #endif
