@@ -80,8 +80,20 @@ final class VideoPlaybackModel {
     /// How far ahead a *preloaded* (not-yet-watched) video buffers. Small on
     /// purpose: enough for an instant start when you reach it, not so much that
     /// the two neighbours the pager warms starve the video actually on screen.
-    /// `start` lifts it to automatic once a page becomes current.
+    /// `start` lifts it to `playingForwardBuffer` once a page becomes current.
     private static let preloadForwardBuffer: TimeInterval = 2
+
+    /// How far ahead the clip *being watched* buffers.
+    ///
+    /// Explicit rather than 0. Zero means "automatic", and automatic turned out
+    /// to be far too conservative here: the diagnostics showed the buffer
+    /// filling to two-to-four seconds, stopping, draining to 0.1s and stalling,
+    /// over and over, for the whole clip. Asking for a real cushion also pays
+    /// for the ±10s skips — the seek target is usually already in memory.
+    ///
+    /// Bounded, because this is memory: 20s of a high-bitrate 4K clip is tens of
+    /// megabytes, and the pager is holding two neighbours besides.
+    private static let playingForwardBuffer: TimeInterval = 20
 
     /// Fetches the signed URL and starts buffering, without playing.
     ///
@@ -129,14 +141,34 @@ final class VideoPlaybackModel {
         wantsPlayback = true
         guard let player else { return }
         configureAudioSession()
-        // On screen now: uncap the buffer (0 = automatic) so the playing clip
-        // builds as deep a cushion as it likes — the neighbours are capped low,
-        // so it isn't fighting them for the link — and let AVPlayer hold off
-        // starting until it has enough to play through without an immediate stall.
-        player.currentItem?.preferredForwardBufferDuration = 0
+        // On screen now: ask for a real cushion so the playing clip can get
+        // ahead — the neighbours stay capped low, so it isn't fighting them for
+        // the link — and let AVPlayer hold off starting until it has enough to
+        // play through without an immediate stall.
+        bufferFreely(true)
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
         isPlaying = true
+    }
+
+    /// How far ahead this clip may read.
+    ///
+    /// The clip on screen gets `playingForwardBuffer`; a neighbour is held to
+    /// `preloadForwardBuffer` so warmed pages don't fight the clip being watched
+    /// over one home link.
+    ///
+    /// This has to be re-applied on *every* resume, not just in `start`. `pause`
+    /// caps the item, and a clip resumed without lifting the cap again streams
+    /// the rest of the video on a two-second buffer — which is the repeated
+    /// `buffer EMPTY` / `PLAYBACK STALLED` the diagnostics caught.
+    private func bufferFreely(_ freely: Bool) {
+        let target = freely ? Self.playingForwardBuffer : Self.preloadForwardBuffer
+        player?.currentItem?.preferredForwardBufferDuration = target
+        #if DEBUG
+        // Says plainly which clip got which policy, so "the cap is still on" is
+        // a thing we can read rather than infer from the buffer's shape.
+        print("🎬 forwardBuffer → \(Int(target))s (\(freely ? "playing" : "preload"))")
+        #endif
     }
 
     /// Leaves the buffer intact — this is a page scrolling out of view, not a
@@ -148,7 +180,7 @@ final class VideoPlaybackModel {
         // ahead, or it keeps pulling bytes in the background and starves the one
         // now on screen. The buffer it already holds stays, so returning to it
         // is still instant.
-        player?.currentItem?.preferredForwardBufferDuration = Self.preloadForwardBuffer
+        bufferFreely(false)
         isPlaying = false
     }
 
@@ -247,6 +279,9 @@ final class VideoPlaybackModel {
             // Pressing play on a finished clip starts it again rather than
             // sitting on the last frame doing nothing.
             if hasFinished { seek(to: 0, exact: true) }
+            // Lift the cap `pause` left on the item. Without this, pausing once
+            // meant the rest of the clip streamed on a two-second buffer.
+            bufferFreely(true)
             player.play()
             isPlaying = true
             hasFinished = false
@@ -380,8 +415,15 @@ final class VideoPlaybackModel {
     // only reads the item handed to it — no main-actor state — so it is safe to
     // call from there.
     private nonisolated static func bufferedAhead(_ item: AVPlayerItem) -> Double {
-        guard let range = item.loadedTimeRanges.last?.timeRangeValue else { return 0 }
-        return (range.start + range.duration).seconds - item.currentTime().seconds
+        let now = item.currentTime()
+        // The range *containing* the playhead, not simply the last one. After a
+        // seek the loaded ranges are disjoint, and the last can sit entirely
+        // behind the playhead — which is why this reported negative seconds.
+        guard let range = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .first(where: { $0.containsTime(now) })
+        else { return 0 }
+        return (range.start + range.duration).seconds - now.seconds
     }
     #endif
 
