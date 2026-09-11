@@ -148,7 +148,17 @@ final class VideoPlaybackModel {
         // the link — and let AVPlayer hold off starting until it has enough to
         // play through without an immediate stall.
         bufferFreely(true)
-        player.automaticallyWaitsToMinimizeStalling = true
+        // Play *now*, don't wait for a cushion first.
+        //
+        // With this true — which it was — AVPlayer holds off starting until it
+        // judges it has enough buffered, and that hesitation is the delay you
+        // feel after tapping play, and again after every ±10s skip while it
+        // re-buffers at the new position. Waiting is the right instinct when the
+        // link can barely carry the stream, which is what the 51 Mbps original
+        // was doing; it is the wrong one for a 1080p rendition at a twentieth of
+        // the bitrate, where the bytes are already there and the only thing the
+        // wait costs is responsiveness.
+        player.automaticallyWaitsToMinimizeStalling = false
         player.play()
         isPlaying = true
     }
@@ -713,12 +723,18 @@ struct VideoControls: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isMuted ? "Unmute" : "Mute")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .glassCapsule(fallback: .ultraThinMaterial)
-        .padding(.horizontal, 12)
-        // Clear of the viewer's action bar, which floats at the very bottom.
-        .padding(.bottom, 104)
+        // No glass capsule. Synology draws this row straight onto the picture —
+        // elapsed, track, remaining, mute, edge to edge — and boxing it in a
+        // pill made ours read as a widget sitting on the video rather than part
+        // of the player. A shadow carries legibility over a bright frame
+        // instead, which is what the timecodes needed the capsule for.
+        .shadow(radius: 6)
+        .padding(.horizontal, 20)
+        // Held clear of the viewer's action bar, which floats at the very
+        // bottom. Sideways there is far less height to spend — the rotated
+        // layer is only as tall as the screen is wide — so the portrait figure
+        // pushed the scrubber almost into the middle of the picture.
+        .padding(.bottom, MediaTilt.shared.isSideways ? 56 : 104)
         .onAppear { isMuted = model.player?.isMuted ?? false }
     }
 }
