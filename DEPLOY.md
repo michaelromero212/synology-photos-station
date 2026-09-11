@@ -391,6 +391,33 @@ by home directory only.
 
 ---
 
+### Every job failing in under ~15 seconds is billing, not code
+
+The signature is unmistakable once seen: all jobs `failure`, each with no steps
+executed. `gh run view <id>` gives the real reason, which the run list never
+shows:
+
+```
+The job was not started because recent account payments have failed or your
+spending limit needs to be increased.
+```
+
+That is **not** an exhausted free allotment, and it does not heal when the month
+rolls over — it failed on 2026-09-09 and again on the 10th. It is a payment
+method or spending limit, fixed only in Settings → Billing & plans.
+
+**This repository is public as of 2026-09-10**, so its CI now runs on free
+standard runners and never touches the spending limit. The wall still stands for
+any *private* repo — `synology-nas-video-station` is the other one here with a
+workflow.
+
+The deploy consequence is the part that bites: a blocked run publishes no image,
+so `:latest` silently stays where it was while `main` moves on. Nothing announces
+it. Use the § above to measure the gap rather than assuming a push implies a
+build.
+
+---
+
 ## Checking what's deployed without touching the NAS
 
 ```bash
