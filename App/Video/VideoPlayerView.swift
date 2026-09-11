@@ -59,6 +59,9 @@ final class VideoPlaybackModel {
     @ObservationIgnored private var endObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var statusObserver: NSKeyValueObservation?
     @ObservationIgnored private var stallObserver: (any NSObjectProtocol)?
+    /// Restarts playback after a stall — see `track`. Required because
+    /// `automaticallyWaitsToMinimizeStalling` is off.
+    @ObservationIgnored private var recoveryObserver: NSKeyValueObservation?
     #if DEBUG
     // Streaming diagnostics, console-only — see `diagnose`.
     @ObservationIgnored private var diagBufferEmpty: NSKeyValueObservation?
@@ -266,6 +269,30 @@ final class VideoPlaybackModel {
             }
         }
 
+        // Restart after a stall.
+        //
+        // `automaticallyWaitsToMinimizeStalling` is false so that play and the
+        // ±10s skips answer immediately, and the price of that is this: AVPlayer
+        // no longer manages buffering on our behalf, so when the buffer runs dry
+        // it stops and stays stopped. Left alone that is a video which plays,
+        // halts, and never comes back — worse than the hesitation the flag was
+        // costing us.
+        //
+        // Watching `isPlaybackLikelyToKeepUp` rather than the stall
+        // notification: the stall says it has gone wrong, this says it is safe
+        // to carry on. Guarded by `isPlaying`, which is intent, so a clip the
+        // viewer paused is never started again behind their back.
+        recoveryObserver = player.currentItem?.observe(
+            \.isPlaybackLikelyToKeepUp, options: [.new]
+        ) { [weak self] item, _ in
+            MainActor.assumeIsolated {
+                guard let self, item.isPlaybackLikelyToKeepUp, self.isPlaying,
+                      let player = self.player, player.timeControlStatus != .playing
+                else { return }
+                player.play()
+            }
+        }
+
         #if DEBUG
         diagnose(player)
         #endif
@@ -466,6 +493,8 @@ final class VideoPlaybackModel {
         endObserver = nil
         stallObserver = nil
         statusObserver = nil
+        recoveryObserver?.invalidate()
+        recoveryObserver = nil
         #if DEBUG
         diagBufferEmpty = nil
         diagKeepUp = nil
