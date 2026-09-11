@@ -239,6 +239,39 @@ actor DerivationWorker {
                     }
                 }
 
+            case Derivatives.playbackJobKind:
+                // Only video has one, and only video above the bitrate
+                // threshold — see `makePlaybackRendition`.
+                guard mediaType == .video else { break }
+
+                // Fetched here rather than widened into the shared `AssetRow`:
+                // every other job kind would carry two columns it never reads.
+                struct Shape: Decodable {
+                    let byteSize: Int?
+                    let durationMS: Int?
+                }
+                let shape = try await app.sql.raw("""
+                    SELECT byte_size AS "byteSize", duration_ms AS "durationMS"
+                    FROM assets WHERE id = \(bind: asset.id)
+                    """).first(decoding: Shape.self)
+
+                // Bits per second from what is already on the row, so no new
+                // column is needed. Unknown duration means unknown bitrate,
+                // which `makePlaybackRendition` treats as "build it" — better a
+                // wasted transcode than a clip that stutters on cellular.
+                var bitrate: Int?
+                if let bytes = shape?.byteSize, let ms = shape?.durationMS, ms > 0 {
+                    bitrate = Int(Double(bytes) * 8.0 / (Double(ms) / 1000.0))
+                }
+
+                _ = try await Derivatives.makePlaybackRendition(
+                    blob: blob,
+                    sha256: asset.sha256,
+                    sourceBitrate: bitrate,
+                    store: app.blobStore,
+                    logger: app.logger
+                )
+
             default:
                 try await finish(job: job, app: app, error: "unknown job kind \(job.kind)")
                 return

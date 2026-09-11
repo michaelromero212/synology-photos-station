@@ -172,6 +172,94 @@ enum Derivatives {
         return destination
     }
 
+    // MARK: - Playback rendition
+
+    /// The long edge of the cellular rendition, and the file it lands in.
+    ///
+    /// 1080p rather than the 720p Synology settles on. Theirs has to decode in a
+    /// Windows browser, so it targets the lowest common denominator; every
+    /// client here is an Apple device, and on a phone screen the difference
+    /// between 720p and 1080p is the difference between "watchable" and "looks
+    /// like the video I took".
+    static let playbackLongEdge = 1920
+    static let playbackName = "playback-1080.mp4"
+
+    /// The `derivation_jobs.kind` that builds one.
+    static let playbackJobKind = "playback"
+
+    /// Only clips fatter than this get one. A video already at a sane bitrate
+    /// streams fine on cellular, and transcoding it would cost CPU and storage
+    /// to produce something no better than the original.
+    static let playbackBitrateThreshold = 12_000_000
+
+    /// Builds the cellular rendition. Idempotent, like `makePreview`.
+    ///
+    /// Returns nil when the original is already lean enough to stream as-is —
+    /// the caller then serves the original and nothing is generated.
+    ///
+    /// **Audio is stream-copied, not re-encoded.** It is about 0.2 Mbps of a
+    /// 51 Mbps clip, so degrading it would save nothing measurable and cost the
+    /// one thing a memory can't spare: the voices sounding like they did. The
+    /// rendition is therefore bit-identical to the original in everything you
+    /// hear, and only the picture is reduced.
+    static func makePlaybackRendition(
+        blob: URL,
+        sha256: String,
+        sourceBitrate: Int?,
+        store: BlobStore,
+        logger: Logger
+    ) async throws -> URL? {
+        if let sourceBitrate, sourceBitrate < playbackBitrateThreshold { return nil }
+
+        let directory = store.derivativeDirectory(sha256: sha256)
+        let destination = directory.appendingPathComponent(playbackName)
+        if FileManager.default.fileExists(atPath: destination.path) { return destination }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // Written to a temporary name and moved into place, so a transcode that
+        // is killed part-way (the container restarting, the NAS rebooting)
+        // cannot leave a truncated file that looks finished to the check above.
+        let partial = directory.appendingPathComponent(playbackName + ".partial")
+        defer { try? FileManager.default.removeItem(at: partial) }
+
+        logger.info("derive \(sha256.prefix(8)): playback rendition")
+        try await Shell.runChecked(
+            "ffmpeg",
+            [
+                "-y", "-i", blob.path,
+                // Fit inside the long edge without upscaling, in either
+                // orientation. `-2` keeps both dimensions even, which H.264
+                // requires.
+                "-vf", "scale='if(gt(iw,ih),min(\(playbackLongEdge),iw),-2)'"
+                     + ":'if(gt(iw,ih),-2,min(\(playbackLongEdge),ih))'",
+                // H.264 rather than HEVC: this box has no hardware encoder wired
+                // up yet, and libx265 in software on a J4125 is not a thing you
+                // wait for. `veryfast` is the difference between minutes and
+                // tens of minutes per clip.
+                "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+                // Quality-targeted, with a ceiling so a busy scene can't spike
+                // past what a cellular link will carry.
+                "-crf", "23", "-maxrate", "10M", "-bufsize", "20M",
+                "-pix_fmt", "yuv420p",
+                // Frame rate is inherited, not forced. Synology's proxy drops to
+                // 15fps and it shows — a child running looks like a flipbook.
+                "-c:a", "copy",
+                // Moves the index to the front so playback can start before the
+                // whole file has been fetched. Without it AVPlayer must read the
+                // end of the file first, which is a wasted round trip.
+                "-movflags", "+faststart",
+                partial.path,
+            ],
+            timeout: 3600
+        )
+
+        guard FileManager.default.fileExists(atPath: partial.path) else {
+            throw DerivativeError.renditionFailed(blob.lastPathComponent)
+        }
+        try FileManager.default.moveItem(at: partial, to: destination)
+        return destination
+    }
+
     /// Seeks a little way in before grabbing the frame — the first frame of a
     /// phone video is very often black or mid-autoexposure.
     private static func extractPoster(from video: URL, to destination: URL) async throws {
@@ -203,12 +291,15 @@ enum Derivatives {
 
 enum DerivativeError: Error, CustomStringConvertible {
     case posterFailed(String)
+    case renditionFailed(String)
     case malformedPPM(String)
 
     var description: String {
         switch self {
         case .posterFailed(let name):
             return "Could not extract a poster frame from \(name)."
+        case .renditionFailed(let name):
+            return "Could not build a playback rendition for \(name)."
         case .malformedPPM(let reason):
             return "Malformed PPM: \(reason)"
         }

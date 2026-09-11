@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import FrameStationAPI
 import Vapor
 
 /// Short-lived, single-asset URL signing for video playback.
@@ -31,24 +32,48 @@ enum PlaybackToken {
 
     struct SecretKey: StorageKey { typealias Value = SymmetricKey }
 
-    static func sign(assetID: UUID, userID: UUID, expires: Int, key: SymmetricKey) -> String {
+    /// The signed message. One definition, used by both sides — `verify` used to
+    /// rebuild this string by hand, which is two places to keep in step and one
+    /// place for them to drift apart.
+    ///
+    /// Quality is inside it so the link cannot be edited into a different
+    /// representation: without that, a `mobile` URL could be turned into an
+    /// `original` one by changing a query parameter, which is the whole point of
+    /// signing.
+    private static func message(
+        assetID: UUID, userID: UUID, expires: Int, quality: PlaybackQuality
+    ) -> Data {
+        Data("\(assetID.uuidString):\(userID.uuidString):\(expires):\(quality.rawValue)".utf8)
+    }
+
+    static func sign(
+        assetID: UUID, userID: UUID, expires: Int,
+        quality: PlaybackQuality = .default, key: SymmetricKey
+    ) -> String {
         // The user is inside the signature so a leaked link can't outlive that
         // person's access to the space any more than it already does.
-        let message = "\(assetID.uuidString):\(userID.uuidString):\(expires)"
-        let mac = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: message(assetID: assetID, userID: userID, expires: expires, quality: quality),
+            using: key
+        )
         return Data(mac).base64URLEncodedString()
     }
 
     static func verify(
-        assetID: UUID, userID: UUID, expires: Int, signature: String, key: SymmetricKey
+        assetID: UUID, userID: UUID, expires: Int,
+        quality: PlaybackQuality = .default, signature: String, key: SymmetricKey
     ) -> Bool {
         guard expires > Int(Date().timeIntervalSince1970) else { return false }
-        let expected = sign(assetID: assetID, userID: userID, expires: expires, key: key)
+        let expected = sign(
+            assetID: assetID, userID: userID, expires: expires, quality: quality, key: key
+        )
         // Constant-time: a byte-by-byte early exit would leak the signature.
         guard expected.utf8.count == signature.utf8.count else { return false }
         return HMAC<SHA256>.isValidAuthenticationCode(
             Data(base64URLEncoded: signature) ?? Data(),
-            authenticating: Data("\(assetID.uuidString):\(userID.uuidString):\(expires)".utf8),
+            authenticating: message(
+                assetID: assetID, userID: userID, expires: expires, quality: quality
+            ),
             using: key
         )
     }

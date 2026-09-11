@@ -161,4 +161,37 @@ enum MetadataBackfill {
             app.logger.error("thumbnail heal failed: \(String(reflecting: error))")
         }
     }
+
+    /// Queues the cellular rendition for videos uploaded before it existed.
+    ///
+    /// Filtered in SQL to fat clips only, so the library's already-lean videos
+    /// never reach the worker: the job would no-op on them anyway, but on a
+    /// migrated library that is thousands of rows of pointless queue churn.
+    /// Duration is required — a row without it has no bitrate to judge, and the
+    /// worker will make that call for itself.
+    ///
+    /// Idempotent by the same `ON CONFLICT` as the thumbnail heal, and bounded,
+    /// so a big library trickles through restarts rather than trying to
+    /// transcode itself in one sitting.
+    static func enqueueMissingPlaybackRenditions(on app: Application) async {
+        do {
+            try await app.sql.raw("""
+                WITH todo AS (
+                    SELECT DISTINCT a.id
+                    FROM assets a
+                    JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
+                    WHERE a.media_type = 'video'
+                      AND a.duration_ms > 0
+                      AND (a.byte_size * 8000 / a.duration_ms)
+                          >= \(bind: Derivatives.playbackBitrateThreshold)
+                    LIMIT 500
+                )
+                INSERT INTO derivation_jobs (asset_id, kind)
+                SELECT id, \(bind: Derivatives.playbackJobKind) FROM todo
+                ON CONFLICT (asset_id, kind) DO NOTHING
+                """).run()
+        } catch {
+            app.logger.error("playback rendition heal failed: \(String(reflecting: error))")
+        }
+    }
 }

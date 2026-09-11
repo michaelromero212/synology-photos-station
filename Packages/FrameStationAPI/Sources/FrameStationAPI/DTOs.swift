@@ -139,6 +139,24 @@ public struct APIErrorResponse: Codable, Sendable, Error {
 ///
 /// Returned rather than constructed client-side so the signing scheme stays a
 /// server concern and can change without shipping a new app.
+/// Which representation of a video to stream.
+///
+/// The *client* resolves this, because the server cannot see which network the
+/// phone is on. A user-facing "Auto" becomes `.original` on wi-fi and `.mobile`
+/// on cellular before the request is ever made.
+public enum PlaybackQuality: String, Codable, Sendable, CaseIterable {
+    /// The file exactly as it was recorded. Needs a link that can carry it —
+    /// roughly 51 Mbps for 4K60 — so this is the wi-fi answer.
+    case original
+    /// The 1080p rendition, for links that can't. Audio is bit-identical to the
+    /// original; only the picture is reduced.
+    case mobile
+
+    /// What an older client gets when it asks for nothing, so a version skew
+    /// keeps behaving exactly as it did before renditions existed.
+    public static let `default` = PlaybackQuality.original
+}
+
 public struct PlaybackURLResponse: Codable, Sendable, Hashable {
     public let url: URL
     public let expiresAt: Date

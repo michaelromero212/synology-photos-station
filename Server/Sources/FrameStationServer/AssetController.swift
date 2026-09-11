@@ -119,10 +119,22 @@ struct AssetController: RouteCollection {
             throw Abort(.badRequest, reason: "That asset isn't a video.")
         }
 
+        // What the caller asked for, defaulting to the original so a client that
+        // predates renditions behaves exactly as it always did.
+        let requested = req.query[String.self, at: "quality"]
+            .flatMap(PlaybackQuality.init(rawValue:)) ?? .default
+        // Asking for the rendition doesn't conjure one: until the transcode has
+        // run there is nothing to serve, and the original is a far better answer
+        // than an error. `stream` makes the same check when it picks the file.
+        let hasRendition = FileManager.default.fileExists(
+            atPath: playbackRenditionPath(sha256: asset.sha256, req).path
+        )
+        let quality: PlaybackQuality = (requested == .mobile && hasRendition) ? .mobile : .original
+
         let expires = Int(Date().addingTimeInterval(PlaybackToken.lifetime).timeIntervalSince1970)
         let signature = PlaybackToken.sign(
             assetID: asset.id, userID: device.userID, expires: expires,
-            key: PlaybackToken.secret(for: req.application)
+            quality: quality, key: PlaybackToken.secret(for: req.application)
         )
         var components = URLComponents()
         // The collection is registered under /v1, so the route this
@@ -131,6 +143,7 @@ struct AssetController: RouteCollection {
         components.queryItems = [
             URLQueryItem(name: "u", value: device.userID.uuidString),
             URLQueryItem(name: "exp", value: String(expires)),
+            URLQueryItem(name: "q", value: quality.rawValue),
             URLQueryItem(name: "sig", value: signature),
         ]
         guard let relative = components.string,
@@ -138,8 +151,19 @@ struct AssetController: RouteCollection {
         else { throw Abort(.internalServerError, reason: "Could not build a playback URL.") }
 
         return PlaybackURLResponse(
-            url: url, expiresAt: Date(timeIntervalSince1970: TimeInterval(expires))
+            url: url, expiresAt: Date(timeIntervalSince1970: TimeInterval(expires)),
+            // Says which representation the client actually got, so it can tell
+            // the difference between "you asked for the rendition and here it
+            // is" and "you asked, but it isn't built yet".
+            kind: quality == .mobile ? "rendition" : "direct"
         )
+    }
+
+    /// Where the cellular rendition for a blob lives, built or not.
+    private func playbackRenditionPath(sha256: String, _ req: Request) -> URL {
+        req.application.blobStore
+            .derivativeDirectory(sha256: sha256)
+            .appendingPathComponent(Derivatives.playbackName)
     }
 
     /// The URL a player actually hits. Range-served, so scrubbing a 4K file
@@ -147,12 +171,16 @@ struct AssetController: RouteCollection {
     @Sendable
     func stream(req: Request) async throws -> Response {
         let assetID = try req.parameters.require("assetID", as: UUID.self)
+        // Absent means original, matching links minted before renditions and
+        // keeping those signatures valid.
+        let quality = req.query[String.self, at: "q"]
+            .flatMap(PlaybackQuality.init(rawValue:)) ?? .default
         guard let rawUser = req.query[String.self, at: "u"],
               let userID = UUID(uuidString: rawUser),
               let expires = req.query[Int.self, at: "exp"],
               let signature = req.query[String.self, at: "sig"],
               PlaybackToken.verify(
-                  assetID: assetID, userID: userID, expires: expires,
+                  assetID: assetID, userID: userID, expires: expires, quality: quality,
                   signature: signature, key: PlaybackToken.secret(for: req.application)
               )
         else {
@@ -177,6 +205,22 @@ struct AssetController: RouteCollection {
               )
             """).first(decoding: AssetRow.self) else {
             throw Abort(.notFound, reason: "No such asset.")
+        }
+
+        // The signature already fixed which representation this link is for, so
+        // there is nothing to decide here beyond whether the file is present —
+        // and if it somehow isn't, the original still plays. Its own mime, not
+        // the asset's: the rendition is always MP4/H.264 whatever the source was.
+        if quality == .mobile {
+            let rendition = playbackRenditionPath(sha256: asset.sha256, req)
+            if FileManager.default.fileExists(atPath: rendition.path) {
+                return try await streamFile(
+                    req, at: rendition, contentType: "video/mp4", immutable: true
+                )
+            }
+            req.logger.warning(
+                "playback rendition missing for \(asset.sha256.prefix(8)); serving original"
+            )
         }
 
         let blob = fileURL(for: asset, req)

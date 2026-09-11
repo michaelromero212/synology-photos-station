@@ -129,6 +129,10 @@ func configure(_ app: Application) async throws {
         // enqueue, but thumbnails outrank metadata in the worker, so these fill
         // first regardless of order.
         Task { await MetadataBackfill.enqueueMissingThumbnails(on: app) }
+        // Videos uploaded before the cellular rendition existed. Last, and
+        // bounded: it is the only job here that can occupy a worker for minutes
+        // at a time, and nothing on screen is waiting for it.
+        Task { await MetadataBackfill.enqueueMissingPlaybackRenditions(on: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")

@@ -383,6 +383,16 @@ struct UploadController: RouteCollection {
         try await DerivationWorker.enqueue(
             assetID: result.assetID, kind: "thumbnails", on: req.sql
         )
+        // And, for a video, the cellular rendition. Queued at upload rather than
+        // built on demand: a 4K transcode takes minutes on this box, so waiting
+        // until someone presses play on mobile data would mean waiting through
+        // it. The job no-ops for photos and for clips already lean enough to
+        // stream as they are. It sits behind thumbnails in the worker's order,
+        // which is right — nobody is watching a transcode, but they are watching
+        // the grid fill.
+        try? await DerivationWorker.enqueue(
+            assetID: result.assetID, kind: Derivatives.playbackJobKind, on: req.sql
+        )
 
         req.logger.info(
             "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated))"
