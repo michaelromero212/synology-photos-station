@@ -26,7 +26,7 @@ final class AppSession {
 
     /// Address, split the way Synology's own app asks for it: a name or IP,
     /// a port, and whether to speak TLS. A single URL field made people guess
-    /// at a scheme, and `192.168.4.83` on its own parses as a *path*, not a
+    /// at a scheme, and `192.168.1.50` on its own parses as a *path*, not a
     /// host, which failed with nothing useful to say.
     var host: String = ""
     var port: String = String(AppSession.defaultPort)

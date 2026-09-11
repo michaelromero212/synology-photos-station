@@ -1,7 +1,19 @@
 # Deploying the server
 
-The exact commands, with real values rather than placeholders. Every one of
-these has been run against this NAS and worked.
+The exact commands, ready to paste. Every one of these has been run against this
+NAS and worked.
+
+Two values are deliberately **not** in this file: the NAS's public hostname and
+its LAN address. They live in `DEPLOY.local.md`, which is gitignored. This
+repository is public, and a home NAS's DDNS name published beside a map of its
+stack, its paths and its health endpoint is a targeting aid — there is no reason
+to hand that over. Everything else here is real and literal: the paths, the
+ports, the image, `127.0.0.1`.
+
+> **Future sessions, read this.** The `<nas-host>` and `<nas-lan-ip>`
+> placeholders below are not an unfilled template. The real values exist, in
+> `DEPLOY.local.md` — read them from there and substitute as you go. Do not
+> paste them back into this file, and do not "helpfully" fill them in.
 
 First-time setup of a fresh box is a different job — see
 [README.md](README.md) § "First-time setup". This file is the routine path:
@@ -9,12 +21,12 @@ a change is on `main` and needs to reach the NAS.
 
 | | |
 |---|---|
-| SSH alias | `nas` → `192.168.1.17` (see below — it moves) |
+| SSH alias | `nas` → `<nas-lan-ip>` (see below — it moves; `DEPLOY.local.md`) |
 | Stack | `/volume1/docker/framestation/` (compose, `.env`, `pgdata`, `blobs`) |
 | Media | `/volume1/FrameStation/` (shared libraries only) |
 | Docker | `/usr/local/bin/docker` — **not on `PATH`** |
 | Health | `http://127.0.0.1:8080/health` on the NAS |
-| Public | `https://mike-home-nas-920.synology.me:8443` |
+| Public | `https://<nas-host>:8443` (`DEPLOY.local.md`) |
 | Image | `ghcr.io/michaelromero212/framestation-server:latest` |
 
 ---
@@ -29,8 +41,16 @@ Server code changed, nothing else. Four commands.
 git push origin main
 ```
 
-**2. Wait for CI.** The image job takes ~8 minutes and runs after the Linux
-build and tests. Pulling before it finishes gives `manifest unknown`.
+**2. Wait for CI.** The image job runs after the Linux build and tests, and its
+duration is bimodal: **~16 minutes** when anything under `Server/` or `Packages/`
+changed, and **under a minute** when nothing did — buildx hits its GHA cache and
+only republishes the manifest. Measured across six runs: 15.8, 15.1, 0.5, 0.5,
+0.4, 0.4. Pulling before it finishes gives `manifest unknown`.
+
+The cache key is coarser than it looks. `Server/Dockerfile` does
+`COPY ./Packages ./Packages`, so editing FrameStationKit — which the server never
+compiles — still busts the layer and forces the full release rebuild. Narrowing
+that COPY to `./Packages/FrameStationAPI` would make app-only commits free.
 
 ```bash
 gh run list --limit 1
@@ -237,27 +257,28 @@ SwiftUI symbol that looks recent, check its line in the SDK header. Constants
 clustered at the *end* of an enum are the late additions, and the late
 additions are the ones CI will not have.
 
-**The NAS is on DHCP, so its address moves.** It was `192.168.4.83` and is now
-`192.168.1.17`. The symptom is not an error you can read: `ssh` sits there and
-eventually times out, and because the session never opens, `sudo` never prompts —
+**The NAS is on DHCP, so its address moves.** It has changed once already;
+`DEPLOY.local.md` carries the current one. The symptom is not an error you can
+read: `ssh` sits there and eventually times out, and because the session never
+opens, `sudo` never prompts —
 so it looks like the password step is broken rather than the network. Check
 before assuming anything else is wrong:
 
 ```bash
-ping -c 2 192.168.1.17
+ping -c 2 <nas-lan-ip>
 ```
 
 If that fails, find the current address in DSM (Control Panel → Network →
 Network Interface) or the router's client list, then fix `HostName` in
-`~/.ssh/config` and the table above. A DHCP reservation on the router stops this
-recurring; the alternative is rediscovering it every few months.
+`~/.ssh/config` and `DEPLOY.local.md`. A DHCP reservation on the router stops
+this recurring; the alternative is rediscovering it every few months.
 
 The public endpoint keeps working throughout, because it goes through DSM's
 reverse proxy rather than the LAN address — which makes it a useful way to check
 the server is alive, and what it thinks its migration count is, without SSH:
 
 ```bash
-curl -s https://mike-home-nas-920.synology.me:8443/health
+curl -s https://<nas-host>:8443/health
 ```
 
 **`ssh -t`, not `ssh`.** `sudo` needs a TTY. Without `-t`:

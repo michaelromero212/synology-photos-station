@@ -3,6 +3,11 @@
 Server/*.p8
 *.p8
 
+# The NAS's real public hostname and LAN address. DEPLOY.md carries the
+# commands with <nas-host> / <nas-lan-ip> placeholders; this file is the only
+# place the actual values live, and this repository is public.
+DEPLOY.local.md
+
 # Swift / SPM
 .build/
 .swiftpm/
