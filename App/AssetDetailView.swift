@@ -1144,6 +1144,9 @@ struct AssetDetailView: View {
 /// lands, and so a page that isn't on screen can tell — a video three swipes
 /// away must not be playing.
 private struct AssetPage: View {
+    /// Read here so a warmed neighbour is fetched in the same representation the
+    /// page will actually play — see the `warm` call below.
+    @Environment(\.connectionMonitor) private var connection
     let model: AssetDetailModel
     let session: AppSession
     /// Read rather than passed in: this page is hosted in a view controller
@@ -1232,7 +1235,17 @@ private struct AssetPage: View {
             // but get the bytes moving: this is the page you are one swipe —
             // or one finished clip — away from.
             Image(platformImage: poster).resizable().scaledToFit()
-                .task { preloader.warm(assetID: model.item.assetID, client: session.client) }
+                .task {
+                    preloader.warm(
+                        assetID: model.item.assetID, client: session.client,
+                        // Same representation the page itself will ask for, or
+                        // arriving at a warmed neighbour would throw the buffer
+                        // away and refetch the other one.
+                        quality: PlaybackSettings.resolvedQuality(
+                            isExpensive: connection?.isExpensive ?? false
+                        )
+                    )
+                }
         }
         #else
         VideoPlayerView(

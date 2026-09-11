@@ -382,6 +382,7 @@ struct MoreView: View {
 
         Section {
             AutoPlayToggle()
+            VideoQualityPicker()
         } header: {
             Text("Playback")
         } footer: {

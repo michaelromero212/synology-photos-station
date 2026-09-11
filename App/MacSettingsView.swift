@@ -28,6 +28,7 @@ struct MacSettingsView: View {
         Form {
             Section {
                 AutoPlayToggle()
+                VideoQualityPicker()
             } footer: {
                 Text(
                     "When a video ends, continue to the next video from the "

@@ -105,7 +105,9 @@ final class VideoPlaybackModel {
     ///
     /// Idempotent: the pager rebuilds neighbours freely, and re-preparing a
     /// video that is already prepared would throw away its buffer.
-    func prepare(assetID: UUID, client: FrameStationClient?) async {
+    func prepare(
+        assetID: UUID, client: FrameStationClient?, quality: PlaybackQuality = .default
+    ) async {
         guard let client, player == nil, !isPreparing else { return }
         isPreparing = true
         isLoading = true
@@ -114,7 +116,7 @@ final class VideoPlaybackModel {
             isLoading = false
         }
         do {
-            let playback = try await client.playbackURL(assetID: assetID)
+            let playback = try await client.playbackURL(assetID: assetID, quality: quality)
             let item = AVPlayerItem(url: playback.url)
             // Preloaded, so buffer only a little ahead. Both pages either side
             // are warmed the moment the pager settles; left uncapped, each
@@ -545,7 +547,15 @@ struct VideoPlayerView: View {
             }
         }
         .task {
-            await model.prepare(assetID: assetID, client: client)
+            // Resolved here rather than inside the model: the connection
+            // monitor is an environment value, and the model has no view to
+            // read it from.
+            await model.prepare(
+                assetID: assetID, client: client,
+                quality: PlaybackSettings.resolvedQuality(
+                    isExpensive: connection?.isExpensive ?? false
+                )
+            )
             if isActive { model.start() }
         }
         .onChange(of: isActive) { _, active in

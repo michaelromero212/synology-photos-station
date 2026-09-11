@@ -1,3 +1,4 @@
+import FrameStationAPI
 import SwiftUI
 
 /// How videos behave once one finishes.
@@ -19,6 +20,62 @@ enum PlaybackSettings {
         get { UserDefaults.standard.object(forKey: autoPlayKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: autoPlayKey) }
     }
+
+    // MARK: - Video quality
+
+    private static let qualityKey = "playback.videoQuality"
+
+    static var videoQuality: VideoQualityPreference {
+        get {
+            UserDefaults.standard.string(forKey: qualityKey)
+                .flatMap(VideoQualityPreference.init(rawValue:)) ?? .auto
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: qualityKey) }
+    }
+
+    /// What to actually ask the server for, given the network underfoot.
+    ///
+    /// The original is a 4K clip at roughly 51 Mbps. A home network carries that
+    /// comfortably; a cellular link does not, and the buffer can never get ahead
+    /// of playback — which is a video that stalls every few seconds rather than
+    /// one that looks slightly softer. So `auto` follows the connection, which
+    /// is what almost everyone wants and why it is the default.
+    static func resolvedQuality(isExpensive: Bool) -> PlaybackQuality {
+        switch videoQuality {
+        case .original: return .original
+        case .dataSaver: return .mobile
+        case .auto: return isExpensive ? .mobile : .original
+        }
+    }
+}
+
+/// The user-facing choice. Distinct from `PlaybackQuality`, which is the wire
+/// value: `auto` is a rule, not a representation, and the server never sees it.
+enum VideoQualityPreference: String, CaseIterable, Identifiable {
+    case auto
+    case original
+    case dataSaver
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .auto: return "Automatic"
+        case .original: return "Original Quality"
+        case .dataSaver: return "Data Saver"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .auto:
+            return "Full quality on Wi-Fi, and a smaller version on cellular so it doesn't stall."
+        case .original:
+            return "Always the file exactly as recorded. On cellular this may pause to buffer."
+        case .dataSaver:
+            return "Always the smaller version. Audio is unchanged — only the picture is reduced."
+        }
+    }
 }
 
 /// The toggle, in More.
@@ -32,5 +89,27 @@ struct AutoPlayToggle: View {
         .onChange(of: autoPlay) { _, new in
             PlaybackSettings.autoPlayNextVideo = new
         }
+    }
+}
+
+/// The quality picker, beside it.
+struct VideoQualityPicker: View {
+    @State private var choice = PlaybackSettings.videoQuality
+
+    var body: some View {
+        Picker(selection: $choice) {
+            ForEach(VideoQualityPreference.allCases) { option in
+                Text(option.title).tag(option)
+            }
+        } label: {
+            Label("Video Quality", systemImage: "slider.horizontal.3")
+        }
+        .onChange(of: choice) { _, new in
+            PlaybackSettings.videoQuality = new
+        }
+
+        Text(choice.detail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 }

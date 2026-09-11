@@ -115,8 +115,15 @@ public actor FrameStationClient {
     }
 
     /// A signed, short-lived URL a player can fetch directly.
-    public func playbackURL(assetID: UUID) async throws -> PlaybackURLResponse {
-        try await send(.get, "v1/assets/\(assetID.uuidString)/playback")
+    /// The signed URL to play. `quality` picks which representation — the
+    /// server falls back to the original whenever the rendition it asks for
+    /// hasn't been built yet, so this can always be asked for optimistically.
+    public func playbackURL(
+        assetID: UUID, quality: PlaybackQuality = .default
+    ) async throws -> PlaybackURLResponse {
+        try await send(
+            .get, "v1/assets/\(assetID.uuidString)/playback?quality=\(quality.rawValue)"
+        )
     }
 
     /// Removes a photo from a library. The file moves to `#recycle`; the

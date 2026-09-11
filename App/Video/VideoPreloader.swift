@@ -1,3 +1,4 @@
+import FrameStationAPI
 import FrameStationKit
 import Foundation
 import Observation
@@ -56,9 +57,11 @@ final class VideoPreloader {
     ///
     /// Safe to call repeatedly — `prepare` returns immediately once a model has
     /// its player, so the pager rebuilding a neighbour costs nothing.
-    func warm(assetID: UUID, client: FrameStationClient?) {
+    func warm(
+        assetID: UUID, client: FrameStationClient?, quality: PlaybackQuality = .default
+    ) {
         let model = model(for: assetID)
-        Task { await model.prepare(assetID: assetID, client: client) }
+        Task { await model.prepare(assetID: assetID, client: client, quality: quality) }
     }
 
     /// Exactly one video plays at a time, and it is the one on screen.
