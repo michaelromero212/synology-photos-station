@@ -242,6 +242,13 @@ enum Derivatives {
             "ffmpeg",
             [
                 "-y", "-i", blob.path,
+                // One video track and one audio track, named explicitly rather
+                // than left to ffmpeg's default selection. An iPhone clip also
+                // carries a spatial-audio `apac` track this ffmpeg cannot decode
+                // and several `mebx` metadata tracks, none of which belong in a
+                // playback rendition. The `?` makes audio optional so a silent
+                // clip still transcodes instead of failing.
+                "-map", "0:v:0", "-map", "0:a:0?",
             ] + scaling + [
                 // H.264 rather than HEVC: this box has no hardware encoder wired
                 // up yet, and libx265 in software on a J4125 is not a thing you
@@ -259,6 +266,12 @@ enum Derivatives {
                 // whole file has been fetched. Without it AVPlayer must read the
                 // end of the file first, which is a wasted round trip.
                 "-movflags", "+faststart",
+                // Named explicitly because the output is written to `.partial`
+                // and ffmpeg picks its muxer from the file extension. Without
+                // this it fails before doing any work — "Unable to find a
+                // suitable output format" — which is precisely how the first
+                // version of this shipped.
+                "-f", "mp4",
                 partial.path,
             ],
             timeout: 3600

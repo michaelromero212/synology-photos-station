@@ -188,7 +188,15 @@ enum MetadataBackfill {
                 )
                 INSERT INTO derivation_jobs (asset_id, kind)
                 SELECT id, \(bind: Derivatives.playbackJobKind) FROM todo
-                ON CONFLICT (asset_id, kind) DO NOTHING
+                -- Retries a *failed* rendition, and only a failed one. The
+                -- worker gives up after three attempts, so without this a job
+                -- that died for a reason since fixed — a bad ffmpeg argument,
+                -- say — stays dead forever and the only cure is editing the
+                -- table by hand. Restricted to 'failed' because resetting a
+                -- 'done' row would retranscode the whole library on every boot.
+                ON CONFLICT (asset_id, kind) DO UPDATE
+                  SET state = 'pending', attempts = 0, last_error = NULL
+                  WHERE derivation_jobs.state = 'failed'
                 """).run()
         } catch {
             app.logger.error("playback rendition heal failed: \(String(reflecting: error))")
