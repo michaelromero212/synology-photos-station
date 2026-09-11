@@ -390,9 +390,20 @@ struct UploadController: RouteCollection {
         // stream as they are. It sits behind thumbnails in the worker's order,
         // which is right — nobody is watching a transcode, but they are watching
         // the grid fill.
-        try? await DerivationWorker.enqueue(
-            assetID: result.assetID, kind: Derivatives.playbackJobKind, on: req.sql
-        )
+        //
+        // Non-fatal, but *logged*. This was a bare `try?`, and when the job kind
+        // turned out to violate a CHECK constraint the failure went nowhere at
+        // all: uploads succeeded, no rendition was ever queued, and the only way
+        // to find out was to read the queue by hand.
+        do {
+            try await DerivationWorker.enqueue(
+                assetID: result.assetID, kind: Derivatives.playbackJobKind, on: req.sql
+            )
+        } catch {
+            req.logger.warning(
+                "could not queue a playback rendition for \(session.filename): \(error)"
+            )
+        }
 
         req.logger.info(
             "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated))"

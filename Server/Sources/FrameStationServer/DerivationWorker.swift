@@ -249,9 +249,12 @@ actor DerivationWorker {
                 struct Shape: Decodable {
                     let byteSize: Int?
                     let durationMS: Int?
+                    let width: Int?
+                    let height: Int?
                 }
                 let shape = try await app.sql.raw("""
-                    SELECT byte_size AS "byteSize", duration_ms AS "durationMS"
+                    SELECT byte_size AS "byteSize", duration_ms AS "durationMS",
+                           width, height
                     FROM assets WHERE id = \(bind: asset.id)
                     """).first(decoding: Shape.self)
 
@@ -264,10 +267,16 @@ actor DerivationWorker {
                     bitrate = Int(Double(bytes) * 8.0 / (Double(ms) / 1000.0))
                 }
 
+                // Nil when the probe never recorded dimensions, which the
+                // rendition treats as "scale it" — the clip is over the bitrate
+                // threshold, so it is very unlikely to be small.
+                let longEdge = [shape?.width, shape?.height].compactMap(\.self).max()
+
                 _ = try await Derivatives.makePlaybackRendition(
                     blob: blob,
                     sha256: asset.sha256,
                     sourceBitrate: bitrate,
+                    sourceLongEdge: longEdge,
                     store: app.blobStore,
                     logger: app.logger
                 )

@@ -206,6 +206,7 @@ enum Derivatives {
         blob: URL,
         sha256: String,
         sourceBitrate: Int?,
+        sourceLongEdge: Int?,
         store: BlobStore,
         logger: Logger
     ) async throws -> URL? {
@@ -222,16 +223,26 @@ enum Derivatives {
         let partial = directory.appendingPathComponent(playbackName + ".partial")
         defer { try? FileManager.default.removeItem(at: partial) }
 
+        // Scaled only when the source is actually bigger. Deciding here, from a
+        // dimension we already store, rather than with an `if(gt(iw,ih),…)`
+        // expression inside the filter: ffmpeg is exec'd with an argument array
+        // and never sees a shell, so the quotes such an expression needs would
+        // arrive as literal characters, and the commas inside it read as filter
+        // separators. `force_original_aspect_ratio=decrease` fits the clip
+        // inside the box in either orientation with no expression at all, and
+        // `force_divisible_by=2` keeps both dimensions even, which H.264 needs.
+        let needsScaling = sourceLongEdge.map { $0 > playbackLongEdge } ?? true
+        let scaling = needsScaling
+            ? ["-vf", "scale=\(playbackLongEdge):\(playbackLongEdge)"
+                    + ":force_original_aspect_ratio=decrease:force_divisible_by=2"]
+            : []
+
         logger.info("derive \(sha256.prefix(8)): playback rendition")
         try await Shell.runChecked(
             "ffmpeg",
             [
                 "-y", "-i", blob.path,
-                // Fit inside the long edge without upscaling, in either
-                // orientation. `-2` keeps both dimensions even, which H.264
-                // requires.
-                "-vf", "scale='if(gt(iw,ih),min(\(playbackLongEdge),iw),-2)'"
-                     + ":'if(gt(iw,ih),-2,min(\(playbackLongEdge),ih))'",
+            ] + scaling + [
                 // H.264 rather than HEVC: this box has no hardware encoder wired
                 // up yet, and libx265 in software on a J4125 is not a thing you
                 // wait for. `veryfast` is the difference between minutes and
