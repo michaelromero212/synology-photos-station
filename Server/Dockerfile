@@ -30,7 +30,14 @@ WORKDIR /build/Server
 RUN swift package resolve
 
 WORKDIR /build
-COPY ./Packages ./Packages
+# FrameStationAPI only — deliberately not all of ./Packages. FrameStationKit is
+# Apple-only (Keychain, ImageIO) and the server never imports it, but copying the
+# whole directory put it in this layer's hash, so every FrameStationKit edit
+# invalidated the cache and bought a full release rebuild the server did not
+# need. That is the difference between a ~16 minute image job and a ~30 second
+# one on an app-only commit. If the server ever does gain a second local package
+# dependency, add it as its own COPY line rather than widening this back out.
+COPY ./Packages/FrameStationAPI ./Packages/FrameStationAPI
 COPY ./Server ./Server
 
 WORKDIR /build/Server
