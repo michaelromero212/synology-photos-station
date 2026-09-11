@@ -232,7 +232,14 @@ final class VideoPlaybackModel {
             forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
-                guard let self, !self.isScrubbing else { return }
+                // Ignored while a seek is in flight, as well as while a finger
+                // owns the scrubber. `skip` moves `position` to where it is
+                // going immediately, and this fires every 100ms with where the
+                // player still *is* — so without the second guard it stomps that
+                // value back a tenth of a second later. Tap +10 twice quickly
+                // and the second tap computed from the stale position, landing
+                // you 10s on instead of 20, with the bar lurching both ways.
+                guard let self, !self.isScrubbing, !self.isSeeking else { return }
                 self.position = time.seconds.isFinite ? time.seconds : 0
                 // Some containers only surface a usable duration once playback
                 // has actually started.
@@ -332,7 +339,13 @@ final class VideoPlaybackModel {
     /// Jumps by `delta` seconds. The one people press over and over.
     func skip(by delta: Double) {
         let target = VideoTiming.skipTarget(from: position, by: delta, duration: duration)
-        position = target
+        // Glide the playhead across rather than teleporting it. The bar snapping
+        // ten seconds sideways reads as a glitch; travelling there reads as a
+        // jump you asked for, which is the difference between our scrubber and
+        // Apple's. Short enough not to lag the finger, and it runs on top of
+        // repeated taps — hold down the skip and the bar sweeps rather than
+        // stuttering, because each tap re-targets an animation already moving.
+        withAnimation(.easeOut(duration: 0.22)) { position = target }
         hasFinished = false
         // Tolerant, not exact. `gobackward.10` / `goforward.10` are "roughly
         // here" jumps you tap over and over, and a frame-exact seek has to
