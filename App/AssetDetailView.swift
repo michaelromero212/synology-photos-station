@@ -246,14 +246,10 @@ struct AssetDetailView: View {
         // lets the media run edge to edge underneath them.
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        // Every piece of chrome in one layer, so it can turn with the clip.
-        //
-        // The window is locked portrait and a landscape video is rotated by hand
-        // (see `videoTilt`). Chrome left upright while the picture turned read as
-        // broken — the back button, the transport and the scrubber all lying on
-        // their side against a correctly-oriented video — so they travel
-        // together. Only for video: a photo doesn't rotate, so its chrome
-        // mustn't either.
+        // Every piece of chrome in one layer, so it travels with the picture
+        // when the viewer turns (see the `videoTilt` below). Chrome left upright
+        // against a rotated picture read as broken — back button, transport and
+        // scrubber all lying on their side.
         //
         // The transport lives here at the viewer level rather than inside the
         // pager page. The pager keeps each page's controller, so controls built
@@ -280,10 +276,23 @@ struct AssetDetailView: View {
                             .transition(.opacity)
                     }
                 }
-                .videoTilt(currentItem.mediaType == .video)
             }
         }
         .overlay { toastLayer }
+        // The whole viewer turns, not the picture inside it.
+        //
+        // Rotating only the player layer and the chrome left the pager itself
+        // unrotated, so a page transition — and the swipe that drives it — still
+        // ran along the portrait axis while you were looking at a picture turned
+        // ninety degrees. Applied out here, after the chrome and the toasts, the
+        // rotation takes the composed viewer with it and the transition matches
+        // what the viewer sees.
+        //
+        // Unconditional, so photos turn too. That is the Apple Photos behaviour
+        // and the only coherent one available: the pager carries stills and
+        // clips in the same stack, and gating on media type would snap the whole
+        // view upright mid-swipe on reaching a photo.
+        .videoTilt()
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)
         .statusBarHidden(!showChrome)

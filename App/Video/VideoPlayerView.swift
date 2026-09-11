@@ -553,9 +553,13 @@ struct VideoPlayerView: View {
                 // they follow every advance. The player keeps the double-tap skip
                 // zones, which are tied to this layer. (`showsControls` is now
                 // vestigial — kept only so the page's call sites stay unchanged.)
+                // Not rotated here. The whole viewer turns as one — pager,
+                // chrome and picture together — so that a page transition and a
+                // swipe run along the axis the viewer actually sees. Rotating
+                // just this layer left the pager sliding the portrait way
+                // underneath a turned picture. See `AssetDetailView`.
                 PlayerLayerView(player: player)
                     .overlay { skipZones }
-                    .videoTilt()
                 #else
                 // macOS and tvOS get AVKit's own transport, which is the right
                 // answer there: it is the control surface people already know,
@@ -840,27 +844,18 @@ private struct VideoTilt: ViewModifier {
     // a value handed to a page would freeze at what it was when the page was
     // built. See `MediaTilt`.
     private var tilt: MediaTilt { .shared }
-    /// Photos don't turn, so neither should the chrome drawn over them. Passing
-    /// this rather than reading the media type here keeps the modifier ignorant
-    /// of what it is rotating.
-    let active: Bool
 
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if active {
-            GeometryReader { geo in
-                let sideways = tilt.isSideways
-                content
-                    .frame(
-                        width: sideways ? geo.size.height : geo.size.width,
-                        height: sideways ? geo.size.width : geo.size.height
-                    )
-                    .rotationEffect(.degrees(tilt.angle))
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .animation(.easeInOut(duration: 0.28), value: tilt.angle)
-            }
-        } else {
+        GeometryReader { geo in
+            let sideways = tilt.isSideways
             content
+                .frame(
+                    width: sideways ? geo.size.height : geo.size.width,
+                    height: sideways ? geo.size.width : geo.size.height
+                )
+                .rotationEffect(.degrees(tilt.angle))
+                .frame(width: geo.size.width, height: geo.size.height)
+                .animation(.easeInOut(duration: 0.28), value: tilt.angle)
         }
     }
 }
@@ -869,8 +864,6 @@ extension View {
     /// Turns with the phone. For the player layer and for the chrome drawn over
     /// it — controls that stayed upright while the clip turned read as broken,
     /// so the two travel together.
-    func videoTilt(_ active: Bool = true) -> some View {
-        modifier(VideoTilt(active: active))
-    }
+    func videoTilt() -> some View { modifier(VideoTilt()) }
 }
 #endif
