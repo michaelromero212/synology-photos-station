@@ -201,9 +201,19 @@ final class AppSession {
         // silent restore has no form to show progress in — it stays on the
         // launch screen until it knows the answer.
 
-        let client = FrameStationClient(configuration: .init(baseURL: baseURL, token: saved.token))
+        let client = FrameStationClient(
+            configuration: .init(baseURL: baseURL, token: saved.token),
+            session: InstrumentedSession.shared
+        )
+        // Launch spends its wait here. Timed because it is visibly slower on
+        // cellular than on wi-fi, and a number says where it went.
+        Diagnostics.shared.log(.launch, "Restoring saved session")
+        let began = Date()
         do {
             let me = try await client.me()
+            Diagnostics.shared.log(.launch, String(
+                format: "Signed in after %.2fs", Date().timeIntervalSince(began)
+            ))
             adopt(client: client, me: me)
             return true
         } catch {
@@ -361,7 +371,9 @@ final class AppSession {
         }
 
         phase = .connecting
-        let client = FrameStationClient(configuration: .init(baseURL: url))
+        let client = FrameStationClient(
+            configuration: .init(baseURL: url), session: InstrumentedSession.shared
+        )
         do {
             let response = try await client.signInWithDSM(
                 DSMLoginRequest(
@@ -406,7 +418,9 @@ final class AppSession {
         }
 
         phase = .connecting
-        let client = FrameStationClient(configuration: .init(baseURL: url))
+        let client = FrameStationClient(
+            configuration: .init(baseURL: url), session: InstrumentedSession.shared
+        )
 
         do {
             let code = inviteCode.trimmingCharacters(in: .whitespaces).uppercased()

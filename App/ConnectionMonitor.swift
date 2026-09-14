@@ -45,6 +45,8 @@ final class ConnectionMonitor {
     private let client: @MainActor () -> FrameStationClient?
 
     private let path = NWPathMonitor()
+    /// So a path update only gets logged when something actually changed.
+    private var lastSatisfied: Bool?
     private var hasPath = true
     private var probe: Task<Void, Never>?
     /// The probe's own `/health` request goes through the same client the
@@ -70,6 +72,19 @@ final class ConnectionMonitor {
                 // executing code"; unwrapping first is the pattern the
                 // `observeOutcomes` hop below already uses.
                 guard let self else { return }
+                // Recorded because the app is meant to adapt when the network
+                // changes underfoot — wi-fi to cellular on the way out of the
+                // house, or a good connection going bad mid-clip — and the only
+                // way to see whether it actually did is to have both the change
+                // and what playback did next in one timeline.
+                if self.isExpensive != expensive || self.lastSatisfied != satisfied {
+                    Diagnostics.shared.log(
+                        .network,
+                        "Path now \(satisfied ? "up" : "down")"
+                            + ", \(expensive ? "metered (cellular/hotspot)" : "unmetered (wi-fi)")"
+                    )
+                }
+                self.lastSatisfied = satisfied
                 self.isExpensive = expensive
                 self.pathChanged(satisfied: satisfied)
             }

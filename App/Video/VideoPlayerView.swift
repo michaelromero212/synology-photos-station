@@ -62,6 +62,8 @@ final class VideoPlaybackModel {
     /// Restarts playback after a stall — see `track`. Required because
     /// `automaticallyWaitsToMinimizeStalling` is off.
     @ObservationIgnored private var recoveryObserver: NSKeyValueObservation?
+    /// Records each stutter for the exported report.
+    @ObservationIgnored private var stalledObserver: (any NSObjectProtocol)?
     #if DEBUG
     // Streaming diagnostics, console-only — see `diagnose`.
     @ObservationIgnored private var diagBufferEmpty: NSKeyValueObservation?
@@ -120,6 +122,13 @@ final class VideoPlaybackModel {
         }
         do {
             let playback = try await client.playbackURL(assetID: assetID, quality: quality)
+            // The signed URL is deliberately not recorded — it carries a
+            // signature, and this log gets shared. What matters is which
+            // representation came back, not how to fetch it.
+            Diagnostics.shared.log(
+                .quality,
+                "Asked for \(quality.rawValue); server served \(playback.kind)"
+            )
             let item = AVPlayerItem(url: playback.url)
             // Preloaded, so buffer only a little ahead. Both pages either side
             // are warmed the moment the pager settles; left uncapped, each
@@ -296,7 +305,24 @@ final class VideoPlaybackModel {
                 guard let self, item.isPlaybackLikelyToKeepUp, self.isPlaying,
                       let player = self.player, player.timeControlStatus != .playing
                 else { return }
+                Diagnostics.shared.log(
+                    .playback, "Buffer recovered, resuming at \(Self.mmss(self.position))"
+                )
                 player.play()
+            }
+        }
+
+        // Logged for the report, not the console. A stutter on cellular is the
+        // thing still to be fixed and it happens where Xcode cannot watch, so
+        // each one is recorded with what the connection was managing at the
+        // time — `measure` reads AVFoundation's own accounting.
+        stalledObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled, object: player.currentItem, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Diagnostics.shared.log(.stall, "Stalled at \(Self.mmss(self.position))")
+                self.measure("at stall")
             }
         }
 
@@ -316,14 +342,63 @@ final class VideoPlaybackModel {
         }
     }
 
+    // MARK: - Diagnostics
+
+    /// `m:ss`, because a log is read by a person.
+    static func mmss(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    /// AVFoundation's own accounting for this item, written to the log.
+    ///
+    /// `observedBitrate` is the number that settles arguments: it is what the
+    /// connection actually delivered. Set beside the stream's own bitrate it
+    /// says whether the link could ever have kept ahead of playback, which is
+    /// the difference between a bug and arithmetic. The rest separates the two
+    /// failure modes — stalls mean the bytes did not arrive in time, dropped
+    /// frames mean they did and the device could not draw them.
+    func measure(_ reason: String) {
+        guard let event = player?.currentItem?.accessLog()?.events.last else { return }
+        var parts: [String] = []
+        if event.observedBitrate > 0 {
+            parts.append("observed \(Self.mbps(event.observedBitrate))")
+        }
+        if event.indicatedBitrate > 0 {
+            parts.append("stream \(Self.mbps(event.indicatedBitrate))")
+        }
+        if event.numberOfStalls > 0 { parts.append("stalls \(event.numberOfStalls)") }
+        if event.numberOfDroppedVideoFrames > 0 {
+            parts.append("dropped \(event.numberOfDroppedVideoFrames)")
+        }
+        if event.startupTime > 0 {
+            parts.append(String(format: "startup %.2fs", event.startupTime))
+        }
+        if event.numberOfBytesTransferred > 0 {
+            parts.append(String(
+                format: "%.1f MB", Double(event.numberOfBytesTransferred) / 1_048_576
+            ))
+        }
+        guard !parts.isEmpty else { return }
+        Diagnostics.shared.log(.measurement, "\(reason) — " + parts.joined(separator: ", "))
+    }
+
+    private static func mbps(_ bitsPerSecond: Double) -> String {
+        String(format: "%.1f Mbps", bitsPerSecond / 1_000_000)
+    }
+
     // MARK: - Transport
 
     func togglePlayPause() {
         guard let player else { return }
         if isPlaying {
+            Diagnostics.shared.log(.action, "Pause at \(Self.mmss(position))")
+            measure("paused")
             player.pause()
             isPlaying = false
         } else {
+            Diagnostics.shared.log(.action, "Play at \(Self.mmss(position))")
             // Pressing play on a finished clip starts it again rather than
             // sitting on the last frame doing nothing.
             if hasFinished { seek(to: 0, exact: true) }
@@ -339,6 +414,11 @@ final class VideoPlaybackModel {
     /// Jumps by `delta` seconds. The one people press over and over.
     func skip(by delta: Double) {
         let target = VideoTiming.skipTarget(from: position, by: delta, duration: duration)
+        Diagnostics.shared.log(
+            .action,
+            "Skip \(delta > 0 ? "+" : "")\(Int(delta))s "
+                + "(\(Self.mmss(position)) → \(Self.mmss(target)))"
+        )
         // Glide the playhead across rather than teleporting it. The bar snapping
         // ten seconds sideways reads as a glitch; travelling there reads as a
         // jump you asked for, which is the difference between our scrubber and
@@ -508,6 +588,8 @@ final class VideoPlaybackModel {
         statusObserver = nil
         recoveryObserver?.invalidate()
         recoveryObserver = nil
+        if let stalledObserver { NotificationCenter.default.removeObserver(stalledObserver) }
+        stalledObserver = nil
         #if DEBUG
         diagBufferEmpty = nil
         diagKeepUp = nil

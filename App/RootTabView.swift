@@ -383,6 +383,12 @@ struct MoreView: View {
         Section {
             AutoPlayToggle()
             VideoQualityPicker()
+            // iOS only: the point of exporting is to read a log from a
+            // phone that was on cellular, where the console cannot reach.
+            // A Mac can just be looked at.
+            #if os(iOS)
+            DiagnosticsExportButton()
+            #endif
         } header: {
             Text("Playback")
         } footer: {

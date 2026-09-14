@@ -17,6 +17,9 @@ Package.pins
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
+# xcodebuild run from the project directory writes here rather than to
+# DerivedData. Nothing generated belongs in a public repo.
+build/
 xcuserdata/
 *.xcuserdatad
 
