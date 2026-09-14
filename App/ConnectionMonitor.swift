@@ -96,13 +96,14 @@ final class ConnectionMonitor {
         // simply nothing to send, the grid failing to load is the only sign
         // the NAS is gone.
         guard let client = client() else { return }
-        Task {
-            // The one weak capture lives on the long-lived observation closure,
-            // so the stream never retains the monitor; the outer Task holds no
-            // `self` at all, and the inner hop just unwraps it. Re-declaring
-            // `[weak self]` on nested Tasks is what tripped "reference to
-            // captured var 'self'".
-            await client.observeOutcomes { [weak self] failure in
+        // Weak at the outermost hop rather than on the inner closure. The
+        // observation closure is stored for the life of the client, so nothing
+        // here may retain the monitor — and declaring it weak on the *inner*
+        // closure while the enclosing Task held it strongly is what Swift 6.4
+        // flags as `ImplicitStrongCapture`: the weak capture reads as protection
+        // it was not actually providing at that level.
+        Task { [weak self] in
+            await client.observeOutcomes { failure in
                 Task { @MainActor in
                     guard let self else { return }
                     if let failure { self.noteFailure(failure) } else { self.noteSuccess() }

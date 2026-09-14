@@ -1,5 +1,7 @@
 import FrameStationAPI
 import FrameStationKit
+// `backupContainer` is a `ModelContainer`, declared as a property below.
+import SwiftData
 import SwiftUI
 
 /// The app's four places: your photos, your albums, what the family shares,
@@ -80,8 +82,11 @@ struct RootTabView: View {
         .glassTabBar()
         #if os(iOS)
         .environment(\.connectionMonitor, connection)
-        .task {
+        .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
+            // `session` is captured explicitly above so this weak capture reads
+            // as what it is: the monitor outlives this task and must not
+            // retain the session, even though the task itself holds it.
             let monitor = ConnectionMonitor { [weak session] in session?.client }
             monitor.start()
             let created = BackupEngine(
