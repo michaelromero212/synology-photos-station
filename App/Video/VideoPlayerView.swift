@@ -90,15 +90,14 @@ final class VideoPlaybackModel {
 
     /// How far ahead the clip *being watched* buffers.
     ///
-    /// Explicit rather than 0. Zero means "automatic", and automatic turned out
-    /// to be far too conservative here: the diagnostics showed the buffer
-    /// filling to two-to-four seconds, stopping, draining to 0.1s and stalling,
-    /// over and over, for the whole clip. Asking for a real cushion also pays
-    /// for the ±10s skips — the seek target is usually already in memory.
+    /// Zero means automatic — AVPlayer sizes it.
     ///
-    /// Bounded, because this is memory: 20s of a high-bitrate 4K clip is tens of
-    /// megabytes, and the pager is holding two neighbours besides.
-    private static let playingForwardBuffer: TimeInterval = 20
+    /// This was twenty seconds, set when the buffer appeared unable to grow past
+    /// four. That reading came from a link that was being hairpinned through the
+    /// router; once that was fixed the same setting became actively harmful,
+    /// because twenty seconds of a 51 Mbps clip is 127 MB, demanded up front and
+    /// demanded again after every skip.
+    private static let playingForwardBuffer: TimeInterval = 0
 
     /// Fetches the signed URL and starts buffering, without playing.
     ///
@@ -160,17 +159,21 @@ final class VideoPlaybackModel {
         // the link — and let AVPlayer hold off starting until it has enough to
         // play through without an immediate stall.
         bufferFreely(true)
-        // Play *now*, don't wait for a cushion first.
+        // AVPlayer decides when there is enough to play. It is better at this
+        // than we are, and the evidence is unambiguous.
         //
-        // With this true — which it was — AVPlayer holds off starting until it
-        // judges it has enough buffered, and that hesitation is the delay you
-        // feel after tapping play, and again after every ±10s skip while it
-        // re-buffers at the new position. Waiting is the right instinct when the
-        // link can barely carry the stream, which is what the 51 Mbps original
-        // was doing; it is the wrong one for a 1080p rendition at a twentieth of
-        // the bitrate, where the bytes are already there and the only thing the
-        // wait costs is responsiveness.
-        player.automaticallyWaitsToMinimizeStalling = false
+        // This was false, to make play and the skips answer instantly. The
+        // measurements show what that actually bought: the player started with
+        // almost nothing buffered, ran dry within a fraction of a second, and
+        // the recovery below put it straight back — stall, resume, stall, twenty
+        // times over, while it pulled 411 MB to advance the playhead two
+        // seconds. Not starvation. Thrashing.
+        //
+        // The premise was that the link could barely carry the stream. It was
+        // wrong: the diagnostics measured 117–675 Mbps against a 51 Mbps stream.
+        // With that much headroom, waiting for a cushion costs almost nothing and
+        // buys back the stability the override destroyed.
+        player.automaticallyWaitsToMinimizeStalling = true
         player.play()
         isPlaying = true
     }
@@ -305,10 +308,15 @@ final class VideoPlaybackModel {
                 guard let self, item.isPlaybackLikelyToKeepUp, self.isPlaying,
                       let player = self.player, player.timeControlStatus != .playing
                 else { return }
+                // Recorded, not acted on. Forcing `play()` here the instant
+                // `isPlaybackLikelyToKeepUp` went true — which it does on a very
+                // thin buffer — is what turned a single stall into a loop of
+                // them. With `automaticallyWaitsToMinimizeStalling` back on,
+                // AVPlayer resumes on its own once it genuinely has enough.
+                _ = player
                 Diagnostics.shared.log(
-                    .playback, "Buffer recovered, resuming at \(Self.mmss(self.position))"
+                    .playback, "Buffer refilled at \(Self.mmss(self.position))"
                 )
-                player.play()
             }
         }
 
