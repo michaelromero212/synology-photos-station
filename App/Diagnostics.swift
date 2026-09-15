@@ -50,15 +50,25 @@ final class Diagnostics {
     /// is chatty. Oldest fall off the front; a report is only ever interesting
     /// from the last few minutes anyway.
     private static let capacity = 3000
+    /// How far over capacity to run before trimming, so the shift is paid
+    /// once per `slack` entries rather than on every append.
+    private static let slack = 256
     private var entries: [Entry] = []
     private let startedAt = Date()
 
     /// Flipped off in a release build's UI, but the machinery stays: the whole
     /// point is to gather evidence from a phone that is not plugged in.
+    /// Trimmed in batches, not one at a time.
+    ///
+    /// `removeFirst` on an Array shifts every remaining element, so trimming on
+    /// each append meant that once the buffer was full *every* log call moved
+    /// three thousand entries — on the main actor, at exactly the moment a
+    /// network change makes the app noisiest. Dropping a block at a time
+    /// amortises that to nothing.
     func log(_ category: Category, _ message: String) {
         entries.append(Entry(at: Date(), category: category, message: message))
-        if entries.count > Self.capacity {
-            entries.removeFirst(entries.count - Self.capacity)
+        if entries.count > Self.capacity + Self.slack {
+            entries.removeFirst(Self.slack)
         }
     }
 
@@ -178,6 +188,18 @@ final class Diagnostics {
 final class ConnectionMetrics: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// Below this a request is simply working, and saying so is noise.
     private static let interestingSeconds: TimeInterval = 0.5
+    /// Guards `lastFresh`. Delegate callbacks arrive on a session-owned queue,
+    /// which is serial in practice but not promised to be.
+    private let gate = NSLock()
+    private var lastFresh = Date.distantPast
+
+    private func permitFreshLog() -> Bool {
+        gate.lock()
+        defer { gate.unlock() }
+        guard Date().timeIntervalSince(lastFresh) > 1 else { return false }
+        lastFresh = Date()
+        return true
+    }
 
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
@@ -185,8 +207,14 @@ final class ConnectionMetrics: NSObject, URLSessionTaskDelegate, @unchecked Send
     ) {
         guard let last = metrics.transactionMetrics.last else { return }
         let total = metrics.taskInterval.duration
-        let fresh = !last.isReusedConnection
-        guard total >= Self.interestingSeconds || fresh else { return }
+        // Slow requests always; new connections at most once a second.
+        //
+        // Logging every fresh connection sounds cheap until the network changes
+        // underfoot: every connection is remade at once, so a grid mid-scroll
+        // fired this once per in-flight thumbnail, each hopping to the main
+        // actor — a burst landing exactly when the UI could least afford it.
+        let slow = total >= Self.interestingSeconds
+        guard slow || (!last.isReusedConnection && permitFreshLog()) else { return }
 
         // The path, not the address. This log is meant to be shared, and the
         // NAS's hostname and address are not ours to scatter about — the family
