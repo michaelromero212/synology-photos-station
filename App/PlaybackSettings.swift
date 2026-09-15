@@ -58,11 +58,18 @@ enum VideoQualityPreference: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Synology's wording, deliberately. Someone coming from Photos should not
+    /// have to work out that our "Data Saver" is their "Speed first" — the
+    /// choice is the same choice, so it reads the same.
+    ///
+    /// The case names and their `rawValue`s stay as they were: those are what is
+    /// written to preferences, and renaming them would quietly reset the setting
+    /// for anyone who had already chosen one.
     var title: String {
         switch self {
-        case .auto: return "Automatic"
-        case .original: return "Original Quality"
-        case .dataSaver: return "Data Saver"
+        case .auto: return "Auto"
+        case .original: return "Quality first"
+        case .dataSaver: return "Speed first"
         }
     }
 
@@ -102,7 +109,7 @@ struct VideoQualityPicker: View {
                 Text(option.title).tag(option)
             }
         } label: {
-            Label("Video Quality", systemImage: "slider.horizontal.3")
+            Label("Playback Quality", systemImage: "slider.horizontal.3")
         }
         .onChange(of: choice) { _, new in
             PlaybackSettings.videoQuality = new
