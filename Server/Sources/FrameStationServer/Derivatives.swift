@@ -214,7 +214,14 @@ enum Derivatives {
 
         let directory = store.derivativeDirectory(sha256: sha256)
         let destination = directory.appendingPathComponent(playbackName)
-        if FileManager.default.fileExists(atPath: destination.path) { return destination }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            // Self-healing: one built before the check above existed may be
+            // unplayable, and returning it would serve the same broken file for
+            // ever. Throwing it away costs a transcode and fixes it for good.
+            if try await hasVideoStream(destination) { return destination }
+            logger.warning("playback rendition for \(sha256.prefix(8)) is unplayable; rebuilding")
+            try? FileManager.default.removeItem(at: destination)
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         // Written to a temporary name and moved into place, so a transcode that
@@ -277,11 +284,35 @@ enum Derivatives {
             timeout: 3600
         )
 
-        guard FileManager.default.fileExists(atPath: partial.path) else {
+        // Existing is not the same as usable.
+        //
+        // A rendition once arrived 112 MB with a duration and no readable track
+        // at all — `+faststart` rewrites the file in a second pass to move the
+        // index to the front, and a pass that does not finish leaves the bytes
+        // without the index. ffmpeg had exited, the file was there, the job was
+        // marked done, and the client got "video could not be played". So the
+        // output is probed before it is allowed into place; a failure here
+        // leaves the job failed, and the heal will try again.
+        guard FileManager.default.fileExists(atPath: partial.path),
+              try await hasVideoStream(partial) else {
             throw DerivativeError.renditionFailed(blob.lastPathComponent)
         }
         try FileManager.default.moveItem(at: partial, to: destination)
         return destination
+    }
+
+    /// Whether a file has a video track ffmpeg can actually read.
+    ///
+    /// `ffprobe` rather than a size check: the failure this exists to catch
+    /// produced a large file with a plausible duration and no streams in it.
+    private static func hasVideoStream(_ file: URL) async throws -> Bool {
+        let output = try? await Shell.run(
+            "ffprobe",
+            ["-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", file.path],
+            timeout: 120
+        )
+        return output?.stdoutText.contains("video") == true
     }
 
     /// Seeks a little way in before grabbing the frame — the first frame of a

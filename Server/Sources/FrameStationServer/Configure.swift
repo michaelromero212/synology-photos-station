@@ -133,6 +133,9 @@ func configure(_ app: Application) async throws {
         // bounded: it is the only job here that can occupy a worker for minutes
         // at a time, and nothing on screen is waiting for it.
         Task { await MetadataBackfill.enqueueMissingPlaybackRenditions(on: app) }
+        // And rebuild any whose file has since vanished — including one the
+        // generator itself discarded for being unplayable.
+        Task { await MetadataBackfill.requeueVanishedPlaybackRenditions(on: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")

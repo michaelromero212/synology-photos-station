@@ -162,6 +162,52 @@ enum MetadataBackfill {
         }
     }
 
+    /// Re-queues a rendition whose file is no longer on disk.
+    ///
+    /// A finished job says the work was done, not that the result survived — a
+    /// file can be deleted, or thrown away by the generator itself for being
+    /// unplayable. Without this the job stays `done` for ever and the server
+    /// quietly falls back to the 51 Mbps original on every cellular play, which
+    /// is exactly the thing the rendition exists to avoid.
+    ///
+    /// Bounded, and a `stat` each: cheap for a handful, and it stops long before
+    /// it could matter on a migrated library.
+    static func requeueVanishedPlaybackRenditions(on app: Application) async {
+        struct Row: Decodable {
+            let id: UUID
+            let sha256: String
+        }
+        do {
+            let rows = try await app.sql.raw("""
+                SELECT a.id, a.sha256
+                FROM assets a
+                JOIN derivation_jobs j ON j.asset_id = a.id
+                WHERE a.media_type = 'video'
+                  AND j.kind = \(bind: Derivatives.playbackJobKind)
+                  AND j.state = 'done'
+                LIMIT 500
+                """).all(decoding: Row.self)
+
+            for row in rows {
+                let file = app.blobStore
+                    .derivativeDirectory(sha256: row.sha256)
+                    .appendingPathComponent(Derivatives.playbackName)
+                guard !FileManager.default.fileExists(atPath: file.path) else { continue }
+                app.logger.info(
+                    "playback rendition for \(row.sha256.prefix(8)) is gone; re-queuing"
+                )
+                try await app.sql.raw("""
+                    UPDATE derivation_jobs
+                    SET state = 'pending', attempts = 0, last_error = NULL
+                    WHERE asset_id = \(bind: row.id)
+                      AND kind = \(bind: Derivatives.playbackJobKind)
+                    """).run()
+            }
+        } catch {
+            app.logger.error("playback rendition re-queue failed: \(String(reflecting: error))")
+        }
+    }
+
     /// Queues the cellular rendition for videos uploaded before it existed.
     ///
     /// Filtered in SQL to fat clips only, so the library's already-lean videos
