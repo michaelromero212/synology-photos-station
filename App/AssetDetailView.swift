@@ -640,7 +640,19 @@ struct AssetDetailView: View {
     /// viewer somewhere you didn't ask to go.
     private func advanceToNextVideo(after finished: TimelineItem) {
         guard PlaybackSettings.autoPlayNextVideo, finished.id == currentID else { return }
-        guard let next = nextVideoID(after: finished.id) else { return }
+        guard let next = nextVideoID(after: finished.id) else {
+            // Nothing left in this day: close, rather than sit on a frozen last
+            // frame waiting to be dismissed. `onClose` then walks the grid to
+            // this day, so the day you just finished is at the top and the next
+            // one is directly below it — the whole run ends where you would go
+            // next.
+            //
+            // Only reached with auto-play on, which is the guard above. With it
+            // off a clip was opened deliberately and one ending is not a reason
+            // to take the viewer away.
+            dismiss()
+            return
+        }
         focus.currentID = next
     }
 
