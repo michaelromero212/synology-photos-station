@@ -699,7 +699,7 @@ struct VideoPlayerView: View {
             await model.prepare(
                 assetID: assetID, client: client,
                 quality: PlaybackSettings.resolvedQuality(
-                    isExpensive: connection?.isExpensive ?? false
+                    isLocal: NetworkLocality.shared.isLocal
                 )
             )
             if isActive { model.start() }

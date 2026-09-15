@@ -47,6 +47,8 @@ final class ConnectionMonitor {
     private let path = NWPathMonitor()
     /// So a path update only gets logged when something actually changed.
     private var lastSatisfied: Bool?
+    /// So a change of interface is logged even when the metered flag does not move.
+    private var lastInterface: String?
     private var hasPath = true
     private var probe: Task<Void, Never>?
     /// The probe's own `/health` request goes through the same client the
@@ -65,6 +67,16 @@ final class ConnectionMonitor {
         path.pathUpdateHandler = { [weak self] update in
             let satisfied = update.status == .satisfied
             let expensive = update.isExpensive
+            // Recorded because `isExpensive` was seen reporting *unmetered* on a
+            // cellular-only connection, and it is not a cosmetic reading: backup
+            // uses it to decide whether it may spend the user's data. The
+            // interface NWPath says it is using settles whether the framework is
+            // wrong or our reading of it is.
+            let interface = update.usesInterfaceType(.wifi) ? "wifi"
+                : update.usesInterfaceType(.cellular) ? "cellular"
+                : update.usesInterfaceType(.wiredEthernet) ? "ethernet"
+                : "other"
+            let constrained = update.isConstrained
             Task { @MainActor [weak self] in
                 // Strongify before touching properties. The optional-chained
                 // writes this replaced (`self?.isExpensive = …`) are what Swift 6
@@ -77,14 +89,17 @@ final class ConnectionMonitor {
                 // house, or a good connection going bad mid-clip — and the only
                 // way to see whether it actually did is to have both the change
                 // and what playback did next in one timeline.
-                if self.isExpensive != expensive || self.lastSatisfied != satisfied {
+                if self.isExpensive != expensive || self.lastSatisfied != satisfied
+                    || self.lastInterface != interface {
                     Diagnostics.shared.log(
                         .network,
-                        "Path now \(satisfied ? "up" : "down")"
-                            + ", \(expensive ? "metered (cellular/hotspot)" : "unmetered (wi-fi)")"
+                        "Path now \(satisfied ? "up" : "down") on \(interface)"
+                            + ", \(expensive ? "metered" : "unmetered")"
+                            + (constrained ? ", low data mode" : "")
                     )
                 }
                 self.lastSatisfied = satisfied
+                self.lastInterface = interface
                 self.isExpensive = expensive
                 self.pathChanged(satisfied: satisfied)
             }

@@ -240,7 +240,11 @@ final class ConnectionMetrics: NSObject, URLSessionTaskDelegate, @unchecked Send
         parts.append(String(format: "total %.2fs", total))
 
         let path = task.originalRequest?.url?.path ?? "?"
+        let address = last.remoteAddress
         Task { @MainActor in
+            // Locality first: this is what `Auto` decides on, and it wants the
+            // answer from the address actually reached.
+            if let address { NetworkLocality.shared.noteServerAddress(address) }
             Diagnostics.shared.log(.network, "\(path) — " + parts.joined(separator: ", "))
         }
     }

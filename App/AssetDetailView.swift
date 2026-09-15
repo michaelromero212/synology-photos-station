@@ -1274,7 +1274,7 @@ private struct AssetPage: View {
                         // arriving at a warmed neighbour would throw the buffer
                         // away and refetch the other one.
                         quality: PlaybackSettings.resolvedQuality(
-                            isExpensive: connection?.isExpensive ?? false
+                            isLocal: NetworkLocality.shared.isLocal
                         )
                     )
                 }

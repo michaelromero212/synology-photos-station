@@ -33,18 +33,28 @@ enum PlaybackSettings {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: qualityKey) }
     }
 
-    /// What to actually ask the server for, given the network underfoot.
+    /// What to actually ask the server for, given where the server is.
     ///
-    /// The original is a 4K clip at roughly 51 Mbps. A home network carries that
-    /// comfortably; a cellular link does not, and the buffer can never get ahead
-    /// of playback — which is a video that stalls every few seconds rather than
-    /// one that looks slightly softer. So `auto` follows the connection, which
-    /// is what almost everyone wants and why it is the default.
-    static func resolvedQuality(isExpensive: Bool) -> PlaybackQuality {
+    /// `auto` turns on whether the NAS is on this device's own network — the
+    /// same distinction Synology Photos makes, and for the same reason. The
+    /// original is a 4K clip at roughly 51 Mbps: a local link carries that with
+    /// room to spare, and anything reached across the internet does not, however
+    /// fast it looks. Measured, not guessed — a remote wi-fi delivered twice the
+    /// stream's bitrate and still stalled, because twice is not enough headroom
+    /// to build a cushion at startup or after a skip.
+    ///
+    /// This replaced a test on whether the connection was *metered*, which was a
+    /// proxy for the same question and got it wrong in the obvious case: a wi-fi
+    /// network away from home is unmetered and entirely remote.
+    ///
+    /// Unknown locality means not local. Before there is evidence the smaller
+    /// stream is the safer answer, because it plays everywhere and the original
+    /// does not.
+    static func resolvedQuality(isLocal: Bool?) -> PlaybackQuality {
         switch videoQuality {
         case .original: return .original
         case .dataSaver: return .mobile
-        case .auto: return isExpensive ? .mobile : .original
+        case .auto: return (isLocal == true) ? .original : .mobile
         }
     }
 }
@@ -76,9 +86,11 @@ enum VideoQualityPreference: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .auto:
-            return "Full quality on Wi-Fi, and a smaller version on cellular so it doesn't stall."
+            return "Full quality at home, and a smaller version when you're away "
+                + "so it doesn't stall."
         case .original:
-            return "Always the file exactly as recorded. On cellular this may pause to buffer."
+            return "Always the file exactly as recorded. Away from home this may "
+                + "pause to buffer."
         case .dataSaver:
             return "Always the smaller version. Audio is unchanged — only the picture is reduced."
         }
