@@ -240,11 +240,7 @@ struct TimelineView: View {
         // moves without insetting anything, which is what keeps it safe.
         .toolbar(selection.isActive ? .automatic : .hidden, for: .navigationBar)
         .navigationDestination(item: $openItem) { opened in
-            AssetDetailView(
-                item: opened.item, space: space, session: session,
-                dayItems: opened.dayItems, pageItems: opened.pageItems
-            )
-            .photoZoomTransition(id: opened.id, in: photoTransition)
+            viewer(for: opened)
         }
         // The bottom bar stands down on the same signal as the top one, so
         // scrolling into the library leaves nothing but photos — the whole
@@ -921,6 +917,43 @@ struct TimelineView: View {
     /// usually in one nobody has looked at yet. Searching loaded buckets first
     /// keeps the common case free; the walk is bounded by the manifest, which is
     /// small even for a large library.
+    /// The full-screen viewer a tap opens.
+    ///
+    /// Lifted out of the `navigationDestination` closure for the same reason
+    /// `macChrome` is lifted out of `body`: inline, the type-checker gave up —
+    /// "unable to type-check this expression in reasonable time" — and adding a
+    /// single argument to the initializer was enough to tip it over.
+    @ViewBuilder
+    private func viewer(for opened: OpenedPhoto) -> some View {
+        AssetDetailView(
+            item: opened.item, space: space, session: session,
+            dayItems: opened.dayItems, pageItems: opened.pageItems,
+            onClose: followViewer
+        )
+        .photoZoomTransition(id: opened.id, in: photoTransition)
+    }
+
+    /// Walks the grid to the day of whatever the viewer finished on.
+    ///
+    /// Auto-play works through a day's clips and swiping carries on past the day
+    /// it opened from, neither of which the grid sees — so returning left you
+    /// wherever the tap happened, hunting for where you actually got to. The
+    /// day goes to the top, which in a grid running oldest to newest puts the
+    /// *next* day directly below it: the one you reach for after finishing this
+    /// day's videos.
+    ///
+    /// A method rather than a closure at the call site. That view builder is
+    /// already at the type-checker's limit and an inline closure tipped it into
+    /// "unable to type-check this expression in reasonable time".
+    private func followViewer(to assetID: UUID) {
+        guard let store else { return }
+        Task {
+            if let key = await bucketKey(for: assetID, in: store) {
+                pendingJump = key
+            }
+        }
+    }
+
     private func bucketKey(for assetID: UUID, in store: TimelineStore) async -> String? {
         if let key = store.items.first(where: { _, items in
             items.contains { $0.assetID == assetID }

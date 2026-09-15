@@ -164,6 +164,12 @@ struct AssetDetailView: View {
     /// Set by "Get Info" in the grid, which means "open this showing its
     /// details" rather than "open this".
     var showsInfoInitially = false
+    /// The item on screen when the viewer closes, so the grid can follow.
+    ///
+    /// Auto-play walks a day's clips without the grid knowing, and swiping
+    /// carries on past the day it opened from. Coming back to wherever the
+    /// tap happened means hunting for where you actually got to.
+    var onClose: (UUID) -> Void = { _ in }
 
     @State private var cache = ViewerModelCache()
     /// Outlives any one page, which is the point: a video prepared as a
@@ -211,7 +217,8 @@ struct AssetDetailView: View {
         session: AppSession,
         dayItems: [TimelineItem] = [],
         pageItems: [TimelineItem] = [],
-        showsInfoInitially: Bool = false
+        showsInfoInitially: Bool = false,
+        onClose: @escaping (UUID) -> Void = { _ in }
     ) {
         self.item = item
         self.space = space
@@ -219,6 +226,7 @@ struct AssetDetailView: View {
         self.dayItems = dayItems
         self.pageItems = pageItems
         self.showsInfoInitially = showsInfoInitially
+        self.onClose = onClose
         #if os(iOS)
         self._focus = State(initialValue: PagerFocus(currentID: item.id))
         #else
@@ -300,7 +308,10 @@ struct AssetDetailView: View {
         // costs an accelerometer subscription, so it runs while the viewer is
         // open and stops with it. See `MediaTilt`.
         .onAppear { tilt.start() }
-        .onDisappear { tilt.stop() }
+        .onDisappear {
+            tilt.stop()
+            onClose(currentItem.assetID)
+        }
         .fullScreenCover(isPresented: $showSlideshow) {
             SlideshowView(
                 session: session,
