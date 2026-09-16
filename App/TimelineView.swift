@@ -202,6 +202,10 @@ struct TimelineView: View {
     /// know what "that day" contained — and everything currently loaded, which
     /// is what the viewer swipes through.
     @State private var openItem: OpenedPhoto?
+    /// Which photograph the viewer was opened on, so closing it can tell
+    /// whether you went anywhere. Recorded centrally rather than at each of the
+    /// three places that open the viewer — see `followViewer`.
+    @State private var openedWith: UUID?
     #endif
 
     var body: some View {
@@ -273,6 +277,12 @@ struct TimelineView: View {
         .toolbar(selection.isActive ? .automatic : .hidden, for: .navigationBar)
         .navigationDestination(item: $openItem) { opened in
             viewer(for: opened)
+        }
+        // One place rather than the three that open the viewer, and it cannot
+        // be read off `openItem` on the way out because that is already nil by
+        // the time the close handler runs.
+        .onChange(of: openItem) { _, opened in
+            if let opened { openedWith = opened.item.assetID }
         }
         // The bottom bar stands down on the same signal as the top one, so
         // scrolling into the library leaves nothing but photos — the whole
@@ -1002,10 +1012,32 @@ struct TimelineView: View {
         // hidden: you come back from a photo to a grid with no way out of it
         // but scrolling.
         scrollProgress.showTopBar()
+
+        let opened = openedWith
+        openedWith = nil
+
+        // Only follow the viewer somewhere it actually went.
+        //
+        // This used to scroll on every close, and the common case is the one it
+        // got wrong: tap a photograph in the day you are already looking at,
+        // come straight back, and the grid was already showing exactly what you
+        // wanted — then a beat later, once the bucket lookup returned, it
+        // yanked that day's header to the top of the screen. That late,
+        // uninvited jump is the flinch on the way out of a photo.
+        //
+        // Following is for when the viewer carried you into a *different* day
+        // by swiping, which is the case it was written for and the only one that
+        // needs the grid to move at all.
+        // Not knowing where you came from is a reason to stay put, not a reason
+        // to jump: leaving the grid where the user left it is the answer that is
+        // never wrong, and moving it is only right with evidence that the viewer
+        // carried them somewhere.
+        guard let opened, assetID != opened else { return }
         Task {
-            if let key = await bucketKey(for: assetID, in: store) {
-                pendingJump = key
-            }
+            guard let key = await bucketKey(for: assetID, in: store),
+                  await bucketKey(for: opened, in: store) != key
+            else { return }
+            pendingJump = key
         }
     }
 
@@ -1618,7 +1650,22 @@ struct TimelineView: View {
                         }
                         Spacer(minLength: 8)
                         Button {
-                            withAnimation { dismissedBackupPrompt = true }
+                            // Not `withAnimation`, and this is the grid's oldest
+                            // rule rather than a matter of taste: this banner
+                            // rides at the bottom of the *scroll content*, so
+                            // dismissing it makes that content shorter. Animating
+                            // the change interpolates the height across a third
+                            // of a second while the stack beneath it is lazily
+                            // realising rows and `defaultScrollAnchor(.bottom)`
+                            // is holding the end in place — three things
+                            // adjusting to each other, frame by frame, which is
+                            // what the lurch on the way out was.
+                            //
+                            // The content genuinely does get shorter and the
+                            // grid genuinely must take up the slack; doing it in
+                            // one pass looks deliberate, and doing it over time
+                            // looks broken.
+                            dismissedBackupPrompt = true
                         } label: {
                             Image(systemName: "xmark")
                                 .font(.callout.weight(.semibold))
