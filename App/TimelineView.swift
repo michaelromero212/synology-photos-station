@@ -176,6 +176,27 @@ struct TimelineView: View {
     /// settled and flung the grid past its end (confirmed on device).
     /// Imperative `scrollTo`, the way the scrubber already jumps, does not loop.
     @State private var pendingJump: String?
+    #if os(iOS)
+    /// The status bar and Dynamic Island's height, from the window itself.
+    ///
+    /// Asked of UIKit rather than of a `GeometryReader`, after the SwiftUI route
+    /// gave three different wrong answers in a row. A reader placed below the
+    /// `ignoresSafeArea` reports zero, because the inset has just been consumed
+    /// and zero is the honest answer to the wrong question. One placed above it
+    /// as a background measures its own region rather than the screen's —
+    /// 20pt, when measured. And the value was never a property of a view to
+    /// begin with: it describes the window, so the window is what is asked.
+    ///
+    /// Read fresh on each evaluation rather than stored. The one caller sits
+    /// inside the grid's `GeometryReader`, which re-runs whenever the size
+    /// changes — which is exactly when this can have changed.
+    private var windowTopInset: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .keyWindow?.safeAreaInsets.top ?? 0
+    }
+    #endif
     #if !os(tvOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
     /// know what "that day" contained — and everything currently loaded, which
@@ -216,7 +237,18 @@ struct TimelineView: View {
         // so it never resizes the scroll view. iOS only — macOS keeps its window
         // toolbar, tvOS its own chrome.
         #if os(iOS)
-        .overlay(alignment: .top) { floatingTopBar }
+        // Under the bar, and outliving it: the grid runs to the top of the
+        // display now, so something has to hold the clock and the glyphs up
+        // over whatever photograph is passing beneath them — including once the
+        // controls have slid away and there is nothing there but library.
+        //
+        // Both are pushed down by the inset the root gave away. They are inside
+        // that `ignoresSafeArea`, so without this they align to the top of the
+        // *display* and the controls land on top of the clock — which is the
+        // trade for letting the grid have the whole screen: what wants the
+        // status bar respected now has to say so.
+        .overlay(alignment: .top) { TopEdgeFade(topInset: windowTopInset) }
+        .overlay(alignment: .top) { floatingTopBar.padding(.top, windowTopInset) }
         #endif
         // The count takes the title while selecting. It used to sit in the
         // leading slot beside the space name, which left two pieces of text
@@ -464,6 +496,22 @@ struct TimelineView: View {
                 await store?.refresh()
             }
         }
+        #if os(iOS)
+        // Outermost, and that is the entire trick.
+        //
+        // `ignoresSafeArea` declines the safe area as it stands at the point it
+        // is applied — it does not stop a *later* modifier from insetting the
+        // result. Everything above re-establishes the top: the navigation
+        // title, the toolbars, the destinations. Applied down on the scroll
+        // view, or even directly on the stack, it was overruled by forty
+        // modifiers' worth of chrome and did nothing at all while reading as
+        // correct. Measured both times: container 737 of a 874pt screen, and a
+        // safe area of zero where the grid asked for it.
+        //
+        // `readTopSafeArea` goes above it, because below it the answer is
+        // always zero.
+        .ignoresSafeArea(.container, edges: .top)
+        #endif
     }
 
     /// Restarts the poll when either the space or the foreground state changes.
@@ -947,6 +995,13 @@ struct TimelineView: View {
     /// "unable to type-check this expression in reasonable time".
     private func followViewer(to assetID: UUID) {
         guard let store else { return }
+        // Closing the viewer is a return to this screen, and a screen you have
+        // just come back to shows its controls — whatever the scroll direction
+        // was when you left it. Without this the bar stays wherever the last
+        // gesture before the tap put it, which on the way into the library is
+        // hidden: you come back from a photo to a grid with no way out of it
+        // but scrolling.
+        scrollProgress.showTopBar()
         Task {
             if let key = await bucketKey(for: assetID, in: store) {
                 pendingJump = key
@@ -1178,17 +1233,27 @@ struct TimelineView: View {
         GeometryReader { proxy in
             ScrollViewReader { scroller in
             ScrollView {
-                // `spacing: 0`, and every gap lives inside the header instead.
-                // Stack spacing sits *above* a pinned header, so at 18 the
-                // header docked 18pt down from the top and the row it was
-                // meant to be covering slid through the gap.
+                // Dates scroll away with their photographs rather than docking
+                // at the top.
                 //
-                // Nothing is attached to the `Section`s themselves either: a
-                // `LazyVStack` only pins what it can still recognise as a
-                // section, and a modifier wrapped round one is a good way to
-                // quietly lose the pinning. The per-bucket `.task` and `.id`
-                // hang off the content and the header instead.
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                // A pinned header has to be opaque — it has content passing
+                // under it — and an opaque band held against the top of an
+                // edge-to-edge grid is a slab sitting between the glass and the
+                // library, directly under the very fade meant to let one dissolve
+                // into the other. Letting it go means the top of the screen is
+                // photographs and nothing else, which is the whole point of
+                // running them up there. Photos does the same.
+                //
+                // What it costs: deep inside a day of a hundred photographs
+                // there is no date on screen. The scrubber answers that on
+                // demand, which is where it was already being asked.
+                //
+                // `spacing: 0` stays, and every gap still lives inside the
+                // header. It was that way because stack spacing sits *above* a
+                // pinned header and left a gap for a row to slide through, and
+                // it is kept because the space above a date and the space below
+                // it are doing different jobs — see `header`.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     // The library's size, at the top — above the oldest photo,
                     // the way Apple heads a library. The grid runs oldest→newest
                     // and opens on the newest, so you meet this only by scrolling
@@ -1223,8 +1288,10 @@ struct TimelineView: View {
                             }
                         } header: {
                             // The scrubber's target. On the header rather than
-                            // the section so a jump lands with the date at the
-                            // top of the screen, where the pinned one sits.
+                            // the section, so a jump lands with the date itself
+                            // at the top of the screen and its photographs
+                            // below — land on the section and the date is the
+                            // one thing scrolled off.
                             header(bucket).id(bucket.key)
                         }
                     }
@@ -1321,16 +1388,53 @@ struct TimelineView: View {
             // is already open, so an ordinary drag still means scroll.
             .selectionSweep(selection, space: Self.gridSpace)
             #endif
-            // Keeps photos out of the strip above the pinned date. The scroll
-            // view's frame stops at the safe area but its content draws past
-            // it, so without this a row slides up under the status bar and sits
-            // there in plain sight above the date — and, while the bar is up,
-            // behind the title too, which on iOS 26 has no background of its
-            // own to hide it.
+            // Not on iOS. The grid's content is *meant* to run up into the
+            // status bar and under the Dynamic Island there, the way Photos
+            // lets a library reach the top of the display, and `TopEdgeFade`
+            // covers that strip instead of a clip cutting it off.
             //
+            // The scroll view's own frame is untouched by this — it still stops
+            // at the safe area, so the pinned date still pins below the island
+            // and nothing about the scroll metrics changes. Only the overflow
+            // that was being thrown away is now drawn. Ignoring the safe area
+            // here instead was the obvious-looking move and the wrong one: it
+            // consumes the inset rather than converting it, so the pinned date
+            // came up level with the clock.
+            //
+            // macOS and tvOS keep the trim. Neither has the fade, and neither
+            // wants photos over its window chrome.
+            #if !os(iOS)
             // The top edge only. `.clipped()` did all four, and the bottom one
             // was the price: see `TopEdgeClip`.
             .clipShape(TopEdgeClip())
+            #endif
+            #if os(iOS)
+            // The top inset, by hand, in two parts.
+            //
+            // `windowTopInset` is the safe area, which the view gives up at the
+            // root (see `body`) so photographs can reach the top of the display
+            // — without putting it back here the first row would sit under the
+            // Dynamic Island permanently rather than merely passing beneath it.
+            // Taken from the window, because by this point the inset has been
+            // consumed: `proxy.safeAreaInsets.top` reads 0 here, and using it
+            // was how this quietly inset by 54 instead of 113.
+            //
+            // The bar's height is the second part, so the pinned date comes to
+            // rest *below* the controls instead of level with them. Without
+            // that the date and the space name shared the same 20pt of screen,
+            // and the only way to separate them was a scrim heavy enough to
+            // bury one, which dragged the fade a row and a half down the page.
+            //
+            // A *constant* margin, and that distinction is the whole safety
+            // argument. What stormed the layout before was an inset that
+            // changed as you scrolled: each change resized the scroll view,
+            // which re-realised rows, which resized it again. This one is the
+            // same on every frame, so there is no loop to enter — the bar still
+            // hides by sliding, as an overlay, touching nothing.
+            .contentMargins(
+                .top, windowTopInset + TopEdgeFade.barHeight, for: .scrollContent
+            )
+            #endif
             // Reads the scroll view's own offset rather than inferring it from
             // content geometry: a LazyVStack only measures realised rows, so a
             // background GeometryReader reports a height that grows as you
@@ -1683,35 +1787,47 @@ struct TimelineView: View {
     /// And the fill is opaque to the leading edge. A translucent header lets the
     /// row underneath ghost through it, and two dates overlapping mid-hand-off
     /// is the exact thing this layout is supposed to avoid.
+    /// The date a group of photographs was taken, and where.
+    ///
+    /// Between an edge-to-edge grid and the glass at the top, this is the only
+    /// piece of the screen that is plain text on the page, so its typography is
+    /// carrying the whole thing. Three deliberate choices:
+    ///
+    /// **Baselines, not centres.** Two sizes on one line aligned by their boxes
+    /// sit at visibly different heights, which is what made the date and the
+    /// place read as two things that happened to collide rather than one line.
+    ///
+    /// **A real step in size.** `.headline` beside `.subheadline` is 17 against
+    /// 15 — too close to establish which is the heading, so the pair read as
+    /// undifferentiated small text and the band around them looked like padding
+    /// with nothing in it. `.title3` gives the date somewhere to stand.
+    ///
+    /// **Weighted spacing.** Three times as much room above as below, so the
+    /// header binds to the photographs it belongs to rather than floating
+    /// between two days. It was 16 and 8, which is the right idea and not enough
+    /// of it to read.
+    ///
+    /// No background. It had one only because it used to pin, and a pinned
+    /// header needs something opaque to hide the row passing beneath it. These
+    /// scroll now, so nothing passes beneath — and having none is what lets a
+    /// date wash out under the top fade on its way off screen, exactly as the
+    /// photographs around it do, instead of riding up as a solid black bar.
     private func header(_ bucket: TimelineBucket) -> some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(Self.displayDate(bucket.key))
-                .font(.headline)
+                .font(.title3.weight(.semibold))
             if let place = bucket.place {
                 Text("· \(place)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 16)
+        .padding(.horizontal, 16)
+        .padding(.top, 24)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Self.headerFill)
-    }
-
-    /// The app's own background, so photos disappear cleanly underneath rather
-    /// than showing through. `.systemBackground` has no macOS spelling and
-    /// `.windowBackgroundColor` has no iOS one, hence the split.
-    static var headerFill: Color {
-        #if os(macOS)
-        return Color(nsColor: .windowBackgroundColor)
-        #elseif os(tvOS)
-        return Color.black
-        #else
-        return Color(uiColor: .systemBackground)
-        #endif
     }
 
     #if os(iOS)
@@ -1741,13 +1857,27 @@ struct TimelineView: View {
 
                 Spacer(minLength: 8)
 
+                // The switcher only, and nothing when there is nothing to switch
+                // between. A personal library does not need to be captioned
+                // "Personal Space" every time you look at it — the name earned
+                // its place when this was an opaque bar with room to spare, and
+                // now that photographs run behind the chrome it is one more
+                // thing between you and them.
+                //
+                // On glass where it does appear, like the buttons either side.
+                // The library passes behind this bar now, and the first thing it
+                // passes behind is the pinned date — two pieces of white text at
+                // the same size in the same place read as one broken line, and a
+                // surface of its own is what separates them.
                 if let spaceSwitcher {
                     spaceSwitcher
-                } else {
-                    Text(space.name).font(.headline).lineLimit(1)
-                }
+                        .padding(.horizontal, 14)
+                        .frame(height: 38)
+                        .glassCapsule(fallback: .regularMaterial)
+                        .contentShape(Capsule())
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: 8)
+                }
 
                 Button { showSearch = true } label: {
                     Image(systemName: "magnifyingglass")
@@ -1772,8 +1902,12 @@ struct TimelineView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(.bar)
-            .overlay(alignment: .bottom) { Divider() }
+            // No background of its own. `TopEdgeFade` is a separate overlay
+            // that stays put when this bar slides away, which is the point —
+            // the wash is what keeps the clock readable over the library, so it
+            // cannot be something that leaves with the controls. The flat
+            // `.bar` fill and the `Divider` that used to be here are precisely
+            // what made the library stop dead in a line below the island.
             // Absorb taps across the whole bar so a tap on its empty middle
             // doesn't fall through to a photo behind it — and stop intercepting
             // once it has slid away.
@@ -1979,6 +2113,7 @@ struct TimelineView: View {
     }
 }
 
+#if !os(iOS)
 /// Trims the grid at the top edge and lets it run off the bottom.
 ///
 /// The grid used to be `.clipped()`, which trims all four. The top edge is the
@@ -1991,6 +2126,11 @@ struct TimelineView: View {
 /// The overhang has to clear the zoom bar, the tab bar and the home indicator
 /// stacked together, and there is nothing below the screen for the surplus to
 /// spill onto, so it is set generously rather than measured.
+///
+/// iPhone and iPad no longer use this. There the row above the frame is wanted
+/// — it is the library reaching the top of the display — and `TopEdgeFade`
+/// covers that strip rather than a clip removing it. The Mac and the TV have no
+/// such fade, and neither wants photographs over its own window chrome.
 private struct TopEdgeClip: Shape {
     func path(in rect: CGRect) -> Path {
         Path(CGRect(
@@ -1999,6 +2139,120 @@ private struct TopEdgeClip: Shape {
         ))
     }
 }
+#endif
+
+#if os(iOS)
+/// The fade Photos runs across the top of the library.
+///
+/// Blur rather than a tint: a flat colour over a photograph reads as a panel
+/// laid on top of it, and what is being imitated here is the library carrying on
+/// underneath.
+///
+/// It reaches full strength at the very top rather than easing in from nothing,
+/// because the clock and the battery have to stay readable over a bright photo,
+/// and it is a material rather than a colour so they stay readable over a dark
+/// one too.
+///
+/// Where full strength has to reach is not negotiable: the controls sit on it,
+/// and it must still be solid at the bottom of them. So the mask holds flat to
+/// there and spends its whole falloff below, on grid — `hold`, computed from the
+/// inset it is handed, is that point.
+///
+/// **This is the app's own fade and not the system's, deliberately.** iOS 26
+/// draws exactly this — a true progressive blur with no tint — for
+/// `scrollEdgeEffectStyle(.soft, for: .top)`, and it was tried here. It renders
+/// nothing: the effect attaches to a *bar*, and this screen hides the navigation
+/// bar so the browsing controls can be a floating overlay that slides away on
+/// scroll. Verified by removing this view on 26 and finding the photographs
+/// sharp and unwashed right up to the clock. Do not re-add it expecting it to
+/// take over; it will look correct in the source and do nothing on screen.
+private struct TopEdgeFade: View {
+    /// 38pt button + 8pt above and below, from `floatingTopBar`. Also what the
+    /// grid holds clear at the top of its content, so the pinned date comes to
+    /// rest below the bar instead of inside it.
+    static let barHeight: CGFloat = 54
+
+    /// Long enough to read as a fade rather than an edge, and no longer: past
+    /// this it stops looking like an edge treatment and starts looking like a
+    /// panel.
+    private static let taper: CGFloat = 26
+    /// Full strength fills whatever is left.
+    ///
+    /// The two together come to exactly `barHeight`, so the wash finishes on the
+    /// same line where the grid's content begins — and that is a constraint, not
+    /// a coincidence. Whatever sits at that line is opaque: either the first row
+    /// of photographs or, when a date is pinned there, its own background. A
+    /// fade that runs past it has its tail painted over, which stops the ramp
+    /// dead partway down and draws the hard line across the screen that it was
+    /// supposed to prevent. It was 40 + 26 against a 54pt margin, so the last
+    /// 12pt of gradient was being covered by the pinned date's black.
+    private static let crown: CGFloat = barHeight - taper
+
+    /// The status bar's own height, handed in rather than sensed. The grid gives
+    /// the safe area up at the root so photographs can reach the top of the
+    /// display, and a given-up inset reads as zero everywhere below it.
+    let topInset: CGFloat
+
+    var body: some View {
+        // One sheet, and Liquid Glass where there is Liquid Glass to be had.
+        //
+        // It was two materials stacked, on the theory that a material samples
+        // what is behind it, so the upper sheet re-blurs the lower one's output
+        // and the blur genuinely *weakens* where only one is left, rather than
+        // merely going transparent. That is true, and it was the wrong trade. A
+        // material in dark mode does not only blur — it darkens — and two of
+        // them compound the darkening as surely as the blur, which is how the
+        // top of the library ended up a grey slab you could not read a
+        // photograph through. Apple's is a blur with almost no tint at all: on
+        // theirs you can still make out the turf, the netting, the map.
+        //
+        // Glass is the closer instrument on 26 — it is built to be seen
+        // through, where a material is built to obscure. Below 26 a single
+        // `.ultraThinMaterial` is the lightest thing available, and one sheet of
+        // it is a great deal lighter than the two it replaces.
+        //
+        // Still one view and not two stacked end to end: a material's blur
+        // kernel is clamped at its own bounds, so adjacent sheets cannot blend
+        // and leave a ruler-straight seam across the screen no matter how
+        // exactly their alphas match at the join.
+        let total = topInset + Self.crown + Self.taper
+        let hold = (topInset + Self.crown) / max(total, 1)
+
+        Color.clear
+            .frame(height: total)
+            .glassBackground(
+                in: Rectangle(),
+                // Nothing here is pressed; `interactive` is a touch affordance
+                // and this is scenery.
+                interactive: false,
+                fallback: .ultraThinMaterial
+            )
+            .mask { Self.falloff(holdingTo: hold) }
+            // Decoration. The bar in front does its own hit testing, and a tap
+            // on the strip beside it belongs to the grid underneath.
+            .allowsHitTesting(false)
+    }
+
+    /// An eased ramp rather than a straight one. A linear fade holds too much
+    /// weight through its middle and then stops, which is the banding you see
+    /// across a cheap scrim; easing it off at both ends leaves no edge to find.
+    private static func falloff(holdingTo hold: CGFloat) -> LinearGradient {
+        let span = max(1 - hold, 0.0001)
+        return LinearGradient(
+            stops: [
+                .init(color: .black, location: 0),
+                .init(color: .black, location: hold),
+                .init(color: .black.opacity(0.94), location: hold + span * 0.25),
+                .init(color: .black.opacity(0.72), location: hold + span * 0.5),
+                .init(color: .black.opacity(0.34), location: hold + span * 0.75),
+                .init(color: .clear, location: 1),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+#endif
 
 
 #if os(macOS)

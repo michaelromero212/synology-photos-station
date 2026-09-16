@@ -226,8 +226,10 @@ struct SharedTab: View {
 
     /// The title-bar space picker, or nil when there is nothing to pick between.
     ///
-    /// One shared space gets a plain title: a menu whose only entry is already
+    /// One shared space gets no title at all: a menu whose only entry is already
     /// ticked is a control that does nothing, and the chevron promises otherwise.
+    /// The grid then looks exactly like the personal one, which is the point —
+    /// the only thing shared adds up there is a control you can actually use.
     private func switcher(among spaces: [SpaceDTO], current: SpaceDTO) -> AnyView? {
         guard spaces.count > 1 else { return nil }
         return AnyView(
@@ -246,14 +248,26 @@ struct SharedTab: View {
                     }
                 }
             } label: {
+                // `Color.primary`, not `.primary`. The bare one is a
+                // *hierarchical* style: it resolves against whatever foreground
+                // style it finds itself in, and inside a menu's label that is
+                // the accent tint — so asking for `.primary` here asked for the
+                // primary level of *red*, and got it. The space name came out
+                // in accent beside a row of white glyphs, which is the one thing
+                // that made a shared library look like a different screen from a
+                // personal one. `Color.primary` is absolute and ignores the tint.
+                //
+                // The chevron drops to secondary for hierarchy: the name is what
+                // you read, the chevron only says it can change.
                 HStack(spacing: 4) {
                     Text(current.name)
                         .font(.headline)
                         .lineLimit(1)
+                        .foregroundStyle(Color.primary)
                     Image(systemName: "chevron.down")
                         .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.secondary)
                 }
-                .foregroundStyle(.primary)
             }
             .accessibilityLabel("Shared space: \(current.name). Change space.")
         )

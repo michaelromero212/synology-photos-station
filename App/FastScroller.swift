@@ -192,6 +192,18 @@ extension Comparable {
 struct ScrollReport: Equatable {
     var offset: Double
     var scrollable: Double
+    /// How much further the grid could travel toward the newest, in points.
+    ///
+    /// Taken from where the visible window sits within the content, not from
+    /// `offset` and `scrollable`. Those two are the scrubber's arithmetic and
+    /// deliberately ignore insets, so their difference is not zero at the end —
+    /// measured, it rests at around 54 on this layout and around 137 once the
+    /// bottom inset is added back, either of which is wider than the window this
+    /// is meant to detect and both of which move with the chrome. The bottom of
+    /// the visible rect meeting the bottom of the content is the same fact
+    /// stated in a way no inset can shift. Goes negative while bounced past the
+    /// end.
+    var toEnd: Double
 }
 
 /// Where the grid is scrolled to, and which way it's going.
@@ -246,6 +258,38 @@ final class ScrollProgress {
         // Guarded: `@Observable` notifies on every set, equal value or not.
         if fraction != next { fraction = next }
         trackDirection(offset: report.offset)
+
+        // Resting on the newest brings the bar back, whichever way you arrived.
+        //
+        // This grid runs oldest→newest and opens at the *bottom*, so that end —
+        // not the scroll view's top — is the position the library returns to,
+        // and chrome you cannot get back by going home is chrome you have lost.
+        //
+        // It also repairs the case that sent me looking: a fling back to the
+        // newest ends in a bounce, and a bounce settles by travelling *backwards*
+        // a few points. That trailing reversal was enough to re-hide a bar the
+        // fling itself had just brought back, so arriving at the end read as
+        // scrolling away from it. Measured in points rather than as a fraction
+        // of the range, because on a large library a fraction of the scrollable
+        // height is hundreds of points and the bar would return long before you
+        // did.
+        if report.toEnd < 24, topBarHidden {
+            topBarHidden = false
+            travel = 0
+        }
+    }
+
+    /// Brings the bar back for a reason other than scrolling.
+    ///
+    /// Arriving somewhere is not the same as travelling: coming back from the
+    /// viewer, the grid is re-anchored under you by `followViewer`, and that
+    /// lands as one enormous offset delta. Counting it as travel would hide the
+    /// bar again in the same breath it was shown, so the baseline is dropped
+    /// here and the next report re-establishes it without a delta.
+    func showTopBar() {
+        if topBarHidden { topBarHidden = false }
+        travel = 0
+        haveOffset = false
     }
 
     /// Flips `topBarHidden` from the direction of travel, with a small deadband
@@ -255,6 +299,18 @@ final class ScrollProgress {
         guard haveOffset else { haveOffset = true; return }
         let delta = offset - lastOffset
         guard abs(delta) > 0.5 else { return }
+        // A jump this big is not a finger.
+        //
+        // The lazy grid's content height changes as buckets realise, and the
+        // scroll view keeps your position by moving the offset to match — a
+        // single report can shift by thousands of points without the grid
+        // appearing to move at all. Counting that as travel is how the bar came
+        // to hide itself while you were scrolling towards the newest: one
+        // correction of -8514pt outweighed the entire gesture. Sixteen
+        // milliseconds of even a hard fling is nowhere near this, so anything
+        // past it is the content resizing underneath us. Dropped, and the
+        // `defer` re-baselines from the new offset.
+        guard abs(delta) < 400 else { travel = 0; return }
         if delta < 0 {                                   // toward older (up) → hide
             travel = Swift.min(travel, 0) + delta
             if travel < -24, !topBarHidden { travel = 0; topBarHidden = true }
@@ -277,7 +333,8 @@ struct ScrollActivityReporter: ViewModifier {
             content.onScrollGeometryChange(for: ScrollReport.self) { geometry in
                 ScrollReport(
                     offset: geometry.contentOffset.y,
-                    scrollable: geometry.contentSize.height - geometry.containerSize.height
+                    scrollable: geometry.contentSize.height - geometry.containerSize.height,
+                    toEnd: geometry.contentSize.height - geometry.visibleRect.maxY
                 )
             } action: { _, report in
                 progress.apply(report)
