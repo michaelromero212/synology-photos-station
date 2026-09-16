@@ -83,8 +83,15 @@ struct PhotoCell: View {
     @ViewBuilder
     private var picture: some View {
         if let image {
+            // No transition. Crossing from the blurred placeholder to the sharp
+            // image composites the two at partial opacity for the length of the
+            // fade, which on one tile is a soft arrival and on a screenful of
+            // them at cold start is the whole grid appearing to blink —
+            // twenty-odd tiles each dipping in brightness, slightly out of step
+            // with each other. Swapping outright is a single frame nobody
+            // registers, which is what Photos and Synology's own app both look
+            // like: the pictures are simply there.
             imageView(image)
-                .transition(.opacity)
         } else if let placeholder {
             imageView(placeholder)
                 .blur(radius: 6, opaque: true)
@@ -156,8 +163,7 @@ struct PhotoCell: View {
     }
 
     private func load() async {
-        // Already painted from the memory cache by `init`; nothing to fetch and
-        // nothing to animate.
+        // Already painted from the memory cache by `init`; nothing to fetch.
         if image != nil { return }
 
         // The ThumbHash placeholder was seeded in `init`, so it is already on
@@ -184,7 +190,7 @@ struct PhotoCell: View {
                 assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
                 version: item.thumbnailVersion
             ) {
-                withAnimation(.easeOut(duration: 0.18)) { image = loaded }
+                image = loaded
                 return
             }
             guard !Task.isCancelled else { return }
