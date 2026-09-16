@@ -248,7 +248,23 @@ struct RootView: View {
                 await registrar.flushPendingRegistration()
             }
             #endif
-            .transition(.opacity)
+            // `.identity`, not `.opacity`, and not merely omitted — an absent
+            // transition defaults to a fade while an animation is running.
+            //
+            // The library arrives at full opacity and the launch screen
+            // dissolves off the top of it. Cross-fading *into* it instead meant
+            // the grid was changing opacity at the same moment it was doing its
+            // first layout — lazy rows realising, `defaultScrollAnchor(.bottom)`
+            // taking up the slack, the banner sizing itself — so the settling
+            // that should happen behind a blank screen happened in front of the
+            // user instead. That is the flash at the bottom of the screen about
+            // a second into a cold launch: caught on a recording, the whole UI
+            // dimmed at 4.13s and came back at 4.28s, which is this 0.18s fade.
+            //
+            // The intent above survives: it is still not a hard cut, because
+            // the launch screen still eases away. Only the library stops being
+            // animated while it is still assembling itself.
+            .transition(.identity)
 
         case .launching:
             LaunchView()
