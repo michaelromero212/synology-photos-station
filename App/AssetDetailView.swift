@@ -253,7 +253,19 @@ struct AssetDetailView: View {
         // date come back as floating controls over the photo, which is what
         // lets the media run edge to edge underneath them.
         .toolbar(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        // The tab bar deliberately stays. It used to be hidden here, which is
+        // the conventional thing for a full-screen viewer and cost more than it
+        // was worth: hiding it on push and restoring it on pop meant the bar
+        // animated itself back *after* the grid had already returned, so every
+        // trip into a photograph ended with the app visibly reassembling
+        // itself. A bar that never moves is worth more than a bar that is
+        // briefly out of the way.
+        //
+        // Nothing has to move up to accommodate it. The picture is meant to run
+        // underneath — `AssetPage` ignores the safe area on purpose — and the
+        // viewer's own controls are floating layers that respect it, so they
+        // ride above the bar on their own now that it contributes to the safe
+        // area again.
         // Every piece of chrome in one layer, so it travels with the picture
         // when the viewer turns (see the `videoTilt` below). Chrome left upright
         // against a rotated picture read as broken — back button, transport and
