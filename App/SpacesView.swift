@@ -42,11 +42,20 @@ final class SpacesModel {
         }
     }
 
-    func add(_ userID: UUID, to spaceID: UUID) async {
+    func add(_ userID: UUID, to spaceID: UUID, as role: SpaceRole = .contributor) async {
         do {
-            try await client.addMember(spaceID: spaceID, userID: userID)
+            try await client.addMember(spaceID: spaceID, userID: userID, role: role)
             await loadMembers(spaceID: spaceID)
         } catch let failure { error = failure.localizedDescription }
+    }
+
+    /// Changing a role and adding a member are the same call.
+    ///
+    /// The server's insert is an upsert — `ON CONFLICT … DO UPDATE SET role`,
+    /// refusing to touch an owner — so there is one endpoint and no separate
+    /// "promote" to keep in step with it.
+    func setRole(_ role: SpaceRole, for userID: UUID, in spaceID: UUID) async {
+        await add(userID, to: spaceID, as: role)
     }
 
     func remove(_ userID: UUID, from spaceID: UUID) async {
@@ -54,6 +63,31 @@ final class SpacesModel {
             try await client.removeMember(spaceID: spaceID, userID: userID)
             await loadMembers(spaceID: spaceID)
         } catch let failure { error = failure.localizedDescription }
+    }
+
+    /// Removing yourself. The server allows it without owner rights — see its
+    /// `removeMember` — and refuses it for the owner, who has to delete the
+    /// space instead.
+    func leave(_ spaceID: UUID, as userID: UUID) async -> Bool {
+        do {
+            try await client.removeMember(spaceID: spaceID, userID: userID)
+            return true
+        } catch let failure {
+            error = failure.localizedDescription
+            return false
+        }
+    }
+
+    func rename(_ spaceID: UUID, to name: String) async -> Bool {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            _ = try await client.renameSpace(spaceID, to: name)
+            return true
+        } catch let failure {
+            error = failure.localizedDescription
+            return false
+        }
     }
 }
 
@@ -83,7 +117,13 @@ struct SpacesView: View {
                     ForEach(shared) { space in
                         if let model {
                             NavigationLink {
-                                SpaceMembersView(space: space, model: model)
+                                SpaceMembersView(
+                                    space: space,
+                                    model: model,
+                                    currentUserID: session.user?.id
+                                ) {
+                                    Task { await session.refreshSpaces() }
+                                }
                             } label: {
                                 Label {
                                     VStack(alignment: .leading, spacing: 1) {
@@ -135,50 +175,268 @@ struct SpacesView: View {
 private struct SpaceMembersView: View {
     let space: SpaceDTO
     let model: SpacesModel
+    /// So the caller can find itself in the roster — "Leave" is the same call as
+    /// "Remove", pointed at yourself, and the row has to know which one it is.
+    let currentUserID: UUID?
+    /// Leaving takes this screen's own space away, so the list behind it has to
+    /// be told before this pops.
+    let onMembershipChanged: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    /// The name as it stands, which is not `space.name`.
+    ///
+    /// `space` is a value copied when the row was tapped and it never changes
+    /// again, so renaming left the title showing the old name until you backed
+    /// out — and, worse, `commitRename` compared the draft against it, so
+    /// renaming A to B and back to A decided nothing had changed and silently
+    /// dropped the second rename. The server's members response carries the
+    /// current name, which is what this tracks.
+    @State private var currentName = ""
+    @State private var draftName = ""
+    @State private var confirmingRemoval: SpaceMemberDTO?
+    @State private var confirmingLeave = false
 
     var body: some View {
         List {
             if let members = model.members {
-                Section("Members") {
-                    ForEach(members.members) { member in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(member.user.displayName)
-                                Text("\(member.role.rawValue.capitalized) · \(member.contributedCount) added")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if members.callerIsOwner, member.role != .owner {
-                                Button("Remove", role: .destructive) {
-                                    Task { await model.remove(member.user.id, from: space.id) }
-                                }
-                                .font(.caption)
-                            }
-                        }
-                    }
-                }
-
-                if members.callerIsOwner {
-                    let current = Set(members.members.map(\.user.id))
-                    let candidates = model.household.filter { !current.contains($0.id) }
-                    if !candidates.isEmpty {
-                        Section("Add from household") {
-                            ForEach(candidates) { user in
-                                Button {
-                                    Task { await model.add(user.id, to: space.id) }
-                                } label: {
-                                    Label(user.displayName, systemImage: "plus.circle")
-                                }
-                            }
-                        }
-                    }
-                }
+                if members.callerIsOwner { nameSection }
+                membersSection(members)
+                if members.callerIsOwner { addSection(members) }
+                if !members.callerIsOwner { leaveSection }
             } else {
                 ProgressView()
             }
         }
-        .navigationTitle(space.name)
-        .task { await model.loadMembers(spaceID: space.id) }
+        .navigationTitle(currentName)
+        .task {
+            currentName = space.name
+            draftName = space.name
+            await model.loadMembers(spaceID: space.id)
+            // The response is authoritative and `space` may already be stale —
+            // someone else can have renamed it since this list was drawn.
+            if let fresh = model.members?.name, fresh != currentName {
+                currentName = fresh
+                draftName = fresh
+            }
+        }
+        // One source of truth, not two. The presented flag is *derived* from the
+        // member being confirmed rather than stored beside it, so there is no
+        // second piece of state to fall out of step — which is the shape of race
+        // that made the log export button do nothing at all.
+        .confirmationDialog(
+            "Remove \(confirmingRemoval?.user.displayName ?? "")?",
+            isPresented: .init(
+                get: { confirmingRemoval != nil },
+                set: { if !$0 { confirmingRemoval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                guard let target = confirmingRemoval else { return }
+                confirmingRemoval = nil
+                Task {
+                    await model.remove(target.user.id, from: space.id)
+                    onMembershipChanged()
+                }
+            }
+            Button("Cancel", role: .cancel) { confirmingRemoval = nil }
+        } message: {
+            Text(Self.removalWarning(for: confirmingRemoval))
+        }
+        .confirmationDialog(
+            "Leave \(currentName)?", isPresented: $confirmingLeave, titleVisibility: .visible
+        ) {
+            Button("Leave", role: .destructive) {
+                guard let me = currentUserID else { return }
+                Task {
+                    if await model.leave(space.id, as: me) {
+                        onMembershipChanged()
+                        dismiss()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "You lose access to everything in it, including anything you added. "
+                    + "Only the owner can let you back in."
+            )
+        }
+    }
+
+    // MARK: - Sections
+
+    /// Renaming was reachable from the server and the SDK and from nowhere a
+    /// person could touch, so a space was stuck with whatever it was called at
+    /// creation — and the field is pre-filled "Family Shared", which makes a
+    /// typo permanent.
+    @ViewBuilder
+    private var nameSection: some View {
+        Section("Name") {
+            #if os(tvOS)
+            Text(draftName)
+            #else
+            TextField("Name", text: $draftName)
+                .submitLabel(.done)
+                .onSubmit { commitRename() }
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private func membersSection(_ members: SpaceMembersResponse) -> some View {
+        Section {
+            ForEach(members.members) { member in
+                MemberRow(
+                    member: member,
+                    isYou: member.user.id == currentUserID,
+                    canManage: members.callerIsOwner && member.role != .owner,
+                    onRole: { role in
+                        Task { await model.setRole(role, for: member.user.id, in: space.id) }
+                    },
+                    onRemove: { confirmingRemoval = member }
+                )
+            }
+        } header: {
+            Text("Members")
+        } footer: {
+            if members.callerIsOwner {
+                // Said out loud because the row above shows "240 added" right
+                // beside Remove, and the obvious reading is that the 240 leave
+                // with the person. They don't, and that is the right policy —
+                // shared memories shouldn't evaporate when someone goes — but it
+                // is not something to discover afterwards.
+                Text("Viewers can see everything here but can't add, edit or delete.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func addSection(_ members: SpaceMembersResponse) -> some View {
+        let current = Set(members.members.map(\.user.id))
+        let candidates = model.household.filter { !current.contains($0.id) }
+        if !candidates.isEmpty {
+            Section("Add from household") {
+                ForEach(candidates) { user in
+                    Button {
+                        Task {
+                            await model.add(user.id, to: space.id)
+                            onMembershipChanged()
+                        }
+                    } label: {
+                        Label(user.displayName, systemImage: "plus.circle")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The server has always allowed this — its `removeMember` requires owner
+    /// rights only when the target isn't you — and nothing in the app ever
+    /// offered it, so a contributor was in a space permanently and had to ask
+    /// the owner to be let out.
+    @ViewBuilder
+    private var leaveSection: some View {
+        Section {
+            Button("Leave Space", role: .destructive) { confirmingLeave = true }
+                .disabled(currentUserID == nil)
+        }
+    }
+
+    /// What removing this person actually does.
+    ///
+    /// The sentence about their contributions is only worth saying when there
+    /// are some — "the 0 items they added stay here" is both noise and slightly
+    /// absurd. When there are, it needs saying: the row shows "240 added" an
+    /// inch from the Remove button and the natural reading is that the 240 go
+    /// with them.
+    private static func removalWarning(for member: SpaceMemberDTO?) -> String {
+        let base = "They lose access to this space."
+        guard let count = member?.contributedCount, count > 0 else { return base }
+        return base + " The \(count) item\(count == 1 ? "" : "s") they added stay here."
+    }
+
+    private func commitRename() {
+        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != currentName else {
+            draftName = currentName
+            return
+        }
+        Task {
+            if await model.rename(space.id, to: trimmed) {
+                currentName = trimmed
+                draftName = trimmed
+                onMembershipChanged()
+            } else {
+                // Put the field back rather than leaving a name on screen that
+                // the server rejected.
+                draftName = currentName
+            }
+        }
+    }
+}
+
+/// One person in the roster.
+///
+/// Lifted out of the list rather than inlined: the row carries a menu whose
+/// contents depend on three booleans, and leaving that inside the `ForEach`
+/// inside the `Section` inside the `List` is how this file starts failing to
+/// type-check in reasonable time.
+private struct MemberRow: View {
+    let member: SpaceMemberDTO
+    let isYou: Bool
+    let canManage: Bool
+    let onRole: (SpaceRole) -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(member.user.displayName + (isYou ? " (You)" : ""))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if canManage { menu }
+        }
+    }
+
+    private var subtitle: String {
+        let count = member.contributedCount
+        return "\(member.role.rawValue.capitalized) · \(count) added"
+    }
+
+    @ViewBuilder
+    private var menu: some View {
+        Menu {
+            // Both offered, with the current one ticked, so the menu says where
+            // this person stands as well as where they could be moved to.
+            Button {
+                onRole(.contributor)
+            } label: {
+                if member.role == .contributor {
+                    Label("Contributor", systemImage: "checkmark")
+                } else {
+                    Text("Contributor")
+                }
+            }
+            Button {
+                onRole(.viewer)
+            } label: {
+                if member.role == .viewer {
+                    Label("Viewer", systemImage: "checkmark")
+                } else {
+                    Text("Viewer")
+                }
+            }
+            Divider()
+            Button("Remove", role: .destructive, action: onRemove)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .foregroundStyle(Color.secondary)
+        }
+        .accessibilityLabel("Manage \(member.user.displayName)")
     }
 }
 
