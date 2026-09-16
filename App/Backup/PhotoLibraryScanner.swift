@@ -157,6 +157,53 @@ enum PhotoLibraryScanner {
         return resources.first
     }
 
+    /// Every image PhotoKit sends for an asset, in the order it sends them.
+    ///
+    /// A stream and not a single value, because `.opportunistic` delivery is
+    /// inherently two-phase: a small degraded placeholder arrives immediately
+    /// and the full-quality image follows. That does not fit a continuation,
+    /// which may only be resumed once — and both call sites had independently
+    /// written the same wrong thing, resuming on the *first* non-nil image.
+    /// That image is by definition the blurry one, and the sharp one arriving a
+    /// moment later was discarded, so every thumbnail in the picker and every
+    /// upload badge was a permanent placeholder.
+    ///
+    /// Asking for `.highQualityFormat` would also fix the blur, at the cost of
+    /// the thing `.opportunistic` exists for: with Optimize Storage on, cells
+    /// would stay empty until each image came down from iCloud. Delivering both
+    /// keeps the instant paint and sharpens up a moment later.
+    ///
+    /// Shared rather than written twice, which is how one bug became two.
+    static func thumbnails(
+        for asset: PHAsset,
+        targetSize: CGSize,
+        using manager: PHImageManager = .default()
+    ) -> AsyncStream<UIImage> {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        // A thumbnail may only exist in iCloud when Optimize Storage is on.
+        options.isNetworkAccessAllowed = true
+
+        return AsyncStream { continuation in
+            let request = manager.requestImage(
+                for: asset, targetSize: targetSize,
+                contentMode: .aspectFill, options: options
+            ) { image, info in
+                if let image { continuation.yield(image) }
+                // The un-degraded image is the last one coming. So is a failure
+                // or a cancellation, neither of which sets the degraded flag —
+                // finishing on it is what stops a caller awaiting for ever.
+                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if !degraded { continuation.finish() }
+            }
+            // Scrolling a cell away cancels its task, which terminates this
+            // stream — at which point the fetch it started is wasted work, and
+            // on an iCloud library it is wasted *network*.
+            continuation.onTermination = { _ in manager.cancelImageRequest(request) }
+        }
+    }
+
     /// The paired video half of a Live Photo, if there is one.
     static func livePhotoResource(for asset: PHAsset) -> PHAssetResource? {
         guard asset.mediaSubtypes.contains(.photoLive) else { return nil }

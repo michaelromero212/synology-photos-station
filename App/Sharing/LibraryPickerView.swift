@@ -53,31 +53,17 @@ final class LibraryPickerModel {
         )
     }
 
-    func thumbnail(for asset: PHAsset, side: CGFloat) async -> UIImage? {
+    /// See `PhotoLibraryScanner.thumbnails` — a stream, because opportunistic
+    /// delivery sends a placeholder before the real thing. Routed through this
+    /// model's own caching manager so the prefetch above is the thing that
+    /// answers, rather than a second manager fetching it all again.
+    func thumbnails(for asset: PHAsset, side: CGFloat) -> AsyncStream<UIImage> {
         let scale = UIScreen.main.scale
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
-        // Thumbnails may only exist in iCloud when Optimize Storage is on.
-        options.isNetworkAccessAllowed = true
-
-        return await withCheckedContinuation { continuation in
-            var resumed = false
-            images.requestImage(
-                for: asset,
-                targetSize: CGSize(width: side * scale, height: side * scale),
-                contentMode: .aspectFill,
-                options: options
-            ) { image, info in
-                // Opportunistic delivery calls back more than once (degraded,
-                // then full). A continuation may only be resumed once, so take
-                // the first non-nil and ignore the rest.
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !resumed, image != nil || !degraded else { return }
-                resumed = true
-                continuation.resume(returning: image)
-            }
-        }
+        return PhotoLibraryScanner.thumbnails(
+            for: asset,
+            targetSize: CGSize(width: side * scale, height: side * scale),
+            using: images
+        )
     }
 
     func toggle(_ asset: PHAsset) {
@@ -240,7 +226,11 @@ private struct PickerCell: View {
             }
         }
         .task(id: asset.localIdentifier) {
-            image = await model.thumbnail(for: asset, side: side)
+            // Assigned each time rather than once: the first is the placeholder
+            // and the one after it is the real thumbnail.
+            for await next in model.thumbnails(for: asset, side: side) {
+                image = next
+            }
         }
     }
 

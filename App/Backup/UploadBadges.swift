@@ -91,36 +91,23 @@ struct PendingTile: View {
         .overlay(alignment: .bottomTrailing) {
             UploadStateBadge(state: state).padding(5)
         }
-        .task(id: localIdentifier) { image = await thumbnail() }
-    }
+        .task(id: localIdentifier) {
+            // Assigned each time rather than once: opportunistic delivery sends
+            // a placeholder first and the real thumbnail after it. Taking only
+            // the first left every badge showing the blurry one — see
+            // `PhotoLibraryScanner.thumbnails`.
+            guard let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil
+            ).firstObject else { return }
 
-    private func thumbnail() async -> UIImage? {
-        guard let asset = PHAsset.fetchAssets(
-            withLocalIdentifiers: [localIdentifier], options: nil
-        ).firstObject else { return nil }
-
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        let scale = UIScreen.main.scale
-
-        return await withCheckedContinuation { continuation in
-            var resumed = false
-            PHImageManager.default().requestImage(
+            let scale = UIScreen.main.scale
+            for await next in PhotoLibraryScanner.thumbnails(
                 for: asset,
                 targetSize: CGSize(
                     width: size.width * scale, height: size.height * scale
-                ),
-                contentMode: .aspectFill,
-                options: options
-            ) { image, info in
-                // Opportunistic delivery fires more than once; a continuation
-                // may only be resumed once.
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !resumed, image != nil || !degraded else { return }
-                resumed = true
-                continuation.resume(returning: image)
+                )
+            ) {
+                image = next
             }
         }
     }
