@@ -208,10 +208,27 @@ struct RootView: View {
 
     var body: some View {
         content
-            // A cut from a blank screen to a full library reads as a jolt even
-            // when it is fast. Short and eased: long enough to feel like the
-            // library arriving, too short to feel like waiting for it.
-            .animation(.easeOut(duration: 0.18), value: session.phase)
+            // No animation here, and specifically not an `.animation(_:value:)`
+            // across this whole subtree.
+            //
+            // There used to be a 0.18s ease on `session.phase`, to stop a cut
+            // from a blank screen to a full library reading as a jolt. The cost
+            // was out of all proportion: that modifier animates *every* change
+            // in the subtree that lands in the same transaction as the phase
+            // flip, and the phase flips at exactly the moment the library is
+            // doing its first layout. So the grid's own content was being
+            // animated — two layouts of the same photographs cross-fading over
+            // each other, which is why a frame-by-frame of the launch caught a
+            // row of pictures apparently drawn *below* the backup banner, a
+            // place nothing can legitimately be.
+            //
+            // Scoping it was tried and is not enough: `.transition(.identity)`
+            // on the connected case stops that view fading itself, and does
+            // nothing about the contents it animates on the way in.
+            //
+            // The jolt it was avoiding is worth less than this. An instant cut
+            // is what Photos does, and a library that is simply *there* reads as
+            // fast rather than as unfinished.
             // At the root rather than on the sign-in screen. Hanging the
             // restore off `ConnectionView` meant the only way to *start*
             // restoring was to already be showing the form — which is why a
@@ -267,12 +284,15 @@ struct RootView: View {
             .transition(.identity)
 
         case .launching:
+            // `.identity` too. With no animation above there is nothing to
+            // drive a fade, and leaving `.opacity` here would only suggest
+            // otherwise to the next person reading it.
             LaunchView()
-                .transition(.opacity)
+                .transition(.identity)
 
         case .disconnected, .connecting, .failed:
             ConnectionView(session: session)
-                .transition(.opacity)
+                .transition(.identity)
         }
     }
 }
