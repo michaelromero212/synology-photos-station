@@ -392,6 +392,7 @@ final class LayoutWatch {
     private var lastOffset: Double?
     private var lastInset: Double?
     private var spent = 0
+    fileprivate var bodyBuilds = 0
     private let startedAt = Date()
 
     func saw(_ report: ScrollReport) {
@@ -443,6 +444,24 @@ final class LayoutWatch {
 
     private static func pt(_ value: Double) -> String {
         String(format: "%.0f", value)
+    }
+}
+#endif
+
+#if os(iOS)
+extension LayoutWatch {
+    /// Counts how often the timeline's `body` is rebuilt, and says so the first
+    /// few times and then on every tenth.
+    ///
+    /// A `body` running again is ordinary and says nothing on its own. What is
+    /// being looked for is a rebuild that coincides with the grid being thrown
+    /// away — so this is only useful read *next to* the store and geometry
+    /// notes, never alone.
+    func noteBodyBuild() {
+        bodyBuilds += 1
+        if bodyBuilds <= 3 || bodyBuilds % 10 == 0 {
+            note("timeline body build #\(bodyBuilds)")
+        }
     }
 }
 #endif

@@ -187,15 +187,11 @@ struct TimelineView: View {
     /// 20pt, when measured. And the value was never a property of a view to
     /// begin with: it describes the window, so the window is what is asked.
     ///
-    /// Read fresh on each evaluation rather than stored. The one caller sits
-    /// inside the grid's `GeometryReader`, which re-runs whenever the size
-    /// changes — which is exactly when this can have changed.
-    private var windowTopInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .keyWindow?.safeAreaInsets.top ?? 0
-    }
+    /// Cached rather than read raw, which is the part that took a device log to
+    /// learn: `keyWindow` is nil on the first layout pass on real hardware, and
+    /// a zero here silently halved the top margin and moved the whole library
+    /// 62pt a tenth of a second after launch. See `WindowMetrics`.
+    private var windowTopInset: CGFloat { WindowMetrics.topInset }
     #endif
     #if !os(tvOS)
     /// The photo a tap opened, the day it came from — the slideshows need to
@@ -209,7 +205,12 @@ struct TimelineView: View {
     #endif
 
     var body: some View {
-        VStack(spacing: 0) {
+        #if os(iOS)
+        // Cheap and only fires when SwiftUI rebuilds this view's identity, which
+        // is precisely the event being hunted.
+        let _ = LayoutWatch.shared.noteBodyBuild()
+        #endif
+        return VStack(spacing: 0) {
             // Only when there's no grid to carry it. The banner rides at the
             // top of the scroll content instead, so it scrolls away with the
             // photos — pinning it here and hiding it on scroll instead was
@@ -470,6 +471,19 @@ struct TimelineView: View {
         }
         #endif
         .task(id: space.id) {
+            #if os(iOS)
+            // A fresh store means a fresh grid: every loaded item discarded and
+            // the whole thing laid out again from nothing. That is a big, ugly
+            // motion if it happens while someone is looking, and a device log
+            // caught it happening five seconds after launch — items back to 0,
+            // the content collapsing and rebuilding, the offset thrown twice.
+            // This says whether the cause is this task re-firing (the space
+            // identity changed) or the view being rebuilt around it.
+            LayoutWatch.shared.note(
+                "timeline task fired for space \(space.id.uuidString.prefix(8))"
+                    + " — store recreated, items discarded"
+            )
+            #endif
             let newStore = session.timelineStore(for: space)
             store = newStore
             await newStore?.load()

@@ -234,6 +234,12 @@ struct RootView: View {
             // restoring was to already be showing the form — which is why a
             // relaunch flashed sign-in at someone who was signed in.
             .task {
+                #if os(iOS)
+                // Before anything lays out. The grid reads this on its very
+                // first pass and `keyWindow` is not reliably there yet on a
+                // device — see `WindowMetrics`.
+                WindowMetrics.seed()
+                #endif
                 guard session.phase == .launching else { return }
                 // Stored credentials first — a relaunch shouldn't need a
                 // new invite.
