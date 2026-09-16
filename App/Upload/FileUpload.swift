@@ -108,12 +108,22 @@ enum FileUpload {
     }
 
     /// Hashes, probes, sends only what's missing, and commits.
+    ///
+    /// `shouldContinue`, when given, is asked before every chunk and aborts with
+    /// `UploadError.pausedByCaller` the moment it says no. Backup uses it to
+    /// stop a file mid-flight when Wi-Fi drops to cellular — see
+    /// `BackupEngine.allowedOnCurrentNetwork`. Nothing is lost by stopping: the
+    /// chunks already accepted stay on the server and the next run's probe
+    /// resumes from exactly there. Defaults to nil, so the Mac drop and the
+    /// share sheet — both of which are someone standing there watching — behave
+    /// exactly as before.
     static func send(
         file: URL,
         descriptor: UploadDescriptor,
         to spaceID: UUID,
         client: FrameStationClient,
         isAutomaticBackup: Bool = false,
+        shouldContinue: (@Sendable () async -> Bool)? = nil,
         onPhase: (@Sendable (Phase) -> Void)? = nil
     ) async throws -> Result {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
@@ -152,7 +162,7 @@ enum FileUpload {
             guard let uploadID = probe.uploadID else { throw UploadError.noUploadSession }
             try await sendChunks(
                 probe: probe, uploadID: uploadID, file: file, client: client,
-                total: size, onPhase: onPhase
+                total: size, shouldContinue: shouldContinue, onPhase: onPhase
             )
             let committed = try await client.commitUpload(
                 uploadID: uploadID, descriptor.commitRequest(spaceID: spaceID)
@@ -171,12 +181,21 @@ enum FileUpload {
         file: URL,
         client: FrameStationClient,
         total: Int64,
+        shouldContinue: (@Sendable () async -> Bool)?,
         onPhase: (@Sendable (Phase) -> Void)?
     ) async throws {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
 
         for index in probe.missingChunks {
+            // Between chunks and not merely between files. A 3 GB video is one
+            // item to the queue but hundreds of chunks on the wire, so a gate
+            // checked only at the top of a file lets the whole of that video go
+            // out over cellular after the network has already changed underneath
+            // it. This is the point where stopping is free.
+            if let shouldContinue, await !shouldContinue() {
+                throw UploadError.pausedByCaller
+            }
             try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
             let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
             guard !data.isEmpty else { continue }
@@ -250,6 +269,10 @@ enum UploadError: LocalizedError {
     case chunkRejected(Int, Int)
     case removedByUser
     case unreadableFile(String)
+    /// The caller withdrew permission to keep sending part-way through — for
+    /// backup, Wi-Fi dropped to cellular mid-file. Not a failure: the chunks
+    /// already on the server stand, and the next run resumes from them.
+    case pausedByCaller
 
     var errorDescription: String? {
         switch self {
@@ -265,6 +288,8 @@ enum UploadError: LocalizedError {
             return "The server rejected part \(index + 1) of this file (HTTP \(status))."
         case .unreadableFile(let name):
             return "\(name) couldn't be read."
+        case .pausedByCaller:
+            return "Paused part-way — it will resume where it stopped."
         }
     }
 }

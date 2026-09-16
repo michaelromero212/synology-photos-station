@@ -58,6 +58,7 @@ enum AssetUploader {
         client: FrameStationClient,
         resource: PHAssetResource? = nil,
         isAutomaticBackup: Bool = false,
+        shouldContinue: (@Sendable () async -> Bool)? = nil,
         onPhase: (@Sendable (Phase) -> Void)? = nil
     ) async throws -> Result {
         guard let resource = resource ?? PhotoLibraryScanner.primaryResource(for: asset) else {
@@ -73,7 +74,8 @@ enum AssetUploader {
 
         return try await FileUpload.send(
             file: scratch, descriptor: descriptor, to: spaceID, client: client,
-            isAutomaticBackup: isAutomaticBackup, onPhase: onPhase
+            isAutomaticBackup: isAutomaticBackup,
+            shouldContinue: shouldContinue, onPhase: onPhase
         )
     }
 }

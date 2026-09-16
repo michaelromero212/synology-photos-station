@@ -440,8 +440,14 @@ final class BackupEngine {
     /// False when "Wi-Fi Only" is on and the only path is metered (cellular or a
     /// personal hotspot). The whole point of the setting is that an unattended
     /// backup never spends the user's cellular data.
+    ///
+    /// Reads `isMetered` and not `isExpensive`. The two are not synonyms here:
+    /// `isExpensive` was caught reporting unmetered on a cellular-only path, and
+    /// because this gate is the only thing standing between an unattended backup
+    /// and someone's data allowance, it failed open — quietly, in the direction
+    /// that costs money. `isMetered` takes the radio's word as well as the flag's.
     private var allowedOnCurrentNetwork: Bool {
-        !settings.wifiOnly || !connection.isExpensive
+        !settings.wifiOnly || !connection.isMetered
     }
 
     func start() async {
@@ -606,7 +612,22 @@ final class BackupEngine {
 
             let result = try await AssetUploader.send(
                 asset, descriptor: item.descriptor, to: spaceID, client: client,
-                resource: resource, isAutomaticBackup: true
+                resource: resource, isAutomaticBackup: true,
+                // Asked before every chunk, so a file that is part-way up when
+                // the phone leaves the house stops there rather than finishing
+                // over cellular. `drainLane` re-checks the same gate between
+                // items; this is the same question asked often enough to matter
+                // on a video.
+                //
+                // Unwrapped before the hop, not optional-chained across it.
+                // `self?.x` inside the `MainActor.run` closure reads the
+                // captured weak *variable* from concurrently-executing code,
+                // which Swift 6 rejects — the same thing `ConnectionMonitor`
+                // and the phase handler below both had to be written around.
+                shouldContinue: { [weak self] in
+                    guard let self else { return false }
+                    return await MainActor.run { self.allowedOnCurrentNetwork }
+                }
             ) { [weak self] phase in
                 Task { @MainActor in
                     guard let self else { return }
@@ -643,6 +664,17 @@ final class BackupEngine {
             try? context.save()
             // The server answered, which is what this is evidence of.
             connection.noteSuccess()
+            return nil
+        } catch UploadError.pausedByCaller {
+            // Wi-Fi went away mid-file. Put the row back exactly as it was
+            // found — including the attempt `claimNext` spent on it, because
+            // the network changing is not the item's fault and three of these
+            // would otherwise retire a perfectly good photo. `drainLane`'s own
+            // check stops the lane on the next turn of the loop.
+            item.state = .pending
+            item.attempts = max(item.attempts - 1, 0)
+            item.lastError = nil
+            try? context.save()
             return nil
         } catch UploadError.noExportableResource {
             item.state = .skipped

@@ -28,13 +28,30 @@ final class ConnectionMonitor {
 
     private(set) var state: State = .online
 
-    /// Whether the current network path is metered — cellular or a personal
-    /// hotspot, as opposed to Wi-Fi or wired. Drives the "Wi-Fi Only" backup
-    /// setting: an unattended backup must not spend the user's cellular data.
-    /// Defaults to false (assume Wi-Fi) so a probe that hasn't reported yet
+    /// Whether spending data on this path would spend the user's mobile
+    /// allowance — cellular or a personal hotspot, as opposed to Wi-Fi or wired.
+    /// Drives the "Wi-Fi Only" backup setting.
+    ///
+    /// **Two readings, OR'd, because neither is sufficient alone.**
+    ///
+    /// `isExpensive` is the obvious one and it cannot be trusted by itself: it
+    /// was observed reporting *unmetered* on a cellular-only connection on this
+    /// very device. Trusting it alone is what let an unattended backup send
+    /// gigabytes of video over cellular with "Wi-Fi Only" switched on — the
+    /// setting failed open, which for a backup app is a phone bill rather than a
+    /// glitch.
+    ///
+    /// `usesInterfaceType(.cellular)` catches exactly that case, and cannot
+    /// catch the other one: a personal hotspot is reached over the *Wi-Fi*
+    /// interface and is only known to be costly because `isExpensive` says so.
+    /// So each covers the other's blind spot, and the union is what the gate
+    /// wants — the question is "would this spend mobile data", not "which radio
+    /// is it".
+    ///
+    /// Defaults to false (assume Wi-Fi) so a path that hasn't reported yet
     /// doesn't wrongly block; `NWPathMonitor` reports within milliseconds of
     /// starting.
-    private(set) var isExpensive = false
+    private(set) var isMetered = false
 
     /// Called on the edge back to `.online`, so backup picks up where the
     /// outage stopped it rather than waiting for the next background window.
@@ -67,13 +84,13 @@ final class ConnectionMonitor {
         path.pathUpdateHandler = { [weak self] update in
             let satisfied = update.status == .satisfied
             let expensive = update.isExpensive
-            // Recorded because `isExpensive` was seen reporting *unmetered* on a
-            // cellular-only connection, and it is not a cosmetic reading: backup
-            // uses it to decide whether it may spend the user's data. The
-            // interface NWPath says it is using settles whether the framework is
-            // wrong or our reading of it is.
+            let usesCellular = update.usesInterfaceType(.cellular)
+            // See `isMetered`. The radio is believed over the flag, and the flag
+            // is believed over nothing — either one saying it costs money is
+            // enough to treat the path as costing money.
+            let metered = usesCellular || expensive
             let interface = update.usesInterfaceType(.wifi) ? "wifi"
-                : update.usesInterfaceType(.cellular) ? "cellular"
+                : usesCellular ? "cellular"
                 : update.usesInterfaceType(.wiredEthernet) ? "ethernet"
                 : "other"
             let constrained = update.isConstrained
@@ -89,18 +106,22 @@ final class ConnectionMonitor {
                 // house, or a good connection going bad mid-clip — and the only
                 // way to see whether it actually did is to have both the change
                 // and what playback did next in one timeline.
-                if self.isExpensive != expensive || self.lastSatisfied != satisfied
+                if self.isMetered != metered || self.lastSatisfied != satisfied
                     || self.lastInterface != interface {
                     Diagnostics.shared.log(
                         .network,
                         "Path now \(satisfied ? "up" : "down") on \(interface)"
-                            + ", \(expensive ? "metered" : "unmetered")"
+                            + ", \(metered ? "metered" : "unmetered")"
+                            // Kept visible when the two disagree, because that
+                            // disagreement is the bug this guards against and it
+                            // is otherwise invisible now that the radio wins.
+                            + (usesCellular && !expensive ? " (isExpensive said unmetered)" : "")
                             + (constrained ? ", low data mode" : "")
                     )
                 }
                 self.lastSatisfied = satisfied
                 self.lastInterface = interface
-                self.isExpensive = expensive
+                self.isMetered = metered
                 self.pathChanged(satisfied: satisfied)
             }
         }
