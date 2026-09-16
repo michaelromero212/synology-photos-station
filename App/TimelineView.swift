@@ -254,6 +254,26 @@ struct TimelineView: View {
         // status bar respected now has to say so.
         .overlay(alignment: .top) { TopEdgeFade(topInset: windowTopInset) }
         .overlay(alignment: .top) { floatingTopBar.padding(.top, windowTopInset) }
+        // And the backup banner at the other end, for the same reason the
+        // controls are up there: an overlay moves nothing when it goes.
+        //
+        // It used to be the last item in the scroll content so it would scroll
+        // away with the photographs. That is a nicer idea than it is a
+        // behaviour — dismissing it made the content shorter, and a grid
+        // anchored to its own end has to take up the slack, so the library
+        // jumped by the banner's height every time someone pressed the X.
+        //
+        // Aligned to the bottom *inside* the safe area, so it rides above the
+        // tab bar rather than under it. Only when the grid is up; the empty-
+        // library case still puts it in the stack in `body`, where there is no
+        // scroll view for it to disturb.
+        .overlay(alignment: .bottom) {
+            if let engine, showsGrid {
+                backupBanner(engine)
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(true)
+            }
+        }
         #endif
         // The count takes the title while selecting. It used to sit in the
         // leading slot beside the space name, which left two pieces of text
@@ -1348,30 +1368,16 @@ struct TimelineView: View {
                         }
                     }
 
-                    // The very last thing in the stack, so — with the count
-                    // moved up top and the zoom pill gone — it rests right above
-                    // the tab bar when the library opens on the newest. Dismiss
-                    // it and the newest row of photos takes that spot instead,
-                    // straight above the bar. It still scrolls up out of the way
-                    // as you move back into older days.
-                    #if os(iOS)
-                    if let engine {
-                        // No animation on this one, unlike the copy in `body`.
-                        // That copy sits outside the scroll view and can afford
-                        // to move; this one is scroll *content*, and animating it
-                        // interpolates the content height underneath a grid that
-                        // is anchored to its own end.
-                        //
-                        // Which is the flash a second after launch: the health
-                        // probe comes back, `connection?.state` changes, and this
-                        // banner spends 0.2s easing into its new size long after
-                        // the eye has settled on a grid it had every reason to
-                        // think was finished. Caught on a screen recording —
-                        // the bottom of the frame goes quiet at 3.19s and then
-                        // moves again at 4.14s, which is exactly how it reads.
-                        backupBanner(engine)
-                    }
-                    #endif
+                    // The backup banner used to live here, at the end of the
+                    // scroll content, so it would scroll away with the photos.
+                    // It is an overlay now — see `body`. Anything in here that
+                    // can appear or disappear resizes the content underneath a
+                    // grid anchored to its own end, and the user dismissing it
+                    // is exactly that: the library jumped by the banner's height
+                    // every time someone closed it, which is the "glitch when I
+                    // press the X" reported three times over.
+                    //
+                    // Nothing that comes and goes belongs in this stack.
 
                     // macOS rounds the window's bottom corners, which would clip
                     // the newest row now that it rests at the very bottom — the
