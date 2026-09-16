@@ -1336,8 +1336,20 @@ struct TimelineView: View {
                     // as you move back into older days.
                     #if os(iOS)
                     if let engine {
+                        // No animation on this one, unlike the copy in `body`.
+                        // That copy sits outside the scroll view and can afford
+                        // to move; this one is scroll *content*, and animating it
+                        // interpolates the content height underneath a grid that
+                        // is anchored to its own end.
+                        //
+                        // Which is the flash a second after launch: the health
+                        // probe comes back, `connection?.state` changes, and this
+                        // banner spends 0.2s easing into its new size long after
+                        // the eye has settled on a grid it had every reason to
+                        // think was finished. Caught on a screen recording —
+                        // the bottom of the frame goes quiet at 3.19s and then
+                        // moves again at 4.14s, which is exactly how it reads.
                         backupBanner(engine)
-                            .animation(.easeOut(duration: 0.2), value: connection?.state)
                     }
                     #endif
 
