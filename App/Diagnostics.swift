@@ -25,6 +25,8 @@ final class Diagnostics {
         case quality = "Quality"
         case measurement = "Measurement"
         case launch = "Launch"
+        /// Anything that moves the grid when the user didn't. See `LayoutWatch`.
+        case layout = "Layout"
 
         /// Read at a glance when skimming a long log.
         var symbol: String {
@@ -36,6 +38,7 @@ final class Diagnostics {
             case .quality: return "🎚"
             case .measurement: return "📊"
             case .launch: return "🚀"
+            case .layout: return "📐"
             }
         }
     }

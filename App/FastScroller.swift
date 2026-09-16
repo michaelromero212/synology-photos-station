@@ -204,6 +204,13 @@ struct ScrollReport: Equatable {
     /// stated in a way no inset can shift. Goes negative while bounced past the
     /// end.
     var toEnd: Double
+    /// The full height of the scroll content, and the top inset applied to it.
+    ///
+    /// Neither is used for scrolling — they are here so `LayoutWatch` can see
+    /// the grid being resized underneath the user, which is what a glitch
+    /// actually is.
+    var contentHeight: Double = 0
+    var insetTop: Double = 0
 }
 
 /// Where the grid is scrolled to, and which way it's going.
@@ -334,13 +341,108 @@ struct ScrollActivityReporter: ViewModifier {
                 ScrollReport(
                     offset: geometry.contentOffset.y,
                     scrollable: geometry.contentSize.height - geometry.containerSize.height,
-                    toEnd: geometry.contentSize.height - geometry.visibleRect.maxY
+                    toEnd: geometry.contentSize.height - geometry.visibleRect.maxY,
+                    contentHeight: geometry.contentSize.height,
+                    insetTop: geometry.contentInsets.top
                 )
             } action: { _, report in
                 progress.apply(report)
+                #if os(iOS)
+                LayoutWatch.shared.saw(report)
+                #endif
             }
         } else {
             content
         }
     }
 }
+
+#if os(iOS)
+/// Watches the grid for movement the user did not ask for.
+///
+/// A glitch, described precisely, is one of two things: the scroll *content*
+/// changing size under a view that is already settled, or the *offset* jumping
+/// without a finger on the glass. Both are visible in the scroll geometry and
+/// neither is visible in a screenshot, which is why chasing this by eye kept
+/// producing plausible wrong answers.
+///
+/// Writes into the same ring buffer as everything else, so Settings → Export
+/// Playback Logs carries it off a phone that is nowhere near a Mac.
+///
+/// Deliberately not a debug-only build flag. The bug is intermittent and
+/// happens on his device and not this one; something that has to be specially
+/// compiled in is something that is never on when the interesting launch
+/// happens.
+@MainActor
+final class LayoutWatch {
+    static let shared = LayoutWatch()
+
+    /// Content-height changes below this are the lazy stack breathing as rows
+    /// realise, and would drown the signal.
+    private static let heightNoise: Double = 1
+    /// An offset move larger than this between two reports is not a finger.
+    /// A hard fling is ~80pt per frame; 400 leaves five times the headroom, and
+    /// is the same number `trackDirection` uses to spot the same thing.
+    private static let jumpFloor: Double = 400
+    /// Enough to cover a launch and then some, then silence. The failure is in
+    /// the first seconds and an unbounded log of every resize would bury it.
+    private static let budget = 120
+
+    private var lastHeight: Double?
+    private var lastOffset: Double?
+    private var lastInset: Double?
+    private var spent = 0
+    private let startedAt = Date()
+
+    func saw(_ report: ScrollReport) {
+        guard spent < Self.budget else { return }
+
+        let since = String(format: "%.2fs", Date().timeIntervalSince(startedAt))
+
+        // The inset is ours — it comes from `windowTopInset` plus the bar — so a
+        // change here is the app moving its own goalposts, not data arriving.
+        if let was = lastInset, abs(report.insetTop - was) > 0.5 {
+            spend("[\(since)] top inset \(Self.pt(was)) → \(Self.pt(report.insetTop))")
+        }
+        lastInset = report.insetTop
+
+        if let was = lastHeight, abs(report.contentHeight - was) > Self.heightNoise {
+            let delta = report.contentHeight - was
+            spend(
+                "[\(since)] content \(Self.pt(was)) → \(Self.pt(report.contentHeight))"
+                    + " (\(delta > 0 ? "+" : "")\(Self.pt(delta)))"
+                    + ", offset \(Self.pt(report.offset))"
+            )
+        }
+        lastHeight = report.contentHeight
+
+        if let was = lastOffset, abs(report.offset - was) > Self.jumpFloor {
+            spend(
+                "[\(since)] offset jumped \(Self.pt(was)) → \(Self.pt(report.offset))"
+                    + " — no gesture moves this far in one frame"
+            )
+        }
+        lastOffset = report.offset
+    }
+
+    /// Notes something the grid did to itself, for correlating against the
+    /// geometry above — "content grew" is only half an answer without "because
+    /// twelve more days arrived".
+    func note(_ what: String) {
+        guard spent < Self.budget else { return }
+        spend("[\(String(format: "%.2fs", Date().timeIntervalSince(startedAt)))] \(what)")
+    }
+
+    private func spend(_ message: String) {
+        spent += 1
+        Diagnostics.shared.log(.layout, message)
+        if spent == Self.budget {
+            Diagnostics.shared.log(.layout, "budget spent — no further layout notes")
+        }
+    }
+
+    private static func pt(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+}
+#endif

@@ -1178,6 +1178,12 @@ struct TimelineView: View {
         return !store.buckets.isEmpty || hasQueuedItems
     }
 
+    /// How many items the grid is actually holding, across every loaded day.
+    /// Cheap — a sum of counts, not a flatten — and only read by `LayoutWatch`.
+    private func loadedCount(_ store: TimelineStore) -> Int {
+        store.items.values.reduce(0) { $0 + $1.count }
+    }
+
     private var hasQueuedItems: Bool {
         #if os(iOS)
         return !queuedByDay.isEmpty
@@ -1484,6 +1490,21 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
+            #if os(iOS)
+            // The other half of `LayoutWatch`: the geometry says the grid moved,
+            // these say what it was reacting to. Without them a content-height
+            // change is a fact with no cause attached, which is exactly how the
+            // launch flash got misattributed twice.
+            .onChange(of: store.buckets.count) { old, new in
+                LayoutWatch.shared.note("buckets \(old) → \(new)")
+            }
+            .onChange(of: store.state) { _, new in
+                LayoutWatch.shared.note("store state → \(new)")
+            }
+            .onChange(of: loadedCount(store)) { old, new in
+                LayoutWatch.shared.note("loaded items \(old) → \(new)")
+            }
+            #endif
             // Skipped entirely on macOS rather than applied with nothing in
             // it. An inset whose content is empty still lays out, and it
             // covered the grid: every click on a photograph went into an
