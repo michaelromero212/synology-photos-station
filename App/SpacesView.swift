@@ -250,8 +250,13 @@ private struct SpaceMembersView: View {
                 guard let me = currentUserID else { return }
                 Task {
                     if await model.leave(space.id, as: me) {
-                        onMembershipChanged()
+                        // Pop first, refresh second. The refresh takes this
+                        // space out of the list this screen was pushed from, and
+                        // pulling a navigation destination's own row out from
+                        // under it while it is still on screen is how SwiftUI is
+                        // made to do something strange.
                         dismiss()
+                        onMembershipChanged()
                     }
                 }
             }
