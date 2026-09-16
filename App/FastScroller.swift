@@ -396,21 +396,26 @@ final class LayoutWatch {
     private let startedAt = Date()
 
     func saw(_ report: ScrollReport) {
+        // Everything below this line runs once per frame of every scroll, so it
+        // is comparisons of doubles and nothing else. The messages are
+        // `@autoclosure` for the same reason: formatting a timestamp per frame,
+        // on the main actor, in the one view whose whole purpose is gliding, is
+        // a cost this had no business adding — and the budget only depletes when
+        // something actually goes wrong, so on a healthy device it would never
+        // have stopped paying it.
         guard spent < Self.budget else { return }
-
-        let since = String(format: "%.2fs", Date().timeIntervalSince(startedAt))
 
         // The inset is ours — it comes from `windowTopInset` plus the bar — so a
         // change here is the app moving its own goalposts, not data arriving.
         if let was = lastInset, abs(report.insetTop - was) > 0.5 {
-            spend("[\(since)] top inset \(Self.pt(was)) → \(Self.pt(report.insetTop))")
+            spend("top inset \(Self.pt(was)) → \(Self.pt(report.insetTop))")
         }
         lastInset = report.insetTop
 
         if let was = lastHeight, abs(report.contentHeight - was) > Self.heightNoise {
             let delta = report.contentHeight - was
             spend(
-                "[\(since)] content \(Self.pt(was)) → \(Self.pt(report.contentHeight))"
+                "content \(Self.pt(was)) → \(Self.pt(report.contentHeight))"
                     + " (\(delta > 0 ? "+" : "")\(Self.pt(delta)))"
                     + ", offset \(Self.pt(report.offset))"
             )
@@ -419,7 +424,7 @@ final class LayoutWatch {
 
         if let was = lastOffset, abs(report.offset - was) > Self.jumpFloor {
             spend(
-                "[\(since)] offset jumped \(Self.pt(was)) → \(Self.pt(report.offset))"
+                "offset jumped \(Self.pt(was)) → \(Self.pt(report.offset))"
                     + " — no gesture moves this far in one frame"
             )
         }
@@ -429,14 +434,17 @@ final class LayoutWatch {
     /// Notes something the grid did to itself, for correlating against the
     /// geometry above — "content grew" is only half an answer without "because
     /// twelve more days arrived".
-    func note(_ what: String) {
+    func note(_ what: @autoclosure () -> String) {
         guard spent < Self.budget else { return }
-        spend("[\(String(format: "%.2fs", Date().timeIntervalSince(startedAt)))] \(what)")
+        spend(what())
     }
 
-    private func spend(_ message: String) {
+    private func spend(_ message: @autoclosure () -> String) {
         spent += 1
-        Diagnostics.shared.log(.layout, message)
+        // The timestamp is built here and nowhere else, so it costs nothing
+        // until something is actually worth writing down.
+        let since = String(format: "%.2fs", Date().timeIntervalSince(startedAt))
+        Diagnostics.shared.log(.layout, "[\(since)] \(message())")
         if spent == Self.budget {
             Diagnostics.shared.log(.layout, "budget spent — no further layout notes")
         }
