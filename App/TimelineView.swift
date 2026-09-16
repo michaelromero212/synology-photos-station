@@ -136,8 +136,6 @@ struct TimelineView: View {
     /// Dismissing the "not enabled" card lasts for the session, not forever:
     /// the next launch asks once more, because an un-backed-up library is
     /// worth one reminder a day.
-    @State private var dismissedBackupPrompt = false
-    @State private var showBackupSettings = false
     @State private var showFocusedBackup = false
     @State private var showPicker = false
     @State private var showSearch = false
@@ -424,13 +422,6 @@ struct TimelineView: View {
         .fullScreenCover(isPresented: $showFocusedBackup) {
             if let engine {
                 FocusedBackupView(engine: engine) { showFocusedBackup = false }
-            }
-        }
-        .sheet(isPresented: $showBackupSettings) {
-            if let engine {
-                BackupSettingsView(
-                    session: session, engine: engine, settings: $backupSettings
-                ) { showBackupSettings = false }
             }
         }
         #endif
@@ -1665,9 +1656,13 @@ struct TimelineView: View {
 
 
     #if os(iOS)
-    /// Pinned above the grid: always present while backup is on, because
-    /// "is my phone backed up" is a question people ask constantly and a
-    /// banner that only appears during work can't answer it.
+    /// Present while backup is running, because "is my phone backed up" is a
+    /// question people ask constantly and a banner that only appears during
+    /// work can't answer it — and present whenever the NAS is unreachable,
+    /// whatever backup is doing.
+    ///
+    /// Nothing at all when backup is simply off. That case used to raise a
+    /// prompt here; it lives in Settings now.
     @ViewBuilder
     private func backupBanner(_ engine: BackupEngine) -> some View {
         // Ahead of both backup states, and shown even when backup is off. A
@@ -1687,62 +1682,18 @@ struct TimelineView: View {
             // browsing here as much as anywhere.
             EmptyView()
         } else if !backupSettings.enabled {
-            // Backup being off is worth interrupting for once, with the action
-            // attached — a status row you have to know to tap is how people end
-            // up months later with nothing backed up. Dismissible, because
-            // being nagged forever about a deliberate choice is worse.
-            if !dismissedBackupPrompt {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Photo Backup Not Enabled")
-                                .font(.headline)
-                            Text("Turn on to continue backing up photos.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 8)
-                        Button {
-                            // Not `withAnimation`, and this is the grid's oldest
-                            // rule rather than a matter of taste: this banner
-                            // rides at the bottom of the *scroll content*, so
-                            // dismissing it makes that content shorter. Animating
-                            // the change interpolates the height across a third
-                            // of a second while the stack beneath it is lazily
-                            // realising rows and `defaultScrollAnchor(.bottom)`
-                            // is holding the end in place — three things
-                            // adjusting to each other, frame by frame, which is
-                            // what the lurch on the way out was.
-                            //
-                            // The content genuinely does get shorter and the
-                            // grid genuinely must take up the slack; doing it in
-                            // one pass looks deliberate, and doing it over time
-                            // looks broken.
-                            dismissedBackupPrompt = true
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.callout.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        // Pulled in toward the message so it clears the
-                        // fast-scroller riding the trailing edge — the X sat
-                        // close enough to the scrubber to fat-finger the wrong one.
-                        .padding(.trailing, 18)
-                    }
-
-                    Button("Set Up Now") { showBackupSettings = true }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .tint(.primary.opacity(0.12))
-                        .foregroundStyle(.primary)
-                }
-                .padding(14)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+            // Nothing. Backup being off used to raise a dismissible prompt here
+            // with a "Set Up Now" on it, on the reasoning that a status row you
+            // have to know to tap is how people end up months later with nothing
+            // backed up. It has been taken out deliberately: turning backup on
+            // lives in Settings, and a panel that appears over the newest row of
+            // someone's library to tell them about a setting is the kind of
+            // thing that makes an app feel like it is selling you something.
+            //
+            // The connection banner above is not the same kind of thing and
+            // stays — that one explains why the tiles are grey, which is the app
+            // accounting for its own state rather than nagging about a choice.
+            EmptyView()
         } else {
             runningBanner(engine)
         }
