@@ -1194,7 +1194,7 @@ struct CollectionsController: RouteCollection {
         return CollectionSummary(
             kind: .favourites,
             key: "all",
-            title: "Favourites",
+            title: "Favorites",
             subtitle: nil,
             count: row.count,
             coverAssetIDs: row.coverAssetIDs ?? []

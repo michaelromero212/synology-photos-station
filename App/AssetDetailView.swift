@@ -581,11 +581,11 @@ struct AssetDetailView: View {
                 Task { await model.toggleFavorite(session.client) }
             } label: {
                 Label(
-                    model.isFavorite ? "Unfavourite" : "Favourite",
+                    model.isFavorite ? "Unfavorite" : "Favorite",
                     systemImage: model.isFavorite ? "heart.fill" : "heart"
                 )
             }
-            .help(model.isFavorite ? "Remove from favourites" : "Add to favourites")
+            .help(model.isFavorite ? "Remove from favorites" : "Add to favorites")
         }
 
         // The action neither reference app has: put this photo in a shared
@@ -995,7 +995,7 @@ struct AssetDetailView: View {
                         .frame(maxWidth: .infinity)
                     ViewerButton(
                         symbol: currentModel.isFavorite ? "heart.fill" : "heart",
-                        label: "Favourite",
+                        label: "Favorite",
                         // The brand red, not the system one. `.red` is
                         // #FF453A — oranger and more saturated than the
                         // #F7605C the icon and every other accent use, and

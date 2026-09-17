@@ -295,7 +295,7 @@ struct RebuildCommand: AsyncCommand {
         // recovery and only noticing months later that the albums never
         // came back.
         console.warning("Rebuilt from files alone. These were never on disk and are gone:")
-        console.warning("  favourites, ratings, tags, captions, albums, and per-photo attribution")
+        console.warning("  favorites, ratings, tags, captions, albums, and per-photo attribution")
         console.warning("  in shared libraries. Photo ids changed, so every app will refetch.")
         if !sharedLibraries.isEmpty {
             console.warning("Shared libraries came back with one member — their owner. Re-add")
