@@ -10,16 +10,50 @@ final class AlbumStore {
     private(set) var albums: [AlbumDTO] = []
     private(set) var isLoading = false
     private(set) var lastError: String?
+    private(set) var hasLoaded = false
 
     private weak var session: AppSession?
+    /// When the list was last answered, for `isStale`.
+    private var fetchedAt: Date?
+
     init(session: AppSession) { self.session = session }
+
+    /// Whether it is worth asking again.
+    ///
+    /// Albums live on the NAS against the account, not the device, so every
+    /// device a person signs in on is already looking at the same list — but
+    /// only as of the last time it asked. This is what makes that "already"
+    /// true in practice rather than in principle: make an album on the phone
+    /// and the iPad, sitting on the same page, went on showing the list it
+    /// fetched when the tab was first built. The data was never out of sync;
+    /// the screen was.
+    ///
+    /// A minute, matching the collections beside it, so flipping between tabs
+    /// doesn't put a run of identical queries on a J4125.
+    var isStale: Bool {
+        guard let fetchedAt else { return true }
+        return Date().timeIntervalSince(fetchedAt) > 60
+    }
+
+    func refreshIfStale() async {
+        guard isStale else { return }
+        await refresh()
+    }
 
     func refresh() async {
         guard let client = session?.client else { return }
-        isLoading = true
+        // Only the first time. A refresh behind a list that is already on
+        // screen must not announce itself — this drives the empty state, and
+        // flipping it on every poll would make the page flicker between having
+        // albums and deciding whether it has any.
+        if !hasLoaded { isLoading = true }
         defer { isLoading = false }
         do {
+            // Assigned only on success. A blip should cost you the update,
+            // never the list you were looking at.
             albums = try await client.albums().albums
+            hasLoaded = true
+            fetchedAt = Date()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -198,12 +232,20 @@ struct AlbumsView: View {
         // collections are computed on the NAS from one library, so every
         // platform already agrees about *what* they are — this is what makes
         // them agree about *when*.
+        // Albums alongside the collections, and that is the fix rather than an
+        // afterthought: these three triggers existed and asked only about the
+        // half of the page the server computes. The half you make yourself —
+        // the albums — was fetched once when the tab was built and then never
+        // again, so an album created on another device showed up on this one
+        // only after the view happened to be torn down and rebuilt.
         .onAppear {
             Task { await collections?.refreshIfStale() }
+            Task { await store?.refreshIfStale() }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await collections?.refreshIfStale() }
+            Task { await store?.refreshIfStale() }
         }
         // The backstop, for a device that is simply left on the page — an Apple
         // TV, or a Mac in a corner. It has no pull-to-refresh to reach for, and
@@ -218,6 +260,7 @@ struct AlbumsView: View {
                 try? await Task.sleep(nanoseconds: 600_000_000_000)
                 guard !Task.isCancelled else { return }
                 await collections?.refreshIfStale()
+                await store?.refreshIfStale()
             }
         }
     }

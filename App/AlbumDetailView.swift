@@ -13,6 +13,7 @@ struct AlbumDetailView: View {
     @State private var items: [TimelineItem] = []
     @State private var isLoading = true
     @State private var lastError: String?
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showRename = false
     @State private var newName = ""
     #if os(iOS)
@@ -101,6 +102,16 @@ struct AlbumDetailView: View {
             }
         }
         .task { await load() }
+        // An album's contents live on the NAS against the account, so adding to
+        // one on the phone changes what this album *is* on every device signed
+        // in to it. Opening it here asks — `.task` above runs each time the
+        // screen is pushed — but a device left sitting on this screen while
+        // another one adds to the album would go on showing what it fetched
+        // when it arrived. Coming back to the app is the moment to ask again.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await load() }
+        }
     }
 
     private var grid: some View {
