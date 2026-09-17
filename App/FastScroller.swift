@@ -232,6 +232,22 @@ struct ScrollReport: Equatable {
 final class ScrollProgress {
     var fraction: Double = 0
 
+    /// Names this grid's scroll view for the diagnostics, and nothing else.
+    ///
+    /// A serial rather than `ObjectIdentifier`, which is an address: free one of
+    /// these and the next allocation can land on it, and a brand new grid would
+    /// then inherit a dead one's geometry as its baseline — reviving the
+    /// cross-view confusion `LayoutWatch.saw(_:from:)` exists to prevent, but
+    /// only now and then, which is worse than always. A number handed out once
+    /// can't be reused.
+    @ObservationIgnored let scrollID = ScrollProgress.nextID()
+
+    private static var issued = 0
+    private static func nextID() -> Int {
+        issued += 1
+        return issued
+    }
+
     /// Was true while the chrome "stood down" on scroll; a constant now. Hiding
     /// a bar resizes the scroll view's safe area, and on a short library that
     /// resize re-realised a grid row, which changed the content height, which
@@ -348,7 +364,10 @@ struct ScrollActivityReporter: ViewModifier {
             } action: { _, report in
                 progress.apply(report)
                 #if os(iOS)
-                LayoutWatch.shared.saw(report)
+                // The progress object is made once per grid and kept, so its
+                // serial is the grid's — which is what the watcher needs to
+                // tell two scroll views apart.
+                LayoutWatch.shared.saw(report, from: progress.scrollID)
                 #endif
             }
         } else {
@@ -388,14 +407,45 @@ final class LayoutWatch {
     /// the first seconds and an unbounded log of every resize would bury it.
     private static let budget = 120
 
-    private var lastHeight: Double?
-    private var lastOffset: Double?
-    private var lastInset: Double?
+    /// What one scroll view last reported. Keyed per view, which is the whole
+    /// point — see `saw(_:from:)`.
+    private struct Seen {
+        var height: Double
+        var offset: Double
+        var inset: Double
+    }
+
+    private var seen: [Int: Seen] = [:]
     private var spent = 0
     fileprivate var bodyBuilds = 0
     private let startedAt = Date()
 
-    func saw(_ report: ScrollReport) {
+    /// `source` identifies the scroll view, and every comparison below is
+    /// against what *that* view last said.
+    ///
+    /// It used to hold one set of last-values for the whole app, and there is
+    /// more than one grid — the personal library and each shared space. So a
+    /// tab switch compared the newly mounted grid's first report against the
+    /// outgoing grid's last one and wrote down the difference as if a single
+    /// view had convulsed: a real log reads
+    ///
+    ///     top inset 116 → 0
+    ///     content 32034 → 816 (-31218), offset 141
+    ///     offset jumped 31243 → 141 — no gesture moves this far in one frame
+    ///
+    /// which is three alarms for nothing. Nothing moved; two different scroll
+    /// views each reported their own perfectly correct geometry. A recording of
+    /// that exact moment shows the headers holding still through the whole
+    /// transition.
+    ///
+    /// That matters more than a tidy log. This instrument exists to be believed
+    /// when it accuses the app of a glitch, and one that cries wolf on every tab
+    /// switch costs an afternoon chasing a phantom — which is the opposite of
+    /// why it was written.
+    ///
+    /// A view's first report is a baseline, not a change, so it is recorded
+    /// silently.
+    func saw(_ report: ScrollReport, from source: Int) {
         // Everything below this line runs once per frame of every scroll, so it
         // is comparisons of doubles and nothing else. The messages are
         // `@autoclosure` for the same reason: formatting a timestamp per frame,
@@ -405,30 +455,39 @@ final class LayoutWatch {
         // have stopped paying it.
         guard spent < Self.budget else { return }
 
+        guard let was = seen[source] else {
+            seen[source] = Seen(
+                height: report.contentHeight,
+                offset: report.offset,
+                inset: report.insetTop
+            )
+            return
+        }
+        seen[source] = Seen(
+            height: report.contentHeight, offset: report.offset, inset: report.insetTop
+        )
+
         // The inset is ours — it comes from `windowTopInset` plus the bar — so a
         // change here is the app moving its own goalposts, not data arriving.
-        if let was = lastInset, abs(report.insetTop - was) > 0.5 {
-            spend("top inset \(Self.pt(was)) → \(Self.pt(report.insetTop))")
+        if abs(report.insetTop - was.inset) > 0.5 {
+            spend("top inset \(Self.pt(was.inset)) → \(Self.pt(report.insetTop))")
         }
-        lastInset = report.insetTop
 
-        if let was = lastHeight, abs(report.contentHeight - was) > Self.heightNoise {
-            let delta = report.contentHeight - was
+        if abs(report.contentHeight - was.height) > Self.heightNoise {
+            let delta = report.contentHeight - was.height
             spend(
-                "content \(Self.pt(was)) → \(Self.pt(report.contentHeight))"
+                "content \(Self.pt(was.height)) → \(Self.pt(report.contentHeight))"
                     + " (\(delta > 0 ? "+" : "")\(Self.pt(delta)))"
                     + ", offset \(Self.pt(report.offset))"
             )
         }
-        lastHeight = report.contentHeight
 
-        if let was = lastOffset, abs(report.offset - was) > Self.jumpFloor {
+        if abs(report.offset - was.offset) > Self.jumpFloor {
             spend(
-                "offset jumped \(Self.pt(was)) → \(Self.pt(report.offset))"
+                "offset jumped \(Self.pt(was.offset)) → \(Self.pt(report.offset))"
                     + " — no gesture moves this far in one frame"
             )
         }
-        lastOffset = report.offset
     }
 
     /// Notes something the grid did to itself, for correlating against the
