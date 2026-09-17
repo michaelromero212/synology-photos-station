@@ -82,7 +82,25 @@ public final class TimelineStore {
     /// looking at and put an error in its place.
     public func load() async {
         let isFirstLoad = manifest == nil
-        if isFirstLoad { state = .loading }
+        if isFirstLoad {
+            // Paint the last library this device saw *before* asking the
+            // network for this one, rather than only if the ask fails.
+            //
+            // The snapshot holds the items, and their thumbnails are already in
+            // the on-disk cache from previous runs, so restoring it puts real
+            // photographs on screen at once. Waiting for the network instead
+            // meant a cold launch went spinner → a grid of grey tiles → photos:
+            // the manifest arrives first and only knows the day names and how
+            // many, so the grid can draw the shape of the library a beat before
+            // it can draw any of it. Caught in three frames of a screen
+            // recording, which is exactly how it looks next to Synology's,
+            // where the pictures are simply there.
+            //
+            // Stale for the moment it takes the fetch below to answer, and then
+            // replaced. For a photo library that is the right trade: last
+            // night's grid is a far better thing to show than a grey one.
+            if !restoreSnapshot() { state = .loading }
+        }
         do {
             let manifest = try await client.timeline(spaceID: spaceID, zoom: zoom)
             self.manifest = manifest
@@ -92,12 +110,11 @@ public final class TimelineStore {
             scheduleSnapshot()
         } catch {
             guard isFirstLoad else { return }
-            // Nothing in memory and nothing on the wire — but there may still
-            // be the last timeline this device saw. Showing that beats showing
-            // an error page over a library the user knows perfectly well
-            // exists, and the connection banner already says why the pictures
-            // are missing.
-            if restoreSnapshot() { return }
+            // Nothing on the wire. If the snapshot above is on screen it stays
+            // there — showing that beats showing an error page over a library
+            // the user knows perfectly well exists, and the connection banner
+            // already says why the pictures are missing.
+            if isFromSnapshot { return }
             state = .failed(error.localizedDescription)
         }
     }
