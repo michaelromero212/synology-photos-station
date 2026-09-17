@@ -118,7 +118,7 @@ struct SpacesView: View {
                 Section("Shared") {
                     let shared = session.spaces.filter { $0.kind == .shared }
                     if shared.isEmpty {
-                        Text("No shared spaces yet.")
+                        Text("No shared albums yet.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(shared) { space in
@@ -150,7 +150,7 @@ struct SpacesView: View {
                     Section { Text(error).font(.caption).foregroundStyle(.red) }
                 }
             }
-            .navigationTitle("Spaces")
+            .navigationTitle("Shared Albums")
             #if !os(tvOS)
             .toolbar {
                 if let onDone {
@@ -352,7 +352,7 @@ private struct SpaceMembersView: View {
     @ViewBuilder
     private var leaveSection: some View {
         Section {
-            Button("Leave Space", role: .destructive) { confirmingLeave = true }
+            Button("Leave Album", role: .destructive) { confirmingLeave = true }
                 .disabled(currentUserID == nil)
         }
     }
@@ -365,7 +365,7 @@ private struct SpaceMembersView: View {
     /// inch from the Remove button and the natural reading is that the 240 go
     /// with them.
     private static func removalWarning(for member: SpaceMemberDTO?) -> String {
-        let base = "They lose access to this space."
+        let base = "They lose access to this album."
         guard let count = member?.contributedCount, count > 0 else { return base }
         return base + " The \(count) item\(count == 1 ? "" : "s") they added stay here."
     }
@@ -499,7 +499,7 @@ private struct CreateSpaceView: View {
                     }
                 }
             }
-            .navigationTitle("New Shared Space")
+            .navigationTitle("New Shared Album")
             #if !os(tvOS)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

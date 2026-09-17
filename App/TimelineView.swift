@@ -61,6 +61,16 @@ struct TimelineView: View {
     /// count then, and a space switcher would both fight it for the slot and
     /// offer to navigate away mid-selection.
     var spaceSwitcher: AnyView?
+    /// Whether this grid was pushed onto a stack and needs a way back.
+    ///
+    /// The grid hides the navigation bar while browsing — the whole top-edge
+    /// treatment depends on the library running under the clock rather than
+    /// stopping below a bar — which also hides the back chevron the system
+    /// would have drawn. That cost nothing while every grid was a tab. A shared
+    /// album is a pushed screen now, so without this it is a room with the door
+    /// painted over: reachable, and escapable only by someone who already knows
+    /// the edge-swipe is there.
+    var isPushed = false
     /// Told where a selection went, so the host can follow it there.
     ///
     /// The grid can share photos but cannot navigate to the result — it only
@@ -85,6 +95,8 @@ struct TimelineView: View {
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
+    /// Pops this grid when it was pushed. Unused when it is a tab's root.
+    @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -847,7 +859,7 @@ struct TimelineView: View {
                     }
                 }
             } label: {
-                Label("Add to Shared Space", systemImage: "person.2")
+                Label("Add to Shared Album", systemImage: "person.2")
             }
         }
 
@@ -1550,7 +1562,7 @@ struct TimelineView: View {
                         Button {
                             showMoveTo = true
                         } label: {
-                            Label("Add to Shared Space", systemImage: "person.2.badge.plus")
+                            Label("Add to Shared Album", systemImage: "person.2.badge.plus")
                         }
                         Divider()
                         #endif
@@ -1891,6 +1903,22 @@ struct TimelineView: View {
     private var floatingTopBar: some View {
         if !selection.isActive {
             HStack(spacing: 8) {
+                // Leading, where the system would have put it, and on the same
+                // glass as its neighbours so it reads as part of the bar rather
+                // than as something left over from a navigation bar that isn't
+                // there.
+                if isPushed {
+                    Button { dismiss() } label: {
+                        Image(systemName: "chevron.backward")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 38, height: 38)
+                            .glassCircle(fallback: .regularMaterial)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Back")
+                }
+
                 Button { showActivity = true } label: {
                     Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
                         .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
@@ -1930,15 +1958,26 @@ struct TimelineView: View {
                     Spacer(minLength: 8)
                 }
 
-                Button { showSearch = true } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.body.weight(.medium))
-                        .frame(width: 38, height: 38)
-                        .glassCircle(fallback: .regularMaterial)
-                        .contentShape(Circle())
+                // Only on a shared album, and that asymmetry is deliberate.
+                //
+                // Search is a button in the corner of the tab bar now, the way
+                // Photos has it, and the personal library's magnifier moved
+                // there. But a tab can only search one library and `/search` is
+                // per-space, so the tab searches the personal one — which would
+                // leave a shared album with no way to search itself at all.
+                // Until search can span libraries, the album that the corner
+                // button cannot reach keeps its own.
+                if space.kind == .shared {
+                    Button { showSearch = true } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.body.weight(.medium))
+                            .frame(width: 38, height: 38)
+                            .glassCircle(fallback: .regularMaterial)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Search \(space.name)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search \(space.name)")
 
                 Button { showPicker = true } label: {
                     Image(systemName: "plus")
@@ -2079,11 +2118,16 @@ struct TimelineView: View {
             // Declared before `+` so it lands to its left: adding a control
             // beside one people already reach for is fine, sliding that one
             // over is not.
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showSearch = true
-                } label: {
-                    Label("Search \(space.name)", systemImage: "magnifyingglass")
+            //
+            // Shared albums only — see the note in `floatingTopBar`. The
+            // personal library's search is the button in the tab bar's corner.
+            if space.kind == .shared {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showSearch = true
+                    } label: {
+                        Label("Search \(space.name)", systemImage: "magnifyingglass")
+                    }
                 }
             }
 

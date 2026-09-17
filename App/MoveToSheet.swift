@@ -38,7 +38,7 @@ struct MoveToSheet: View {
                         Label("Nowhere to add these", systemImage: "person.2")
                     } description: {
                         Text(
-                            "Photos can only be added to a shared space. "
+                            "Photos can only be added to a shared album. "
                             + "Create one and everyone in it sees the same photos."
                         )
                     }
@@ -68,7 +68,7 @@ struct MoveToSheet: View {
             }
         } message: {
             Text(
-                "Everyone in \(pending?.name ?? "the space") will see them and be notified. "
+                "Everyone in \(pending?.name ?? "the album") will see them and be notified. "
                 + "Your copies stay in \(source.name) — you can remove them afterwards if you want."
             )
         }

@@ -35,7 +35,7 @@ struct CreditEditorSheet: View {
                     ContentUnavailableView(
                         "No one to credit",
                         systemImage: "person.2",
-                        description: Text("Only members of this space can be credited.")
+                        description: Text("Only members of this album can be credited.")
                     )
                 } else {
                     list

@@ -50,7 +50,19 @@ final class AlbumStore {
     }
 }
 
-/// Albums — what the library noticed, and what you filed by hand.
+/// Where a tap on a shared album goes.
+///
+/// Carries the id rather than the `SpaceDTO`, because a pushed value is a
+/// snapshot taken at the moment of the tap, and a shared album can be renamed
+/// from inside itself. Resolving the id against the session on every body keeps
+/// the title honest — the same staleness that once made a rename look as though
+/// it hadn't taken.
+struct SharedAlbumRoute: Hashable {
+    let spaceID: UUID
+}
+
+/// Albums — what the library noticed, what you filed by hand, and what the
+/// family shares.
 ///
 /// Two halves. Above: collections the server worked out from dates and
 /// coordinates — today in earlier years, days that stood out. Below: the albums
@@ -91,6 +103,10 @@ struct AlbumsView: View {
     private var hasNothing: Bool {
         guard let store, !store.isLoading else { return false }
         guard let collections, collections.hasLoaded else { return false }
+        // Shared albums count. Without this, someone whose whole use of the app
+        // is one family album saw "Nothing to show yet" on the page their album
+        // lives on.
+        guard session.sharedSpaces.isEmpty else { return false }
         return store.albums.isEmpty && (collections.page?.isEmpty ?? true)
     }
 
@@ -218,6 +234,7 @@ struct AlbumsView: View {
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
+                    sharedAlbums()
                     if let space = session.personalSpace, let found = collections?.page {
                         utilities(found, space: space)
                     }
@@ -329,6 +346,80 @@ struct AlbumsView: View {
                 .padding(.horizontal, spacing)
             }
         }
+    }
+
+    /// What the family shares, on the same page as what you filed yourself.
+    ///
+    /// These had a tab of their own. It was the wrong shape twice over: a whole
+    /// tab that was empty for anyone who shares nothing, and — for anyone who
+    /// does — a second place to go looking for "a set of photos with a name on
+    /// it", which is exactly what an album is. Photos puts Shared Albums on the
+    /// same page as your own albums, and it is right: the thing that differs is
+    /// who can see them, not what they are.
+    ///
+    /// Below your own albums rather than above. Yours are the ones you reach
+    /// for daily; these are the ones you visit when somebody adds to them, and
+    /// the notification is what sends you.
+    @ViewBuilder
+    private func sharedAlbums() -> some View {
+        let shared = session.sharedSpaces
+        if !shared.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("Shared Albums")
+                VStack(spacing: 8) {
+                    ForEach(shared) { space in
+                        NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
+                            sharedAlbumRow(space)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, spacing)
+            }
+        }
+    }
+
+    private func sharedAlbumRow(_ space: SpaceDTO) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "person.2.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(.tint)
+                .frame(width: 44, height: 44)
+                .background(
+                    .quaternary.opacity(0.5),
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(space.name)
+                    .font(.system(.body, design: .default, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                // The people, not the photographs. A shared album's count
+                // changes whenever anyone adds anything, so a number of photos
+                // here would be wrong more often than right — and who is in it
+                // is the fact that makes it different from an album of your own.
+                Text(
+                    space.memberCount == 1
+                        ? "Just you" : "\(space.memberCount) people"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 12)
+        .background(
+            .quaternary.opacity(0.35),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .contentShape(Rectangle())
     }
 
     /// Set with a little more care than a list header usually gets: tighter

@@ -88,7 +88,7 @@ struct ActivityInboxView: View {
                     ContentUnavailableView(
                         "Nothing new",
                         systemImage: "bell.slash",
-                        description: Text("When someone adds photos or videos to a shared space, it shows up here.")
+                        description: Text("When someone adds photos or videos to a shared album, it shows up here.")
                     )
                 } else {
                     List(store.items) { item in

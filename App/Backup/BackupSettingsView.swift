@@ -89,7 +89,7 @@ struct BackupSettingsView: View {
         return "Photos and videos are backed up to folders created under "
             + "/\(name)/MobileBackup/iPhone, named by the year and month they "
             + "were taken.\n\nBackup only ever goes to your own library. To put "
-            + "something in a shared space, choose it there — nothing reaches "
+            + "something in a shared album, choose it there — nothing reaches "
             + "the family by default."
     }
 
@@ -259,7 +259,7 @@ struct BackupSettingsView: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Get told when someone adds photos or videos to a shared space.")
+            Text("Get told when someone adds photos or videos to a shared album.")
         }
     }
 

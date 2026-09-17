@@ -4,12 +4,18 @@ import FrameStationKit
 import SwiftData
 import SwiftUI
 
-/// The app's four places: your photos, your albums, what the family shares,
-/// and everything else.
+/// The app's three places — your photos, your albums, everything else — and a
+/// search button in the corner.
 ///
-/// Replaces the space dropdown in the title bar. Personal and shared libraries
-/// are different enough — one is yours, one is everyone's — that hiding the
-/// switch inside a menu made the shared space easy to forget existed.
+/// Shaped after Photos, deliberately and in detail, because this app is meant
+/// to read as a continuation of it rather than as a rival to it. Someone who
+/// knows where things are in Photos should not have to learn where they are
+/// here.
+///
+/// Shared albums had a tab of their own and no longer do. It was empty for
+/// anyone who shares nothing, and for everyone else it was a second place to
+/// look for a named set of photographs — which is what an album is. They sit on
+/// the Albums page now, below the ones you made yourself.
 struct RootTabView: View {
     @Bindable var session: AppSession
 
@@ -25,21 +31,27 @@ struct RootTabView: View {
     /// Built alongside the engine and shared with it: the engine is what
     /// discovers an outage, and the grid is what has to say so.
     @State private var connection: ConnectionMonitor?
-    /// Which shared space the Shared tab is showing, and what just landed there
-    /// for checking.
+    /// What just landed in a shared album, for checking.
     ///
-    /// Held here rather than inside `SharedTab` because sharing happens in the
-    /// grid you are *leaving* — usually the Photos tab — and the review belongs
-    /// to the grid you arrive at. Two sibling tabs cannot hand state to each
-    /// other; their parent can.
-    @State private var sharedSpaceID: UUID?
+    /// Held here because sharing happens in the grid you are *leaving* — usually
+    /// the Photos tab — and the review belongs to the grid you arrive at. A tab
+    /// cannot hand state to a screen inside another tab; their parent can.
     @State private var review: MoveReview?
     #endif
 
     /// Which tab is on screen. Bound so following a share can move you.
     @State private var tab = Tabs.photos
 
-    private enum Tabs: Hashable { case photos, albums, shared, more }
+    /// What the Albums tab has pushed on top of itself.
+    ///
+    /// Owned here rather than inside `AlbumsView` for the same reason the
+    /// review is: a share that starts in the Photos tab has to be able to open
+    /// the shared album it landed in, and that album is now a screen *inside*
+    /// another tab rather than a tab of its own. Only the parent can both
+    /// switch tabs and push.
+    @State private var albumsPath: [SharedAlbumRoute] = []
+
+    private enum Tabs: Hashable { case photos, albums, more, search }
 
     var body: some View {
         #if os(macOS)
@@ -52,33 +64,9 @@ struct RootTabView: View {
 
     #if !os(macOS)
     private var tabs: some View {
-        // `.tabItem` rather than the iOS 18 `Tab` builder: the deployment
-        // target is 17, and this form behaves identically on both.
-        TabView(selection: $tab) {
-            NavigationStack {
-                if let personal = session.personalSpace {
-                    photosTimeline(personal)
-                } else {
-                    ProgressView()
-                }
-            }
-            .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
-            .tag(Tabs.photos)
-
-            NavigationStack { AlbumsView(session: session) }
-                .tabItem { Label("Albums", systemImage: "rectangle.stack") }
-                .tag(Tabs.albums)
-
-            NavigationStack { sharedTab }
-                .tabItem { Label("Shared", systemImage: "person.2") }
-                .tag(Tabs.shared)
-
-            NavigationStack { moreTab }
-            .tabItem { Label("More", systemImage: "ellipsis") }
-            .tag(Tabs.more)
-        }
+        tabContainer
         // On the TabView rather than per-tab: the bar is one control shared by
-        // all four, and setting it four times is four chances to miss one.
+        // all of them, and setting it four times is four chances to miss one.
         .glassTabBar()
         #if os(iOS)
         .environment(\.connectionMonitor, connection)
@@ -104,6 +92,99 @@ struct RootTabView: View {
         #endif
     }
 
+    /// Three places and a search button.
+    ///
+    /// Two shapes of the same four screens. The `Tab` builder is iOS 18, and
+    /// it is worth branching for exactly one reason: a tab declared with
+    /// `role: .search` is drawn by the system as a detached circle at the
+    /// trailing end of the bar, which is where Photos puts search and what was
+    /// asked for. Hand-rolling that as a floating button would mean guessing
+    /// the bar's height, its inset and its glass, and guessing again every
+    /// time the system changed them.
+    ///
+    /// On 17 the same four tabs render as four ordinary items. Search is then
+    /// simply the last one rather than a separate control — a plainer bar, not
+    /// a broken one.
+    @ViewBuilder
+    private var tabContainer: some View {
+        if #available(iOS 18.0, tvOS 18.0, *) {
+            TabView(selection: $tab) {
+                Tab("Photos", systemImage: "photo.on.rectangle", value: Tabs.photos) {
+                    NavigationStack { photosTab }
+                }
+                Tab("Albums", systemImage: "rectangle.stack", value: Tabs.albums) {
+                    albumsTab
+                }
+                Tab("More", systemImage: "ellipsis", value: Tabs.more) {
+                    NavigationStack { moreTab }
+                }
+                Tab(
+                    "Search", systemImage: "magnifyingglass",
+                    value: Tabs.search, role: .search
+                ) {
+                    NavigationStack { searchTab }
+                }
+            }
+        } else {
+            TabView(selection: $tab) {
+                NavigationStack { photosTab }
+                    .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
+                    .tag(Tabs.photos)
+
+                albumsTab
+                    .tabItem { Label("Albums", systemImage: "rectangle.stack") }
+                    .tag(Tabs.albums)
+
+                NavigationStack { moreTab }
+                    .tabItem { Label("More", systemImage: "ellipsis") }
+                    .tag(Tabs.more)
+
+                NavigationStack { searchTab }
+                    .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                    .tag(Tabs.search)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var photosTab: some View {
+        if let personal = session.personalSpace {
+            photosTimeline(personal)
+        } else {
+            ProgressView()
+        }
+    }
+
+    /// Albums, with the shared ones on the same page.
+    ///
+    /// The stack lives out here holding a path, because a share that finishes
+    /// in the Photos tab has to be able to open the shared album it landed in —
+    /// see `followShare`.
+    private var albumsTab: some View {
+        NavigationStack(path: $albumsPath) {
+            AlbumsView(session: session)
+                .navigationDestination(for: SharedAlbumRoute.self) { route in
+                    sharedAlbum(route.spaceID)
+                }
+        }
+    }
+
+    /// Search, scoped to the personal library.
+    ///
+    /// The same screen the magnifier in the grid's top bar used to open, which
+    /// is why it takes a space at all. Searching every library at once is a
+    /// server question rather than a navigation one — `/search` is per-space —
+    /// so this searches the one people mean when they say "my photos", and
+    /// finding something inside a shared album still means opening it.
+    @ViewBuilder
+    private var searchTab: some View {
+        if let personal = session.personalSpace {
+            SearchView(session: session, space: personal)
+        } else {
+            ProgressView()
+        }
+    }
+
     @ViewBuilder
     private var moreTab: some View {
         #if os(iOS)
@@ -113,17 +194,35 @@ struct RootTabView: View {
         #endif
     }
 
+    /// One shared album, opened from the Albums page.
+    ///
+    /// Resolved from the session rather than carried in the route, so renaming
+    /// it from inside updates the title you are looking at.
     @ViewBuilder
-    private var sharedTab: some View {
-        #if os(iOS)
-        SharedTab(
-            session: session, engine: engine, backupSettings: $backupSettings,
-            selectedSpaceID: $sharedSpaceID, review: $review,
-            onShared: followShare
-        )
-        #else
-        SharedTab(session: session)
-        #endif
+    private func sharedAlbum(_ spaceID: UUID) -> some View {
+        if let space = session.spaces.first(where: { $0.id == spaceID }) {
+            #if os(iOS)
+            TimelineView(
+                session: session, space: space,
+                engine: engine, backupSettings: $backupSettings,
+                isPushed: true,
+                onShared: followShare,
+                review: review,
+                onReviewDone: { review = nil },
+                onRemoveOriginals: removeOriginals
+            )
+            #else
+            TimelineView(session: session, space: space, isPushed: true)
+            #endif
+        } else {
+            // Left rather than left behind: someone else can remove you from a
+            // shared album while you are looking at the list it was on.
+            ContentUnavailableView {
+                Label("Album unavailable", systemImage: "person.2.slash")
+            } description: {
+                Text("This shared album isn't available to you any more.")
+            }
+        }
     }
 
     @ViewBuilder
@@ -143,9 +242,16 @@ struct RootTabView: View {
     /// Goes where the photos went.
     ///
     /// The same three steps wherever the share started: remember what landed and
-    /// where it came from, point the Shared tab at the destination, then show
-    /// that tab. Ordered so the grid is already looking at the right space by
-    /// the time it appears — switching tabs first would flash the previous one.
+    /// where it came from, open the shared album it landed in, then show the tab
+    /// that album lives on. Ordered so the grid is already looking at the right
+    /// album by the time it appears — switching tabs first would flash the
+    /// previous one.
+    ///
+    /// The destination used to be a tab; it is a screen inside Albums now, so
+    /// "point at it" means setting the path rather than an id. Assigning the
+    /// whole path rather than appending matters: following two shares in a row
+    /// should land you in the second album, not stack one on the other with a
+    /// back chevron into a review you have already finished.
     private func followShare(
         destination: SpaceDTO, result: ShareAssetsResponse, from: SpaceDTO
     ) {
@@ -154,132 +260,16 @@ struct RootTabView: View {
             destinationName: destination.name,
             source: MoveReview.Source(space: from, assetIDs: result.sourceAssetIDs)
         )
-        sharedSpaceID = destination.id
-        tab = .shared
+        albumsPath = [SharedAlbumRoute(spaceID: destination.id)]
+        tab = .albums
     }
 
-    private var engineIfReady: BackupEngine? { engine }
-    #endif
-    #endif
-}
-
-/// The family's shared spaces, no longer buried in a dropdown.
-///
-/// One shared space opens straight into it — a list of one is a wasted tap.
-/// Several get a list, because at that point the choice is real.
-struct SharedTab: View {
-    @Bindable var session: AppSession
-    #if os(iOS)
-    let engine: BackupEngine?
-    @Binding var backupSettings: BackupSettings
-    #endif
-
-    /// Which shared space is on screen, and what just landed in it.
+    /// Clears the originals from the album they were shared out of.
     ///
-    /// Owned by `RootTabView`: a share that starts in the Photos tab has to be
-    /// able to point this tab at a destination before it is even on screen, and
-    /// state private to this view could not be reached from there.
-    #if os(iOS)
-    @Binding var selectedSpaceID: UUID?
-    @Binding var review: MoveReview?
-    let onShared: (SpaceDTO, ShareAssetsResponse, SpaceDTO) -> Void
-    #else
-    @State private var selectedSpaceID: UUID?
-    #endif
-
-    var body: some View {
-        Group {
-            let shared = session.spaces.filter { $0.kind == .shared }
-            if shared.isEmpty {
-                ContentUnavailableView {
-                    Label("Nothing shared yet", systemImage: "person.2")
-                } description: {
-                    Text("Create a shared space and everyone in it sees the same photos.")
-                } actions: {
-                    NavigationLink("Manage Spaces") {
-                        SpacesView(session: session)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            } else {
-                // Always the grid, never a list of names.
-                //
-                // A list was a whole screen that showed no photographs and
-                // existed only to be tapped through — and it appeared the moment
-                // a second shared space existed, so the tab changed shape
-                // underneath people who had got used to landing straight in
-                // their library. Switching spaces is now a title-bar menu, the
-                // way choosing a library is everywhere else, and the grid is
-                // what you see the instant the tab opens.
-                let current = shared.first { $0.id == selectedSpaceID } ?? shared[0]
-                timeline(for: current, switcher: switcher(among: shared, current: current))
-                    #if os(iOS)
-                    // Following a move is the whole point of the review: the
-                    // photos went somewhere, so go there. Switching the space
-                    // and handing down what arrived are one action.
-                    .id(current.id)
-                    #endif
-            }
-        }
-        .task { await session.refreshSpaces() }
-    }
-
-    /// The title-bar space picker, or nil when there is nothing to pick between.
-    ///
-    /// One shared space gets no title at all: a menu whose only entry is already
-    /// ticked is a control that does nothing, and the chevron promises otherwise.
-    /// The grid then looks exactly like the personal one, which is the point —
-    /// the only thing shared adds up there is a control you can actually use.
-    private func switcher(among spaces: [SpaceDTO], current: SpaceDTO) -> AnyView? {
-        guard spaces.count > 1 else { return nil }
-        return AnyView(
-            Menu {
-                // Ticked rather than merely highlighted, so the menu says where
-                // you are as well as where you could go.
-                ForEach(spaces) { space in
-                    Button {
-                        selectedSpaceID = space.id
-                    } label: {
-                        if space.id == current.id {
-                            Label(space.name, systemImage: "checkmark")
-                        } else {
-                            Text(space.name)
-                        }
-                    }
-                }
-            } label: {
-                // `Color.primary`, not `.primary`. The bare one is a
-                // *hierarchical* style: it resolves against whatever foreground
-                // style it finds itself in, and inside a menu's label that is
-                // the accent tint — so asking for `.primary` here asked for the
-                // primary level of *red*, and got it. The space name came out
-                // in accent beside a row of white glyphs, which is the one thing
-                // that made a shared library look like a different screen from a
-                // personal one. `Color.primary` is absolute and ignores the tint.
-                //
-                // The chevron drops to secondary for hierarchy: the name is what
-                // you read, the chevron only says it can change.
-                HStack(spacing: 4) {
-                    Text(current.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .foregroundStyle(Color.primary)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.secondary)
-                }
-            }
-            .accessibilityLabel("Shared space: \(current.name). Change space.")
-        )
-    }
-
-    #if os(iOS)
-    /// Clears the originals from the space they were shared out of.
-    ///
-    /// Offered rather than assumed, and offered *here* — after the copies are
-    /// visibly sitting in the destination — because that is the only point at
-    /// which agreeing to it is an informed decision rather than a guess about
-    /// whether the share worked.
+    /// Offered rather than assumed, and offered *after* the copies are visibly
+    /// sitting in the destination — that is the only point at which agreeing to
+    /// it is an informed decision rather than a guess about whether the share
+    /// worked.
     ///
     /// Failures are collected rather than fatal: nineteen of twenty removed is
     /// a better outcome than nothing removed, and the one that didn't is still
@@ -309,25 +299,9 @@ struct SharedTab: View {
         }
     }
     #endif
-
-    /// The backup bar's state is iOS-only; other platforms get the plain grid.
-    @ViewBuilder
-    private func timeline(for space: SpaceDTO, switcher: AnyView? = nil) -> some View {
-        #if os(iOS)
-        TimelineView(
-            session: session, space: space,
-            engine: engine, backupSettings: $backupSettings,
-            spaceSwitcher: switcher,
-            onShared: onShared,
-            review: review,
-            onReviewDone: { review = nil },
-            onRemoveOriginals: removeOriginals
-        )
-        #else
-        TimelineView(session: session, space: space, spaceSwitcher: switcher)
-        #endif
-    }
+    #endif
 }
+
 
 /// Settings and everything that isn't a photo.
 struct MoreView: View {
@@ -395,7 +369,7 @@ struct MoreView: View {
             NavigationLink {
                 SpacesView(session: session)
             } label: {
-                Label("Manage Spaces", systemImage: "person.2.badge.gearshape")
+                Label("Manage Shared Albums", systemImage: "person.2.badge.gearshape")
             }
         }
 
