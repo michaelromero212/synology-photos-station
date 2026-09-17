@@ -173,6 +173,15 @@ enum PhotoLibraryScanner {
     /// would stay empty until each image came down from iCloud. Delivering both
     /// keeps the instant paint and sharpens up a moment later.
     ///
+    /// This phone's copy of one photo, by the identifier PhotoKit gave it.
+    ///
+    /// Nil once it has been deleted from the camera roll, which every caller
+    /// has to treat as ordinary rather than as a failure — the library on the
+    /// NAS outlives the copy on the device, and that is the point of backing up.
+    static func asset(for localIdentifier: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
+    }
+
     /// Shared rather than written twice, which is how one bug became two.
     static func thumbnails(
         for asset: PHAsset,

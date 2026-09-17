@@ -87,6 +87,10 @@ struct RootTabView: View {
             monitor.onReconnect = { [weak created] in await created?.start() }
             connection = monitor
             engine = created
+            // Before the first grid draws, and whether or not backup is on:
+            // this is what lets a tile whose thumbnail the NAS has not made yet
+            // be drawn from the copy still on the phone. See `LocalOriginals`.
+            created.seedLocalOriginals()
             if backupSettings.enabled { created.enableBackgroundRuns() }
         }
         #endif

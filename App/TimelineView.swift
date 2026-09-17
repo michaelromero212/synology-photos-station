@@ -977,27 +977,64 @@ struct TimelineView: View {
     /// Pending, real and placeholder tiles all end up in one list so the
     /// justified layout can size them together — a row that stopped at the last
     /// uploaded photo and started again underneath would show the seam.
+    /// One day's tiles, in the order the photographs were taken.
+    ///
+    /// Not-yet-uploaded photos used to lead their day, on the reasoning that
+    /// they were what the user was waiting on and shouldn't be buried. The cost
+    /// was worse than the problem: a photo taken at nine in the morning sat at
+    /// the head of its day until it finished uploading and then **jumped** down
+    /// to where it belonged. Adding a batch meant watching the grid shuffle
+    /// itself for as long as the upload ran, which reads as the app not knowing
+    /// where things go.
+    ///
+    /// They are placed by capture time now — the same ordering the store uses,
+    /// from the date PHAsset already gave us — so a tile appears where it will
+    /// stay, and finishing the upload swaps the picture underneath it without
+    /// moving anything.
     private func entries(for bucket: TimelineBucket, items: [TimelineItem]) -> [GridEntry] {
-        var entries: [GridEntry] = []
-
-        // Not-yet-uploaded photos lead their day: they are the newest thing
-        // that happened, and burying them under already-safe photos hides
-        // exactly what the user is waiting on.
         #if os(iOS)
-        for queued in queuedByDay[bucket.key] ?? [] {
-            entries.append(.pending(localIdentifier: queued.localIdentifier, state: queued.state))
-        }
+        let queued = queuedByDay[bucket.key] ?? []
         #endif
 
         if items.isEmpty {
             // Placeholders keep the section the right height so the scrollbar
-            // doesn't jump when the bucket lands.
+            // doesn't jump when the bucket lands. Nothing to interleave with
+            // yet, so the pending tiles lead — there is no order to be wrong
+            // about.
+            var entries: [GridEntry] = []
+            #if os(iOS)
+            entries = queued.map {
+                .pending(localIdentifier: $0.localIdentifier, state: $0.state)
+            }
+            #endif
             entries.append(contentsOf: (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) })
-        } else {
-            entries.append(contentsOf: items.map(GridEntry.item))
+            return entries
         }
 
-        return entries
+        #if os(iOS)
+        guard !queued.isEmpty else { return items.map(GridEntry.item) }
+
+        // Sorted on `(date, id)` rather than date alone. `sorted(by:)` is not a
+        // stable sort, and a day can easily hold several photos sharing a
+        // second — a burst, or a video and its still. Ties broken by anything
+        // that varies between body builds would let those tiles swap places on
+        // an unrelated redraw, which is the flicker this method exists to stop.
+        let dated: [(date: Date, id: String, entry: GridEntry)] =
+            items.map { ($0.capturedAt, "i\($0.id.uuidString)", .item($0)) }
+            + queued.map {
+                (
+                    $0.capturedAt,
+                    "p\($0.localIdentifier)",
+                    .pending(localIdentifier: $0.localIdentifier, state: $0.state)
+                )
+            }
+
+        return dated
+            .sorted { ($0.date, $0.id) < ($1.date, $1.id) }
+            .map(\.entry)
+        #else
+        return items.map(GridEntry.item)
+        #endif
     }
 
     /// Draws one entry at the size the layout worked out for it.
@@ -1194,23 +1231,45 @@ struct TimelineView: View {
     /// personal space, so before this every shared space's grid drew the phone's
     /// entire backlog of pending uploads as though they were on their way *there*
     /// — tiles for photos that were never going to appear.
-    private var queuedByDay: [String: [(localIdentifier: String, state: UploadState)]] {
-        var grouped: [String: [(localIdentifier: String, state: UploadState)]] = [:]
+    /// Carries `capturedAt` through rather than only using it to pick the day:
+    /// `entries(for:items:)` needs it to put the tile in the right place
+    /// *within* that day.
+    private var queuedByDay: [String: [QueuedTile]] {
+        var grouped: [String: [QueuedTile]] = [:]
         let zoom = store?.zoom ?? .day
 
         if let engine, backupSettings.enabled,
            backupSettings.targetSpace(in: session.spaces)?.id == space.id {
             for entry in engine.queued {
                 let key = Self.dayKey(entry.capturedAt, zoom: zoom)
-                grouped[key, default: []].append((entry.localIdentifier, entry.state))
+                grouped[key, default: []].append(
+                    QueuedTile(
+                        localIdentifier: entry.localIdentifier,
+                        state: entry.state,
+                        capturedAt: entry.capturedAt
+                    )
+                )
             }
         }
 
         for entry in session.pendingUploads.items(in: space.id) {
             let key = Self.dayKey(entry.capturedAt, zoom: zoom)
-            grouped[key, default: []].append((entry.localIdentifier, entry.state))
+            grouped[key, default: []].append(
+                QueuedTile(
+                    localIdentifier: entry.localIdentifier,
+                    state: entry.state,
+                    capturedAt: entry.capturedAt
+                )
+            )
         }
         return grouped
+    }
+
+    /// A photo on its way up, and where it belongs while it travels.
+    private struct QueuedTile {
+        let localIdentifier: String
+        let state: UploadState
+        let capturedAt: Date
     }
 
     /// The photo's own wall clock, matching how the server buckets it.
@@ -1279,9 +1338,11 @@ struct TimelineView: View {
     /// A photo taken this morning has no bucket yet — without this it would be
     /// invisible until its upload finished, which is the opposite of what a
     /// backup indicator is for.
-    static func mergedBuckets(
+    /// Generic in the value because it only ever reads the keys — the days that
+    /// exist on the phone. What is queued *in* each day is the caller's business.
+    static func mergedBuckets<Queued>(
         _ store: TimelineStore,
-        queued: [String: [(localIdentifier: String, state: UploadState)]]
+        queued: [String: Queued]
     ) -> [TimelineBucket] {
         var buckets = store.buckets
         let known = Set(buckets.map(\.key))

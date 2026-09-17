@@ -17,6 +17,11 @@ struct PhotoCell: View {
 
     @State private var image: PlatformImage?
     @State private var placeholder: PlatformImage?
+    /// Whether `image` is this phone's own copy, standing in until the NAS has
+    /// one. A real picture, so it is not blurred like the ThumbHash — but still
+    /// a stand-in, so it does not count as "already loaded" and must be
+    /// replaced by the server's version when that arrives.
+    @State private var isLocalOriginal = false
 
     /// Seeded from the decoded-image cache, so a tile whose picture is already
     /// in memory draws it in the very first frame rather than after two actor
@@ -164,7 +169,10 @@ struct PhotoCell: View {
 
     private func load() async {
         // Already painted from the memory cache by `init`; nothing to fetch.
-        if image != nil { return }
+        // A borrowed local copy does not count: it is standing in for a
+        // thumbnail the NAS has not made yet, and when the NAS makes one this
+        // task re-runs and should go and get it.
+        if image != nil, !isLocalOriginal { return }
 
         // The ThumbHash placeholder was seeded in `init`, so it is already on
         // screen — no decode here, and no grey frame before it.
@@ -172,7 +180,23 @@ struct PhotoCell: View {
         // 202 while the derivation queue is behind: keep the placeholder rather
         // than requesting an image that isn't there yet. The grid is told when
         // that changes — see DerivationWorker — and this task is keyed on it.
-        guard item.isDerived, let loader else { return }
+        guard item.isDerived, let loader else {
+            // Except when the picture is already on this phone.
+            //
+            // "Keep the placeholder" assumed there was one. For anything just
+            // uploaded there isn't: the ThumbHash is made *by* derivation, so
+            // until that runs the item has no thumbnail and no stand-in for one,
+            // and the tile is plain grey. Uploading a few hundred photos filled
+            // the grid with grey squares — at exactly the moment somebody is
+            // watching to see that their photographs arrived safely.
+            //
+            // So if this device is the one that uploaded it, draw it from the
+            // camera roll. Same photograph, no network, no waiting on the NAS.
+            #if os(iOS)
+            await paintLocalOriginal()
+            #endif
+            return
+        }
 
         // A nil answer is a setback, not a verdict.
         //
@@ -191,13 +215,66 @@ struct PhotoCell: View {
                 version: item.thumbnailVersion
             ) {
                 image = loaded
+                isLocalOriginal = false
                 return
             }
             guard !Task.isCancelled else { return }
             try? await Task.sleep(nanoseconds: 300_000_000 << UInt64(attempt))
             guard !Task.isCancelled else { return }
         }
+
+        // Three tries is about a second, and the server can easily need longer.
+        //
+        // `isDerived` says the row has been marked derived; it does not promise
+        // the bytes are servable this instant, and during a large backup they
+        // often are not — the queue is minutes deep and the answer is a 202.
+        // So a tile can burn all three attempts in the first second of being
+        // looked at and then wait, grey, until the item changes and re-runs
+        // this task.
+        //
+        // Caught on a device: an asset the server was serving perfectly well by
+        // then still had a grey tile, because the cell had given up a minute
+        // earlier and nothing had asked again since.
+        //
+        // If the photograph is on this phone, that wait is unnecessary.
+        #if os(iOS)
+        await paintLocalOriginal()
+        #endif
     }
+
+    #if os(iOS)
+    /// Draws the copy still sitting in this phone's photo library.
+    ///
+    /// Into `image`, not `placeholder`, and the difference is visible: the
+    /// placeholder slot is blurred six points because what normally goes there
+    /// is a 32-pixel ThumbHash. Putting a real photograph through that blur was
+    /// the first attempt, and it looked like a mistake rather than like a
+    /// picture — soft in a grid where every neighbour is sharp.
+    ///
+    /// `isLocalOriginal` is what keeps it honest: `load` treats an image flagged
+    /// that way as not-yet-loaded, so when the NAS finishes deriving and this
+    /// task re-runs — it is keyed on `isDerived` — the server's thumbnail is
+    /// fetched and takes over. Every device ends up showing the same picture;
+    /// this one just doesn't have to wait to show *a* picture.
+    ///
+    /// The stream is two-phase — PhotoKit sends a fast degraded frame and then
+    /// the full one — so the tile fills almost immediately and then sharpens.
+    private func paintLocalOriginal() async {
+        guard image == nil || isLocalOriginal,
+              let localIdentifier = LocalOriginals.shared.localIdentifier(for: item.assetID),
+              let asset = PhotoLibraryScanner.asset(for: localIdentifier)
+        else { return }
+
+        let pixels = CGFloat(PhotoGridMetrics.thumbnailPixels)
+        for await thumbnail in PhotoLibraryScanner.thumbnails(
+            for: asset, targetSize: CGSize(width: pixels, height: pixels)
+        ) {
+            guard !Task.isCancelled else { return }
+            image = thumbnail
+            isLocalOriginal = true
+        }
+    }
+    #endif
 
     /// `0:59`, `12:08`, `1:02:33` — the way Photos writes them.
     ///

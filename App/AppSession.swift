@@ -336,6 +336,11 @@ final class AppSession {
         // Each one holds a family's photographs and a client that is about to
         // be invalid.
         timelineStores.removeAll()
+        #if os(iOS)
+        // Which of this phone's photos are which of that account's assets. Of
+        // no use to whoever signs in next, and not theirs to hold.
+        LocalOriginals.shared.forget()
+        #endif
         user = nil
         spaces = []
         selectedSpace = nil

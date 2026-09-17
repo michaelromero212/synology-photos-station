@@ -450,6 +450,31 @@ final class BackupEngine {
         !settings.wifiOnly || !connection.isMetered
     }
 
+    /// Re-links this phone's photos to the assets they became on the NAS.
+    ///
+    /// `LocalOriginals` is memory-only and the queue is not, which is the whole
+    /// reason this exists: back up two thousand photos, get force-quit or simply
+    /// come back tomorrow, and the NAS may still be deriving thumbnails for
+    /// them. Without this the grid would forget it has the originals sitting
+    /// right here and go back to drawing grey squares.
+    ///
+    /// Newest first and bounded, because those are the ones whose derivations
+    /// are plausibly still outstanding. Failure is silent: every entry is an
+    /// optimisation, and not having it costs a wait, not a photograph.
+    func seedLocalOriginals() {
+        var descriptor = FetchDescriptor<BackupItem>(
+            predicate: #Predicate { $0.assetID != nil },
+            sortBy: [SortDescriptor(\.completedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 2000
+        guard let rows = try? ModelContext(container).fetch(descriptor) else { return }
+        LocalOriginals.shared.adopt(
+            rows.compactMap { row in
+                row.assetID.map { (assetID: $0, localIdentifier: row.localIdentifier) }
+            }
+        )
+    }
+
     func start() async {
         guard !isRunning else { return }
         guard session.client != nil, settings.targetSpace(in: session.spaces) != nil else {
@@ -648,7 +673,14 @@ final class BackupEngine {
             item.sha256 = result.sha256
             item.byteSize = result.byteSize
             item.assetID = result.assetID
-            if let assetID = result.assetID { recentlyUploaded.insert(assetID) }
+            if let assetID = result.assetID {
+                recentlyUploaded.insert(assetID)
+                // The NAS has the file but not yet a thumbnail of it, and this
+                // phone has had one all along. See `LocalOriginals`.
+                LocalOriginals.shared.record(
+                    assetID: assetID, localIdentifier: item.localIdentifier
+                )
+            }
             item.state = .done
             item.completedAt = Date()
             item.lastError = nil

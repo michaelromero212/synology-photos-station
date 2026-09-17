@@ -95,18 +95,25 @@ final class PendingUploads {
             // and a failed one has no business sitting in the grid pretending to
             // be on its way — the picker reports the failure instead.
             defer { remove(claimed.id) }
-            guard let asset = Self.asset(for: claimed.localIdentifier),
+            guard let asset = PhotoLibraryScanner.asset(for: claimed.localIdentifier),
                   let candidate = PhotoLibraryScanner.describe(asset) else {
                 failed += 1
                 continue
             }
             do {
-                _ = try await AssetUploader.send(
+                let result = try await AssetUploader.send(
                     asset,
                     descriptor: UploadDescriptor(asset: asset, candidate: candidate),
                     to: spaceID,
                     client: client
                 )
+                // The server has the file and will get to a thumbnail of it in
+                // its own time; this phone has one now. See `LocalOriginals`.
+                if let assetID = result.assetID {
+                    LocalOriginals.shared.record(
+                        assetID: assetID, localIdentifier: claimed.localIdentifier
+                    )
+                }
             } catch {
                 failed += 1
             }
@@ -124,10 +131,6 @@ final class PendingUploads {
         }) else { return nil }
         items[index].state = .uploading
         return items[index]
-    }
-
-    private static func asset(for localIdentifier: String) -> PHAsset? {
-        PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
     }
 
     private func remove(_ id: UUID) {
