@@ -103,10 +103,12 @@ struct AlbumsView: View {
     private var hasNothing: Bool {
         guard let store, !store.isLoading else { return false }
         guard let collections, collections.hasLoaded else { return false }
-        // Shared albums count. Without this, someone whose whole use of the app
-        // is one family album saw "Nothing to show yet" on the page their album
-        // lives on.
+        // Shared albums count, on the platforms that list them here. Without
+        // this, someone whose whole use of the app is one family album saw
+        // "Nothing to show yet" on the page their album lives on.
+        #if !os(macOS)
         guard session.sharedSpaces.isEmpty else { return false }
+        #endif
         return store.albums.isEmpty && (collections.page?.isEmpty ?? true)
     }
 
@@ -360,8 +362,14 @@ struct AlbumsView: View {
     /// Below your own albums rather than above. Yours are the ones you reach
     /// for daily; these are the ones you visit when somebody adds to them, and
     /// the notification is what sends you.
+    ///
+    /// Not on a Mac. A window has a sidebar, and the sidebar already gives every
+    /// shared album a row of its own — putting them here as well would be the
+    /// same list twice, and these rows would be the dead half of it, since the
+    /// destination that answers them belongs to the tab bar's stack.
     @ViewBuilder
     private func sharedAlbums() -> some View {
+        #if !os(macOS)
         let shared = session.sharedSpaces
         if !shared.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
@@ -377,8 +385,10 @@ struct AlbumsView: View {
                 .padding(.horizontal, spacing)
             }
         }
+        #endif
     }
 
+    #if !os(macOS)
     private func sharedAlbumRow(_ space: SpaceDTO) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "person.2.fill")
@@ -421,6 +431,7 @@ struct AlbumsView: View {
         )
         .contentShape(Rectangle())
     }
+    #endif
 
     /// Set with a little more care than a list header usually gets: tighter
     /// tracking and a touch more weight, because these are the only words on
