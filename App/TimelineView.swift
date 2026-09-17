@@ -306,6 +306,28 @@ struct TimelineView: View {
         // safe area and fed the storm this session already fought. The overlay
         // moves without insetting anything, which is what keeps it safe.
         .toolbar(selection.isActive ? .automatic : .hidden, for: .navigationBar)
+        // Only while selecting, and the "only" is load-bearing.
+        //
+        // Selecting, the bar above returns to carry the count and the X, and
+        // the system puts its back chevron in the same corner: two round
+        // buttons side by side, one cancelling the selection and one silently
+        // throwing it away along with the screen. Photos hides the back button
+        // the moment you start selecting, and it is right — you finish with the
+        // selection, then you leave.
+        //
+        // Browsing, this must stay false even though the bar is hidden and its
+        // chevron with it, because hiding the back button also disables the
+        // swipe-from-the-edge that pops the screen. Hiding it unconditionally
+        // was tried and measured: the swipe stopped working. That is survivable
+        // for as long as `floatingTopBar` is on screen carrying its own
+        // chevron — and that bar slides away on scroll, so someone a few
+        // screens down a long shared album would have had no way out at all
+        // until they scrolled back up. The gesture is the floor under the
+        // button, and it has to stay.
+        //
+        // A no-op on a grid that is a tab's root, which has nothing to go back
+        // to in the first place.
+        .navigationBarBackButtonHidden(selection.isActive)
         .navigationDestination(item: $openItem) { opened in
             viewer(for: opened)
         }
@@ -1894,6 +1916,25 @@ struct TimelineView: View {
     }
 
     #if os(iOS)
+    /// Whether the floating bar is allowed to slide away on scroll.
+    ///
+    /// Never, on a pushed grid, because there the bar carries the only way out.
+    ///
+    /// Hiding the navigation bar — which this whole top-edge treatment depends
+    /// on — also takes the swipe-from-the-edge that pops a screen with it.
+    /// Measured, not assumed: the same edge swipe pops a collection's grid,
+    /// which keeps its bar, and does nothing in a shared album, which doesn't.
+    /// That cost nothing while every grid was a tab with nowhere to go back to.
+    /// Now one of them is a pushed screen, and a chevron that slides away on
+    /// scroll would have left someone a few screens into a long shared album
+    /// with no exit at all until they scrolled back to the top.
+    ///
+    /// The cost is a strip of chrome over the photographs in shared albums
+    /// only. Worth it: the alternative is a room you can get stuck in.
+    private var barHidden: Bool {
+        scrollProgress.topBarHidden && !isPushed
+    }
+
     /// The browsing controls, floated over the top of the grid so they can
     /// slide away on scroll without insetting the scroll view (the safe way —
     /// see `ScrollProgress.topBarHidden`). Shown only while browsing; selection
@@ -2002,12 +2043,12 @@ struct TimelineView: View {
             // doesn't fall through to a photo behind it — and stop intercepting
             // once it has slid away.
             .contentShape(Rectangle())
-            .allowsHitTesting(!scrollProgress.topBarHidden)
+            .allowsHitTesting(!barHidden)
             // The slide+fade. Offset alone can't fully clear a bar that begins at
             // the safe-area top, so opacity carries it the rest of the way up.
-            .offset(y: scrollProgress.topBarHidden ? -120 : 0)
-            .opacity(scrollProgress.topBarHidden ? 0 : 1)
-            .animation(.easeOut(duration: 0.26), value: scrollProgress.topBarHidden)
+            .offset(y: barHidden ? -120 : 0)
+            .opacity(barHidden ? 0 : 1)
+            .animation(.easeOut(duration: 0.26), value: barHidden)
         }
     }
     #endif

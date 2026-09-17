@@ -19,7 +19,16 @@ struct AlbumDetailView: View {
     @State private var showPicker = false
     #endif
 
-    private let columns = 4
+    /// The library's own width, not a number of its own.
+    ///
+    /// This said 4, which was the library's width when it was written and
+    /// silently stopped being it. A photo grid should be a photo grid wherever
+    /// you meet one: opening an album and finding its tiles a different size
+    /// from the timeline's, the search results' and a trip's is the kind of
+    /// small wrongness that reads as carelessness without ever announcing what
+    /// it was. Naming the source means the next change to the grid carries here
+    /// on its own.
+    private let columns = TimelineZoom.day.columns
     private let spacing: CGFloat = PhotoGridMetrics.spacing
 
     var body: some View {
