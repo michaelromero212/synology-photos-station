@@ -27,6 +27,10 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     /// put my photos somewhere safe" — and the only collection here that
     /// answers it, because every other one is ordered by the past.
     case recentlyAdded
+    /// The ones this person reached over and marked. Not computed at all, and
+    /// that is the point of it: everything else here is the library's opinion,
+    /// and this is theirs.
+    case favourites
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -135,6 +139,12 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// Put inside `days`, one new enum case would have emptied the Albums tab
     /// on every device that hadn't been rebuilt yet.
     public let recentlyAdded: CollectionSummary?
+    /// What this person has marked, in this space. Per-user by construction —
+    /// two people looking at the same shared album see their own.
+    ///
+    /// Its own field for the same reason as `recentlyAdded`: an older client
+    /// ignores a key it doesn't know and so never meets the new kind.
+    public let favourites: CollectionSummary?
 
     public init(
         hero: CollectionSummary?,
@@ -143,7 +153,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         revisits: [CollectionSummary] = [],
         mediaTypes: [CollectionSummary] = [],
         recentlyDeleted: CollectionSummary?,
-        recentlyAdded: CollectionSummary? = nil
+        recentlyAdded: CollectionSummary? = nil,
+        favourites: CollectionSummary? = nil
     ) {
         self.hero = hero
         self.trips = trips
@@ -152,6 +163,7 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.mediaTypes = mediaTypes
         self.recentlyDeleted = recentlyDeleted
         self.recentlyAdded = recentlyAdded
+        self.favourites = favourites
     }
 
     /// Whether the page has anything to *show* — as opposed to anything at all.

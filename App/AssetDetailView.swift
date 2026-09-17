@@ -995,7 +995,7 @@ struct AssetDetailView: View {
                         .frame(maxWidth: .infinity)
                     ViewerButton(
                         symbol: currentModel.isFavorite ? "heart.fill" : "heart",
-                        label: "Favorite",
+                        label: "Favourite",
                         // The brand red, not the system one. `.red` is
                         // #FF453A — oranger and more saturated than the
                         // #F7605C the icon and every other accent use, and

@@ -252,6 +252,7 @@ struct CollectionHeroCard: View {
         case .season: return "LOOKING BACK"
         case .recentlyDeleted: return "REMOVED"
         case .recentlyAdded: return "JUST ARRIVED"
+        case .favourites: return "YOUR FAVOURITES"
         }
     }
 }

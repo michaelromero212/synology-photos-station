@@ -76,6 +76,9 @@ struct CollectionsController: RouteCollection {
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
+        let marked = try await favourites(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
         let away = try await revisits(spaceID: spaceID, seed: seed, on: req.sql)
         let season = try await lastSeason(
             spaceID: spaceID, today: today, seed: seed, on: req.sql
@@ -131,7 +134,8 @@ struct CollectionsController: RouteCollection {
             },
             mediaTypes: types,
             recentlyDeleted: deleted,
-            recentlyAdded: arrived
+            recentlyAdded: arrived,
+            favourites: marked
         )
     }
 
@@ -1157,6 +1161,46 @@ struct CollectionsController: RouteCollection {
         )
     }
 
+    /// The photographs this person marked, in this space.
+    ///
+    /// The only collection on the page that is nobody's inference. Everything
+    /// else is the library saying "you might want this"; a favourite is the
+    /// person having already said so, which is why it belongs near the top and
+    /// why it never needs a rule about when to show it — if it is empty there
+    /// is nothing to show, and if it is not, they put it there on purpose.
+    ///
+    /// Keyed on the viewer as well as the space, so two people in one shared
+    /// album each see their own.
+    private func favourites(
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> CollectionSummary? {
+        struct Row: Decodable {
+            let count: Int
+            let coverAssetIDs: [UUID]?
+        }
+        let row = try await sql.raw("""
+            SELECT count(*)::int AS count,
+                   (array_agg(a.id ORDER BY f.favorited_at DESC))[1:\(bind: Self.coverDepth)::int]
+                       AS "coverAssetIDs"
+            FROM space_asset_favorites f
+            JOIN space_assets sa ON sa.id = f.space_asset_id
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND f.user_id = \(bind: userID)
+              AND sa.deleted_at IS NULL
+            """).first(decoding: Row.self)
+
+        guard let row, row.count > 0 else { return nil }
+        return CollectionSummary(
+            kind: .favourites,
+            key: "all",
+            title: "Favourites",
+            subtitle: nil,
+            count: row.count,
+            coverAssetIDs: row.coverAssetIDs ?? []
+        )
+    }
+
     static let recentlyAddedDays = 30
 
     // MARK: - Media types
@@ -1500,6 +1544,14 @@ struct CollectionsController: RouteCollection {
                 throw Abort(.badRequest, reason: "No such media type.")
             }
             filter = predicate
+        case .favourites:
+            filter = """
+                AND EXISTS (
+                    SELECT 1 FROM space_asset_favorites f
+                    WHERE f.space_asset_id = sa.id
+                      AND f.user_id = \(bind: device.userID)
+                )
+                """
         case .recentlyAdded:
             // Days, from the key. The only collection keyed by a window rather
             // than by a date or a place, because it is the only one that means

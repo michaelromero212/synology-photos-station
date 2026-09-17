@@ -282,7 +282,7 @@ struct AlbumsView: View {
                         // reassurance — "did the photographs I took this week
                         // actually get here" — and somebody asking that should
                         // not have to scroll past a card about 2019.
-                        recentlyAdded(found, space: space)
+                        standing(found, space: space)
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
@@ -301,22 +301,33 @@ struct AlbumsView: View {
     }
 
 
-    /// What reached the library lately, by arrival rather than by capture.
+    /// The two shelves that are always there.
     ///
-    /// Absent when the server sends nothing — either the field is missing,
-    /// because that server predates it, or nothing has arrived in the window.
-    /// Both mean the same thing here: no row. A "Recently Added" reading zero
-    /// is worse than none at all, because it says the app isn't being used.
+    /// Everything below these is the library's opinion — a trip it noticed, a
+    /// day it thought was busy, a place you haven't been. These two are not
+    /// opinions. One is "did my photographs get here", the other is "the ones I
+    /// said I liked", and both are true on the first day and on the ten
+    /// thousandth. A page made only of suggestions has nothing to stand on when
+    /// it has nothing to suggest.
+    ///
+    /// Above the hero deliberately. The hero is the most interesting thing
+    /// today; these are the things somebody came to the page *for*, and making
+    /// them scroll past a card about 2019 to reach one is the wrong order.
     @ViewBuilder
-    private func recentlyAdded(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
-        if let arrived = found.recentlyAdded {
-            NavigationLink {
-                CollectionDetailView(session: session, space: space, collection: arrived)
-            } label: {
-                CollectionRowCard(collection: arrived, loader: session.loader)
-                    .padding(.horizontal, spacing)
+    private func standing(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        let shelves = [found.recentlyAdded, found.favourites].compactMap { $0 }
+        if !shelves.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(shelves, id: \.key) { shelf in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: shelf)
+                    } label: {
+                        CollectionRowCard(collection: shelf, loader: session.loader)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, spacing)
         }
     }
 
