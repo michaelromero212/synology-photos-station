@@ -197,7 +197,7 @@ struct SharedTab: View {
                     Text("Create a shared space and everyone in it sees the same photos.")
                 } actions: {
                     NavigationLink("Manage Spaces") {
-                        SpacesView(session: session) {}
+                        SpacesView(session: session)
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -393,7 +393,7 @@ struct MoreView: View {
             .tint(.primary)
             #endif
             NavigationLink {
-                SpacesView(session: session) {}
+                SpacesView(session: session)
             } label: {
                 Label("Manage Spaces", systemImage: "person.2.badge.gearshape")
             }

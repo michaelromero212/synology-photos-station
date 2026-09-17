@@ -94,7 +94,14 @@ final class SpacesModel {
 /// Space management: create a shared space, see who's in it, add and remove.
 struct SpacesView: View {
     @Bindable var session: AppSession
-    let onDone: () -> Void
+    /// Nil when this screen is pushed rather than presented.
+    ///
+    /// Three of the four places that show this were passing `{}` — an empty
+    /// closure — and all three push it, where there is already a back chevron
+    /// doing the job. So "Done" sat in the corner next to it doing nothing at
+    /// all, which is worse than no button: it reads as broken rather than as
+    /// absent. Only the sheet from the grid has somewhere for it to go.
+    var onDone: (() -> Void)?
 
     @State private var model: SpacesModel?
     @State private var showCreate = false
@@ -146,8 +153,10 @@ struct SpacesView: View {
             .navigationTitle("Spaces")
             #if !os(tvOS)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: onDone)
+                if let onDone {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", action: onDone)
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { showCreate = true } label: { Image(systemName: "plus") }

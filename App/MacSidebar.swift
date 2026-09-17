@@ -211,7 +211,7 @@ struct MacRootView: View {
             }
 
         case .spaces:
-            SpacesView(session: session) {}
+            SpacesView(session: session)
         }
     }
 
