@@ -195,6 +195,27 @@ struct PhotoCell: View {
             #if os(iOS)
             await paintLocalOriginal()
             #endif
+
+            // And then ask the server anyway, once.
+            //
+            // `isDerived` is what the *client* last heard, not what is true.
+            // A delta that never arrived, or one applied to a copy that was
+            // later replaced by a stale snapshot, leaves this false on an asset
+            // the NAS finished long ago — and nothing re-asks, because the
+            // task is keyed on this very flag. That is the difference between a
+            // tile that is briefly grey and one that is grey for good.
+            //
+            // One request, and a 202 if it really isn't ready, which costs the
+            // NAS almost nothing and cannot cache a miss. Worth it: the rule is
+            // that a photograph on the server always ends up drawn.
+            if image == nil, let loader,
+               let loaded = await loader.thumbnail(
+                   assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                   version: item.thumbnailVersion
+               ) {
+                image = loaded
+                isLocalOriginal = false
+            }
             return
         }
 

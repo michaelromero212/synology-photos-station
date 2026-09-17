@@ -274,7 +274,27 @@ public final class TimelineStore {
             // too — that is the whole point of announcing derivations — and an
             // update in place changes neither bucket membership nor any count,
             // so there is nothing in the manifest for it to refresh.
-            if membershipMoved { await load() }
+            if membershipMoved {
+                await load()
+            } else {
+                // Write the delta down, or the next cold start undoes it.
+                //
+                // This is what made thumbnails come back and then leave again.
+                // Snapshots were saved by `load` and `loadBucket` — the paths
+                // that *fetch* — and never by the one that applies changes. An
+                // in-place update deliberately does not reload (it moves
+                // nothing and changes no counts), so the most important update
+                // there is, "the NAS has finished this thumbnail", lived only
+                // in memory.
+                //
+                // The grid therefore healed itself while the app was open and
+                // forgot every time it was killed: cold launch restores the
+                // snapshot taken *before* derivation landed, the tile is grey
+                // because `isDerived` is false, the delta arrives a moment
+                // later and fills it, and the cycle repeats forever because
+                // that correction is never the thing being saved.
+                scheduleSnapshot()
+            }
         } catch {
             // A failed refresh leaves the existing timeline intact on purpose —
             // a transient network blip should not blank the grid.
