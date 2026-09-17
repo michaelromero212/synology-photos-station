@@ -2003,7 +2003,7 @@ struct TimelineView: View {
     private func header(_ bucket: TimelineBucket) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(Self.displayDate(bucket.key))
-                .font(.title3.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
             if let place = bucket.place {
                 Text("· \(place)")
                     .font(.subheadline)
@@ -2013,7 +2013,23 @@ struct TimelineView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 24)
+        // Measured off Synology's grid rather than chosen: its heading sits
+        // about eleven points below the previous day's last row and ten above
+        // its own first, at roughly fifteen points of type. This was `.title3`
+        // — twenty points — with twenty-four above, so each day cost about
+        // twenty points of vertical space more than it needed and the date
+        // competed with the photographs instead of labelling them.
+        //
+        // The place keeps its own size and stays secondary. Both halves at one
+        // size is what the reference does; the greyer place is ours, and it is
+        // the part that makes a long county name read as a caption rather than
+        // as more heading.
+        // Eight, not eleven, because the line box adds about four points of
+        // leading above the cap height before any padding applies — so twelve
+        // measured as sixteen on screen. Eight lands the visible gap on twelve
+        // and the whole day heading on about thirty-four points, which is the
+        // reference.
+        .padding(.top, 8)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
