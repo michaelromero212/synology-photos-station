@@ -1960,20 +1960,32 @@ struct TimelineView: View {
                     .accessibilityLabel("Back")
                 }
 
-                Button { showActivity = true } label: {
-                    Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
-                        .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
-                        .font(.body.weight(.medium))
-                        .frame(width: 38, height: 38)
-                        .glassCircle(fallback: .regularMaterial)
-                        .contentShape(Circle())
+                // The personal library only, and once, which is the whole point
+                // of it being here.
+                //
+                // Activity is one inbox for the whole account — everything
+                // anyone has added to anything you can see. Repeating its door
+                // on every shared album suggested otherwise: four albums, four
+                // bells, each looking like it might hold that album's news, all
+                // four opening the same list. It belongs on the one screen that
+                // is unambiguously "your library, everything in it", which is
+                // also the screen you land on.
+                if space.kind == .personal {
+                    Button { showActivity = true } label: {
+                        Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
+                            .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                            .font(.body.weight(.medium))
+                            .frame(width: 38, height: 38)
+                            .glassCircle(fallback: .regularMaterial)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        (activity?.unreadCount ?? 0) > 0
+                            ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                            : "Recent activity"
+                    )
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(
-                    (activity?.unreadCount ?? 0) > 0
-                        ? "Recent activity, \(activity?.unreadCount ?? 0) new"
-                        : "Recent activity"
-                )
 
                 Spacer(minLength: 8)
 
@@ -2140,19 +2152,23 @@ struct TimelineView: View {
 
         // The browsing controls, and only while browsing. See the note above.
         if !isSelecting {
-            ToolbarItem(placement: Self.leadingPlacement) {
-                Button {
-                    showActivity = true
-                } label: {
-                    Image(systemName: (activity?.unreadCount ?? 0) > 0
-                          ? "bell.badge.fill" : "bell")
-                        .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+            // Personal library only — see the note in `floatingTopBar`. One
+            // account-wide inbox deserves one door, not one per album.
+            if space.kind == .personal {
+                ToolbarItem(placement: Self.leadingPlacement) {
+                    Button {
+                        showActivity = true
+                    } label: {
+                        Image(systemName: (activity?.unreadCount ?? 0) > 0
+                              ? "bell.badge.fill" : "bell")
+                            .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                    }
+                    .accessibilityLabel(
+                        (activity?.unreadCount ?? 0) > 0
+                            ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                            : "Recent activity"
+                    )
                 }
-                .accessibilityLabel(
-                    (activity?.unreadCount ?? 0) > 0
-                        ? "Recent activity, \(activity?.unreadCount ?? 0) new"
-                        : "Recent activity"
-                )
             }
 
             #if os(iOS)
