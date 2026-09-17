@@ -251,6 +251,7 @@ struct CollectionHeroCard: View {
         case .mediaType: return "EVERYTHING OF ONE KIND"
         case .season: return "LOOKING BACK"
         case .recentlyDeleted: return "REMOVED"
+        case .recentlyAdded: return "JUST ARRIVED"
         }
     }
 }

@@ -22,6 +22,11 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     case season
     /// Everything of one shape — videos, panoramas, bursts.
     case mediaType
+    /// What reached the library lately, by *arrival* rather than by when it was
+    /// taken. The one question a backup app is asked constantly — "did my phone
+    /// put my photos somewhere safe" — and the only collection here that
+    /// answers it, because every other one is ordered by the past.
+    case recentlyAdded
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -123,6 +128,13 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     public let mediaTypes: [CollectionSummary]
     /// Present only for a personal space, and only when something is in it.
     public let recentlyDeleted: CollectionSummary?
+    /// What arrived lately. Its own field rather than a member of any array
+    /// above, and that is a deployment decision as much as a shape one: a
+    /// client that predates this ignores a JSON key it does not know, so it
+    /// never meets the `recentlyAdded` case and never fails to decode the page.
+    /// Put inside `days`, one new enum case would have emptied the Albums tab
+    /// on every device that hadn't been rebuilt yet.
+    public let recentlyAdded: CollectionSummary?
 
     public init(
         hero: CollectionSummary?,
@@ -130,7 +142,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         days: [CollectionSummary],
         revisits: [CollectionSummary] = [],
         mediaTypes: [CollectionSummary] = [],
-        recentlyDeleted: CollectionSummary?
+        recentlyDeleted: CollectionSummary?,
+        recentlyAdded: CollectionSummary? = nil
     ) {
         self.hero = hero
         self.trips = trips
@@ -138,6 +151,7 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.revisits = revisits
         self.mediaTypes = mediaTypes
         self.recentlyDeleted = recentlyDeleted
+        self.recentlyAdded = recentlyAdded
     }
 
     /// Whether the page has anything to *show* — as opposed to anything at all.

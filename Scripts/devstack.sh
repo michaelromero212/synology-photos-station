@@ -36,7 +36,21 @@ ENVFILE="$DATA/env"
 
 PGPORT=55432
 SRVPORT=8099
-SRVBIN="$REPO/Server/.build/arm64-apple-macosx/debug/FrameStationServer"
+# Asked for rather than assumed.
+#
+# This was the literal path `.build/arm64-apple-macosx/debug/FrameStationServer`,
+# which the toolchain stopped writing to: newer Swift builds land in
+# `.build/out/Products/Debug`. Nothing failed. `swift build` said "Build
+# complete", the agent kept launching the file that was still sitting at the old
+# path, and the dev server went on serving a build from six days earlier — so a
+# new endpoint answered 404 and a changed query returned the old answer, both
+# silently, while every local check appeared to pass.
+#
+# `--show-bin-path` is the toolchain's own answer to "where did you put it", so
+# this cannot drift again. The fallback keeps the script working if SwiftPM
+# can't answer.
+SRVBIN="$( (cd "$REPO/Server" && swift build --show-bin-path 2>/dev/null) )/FrameStationServer"
+[ -x "$SRVBIN" ] || SRVBIN="$REPO/Server/.build/arm64-apple-macosx/debug/FrameStationServer"
 # The version-stable symlink, not the Cellar path — a Homebrew upgrade must not
 # silently leave launchd pointing at a directory that no longer exists.
 PGBIN="/opt/homebrew/opt/postgresql@16/bin/postgres"

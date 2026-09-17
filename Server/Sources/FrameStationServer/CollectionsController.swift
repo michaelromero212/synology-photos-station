@@ -75,6 +75,7 @@ struct CollectionsController: RouteCollection {
             excluding: claimed, on: req.sql
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
+        let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
         let away = try await revisits(spaceID: spaceID, seed: seed, on: req.sql)
         let season = try await lastSeason(
             spaceID: spaceID, today: today, seed: seed, on: req.sql
@@ -129,7 +130,8 @@ struct CollectionsController: RouteCollection {
                 return !tripPlaces.contains(place.title)
             },
             mediaTypes: types,
-            recentlyDeleted: deleted
+            recentlyDeleted: deleted,
+            recentlyAdded: arrived
         )
     }
 
@@ -481,9 +483,12 @@ struct CollectionsController: RouteCollection {
             LIMIT 60
             """).all(decoding: DayRow.self)
 
-        return Self.runs(from: rows.filter { !claimed.contains($0.day) }).prefix(6).map {
-            Self.describe($0, holidays: holidays, named: named, recurring: recurring)
-        }
+        return Self.runs(from: rows.filter { !claimed.contains($0.day) })
+            .compactMap {
+                Self.describe($0, holidays: holidays, named: named, recurring: recurring)
+            }
+            .prefix(6)
+            .map { $0 }
     }
 
     /// A stretch of consecutive busy days, treated as one occasion.
@@ -547,12 +552,24 @@ struct CollectionsController: RouteCollection {
     /// The generic weekday remains as the last resort, because a day that is
     /// simply busy is a real thing and deserves an honest name rather than a
     /// stretched one.
+    ///
+    /// Nil when even that fails. A run of several days that happened nowhere in
+    /// particular, on no named occasion, has nothing to be called except how
+    /// long it was — and "Two days" is not a name, it is this function's
+    /// working shown on the page. One of those on a page is enough to make the
+    /// good titles beside it look accidental too, and a library ten times this
+    /// size produces them by the hundred rather than by the fewer.
+    ///
+    /// Dropping it loses nothing: the photographs are in the timeline where
+    /// they were taken, and the collection was only ever an offer to look at
+    /// them a different way. An offer that cannot say what it is offering is
+    /// better not made.
     static func describe(
         _ run: Run,
         holidays: [String: String] = [:],
         named: [String: String] = [:],
         recurring: Set<String> = []
-    ) -> CollectionSummary {
+    ) -> CollectionSummary? {
         let place = run.place
         let title: String
         // Whether the title already names where this happened, so the subtitle
@@ -583,7 +600,10 @@ struct CollectionsController: RouteCollection {
             title = holiday
             titleNamedPlace = false
         } else if run.span > 1 {
-            title = runTitle(run, place: place)
+            // Only when it can say where, or what kind of stretch it was. A
+            // weekend is a thing; "four days" is a measurement.
+            guard let earned = runTitle(run, place: place) else { return nil }
+            title = earned
         } else if run.placeCount >= 3 {
             title = "\(spelled(run.placeCount).capitalized) places in one day"
             titleNamedPlace = true
@@ -634,7 +654,10 @@ struct CollectionsController: RouteCollection {
 
     /// Names a stretch of days. A weekend is worth recognising by name; four
     /// days in a row is worth counting.
-    private static func runTitle(_ run: Run, place: String?) -> String {
+    ///
+    /// Nil where neither applies and there is no place to hang it on, which is
+    /// the one case that produced titles like "Two days".
+    private static func runTitle(_ run: Run, place: String?) -> String? {
         let weekdays = run.days.compactMap { parseDate($0.day) }
             .map { utc.component(.weekday, from: $0) }   // 1 = Sunday, 7 = Saturday
         let isWeekendPair = run.span == 2 && weekdays.contains(1) && weekdays.contains(7)
@@ -645,8 +668,12 @@ struct CollectionsController: RouteCollection {
             phrase = "A weekend"
         } else if run.span == 3, touchesWeekend {
             phrase = "A long weekend"
-        } else {
+        } else if place != nil {
+            // "Four days in Asheville" earns its place — the count is doing
+            // real work once there is somewhere for it to have happened.
             phrase = "\(spelled(run.span).capitalized) days"
+        } else {
+            return nil
         }
         return inPlace(phrase, place)
     }
@@ -981,6 +1008,12 @@ struct CollectionsController: RouteCollection {
     ) async throws -> CollectionSummary? {
         guard let season = Self.completedSeason(before: today) else { return nil }
         let local = TimelineController.localTime
+            // `::int` on both binds, and not decoration. Swift's `Int` binds as
+            // BIGINT, and Postgres will not implicitly narrow that for a named
+            // `make_interval` argument or an array subscript — so without the
+            // casts this query raised, and because it is built alongside every
+            // other collection it took the *whole* Albums page down with it. A
+            // 500 on one new row is not a missing row, it is an empty page.
         let row = try await sql.raw("""
             SELECT count(*)::int AS count,
                    COALESCE(
@@ -1085,6 +1118,46 @@ struct CollectionsController: RouteCollection {
             coverAssetIDs: []
         )
     }
+
+    /// What has arrived lately, by upload time rather than capture time.
+    ///
+    /// Every other collection on this page is built from when a photograph was
+    /// *taken*, which is the right axis for remembering and the wrong one for
+    /// reassurance. Restore an old shoebox of scans and they land in 1974,
+    /// correctly, and nowhere near anything that says they arrived safely.
+    ///
+    /// Thirty days, and only when something is in it — an empty "Recently
+    /// Added" is a row that says the app is not being used.
+    private func recentlyAdded(
+        spaceID: UUID, on sql: any SQLDatabase
+    ) async throws -> CollectionSummary? {
+        struct Row: Decodable {
+            let count: Int
+            let coverAssetIDs: [UUID]?
+        }
+        let row = try await sql.raw("""
+            SELECT count(*)::int AS count,
+                   (array_agg(a.id ORDER BY sa.uploaded_at DESC))[1:\(bind: Self.coverDepth)::int]
+                       AS "coverAssetIDs"
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND sa.uploaded_at >= now() - make_interval(days => \(bind: Self.recentlyAddedDays)::int)
+            """).first(decoding: Row.self)
+
+        guard let row, row.count > 0 else { return nil }
+        return CollectionSummary(
+            kind: .recentlyAdded,
+            key: String(Self.recentlyAddedDays),
+            title: "Recently Added",
+            subtitle: "Last \(Self.recentlyAddedDays) days",
+            count: row.count,
+            coverAssetIDs: row.coverAssetIDs ?? []
+        )
+    }
+
+    static let recentlyAddedDays = 30
 
     // MARK: - Media types
 
@@ -1427,6 +1500,14 @@ struct CollectionsController: RouteCollection {
                 throw Abort(.badRequest, reason: "No such media type.")
             }
             filter = predicate
+        case .recentlyAdded:
+            // Days, from the key. The only collection keyed by a window rather
+            // than by a date or a place, because it is the only one that means
+            // "lately" rather than "then".
+            let days = Int(key) ?? Self.recentlyAddedDays
+            filter = """
+                AND sa.uploaded_at >= now() - make_interval(days => \(bind: days)::int)
+                """
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
         }

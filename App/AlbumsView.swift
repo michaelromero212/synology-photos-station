@@ -276,6 +276,13 @@ struct AlbumsView: View {
                 // list of settings.
                 VStack(alignment: .leading, spacing: 30) {
                     if let space = session.personalSpace, let found = collections?.page {
+                        // First, and above the hero, because it answers a
+                        // different question from everything below it. The rest
+                        // of this page is about remembering; this one is about
+                        // reassurance — "did the photographs I took this week
+                        // actually get here" — and somebody asking that should
+                        // not have to scroll past a card about 2019.
+                        recentlyAdded(found, space: space)
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
@@ -290,6 +297,26 @@ struct AlbumsView: View {
                 await store.refresh()
                 await collections?.refresh()
             }
+        }
+    }
+
+
+    /// What reached the library lately, by arrival rather than by capture.
+    ///
+    /// Absent when the server sends nothing — either the field is missing,
+    /// because that server predates it, or nothing has arrived in the window.
+    /// Both mean the same thing here: no row. A "Recently Added" reading zero
+    /// is worse than none at all, because it says the app isn't being used.
+    @ViewBuilder
+    private func recentlyAdded(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if let arrived = found.recentlyAdded {
+            NavigationLink {
+                CollectionDetailView(session: session, space: space, collection: arrived)
+            } label: {
+                CollectionRowCard(collection: arrived, loader: session.loader)
+                    .padding(.horizontal, spacing)
+            }
+            .buttonStyle(.plain)
         }
     }
 
