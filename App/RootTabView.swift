@@ -92,6 +92,12 @@ struct RootTabView: View {
             // be drawn from the copy still on the phone. See `LocalOriginals`.
             created.seedLocalOriginals()
             if backupSettings.enabled { created.enableBackgroundRuns() }
+            // Finish anything a share left outstanding when the app was last
+            // taken away. Automatic backup has always resumed itself; this is
+            // the manual path getting the same treatment — see `ManualUpload`.
+            if let client = session.client {
+                await session.pendingUploads.attach(container: container, client: client)
+            }
         }
         #endif
     }

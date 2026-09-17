@@ -253,13 +253,38 @@ struct AssetController: RouteCollection {
         }
 
         let path = req.blobStore.derivativePath(sha256: asset.sha256, name: "thumb-\(size).jpg")
-        guard FileManager.default.fileExists(atPath: path.path) else {
-            // Still queued, or the queue failed. 202 rather than 404 so the
-            // client knows to keep the ThumbHash placeholder and retry, instead
-            // of caching a miss forever.
-            throw Abort(.accepted, reason: "Thumbnail not generated yet.")
+        if FileManager.default.fileExists(atPath: path.path) {
+            return try await streamFile(req, at: path, contentType: "image/jpeg", immutable: true)
         }
-        return try await streamFile(req, at: path, contentType: "image/jpeg", immutable: true)
+
+        // A bigger one will do, if there is one.
+        //
+        // Uploading clients hand over a thumbnail so nobody waits on the
+        // derivation queue, and they send the size the grid asks for — 512.
+        // Album and collection covers ask for 256, which no client sends, so
+        // until derivation ran those covers stayed blank while the very same
+        // photograph was already drawable elsewhere in the app. Serving the 512
+        // in its place costs a few kilobytes and is indistinguishable on screen;
+        // the 256 replaces it the moment derivation produces one.
+        //
+        // Larger only, never smaller: sending a 256 where a 512 was asked for
+        // would be visibly soft, which is the whole failure this app keeps
+        // coming back to.
+        if let larger = Derivatives.eagerSizes.filter({ $0 > size }).sorted().first {
+            let fallback = req.blobStore.derivativePath(
+                sha256: asset.sha256, name: "thumb-\(larger).jpg"
+            )
+            if FileManager.default.fileExists(atPath: fallback.path) {
+                return try await streamFile(
+                    req, at: fallback, contentType: "image/jpeg", immutable: true
+                )
+            }
+        }
+
+        // Still queued, or the queue failed. 202 rather than 404 so the
+        // client knows to keep the ThumbHash placeholder and retry, instead
+        // of caching a miss forever.
+        throw Abort(.accepted, reason: "Thumbnail not generated yet.")
     }
 
     /// Takes the thumbnail the uploading device already made.

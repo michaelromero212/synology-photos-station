@@ -167,6 +167,17 @@ enum FileUpload {
             let committed = try await client.commitUpload(
                 uploadID: uploadID, descriptor.commitRequest(spaceID: spaceID)
             )
+            #if os(macOS)
+            // The Mac's half of the thumbnail handover. iOS does this in
+            // `AssetUploader`, where PhotoKit gives a better rendering than
+            // anything read back off disk; a Mac has only the file, so it
+            // renders from that. Without this, everything dropped on the Mac is
+            // a grey tile on every phone until the NAS derives it.
+            await sendThumbnail(
+                file: file, mediaType: descriptor.mediaType,
+                assetID: committed.assetID, client: client
+            )
+            #endif
             return Result(
                 assetID: committed.assetID, deduplicated: false, byteSize: size, sha256: digest
             )
@@ -260,6 +271,36 @@ enum FileUpload {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    #if os(macOS)
+    /// Hands the rendered thumbnail over, and never lets that failure matter.
+    ///
+    /// The upload has already succeeded by the time this runs. Turning a stored
+    /// photograph into a thrown error — and therefore into a retry that sends
+    /// the whole file again — would be a poor trade for a picture the NAS will
+    /// produce on its own a minute later.
+    private static func sendThumbnail(
+        file: URL, mediaType: MediaType, assetID: UUID?, client: FrameStationClient
+    ) async {
+        guard let assetID,
+              let rendered = FileThumbnail.render(file: file, mediaType: mediaType)
+        else { return }
+        let request = UploadThumbnailRequest(
+            jpeg: rendered.jpeg,
+            thumbHash: rendered.thumbHash,
+            size: PhotoGridMetrics.thumbnailPixels
+        )
+        for attempt in 0..<2 {
+            do {
+                try await client.sendThumbnail(assetID: assetID, request)
+                return
+            } catch {
+                guard attempt == 0, !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
+    }
+    #endif
 }
 
 enum UploadError: LocalizedError {
@@ -292,6 +333,8 @@ enum UploadError: LocalizedError {
             return "Paused part-way — it will resume where it stopped."
         }
     }
+
+
 }
 
 #endif

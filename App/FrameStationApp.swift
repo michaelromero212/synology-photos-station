@@ -163,8 +163,33 @@ struct FrameStationApp: App {
                 at: support, withIntermediateDirectories: true
             )
         }
-        do { return try ModelContainer(for: BackupItem.self) }
-        catch { fatalError("Could not open the backup queue: \(error)") }
+        do { return try ModelContainer(for: BackupItem.self, ManualUpload.self) }
+        catch {
+            // Degraded, never dead.
+            //
+            // This was a `fatalError`, which made an unopenable queue a phone
+            // that cannot start its photo library at all — the one outcome
+            // worse than losing the queue. A store can fail to open for
+            // reasons that have nothing to do with the photographs: a disk
+            // full at the wrong moment, a schema the app can't migrate, a file
+            // left unreadable by a restore.
+            //
+            // An in-memory container keeps every other part of the app
+            // working: browsing, uploading by hand, shared albums, playback.
+            // Only the durable queue is lost, and it rebuilds itself from the
+            // photo library on the next scan.
+            Diagnostics.shared.log(
+                .launch, "backup queue unavailable, running in memory: \(error)"
+            )
+            do {
+                return try ModelContainer(
+                    for: BackupItem.self, ManualUpload.self,
+                    configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+                )
+            } catch {
+                fatalError("Could not open even an in-memory queue: \(error)")
+            }
+        }
     }()
     #endif
 

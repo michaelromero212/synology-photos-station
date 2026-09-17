@@ -151,6 +151,10 @@ struct TimelineView: View {
     @State private var showFocusedBackup = false
     @State private var showPicker = false
     @State private var showSearch = false
+    #if os(iOS)
+    /// The pending pull-the-grid, so a stream of landings coalesces into one.
+    @State private var landingRefresh: Task<Void, Never>?
+    #endif
     @State private var showMoveTo = false
     @State private var moveError: String?
     /// Owned by RootTabView, read here because this is where a broken
@@ -493,6 +497,22 @@ struct TimelineView: View {
         // about it; the cloud badges survive until they pull to refresh.
         .onChange(of: engine?.completedRuns) { _, _ in
             Task { await store?.refresh() }
+        }
+        // As each item lands, not just when the whole run does.
+        //
+        // A pending tile retires the moment its upload commits — `queued` is
+        // rebuilt from pending and uploading rows only — but the server row
+        // behind it arrives on the next delta. Refreshing at the end of the
+        // *run* meant that for a backup of a few thousand photos, every one
+        // that finished left a hole in the grid until either the run ended or
+        // the fifteen-second poll came round. Photographs disappearing on the
+        // way to being safe is the worst possible moment to look unreliable.
+        //
+        // Debounced rather than per item: a thousand finished uploads must not
+        // become a thousand delta requests. See `scheduleLandingRefresh`.
+        .onChange(of: engine?.progress.done) { _, _ in scheduleLandingRefresh() }
+        .onChange(of: session.pendingUploads.completedItems) { _, _ in
+            scheduleLandingRefresh()
         }
         // And the same for a batch shared straight from the library: the local
         // tiles retire as each one lands, so without this there is a gap where
@@ -1231,6 +1251,28 @@ struct TimelineView: View {
     /// personal space, so before this every shared space's grid drew the phone's
     /// entire backlog of pending uploads as though they were on their way *there*
     /// — tiles for photos that were never going to appear.
+    #if os(iOS)
+    /// Pulls the grid shortly after uploads stop landing.
+    ///
+    /// The window it closes is the one between a pending tile retiring and its
+    /// server row arriving. Doing it per item would put one delta request on
+    /// the NAS per photograph — precisely the wrong thing during the backup
+    /// this exists to smooth — so each landing pushes the refresh out rather
+    /// than adding one, and a burst of two hundred arrivals costs a single
+    /// request shortly after the last of them.
+    ///
+    /// Six hundred milliseconds: long enough that a steady stream of uploads
+    /// coalesces, short enough that a single share feels immediate.
+    private func scheduleLandingRefresh() {
+        landingRefresh?.cancel()
+        landingRefresh = Task { [store] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            await store?.refresh()
+        }
+    }
+    #endif
+
     /// Carries `capturedAt` through rather than only using it to pick the day:
     /// `entries(for:items:)` needs it to put the tile in the right place
     /// *within* that day.

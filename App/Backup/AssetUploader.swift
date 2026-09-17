@@ -114,14 +114,24 @@ enum AssetUploader {
               jpeg.count <= UploadThumbnailRequest.maxBytes
         else { return }
 
-        try? await client.sendThumbnail(
-            assetID: assetID,
-            UploadThumbnailRequest(
-                jpeg: jpeg,
-                thumbHash: thumbHash(of: rendered),
-                size: PhotoGridMetrics.thumbnailPixels
-            )
+        let request = UploadThumbnailRequest(
+            jpeg: jpeg,
+            thumbHash: thumbHash(of: rendered),
+            size: PhotoGridMetrics.thumbnailPixels
         )
+        // Twice, with a pause. One dropped connection used to cost the picture
+        // on everybody else's phone until the NAS derived it — a silent loss of
+        // the whole benefit, for a request small enough that retrying it is
+        // free. Still swallowed after that: the photograph is safe either way.
+        for attempt in 0..<2 {
+            do {
+                try await client.sendThumbnail(assetID: assetID, request)
+                return
+            } catch {
+                guard attempt == 0, !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
     }
 
     /// The ThumbHash for an image, as bytes.
