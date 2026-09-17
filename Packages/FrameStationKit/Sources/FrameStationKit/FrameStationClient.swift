@@ -209,6 +209,18 @@ public actor FrameStationClient {
         try await send(.post, "v1/uploads/\(uploadID)/commit", body: body)
     }
 
+    /// Hands the server the thumbnail this device already rendered.
+    ///
+    /// Sent right after a commit, so the picture is servable to *every* device
+    /// immediately rather than after the NAS works through its derivation
+    /// queue. Best-effort by nature — see `UploadThumbnailRequest`.
+    public func sendThumbnail(
+        assetID: UUID,
+        _ body: UploadThumbnailRequest
+    ) async throws {
+        try await sendNoContent(.post, "v1/assets/\(assetID)/thumb", body: body)
+    }
+
     /// Links an already-stored asset into a space — the `.have` path, and how a
     /// photo moves from Personal to Family Shared without copying bytes.
     public func linkAsset(

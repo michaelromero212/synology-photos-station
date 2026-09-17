@@ -17,6 +17,7 @@ struct AssetController: RouteCollection {
             .grouped(AuthenticatedDevice.guardMiddleware())
 
         protected.get("assets", ":assetID", "thumb", use: thumbnail)
+        protected.post("assets", ":assetID", "thumb", use: acceptThumbnail)
         protected.get("assets", ":assetID", "preview", use: preview)
         protected.get("assets", ":assetID", "original", use: original)
         protected.get("assets", ":assetID", "playback", use: playbackURL)
@@ -259,6 +260,115 @@ struct AssetController: RouteCollection {
             throw Abort(.accepted, reason: "Thumbnail not generated yet.")
         }
         return try await streamFile(req, at: path, contentType: "image/jpeg", immutable: true)
+    }
+
+    /// Takes the thumbnail the uploading device already made.
+    ///
+    /// The point is *whose* screen it fills. A device that uploads can draw the
+    /// photo from its own camera roll while the NAS catches up; nobody else
+    /// can, so on every other phone in the family the tile is grey until the
+    /// derivation queue gets there. On a modest NAS mid-backup that is a long
+    /// time, and it is exactly when people are watching to see that the photos
+    /// arrived. Handing the picture over with the upload turns that wait into
+    /// nothing, and costs the NAS no CPU at all.
+    ///
+    /// Written exactly as derivation writes: the file under the same
+    /// derivative name the GET serves, the ThumbHash and `derived_at` on the
+    /// row, and a `/changes` row per space so other devices are *told* rather
+    /// than left to find out on their next cold start. That last part is the
+    /// difference between this working and this appearing not to work.
+    ///
+    /// Not trusted permanently. The derivation job stays queued, so the
+    /// server's own rendering replaces this whenever it runs — a device that
+    /// sends a poor thumbnail, or one that no longer matches after an edit, is
+    /// corrected rather than believed forever.
+    @Sendable
+    func acceptThumbnail(req: Request) async throws -> HTTPStatus {
+        // Readable is the right bar, not "uploader". Anyone who can see the
+        // asset could fetch this same thumbnail a second later anyway, the
+        // write is idempotent, and derivation overwrites it regardless — so a
+        // stricter check would buy nothing and would break the ordinary case
+        // of a second device finishing an upload the first one started.
+        let asset = try await requireReadableAsset(req)
+        let body = try req.content.decode(UploadThumbnailRequest.self)
+
+        guard body.jpeg.count <= UploadThumbnailRequest.maxBytes else {
+            throw Abort(.payloadTooLarge, reason: "Thumbnail is too large.")
+        }
+        guard Derivatives.eagerSizes.contains(body.size) else {
+            throw Abort(.badRequest,
+                        reason: "size must be one of \(Derivatives.eagerSizes.map(String.init).joined(separator: ", ")).")
+        }
+        // Cheap shape check so a mislabelled body cannot land where a JPEG is
+        // served with `image/jpeg`. Two bytes, and it is the whole of what we
+        // can honestly verify without decoding.
+        guard body.jpeg.count > 2, body.jpeg[body.jpeg.startIndex] == 0xFF,
+              body.jpeg[body.jpeg.index(after: body.jpeg.startIndex)] == 0xD8 else {
+            throw Abort(.badRequest, reason: "Thumbnail is not a JPEG.")
+        }
+
+        let path = req.blobStore.derivativePath(sha256: asset.sha256, name: "thumb-\(body.size).jpg")
+        // Never over the server's own work. Once derivation has run, its
+        // rendering is the better one and this request is a straggler from a
+        // client that didn't know yet.
+        var changedSomething = false
+        if !FileManager.default.fileExists(atPath: path.path) {
+            try FileManager.default.createDirectory(
+                at: path.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try body.jpeg.write(to: path, options: .atomic)
+            changedSomething = true
+        }
+
+        let assetID = asset.id
+        let thumbHash = body.thumbHash.map { ByteBuffer(bytes: $0) }
+        try await req.application.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                // `COALESCE` under a `WHERE` that matches only rows still
+                // missing something: a row that already has the server's own
+                // ThumbHash keeps it, `derived_at` is only claimed if nothing
+                // has claimed it, and — the part that matters at scale — a row
+                // that already has both is not written at all.
+                struct Touched: Decodable { let id: UUID }
+                let updated = try await sql.raw("""
+                    UPDATE assets
+                    SET thumbhash  = COALESCE(thumbhash, \(bind: thumbHash)),
+                        derived_at = COALESCE(derived_at, now())
+                    WHERE id = \(bind: assetID)
+                      AND (thumbhash IS NULL OR derived_at IS NULL)
+                    RETURNING id
+                    """).all(decoding: Touched.self)
+                changedSomething = changedSomething || !updated.isEmpty
+
+                // Announced only when there is something to announce.
+                //
+                // Clients send this after every upload, and an upload that
+                // deduplicates onto a photograph the NAS already knows changes
+                // nothing. Announcing regardless would put one delta row per
+                // photo through `/changes` every time somebody re-ran a backup
+                // over a library that was already safe — waking every device in
+                // the house to tell it nothing happened.
+                if changedSomething {
+                    let placements = try await sql.raw("""
+                        SELECT id, space_id AS "spaceID" FROM space_assets
+                        WHERE asset_id = \(bind: assetID) AND deleted_at IS NULL
+                        """).all(decoding: DerivationWorker.SpacePlacement.self)
+
+                    for placement in placements {
+                        _ = try await ChangeLog.append(
+                            spaceID: placement.spaceID, entity: "space_asset",
+                            entityID: placement.id, op: "update", on: sql
+                        )
+                    }
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+        return .noContent
     }
 
     /// Full-screen preview, rendered on first request.

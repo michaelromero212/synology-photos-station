@@ -220,3 +220,44 @@ public struct LinkAssetRequest: Codable, Sendable {
         self.sourceLocalID = sourceLocalID
     }
 }
+
+/// A thumbnail the uploading device made, handed over so nobody has to wait for
+/// the NAS to make one.
+///
+/// The gap this closes: a committed asset has no thumbnail and no ThumbHash
+/// until the derivation queue reaches it, so every client — not only the one
+/// that uploaded — draws a grey square until then. On a NAS with a modest CPU
+/// and a backup of several thousand items, "until then" is a long time, and it
+/// is precisely when people are watching to see their photographs arrive.
+///
+/// The device that just uploaded already has the pixels and had to decode them
+/// anyway, so it renders a thumbnail and a ThumbHash and sends both. The server
+/// stores them as though it had derived them itself and announces the change,
+/// which is what makes the picture appear on everyone's phone rather than only
+/// on the uploader's.
+///
+/// Full derivation still runs afterwards and overwrites this with the server's
+/// own rendering, so the handed-over copy is a head start rather than a
+/// permanent substitute — and a client that sends a poor one is corrected
+/// rather than believed forever.
+public struct UploadThumbnailRequest: Codable, Sendable {
+    /// JPEG bytes, sized for the grid. Rejected above `maxBytes`.
+    public let jpeg: Data
+    /// The ThumbHash for the same image, encoded by the device. Optional
+    /// because it is a nicety — without it the tile still gets the real
+    /// thumbnail, just no blurred stand-in in the instant before it loads.
+    public let thumbHash: Data?
+    /// What the thumbnail's longest edge is, so the server files it under the
+    /// size the grid asks for rather than guessing.
+    public let size: Int
+
+    /// A generous ceiling for a grid thumbnail and a cheap guard against a
+    /// client sending a full-resolution image up a second time.
+    public static let maxBytes = 512 * 1024
+
+    public init(jpeg: Data, thumbHash: Data?, size: Int) {
+        self.jpeg = jpeg
+        self.thumbHash = thumbHash
+        self.size = size
+    }
+}
