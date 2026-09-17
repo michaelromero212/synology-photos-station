@@ -122,6 +122,15 @@ struct AlbumsView: View {
     /// gating the property alone left tvOS with closures referring to something
     /// that wasn't there. An unused optional is cheaper than a fourth `#if`.
     @State private var naming: CollectionSummary?
+    /// How many distinct places the library knows, for the Places row.
+    ///
+    /// Fetched here rather than added to the collections payload: the endpoint
+    /// already exists and Search already calls it, and one small request is a
+    /// cheaper thing to own than another field on a response that four clients
+    /// decode.
+    @State private var placeTotal = 0
+    /// The place the Places list handed back, pushed as its own screen.
+    @State private var pickedPlace: String?
     @Environment(\.scenePhase) private var scenePhase
 
     private let columns = 2
@@ -214,10 +223,30 @@ struct AlbumsView: View {
             }
         }
         #endif
+        .navigationDestination(item: $pickedPlace) { place in
+            if let space = session.personalSpace {
+                CollectionDetailView(
+                    session: session, space: space,
+                    // `.revisit` is the kind that means "everything from one
+                    // place, whenever it was" — exactly this, and already
+                    // handled end to end.
+                    collection: CollectionSummary(
+                        kind: .revisit, key: place, title: place,
+                        subtitle: nil, count: 0, coverAssetIDs: []
+                    )
+                )
+            }
+        }
         .task {
             let created = store ?? AlbumStore(session: session)
             store = created
             await created.refresh()
+        }
+        .task(id: session.personalSpace?.id) {
+            guard let space = session.personalSpace, let client = session.client else { return }
+            // One row's worth: the count, not the list. The list is fetched by
+            // the screen behind the row, and only if somebody opens it.
+            placeTotal = (try? await client.places(spaceID: space.id, limit: 1))?.total ?? 0
         }
         // Keyed on the space so switching personal libraries rebuilds it, and
         // separate from the albums load because either can fail alone.
@@ -287,6 +316,9 @@ struct AlbumsView: View {
                     }
                     manual(store, side: side)
                     sharedAlbums()
+                    if let space = session.personalSpace {
+                        places(space: space)
+                    }
                     if let space = session.personalSpace, let found = collections?.page {
                         utilities(found, space: space)
                     }
@@ -517,6 +549,32 @@ struct AlbumsView: View {
     /// Set with a little more care than a list header usually gets: tighter
     /// tracking and a touch more weight, because these are the only words on
     /// the page that aren't either a photograph or a fact about one.
+    /// A way in by *where*, which for an old library is often the only way in
+    /// somebody has.
+    ///
+    /// "Somewhere near the lake, a few summers ago" is a question a person can
+    /// actually ask; "August 2021" usually isn't. Every photograph with GPS
+    /// already carries a place name from import, so this costs nothing to offer
+    /// and gets better as the library grows.
+    ///
+    /// Reuses Search's list rather than growing a second one, and a picked
+    /// place opens as a `revisit` collection, which is already keyed by place
+    /// name and already knows how to fetch one. Nothing new on the server.
+    @ViewBuilder
+    private func places(space: SpaceDTO) -> some View {
+        if placeTotal > 0 {
+            NavigationLink {
+                AllPlacesView(session: session, space: space, total: placeTotal) { name in
+                    pickedPlace = name
+                }
+            } label: {
+                utilityRow("Places", systemImage: "map", count: placeTotal)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, spacing)
+        }
+    }
+
     /// The file-shaped things, at the bottom, behind one door each.
     ///
     /// Apple gives media types a section apiece and the page becomes a filing
