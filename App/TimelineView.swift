@@ -482,20 +482,20 @@ struct TimelineView: View {
         }
         #endif
         .task(id: space.id) {
+            let newStore = session.timelineStore(for: space)
             #if os(iOS)
-            // A fresh store means a fresh grid: every loaded item discarded and
-            // the whole thing laid out again from nothing. That is a big, ugly
-            // motion if it happens while someone is looking, and a device log
-            // caught it happening five seconds after launch — items back to 0,
-            // the content collapsing and rebuilding, the offset thrown twice.
-            // This says whether the cause is this task re-firing (the space
-            // identity changed) or the view being rebuilt around it.
+            // Says how much library survived. This task runs on every
+            // appearance, so in a tab bar it runs on every tab switch, and it
+            // used to hand back a brand new store each time — the whole grid
+            // discarded and refetched, caught here eight times in three
+            // minutes. Stores are kept per space now, so a healthy line reports
+            // items already in hand; a zero after the first visit means
+            // something is dropping them again.
             LayoutWatch.shared.note(
-                "timeline task fired for space \(space.id.uuidString.prefix(8))"
-                    + " — store recreated, items discarded"
+                "timeline task for space \(space.id.uuidString.prefix(8)) — "
+                    + "\(newStore.map(loadedCount) ?? 0) items already in hand"
             )
             #endif
-            let newStore = session.timelineStore(for: space)
             store = newStore
             await newStore?.load()
         }

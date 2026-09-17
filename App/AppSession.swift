@@ -333,6 +333,9 @@ final class AppSession {
         needsTwoFactor = false
         client = nil
         loader = nil
+        // Each one holds a family's photographs and a client that is about to
+        // be invalid.
+        timelineStores.removeAll()
         user = nil
         spaces = []
         selectedSpace = nil
@@ -340,6 +343,12 @@ final class AppSession {
     }
 
     private func adopt(client: FrameStationClient, me: MeResponse) {
+        // Tied to the client they were built with, so they go when it does.
+        // Today every route out of `.connected` runs through `signOut`, which
+        // already clears them — but that is an argument about which paths
+        // happen to exist, and the invariant belongs next to the assignment
+        // that would break it.
+        timelineStores.removeAll()
         self.client = client
         self.loader = ThumbnailLoader(
             client: client, diskLimitBytes: CacheSettings.limit.bytes
@@ -390,6 +399,7 @@ final class AppSession {
             rememberSignInFields()
             persist(.init(serverURL: url, token: response.token))
 
+            timelineStores.removeAll()  // As in `adopt` — they belong to the old client.
             self.client = client
             self.loader = ThumbnailLoader(client: client)
             self.user = response.user
@@ -467,9 +477,30 @@ final class AppSession {
 
     var sharedSpaces: [SpaceDTO] { spaces.filter { $0.kind == .shared } }
 
+    /// One store per space, kept for as long as the session is.
+    ///
+    /// This used to build a fresh `TimelineStore` on every call, and
+    /// `TimelineView` asks on every appearance — which inside a `TabView` means
+    /// every single tab switch. So leaving Photos and coming back threw the
+    /// whole library away and fetched it again: `items` to zero, every cell
+    /// rebuilt, every thumbnail re-requested, the grid visibly reassembling
+    /// itself. A log from his phone caught it happening **eight times in three
+    /// minutes** of ordinary use, across his personal library and a shared one.
+    ///
+    /// Keeping them also keeps what the store has learned — which buckets are
+    /// loaded, and the zoom the user chose — so returning to a tab returns you
+    /// to the library you left rather than to a spinner.
+    ///
+    /// Cleared on `signOut`, with everything else that must not outlive the
+    /// session that fetched it.
+    private var timelineStores: [UUID: TimelineStore] = [:]
+
     func timelineStore(for space: SpaceDTO) -> TimelineStore? {
         guard let client else { return nil }
-        return TimelineStore(client: client, spaceID: space.id)
+        if let existing = timelineStores[space.id] { return existing }
+        let store = TimelineStore(client: client, spaceID: space.id)
+        timelineStores[space.id] = store
+        return store
     }
 
     // MARK: - Device identity
