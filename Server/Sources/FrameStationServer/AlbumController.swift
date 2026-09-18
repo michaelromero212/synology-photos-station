@@ -81,20 +81,11 @@ struct AlbumController: RouteCollection {
         _ = try await requireReadable(albumID, device: device, on: req.sql)
 
         let rows = try await req.sql.raw("""
-            SELECT sa.id,
-                   sa.space_id   AS "spaceID",
-                   a.id          AS "assetID",
-                   \(unsafeRaw: TimelineController.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                   a.width, a.height,
-                   a.media_type  AS "mediaType",
-                   a.duration_ms AS "durationMs",
-                   a.thumbhash   AS "thumbHash",
+            SELECT \(unsafeRaw: TimelineController.itemColumns),
                    EXISTS (
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
-                   ) AS "isFavorite",
-                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                   (a.derived_at IS NOT NULL) AS "isDerived"
+                   ) AS "isFavorite"
             FROM album_assets aa
             JOIN space_assets sa ON sa.id = aa.space_asset_id
             JOIN assets a ON a.id = sa.asset_id

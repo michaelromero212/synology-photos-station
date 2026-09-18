@@ -34,6 +34,49 @@ struct TimelineController: RouteCollection {
     /// with each other.
     static let visible = "NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)"
 
+    /// Everything `ItemRow` decodes, except the favourite flag.
+    ///
+    /// Shared because it drifted, and drifted silently. Five queries across four
+    /// controllers build a `TimelineItem`, each with its own hand-written column
+    /// list, and when `isBurst` was added to `ItemRow` two of them were not
+    /// updated — search and an album's contents. Swift's synthesised `Decodable`
+    /// requires a key for every non-optional property *whether or not it has a
+    /// default*, so both endpoints answered 400 the moment they matched
+    /// anything: search returned nothing but an error, and opening a hand-made
+    /// album failed outright. Neither had a test, and an empty album and an
+    /// empty search both look like success.
+    ///
+    /// The optional properties hid the rest of the drift rather than causing it.
+    /// A missing key decodes as nil, so `thumbVersion` absent meant a client
+    /// that could not cache-bust a regenerated thumbnail, and `sourceLocalID`
+    /// absent meant a phone that would not draw its own copy — both degraded
+    /// quietly, in two places, for as long as the lists disagreed.
+    ///
+    /// The favourite flag stays out because it needs the asking user's id as a
+    /// bound parameter, and a shared raw string cannot carry one safely. Every
+    /// caller adds that `EXISTS` itself; it is the one column that is genuinely
+    /// per-request, and it is the column nobody has ever forgotten.
+    static let itemColumns = """
+               sa.id,
+               sa.space_id   AS "spaceID",
+               a.id          AS "assetID",
+               \(localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+               a.width, a.height, a.orientation,
+               a.media_type  AS "mediaType",
+               a.duration_ms AS "durationMs",
+               a.thumbhash   AS "thumbHash",
+               COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
+               (a.derived_at IS NOT NULL) AS "isDerived",
+               (a.burst_id IS NOT NULL) AS "isBurst",
+               a.thumb_version AS "thumbVersion",
+               sa.source_local_id AS "sourceLocalID",
+               -- The paired half of a Live Photo, so the viewer can play it
+               -- from the still rather than from a tile of its own.
+               (SELECT v.id FROM assets v
+                WHERE v.live_group_id = a.live_group_id
+                  AND v.media_type = 'video' LIMIT 1) AS "liveVideoAssetID"
+        """
+
     private static func format(for zoom: TimelineZoom) -> String {
         switch zoom {
         case .year: return "YYYY"
@@ -160,28 +203,11 @@ struct TimelineController: RouteCollection {
 
         let pattern = Self.format(for: zoom)
         let rows = try await req.sql.raw("""
-            SELECT sa.id,
-                   sa.space_id   AS "spaceID",
-                   a.id          AS "assetID",
-                   \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                   a.width, a.height, a.orientation,
-                   a.media_type  AS "mediaType",
-                   a.duration_ms AS "durationMs",
-                   a.thumbhash   AS "thumbHash",
+            SELECT \(unsafeRaw: Self.itemColumns),
                    EXISTS (
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
-                   ) AS "isFavorite",
-                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                   (a.derived_at IS NOT NULL) AS "isDerived",
-                   (a.burst_id IS NOT NULL) AS "isBurst",
-                   a.thumb_version AS "thumbVersion",
-                   sa.source_local_id AS "sourceLocalID",
-                   -- The paired half of a Live Photo, so the viewer can play it
-                   -- from the still rather than from a tile of its own.
-                   (SELECT v.id FROM assets v
-                    WHERE v.live_group_id = a.live_group_id
-                      AND v.media_type = 'video' LIMIT 1) AS "liveVideoAssetID"
+                   ) AS "isFavorite"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)

@@ -78,6 +78,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND a.place_name IS NOT NULL
+              AND \(unsafeRaw: TimelineController.visible)
               AND a.place_name ILIKE \(bind: pattern)
             GROUP BY a.place_name
             ORDER BY \(unsafeRaw: ordering)
@@ -94,6 +95,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND a.place_name IS NOT NULL
+              AND \(unsafeRaw: TimelineController.visible)
               AND a.place_name ILIKE \(bind: pattern)
             """).first(decoding: CountRow.self)?.total ?? 0
 
@@ -143,28 +145,21 @@ struct SearchController: RouteCollection {
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
               AND a.place_name ILIKE \(bind: pattern)
             """).first(decoding: CountRow.self)?.total ?? 0
 
         let rows = try await req.sql.raw("""
-            SELECT sa.id,
-                   sa.space_id   AS "spaceID",
-                   a.id          AS "assetID",
-                   \(unsafeRaw: TimelineController.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                   a.width, a.height, a.orientation,
-                   a.media_type  AS "mediaType",
-                   a.duration_ms AS "durationMs",
-                   a.thumbhash   AS "thumbHash",
+            SELECT \(unsafeRaw: TimelineController.itemColumns),
                    EXISTS (
                        SELECT 1 FROM space_asset_favorites f
                        WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
-                   ) AS "isFavorite",
-                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                   (a.derived_at IS NOT NULL) AS "isDerived"
+                   ) AS "isFavorite"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
               AND a.place_name ILIKE \(bind: pattern)
             ORDER BY \(unsafeRaw: TimelineController.localTime) DESC, sa.id
             LIMIT \(bind: limit) OFFSET \(bind: offset)
