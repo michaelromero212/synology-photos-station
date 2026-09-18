@@ -154,6 +154,9 @@ enum FileUpload {
                     LinkAssetRequest(sourceLocalID: descriptor.sourceLocalID)
                 )
             }
+            #if os(iOS)
+            await rememberLocalOriginal(assetID: probe.assetID, descriptor: descriptor)
+            #endif
             return Result(
                 assetID: probe.assetID, deduplicated: true, byteSize: size, sha256: digest
             )
@@ -167,6 +170,11 @@ enum FileUpload {
             let committed = try await client.commitUpload(
                 uploadID: uploadID, descriptor.commitRequest(spaceID: spaceID)
             )
+            #if os(iOS)
+            // Before the thumbnail handover below, not after it. The grid can
+            // see this asset from the moment the commit returned.
+            await rememberLocalOriginal(assetID: committed.assetID, descriptor: descriptor)
+            #endif
             #if os(macOS)
             // The Mac's half of the thumbnail handover. iOS does this in
             // `AssetUploader`, where PhotoKit gives a better rendering than
@@ -271,6 +279,35 @@ enum FileUpload {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    #if os(iOS)
+    /// Remembers which photograph on this phone became which asset on the NAS,
+    /// at the earliest moment both are known.
+    ///
+    /// The timing is the entire point. This used to be done by the callers,
+    /// after `AssetUploader.send` returned — which is after the commit *and*
+    /// after the thumbnail handover, a second network round trip with a retry
+    /// behind it. But the server knows about the asset the instant the commit
+    /// lands, so `/changes` offers it to the grid immediately and the grid
+    /// builds a tile for it about six hundred milliseconds later. The tile
+    /// therefore asked whether this phone had the original a full second or
+    /// more before anything had said that it did, found nothing, and drew grey.
+    ///
+    /// A device log named it exactly: every blank tile read `no mapping`, while
+    /// the same run reported sixteen mappings known and fetched each blank
+    /// tile's thumbnail successfully a second or two later. The registry was
+    /// never missing the photographs. It was being told too late.
+    ///
+    /// Recorded here instead, in the one place that holds both halves at commit
+    /// time and covers every caller — backup, the share picker, and anything
+    /// added later — rather than in each of them separately.
+    private static func rememberLocalOriginal(
+        assetID: UUID?, descriptor: UploadDescriptor
+    ) async {
+        guard let assetID, let localIdentifier = descriptor.sourceLocalID else { return }
+        await LocalOriginals.shared.record(assetID: assetID, localIdentifier: localIdentifier)
+    }
+    #endif
 
     #if os(macOS)
     /// Hands the rendered thumbnail over, and never lets that failure matter.
