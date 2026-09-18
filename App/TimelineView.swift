@@ -282,19 +282,21 @@ struct TimelineView: View {
         // library case still puts it in the stack in `body`, where there is no
         // scroll view for it to disturb.
         .overlay(alignment: .bottom) {
+            // Only the connection banner floats now, and only because it is an
+            // error rather than a status: a NAS that isn't answering breaks
+            // browsing, and saying so where somebody is already looking is worth
+            // covering a row for. Backup status went to the end of the library
+            // instead — see `libraryFooter`.
+            //
             // Not while selecting. The selection bar goes here too, and of the
-            // two only one is something to act on — "Photo Backup Complete" can
-            // wait the few seconds it takes to choose some photographs. Without
-            // this it was drawn straight through the Share and Delete labels.
-            if let engine, showsGrid, !selection.isActive {
-                backupBanner(engine)
-                    // Above the floating bar, not through it. Eight points off
-                    // the safe area was right when the system drew the tab bar
-                    // and reserved its own space; ours floats twenty-one points
-                    // from the bottom of the *display* and reserves nothing, so
-                    // the banner was being drawn straight across the pill —
-                    // "Photo Backup Complete" legible through "Albums". This is
-                    // the same measurement every screen already keeps clear.
+            // two only one is something to act on.
+            //
+            // Above the floating bar, not through it: eight points off the safe
+            // area was right when the system drew the tab bar and reserved its
+            // own space, and ours floats twenty-one points from the bottom of
+            // the display and reserves nothing.
+            if let connection, connection.state != .online, showsGrid, !selection.isActive {
+                connectionBanner(connection.state)
                     .padding(.bottom, FloatingTabBarMetrics.contentInset)
                     .allowsHitTesting(true)
             }
@@ -1553,16 +1555,19 @@ struct TimelineView: View {
                         }
                     }
 
-                    // The backup banner used to live here, at the end of the
-                    // scroll content, so it would scroll away with the photos.
-                    // It is an overlay now — see `body`. Anything in here that
-                    // can appear or disappear resizes the content underneath a
-                    // grid anchored to its own end, and the user dismissing it
-                    // is exactly that: the library jumped by the banner's height
-                    // every time someone closed it, which is the "glitch when I
-                    // press the X" reported three times over.
+                    // The line the library ends on — see `libraryFooter`.
                     //
-                    // Nothing that comes and goes belongs in this stack.
+                    // The old dismissible banner lived here and was moved out to
+                    // an overlay for a good reason: anything in this stack that
+                    // can appear or disappear resizes the content underneath a
+                    // grid anchored to its own end, and closing it made the
+                    // library jump by its height — the "glitch when I press the
+                    // X" reported three times over.
+                    //
+                    // That rule still holds and this does not break it. The
+                    // footer has one fixed height in every state and no way to
+                    // be dismissed, so there is nothing that comes and goes.
+                    libraryFooter
 
                     // macOS rounds the window's bottom corners, which would clip
                     // the newest row now that it rests at the very bottom — the
@@ -1855,6 +1860,98 @@ struct TimelineView: View {
             }
         }
     }
+
+
+    /// The line the library ends on, where Photos ends one.
+    ///
+    /// What it replaces was a panel floating over the newest row of somebody's
+    /// photographs, permanently, carrying a green badge, a chevron and a button,
+    /// to say "Photo Backup Complete". A finished backup is not news. Chrome
+    /// that announces a resting state is chrome that is always on screen, and
+    /// this one was — over the library, saying nothing had happened, forever.
+    ///
+    /// So it speaks only while something is happening, and otherwise says what
+    /// the library *is*: a count, quietly, at the end of it. No panel, no
+    /// chevron, no badge — the shape of the thing is a line of grey text under
+    /// the last row, which is what makes it read as part of the library rather
+    /// than as something sitting on top of it.
+    ///
+    /// One fixed height in every state, which is the condition for living in the
+    /// scroll content at all. See the note at the call site.
+    @ViewBuilder
+    private var libraryFooter: some View {
+        VStack(spacing: 6) {
+            #if os(iOS)
+            if let engine, isBackingUp(engine) {
+                Text(backingUpTitle(engine))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                progressTrack(engine)
+            } else {
+                countLine
+            }
+            #else
+            countLine
+            #endif
+        }
+        .frame(height: Self.footerHeight)
+        .frame(maxWidth: .infinity)
+        #if os(iOS)
+        // Tappable only while there is a backup to look into. A count is a fact
+        // rather than a control, and making it open something is how a footer
+        // starts being mistaken for a row.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard let engine, isBackingUp(engine) else { return }
+            showBackup = true
+        }
+        #endif
+    }
+
+    /// Two lines' worth, held whether or not the second line is drawn — see
+    /// `libraryFooter`.
+    private static let footerHeight: CGFloat = 44
+
+    private var countLine: some View {
+        Text(
+            store.map {
+                "\($0.total.formatted()) Item\($0.total == 1 ? "" : "s")"
+            } ?? " "
+        )
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+    }
+
+    #if os(iOS)
+    /// Whether there is anything to say. Backup is about this phone's camera
+    /// roll, so it has nothing to report in a shared album.
+    private func isBackingUp(_ engine: BackupEngine) -> Bool {
+        space.kind == .personal && backupSettings.enabled && engine.progress.pending > 0
+    }
+
+    private func backingUpTitle(_ engine: BackupEngine) -> String {
+        let left = engine.progress.pending
+        return "Backing Up \(left.formatted()) Item\(left == 1 ? "" : "s")"
+    }
+
+    /// A hairline, not a `ProgressView`. The stock bar is a control's width and
+    /// a control's weight; this is the same measurement drawn as quietly as the
+    /// text above it.
+    private func progressTrack(_ engine: BackupEngine) -> some View {
+        let progress = engine.progress
+        let done = max(progress.total - progress.pending, 0)
+        let fraction = progress.total > 0 ? Double(done) / Double(progress.total) : 0
+        return Capsule()
+            .fill(.quaternary)
+            .frame(width: 140, height: 3)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(.tint)
+                    .frame(width: 140 * fraction, height: 3)
+            }
+            .animation(.easeOut(duration: 0.25), value: fraction)
+    }
+    #endif
 
 
     #if os(iOS)
