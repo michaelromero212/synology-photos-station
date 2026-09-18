@@ -217,6 +217,41 @@ entirely and cannot expire. The image holds the compiled server and its runtime
 dependencies — no data, no secrets — so it is a defensible choice; it is simply a
 decision about publishing rather than about deployment.
 
+### When the pull says `denied` and the package is public
+
+A different failure with a nearly identical look, and the fix is the opposite
+one: log *out*.
+
+`unauthorized` means no credentials. **`denied` means credentials that are not
+permitted** — so Docker is logged in and being refused, which on a public package
+can only mean the stored login has gone stale. A token whose `read:packages`
+scope lapsed, or that expired, is *worse than no token at all*: Docker sends it,
+GHCR judges the authenticated request and refuses, and the anonymous path a
+public package would otherwise offer is never tried.
+
+Check whether the package is actually public before touching the NAS, from your
+Mac, with no credentials involved:
+
+```bash
+T=$(curl -s "https://ghcr.io/token?scope=repository:michaelromero212/framestation-server:pull&service=ghcr.io" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $T" \
+    https://ghcr.io/v2/michaelromero212/framestation-server/manifests/latest
+```
+
+`200` means the image is anonymously pullable and the NAS is the problem:
+
+```bash
+ssh -t nas 'sudo /usr/local/bin/docker logout ghcr.io'
+```
+
+`sudo`, because the credential is in `/root/.docker/config.json` — a logout as
+your own user clears a different file and changes nothing. Then re-run step 3.
+
+Worth knowing that repository visibility and **package** visibility are separate
+settings. Making the repo public does not touch a container package, and a
+public repo can publish a private image indefinitely without saying so.
+
 ### When a migration is pending
 
 Migrations apply automatically on first boot of the new image, atomically and
