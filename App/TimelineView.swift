@@ -1000,6 +1000,53 @@ struct TimelineView: View {
     }
     #endif
 
+    /// What has to change before the library needs re-measuring. Days arriving
+    /// is the common one; the other two are a density change and a window that
+    /// resized under an iPad.
+    private struct LibraryShapeKey: Equatable {
+        let buckets: Int
+        let zoom: TimelineZoom
+        let width: CGFloat
+    }
+
+    /// The library's height, day by day, worked out from the manifest.
+    ///
+    /// Exact on a square grid and needs nothing loaded: a day of `n` photographs
+    /// is `ceil(n / columns)` rows of `side`, under a heading that measures about
+    /// thirty-four points. The manifest carries every day's count before a single
+    /// bucket is fetched, so the whole library can be measured the moment it
+    /// arrives.
+    ///
+    /// Only where the grid is square. The justified layout sizes its rows from
+    /// aspect ratios it does not know until the photographs load, so there is
+    /// nothing honest to compute and the scrubber keeps the scroll view's own
+    /// arithmetic there.
+    private func librarySpan(_ store: TimelineStore, width: CGFloat) -> LibrarySpan? {
+        guard !PhotoGridMetrics.usesJustifiedRows, width > 0 else { return nil }
+        let side = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        var start: [String: Double] = [:]
+        var height: [String: Double] = [:]
+        var running: Double = 0
+        for bucket in sections(store) {
+            let rows = Int((Double(bucket.count) / Double(columns)).rounded(.up))
+            let grid = Double(rows) * Double(side)
+                + Double(max(rows - 1, 0)) * Double(spacing)
+            let whole = Double(Self.headerHeight) + grid
+            start[bucket.key] = running
+            height[bucket.key] = whole
+            running += whole
+        }
+        return LibrarySpan(total: running, start: start, height: height)
+    }
+
+    /// What a day's heading costs, top padding to bottom padding.
+    ///
+    /// A constant rather than a measurement: it is the same on every row, it is
+    /// already pinned by the padding in `header`, and reading it back would mean
+    /// a geometry reader per day to refine a number that only ever shifts the
+    /// thumb by a hair.
+    private static let headerHeight: CGFloat = 34
+
     /// Asks the loader to warm a day's thumbnails.
     ///
     /// Capped rather than the whole bucket: a day with six hundred photos would
@@ -1713,6 +1760,17 @@ struct TimelineView: View {
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
+            // The library's true height, refreshed whenever its shape changes —
+            // a bucket arriving, the zoom changing, the window resizing. See
+            // `librarySpan`.
+            .onChange(of: LibraryShapeKey(
+                buckets: store.buckets.count, zoom: store.zoom, width: proxy.size.width
+            ), initial: true) { _, _ in
+                scrollProgress.span = librarySpan(store, width: proxy.size.width)
+            }
+            // Which day is at the top — see `ScrollTopSectionReporter` for why
+            // this reads rather than binds.
+            .modifier(ScrollTopSectionReporter(progress: scrollProgress))
             #if os(iOS)
             // The other half of `LayoutWatch`: the geometry says the grid moved,
             // these say what it was reacting to. Without them a content-height

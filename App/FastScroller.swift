@@ -210,6 +210,10 @@ struct ScrollReport: Equatable {
     /// the grid being resized underneath the user, which is what a glitch
     /// actually is.
     var contentHeight: Double = 0
+    /// The viewport's height. Part of the scrubber's arithmetic once that stops
+    /// trusting `scrollable` — the travel is the library's height less one
+    /// screen, and the screen has to come from somewhere real.
+    var container: Double = 0
     var insetTop: Double = 0
 }
 
@@ -227,10 +231,56 @@ struct ScrollReport: Equatable {
 /// scrubber alone, while `chromeHidden` flips a handful of times per scroll and
 /// is the only property the grid itself reads. `@Observable` tracks per
 /// property, so the grid is invalidated by the flip and never by the frame.
+/// The library's true shape, so the scrubber need not ask the scroll view how
+/// tall the content is.
+///
+/// It cannot ask, and that is the whole reason this exists. A `LazyVStack`
+/// guesses at the sections it has not built, and measured on a real library the
+/// guess came out at seven times the truth and never settled — so a thumb
+/// positioned by `offset / contentHeight` lurched whenever a guess collapsed,
+/// and rested a third of the way down a track at the end of the library.
+///
+/// The manifest knows better than the scroll view ever will. It carries every
+/// day and its count before a single photograph loads, and on a square grid a
+/// day's height follows from its count exactly. So the heights come from there
+/// and the scroll view is asked only where it is, never how big it is.
+struct LibrarySpan: Equatable {
+    /// Height of the whole library, in points.
+    var total: Double
+    /// Where each day begins, and how tall it is.
+    var start: [String: Double]
+    var height: [String: Double]
+
+    static let empty = LibrarySpan(total: 0, start: [:], height: [:])
+}
+
 @Observable
 @MainActor
 final class ScrollProgress {
     var fraction: Double = 0
+
+    /// Set by the grid whenever the library's shape changes. Nil falls back to
+    /// the scroll view's own geometry, which is what every platform without a
+    /// square grid still uses.
+    @ObservationIgnored var span: LibrarySpan?
+
+    /// The topmost day on screen, reported one-way by the scroll view.
+    ///
+    /// One-way matters: a `scrollPosition` *binding* writes back, and its
+    /// write-back turned every content-size wobble into a re-scroll — the grid
+    /// never stopped moving. This only ever reads.
+    @ObservationIgnored var topKey: String? {
+        didSet {
+            guard topKey != oldValue else { return }
+            // Re-baselined at every day boundary. The scroll view's *total* is a
+            // guess, but its *rate* is true over content it has actually built,
+            // so measuring from the top of the current day keeps the error
+            // inside one day and resets it a few seconds later.
+            baseline = nil
+        }
+    }
+
+    private var baseline: Double?
 
     /// Names this grid's scroll view for the diagnostics, and nothing else.
     ///
@@ -268,6 +318,30 @@ final class ScrollProgress {
     /// (never per frame), so the one view that reads it is cheap to invalidate.
     var topBarHidden = false
 
+    /// Where the grid is in the *library*, rather than in the scroll view's idea
+    /// of itself. Nil when there is no manifest to go on.
+    ///
+    /// Two parts: the days above the one on screen, which the manifest gives
+    /// exactly, and how far through that day the grid has come, which only the
+    /// scroll view knows. The second is what keeps the thumb gliding through a
+    /// holiday of three hundred photographs instead of resting on its day and
+    /// stepping when the day turns.
+    private func trueFraction(_ report: ScrollReport) -> Double? {
+        guard let span, span.total > 0, let topKey,
+              let start = span.start[topKey], let height = span.height[topKey]
+        else { return nil }
+
+        if baseline == nil { baseline = report.offset }
+        let within = height > 1
+            ? ((report.offset - (baseline ?? report.offset)) / height).clamped(to: 0...1)
+            : 0
+        // The travel is the library less one screen: at the end, the last screen
+        // is on screen, and the thumb belongs at the bottom rather than a
+        // screen short of it.
+        let travel = max(span.total - report.container, 1)
+        return ((start + within * height) / travel).clamped(to: 0...1)
+    }
+
     private var lastOffset: Double = 0
     private var haveOffset = false
     /// One-way accumulated travel, so a decisive run flips the bar rather than a
@@ -275,9 +349,11 @@ final class ScrollProgress {
     private var travel: Double = 0
 
     func apply(_ report: ScrollReport) {
-        let next = report.scrollable > 1
-            ? (report.offset / report.scrollable).clamped(to: 0...1)
-            : 0
+        let next = trueFraction(report) ?? (
+            report.scrollable > 1
+                ? (report.offset / report.scrollable).clamped(to: 0...1)
+                : 0
+        )
         // Guarded: `@Observable` notifies on every set, equal value or not.
         if fraction != next { fraction = next }
         trackDirection(offset: report.offset)
@@ -348,6 +424,30 @@ final class ScrollProgress {
 ///
 /// `onScrollGeometryChange` is iOS 18; on 17 the scrubber still scrubs and the
 /// chrome simply stays up — a graceful loss rather than a broken screen.
+/// Reports the topmost day on screen, one way only.
+///
+/// `scrollPosition` would report the same thing and is a *binding*: it writes
+/// back, and the write-back turned every content-size wobble into a re-scroll
+/// until the grid never settled. This reads and never writes, which is the only
+/// reason the scrubber is allowed to know where the grid is at all.
+///
+/// iOS 18, like the geometry reporter beside it. Below that the scrubber keeps
+/// the scroll view's own arithmetic, which is what it always had.
+struct ScrollTopSectionReporter: ViewModifier {
+    let progress: ScrollProgress
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, tvOS 18.0, *) {
+            content.onScrollTargetVisibilityChange(idType: String.self) { visible in
+                guard let first = visible.first else { return }
+                progress.topKey = first
+            }
+        } else {
+            content
+        }
+    }
+}
+
 struct ScrollActivityReporter: ViewModifier {
     let progress: ScrollProgress
 
@@ -359,6 +459,7 @@ struct ScrollActivityReporter: ViewModifier {
                     scrollable: geometry.contentSize.height - geometry.containerSize.height,
                     toEnd: geometry.contentSize.height - geometry.visibleRect.maxY,
                     contentHeight: geometry.contentSize.height,
+                    container: geometry.containerSize.height,
                     insetTop: geometry.contentInsets.top
                 )
             } action: { _, report in
