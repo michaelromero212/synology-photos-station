@@ -1000,6 +1000,50 @@ struct TimelineView: View {
     }
     #endif
 
+    /// Where the thumb is pointing, and the load it will eventually ask for.
+    @State private var scrubTarget: String?
+    @State private var scrubLoad: Task<Void, Never>?
+
+    /// Follows the thumb without fetching everything it passes over.
+    ///
+    /// This used to ask the NAS for every day the thumb crossed. Dragging from
+    /// this year to 2019 is a few hundred days, so it was a few hundred queries
+    /// and a few hundred bursts of random read on a box with spinning disks —
+    /// for days nobody was going to look at, arriving after the drag had already
+    /// gone past them. The scrubber exists to *skip* that work; it was creating
+    /// it instead.
+    ///
+    /// Debounced rather than deferred to the release, because holding the thumb
+    /// still over a month is a request to see that month — a quarter of a second
+    /// of stillness is the difference between passing through and arriving.
+    ///
+    /// Only the *explicit* load is dropped. Each day's own `.task` still runs
+    /// when its section is realized, and that one is tied to the section's
+    /// lifetime, so a day the drag sweeps past has its request cancelled when it
+    /// leaves the screen a frame later. The difference is between work that can
+    /// be called off and work that cannot.
+    private func scrub(
+        to bucket: TimelineBucket, in store: TimelineStore, scroller: ScrollViewProxy
+    ) {
+        scroller.scrollTo(bucket.key, anchor: .top)
+        scrubTarget = bucket.key
+        scrubLoad?.cancel()
+        scrubLoad = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            await store.loadBucket(bucket.key)
+        }
+    }
+
+    /// The one day that is definitely wanted: the one under the thumb when it
+    /// was let go. Asked for immediately rather than waiting out the debounce.
+    private func scrubEnded(in store: TimelineStore) {
+        scrubLoad?.cancel()
+        guard let key = scrubTarget else { return }
+        scrubTarget = nil
+        Task { await store.loadBucket(key) }
+    }
+
     /// What has to change before the library needs re-measuring. Days arriving
     /// is the common one; the other two are a density change and a window that
     /// resized under an iPad.
@@ -1903,18 +1947,20 @@ struct TimelineView: View {
                             buckets: store.buckets,
                             progress: scrollProgress
                         ) { bucket in
-                            scroller.scrollTo(bucket.key, anchor: .top)
-                            Task { await store.loadBucket(bucket.key) }
-                        } onScrubEnd: {}
+                            scrub(to: bucket, in: store, scroller: scroller)
+                        } onScrubEnd: {
+                            scrubEnded(in: store)
+                        }
                         .padding(.vertical, 6)
                     } else {
                         FastScroller(
                             buckets: store.buckets,
                             progress: scrollProgress
                         ) { bucket in
-                            scroller.scrollTo(bucket.key, anchor: .top)
-                            Task { await store.loadBucket(bucket.key) }
-                        } onScrubEnd: {}
+                            scrub(to: bucket, in: store, scroller: scroller)
+                        } onScrubEnd: {
+                            scrubEnded(in: store)
+                        }
                         .padding(.vertical, 6)
                     }
                 }
