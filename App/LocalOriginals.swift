@@ -58,6 +58,11 @@ final class LocalOriginals {
 
     func localIdentifier(for assetID: UUID) -> String? { byAsset[assetID] }
 
+    /// How many photographs this phone can draw without asking the NAS. Read
+    /// when a diagnostics log is exported — a small number here is itself the
+    /// answer to "why didn't the local copy help".
+    var coverage: Int { byAsset.count }
+
     /// Seeds from the durable upload queue at launch.
     ///
     /// The queue already stores both halves of the pair and survives being

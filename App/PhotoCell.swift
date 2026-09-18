@@ -193,7 +193,7 @@ struct PhotoCell: View {
         // Painting the local copy up front closes it. No network, same
         // photograph, and the server's own rendering replaces it below when it
         // arrives.
-        await paintLocalOriginal()
+        let local = await paintLocalOriginal()
         #endif
 
         // 202 while the derivation queue is behind: keep what we have rather
@@ -211,14 +211,25 @@ struct PhotoCell: View {
             //
             // One request, and a 202 if it really isn't ready, which costs the
             // NAS almost nothing and cannot cache a miss.
-            if let loader,
-               let loaded = await loader.thumbnail(
-                   assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
-                   version: item.thumbnailVersion
-               ) {
-                image = loaded
-                isLocalOriginal = false
+            var asked = false
+            if let loader {
+                asked = true
+                if let loaded = await loader.thumbnail(
+                    assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                    version: item.thumbnailVersion
+                ) {
+                    image = loaded
+                    isLocalOriginal = false
+                }
             }
+            #if os(iOS)
+            if image == nil {
+                ThumbnailWatch.shared.blank(
+                    assetID: item.assetID, isDerived: item.isDerived,
+                    local: local, server: asked ? .refused : .notAsked
+                )
+            }
+            #endif
             return
         }
 
@@ -247,6 +258,17 @@ struct PhotoCell: View {
             guard !Task.isCancelled else { return }
         }
 
+        #if os(iOS)
+        // Derived, asked three times, and still nothing to draw. Whether the
+        // local copy covered it is the fact that separates "the NAS is busy"
+        // from "this shortcut doesn't reach these photographs".
+        if image == nil {
+            ThumbnailWatch.shared.blank(
+                assetID: item.assetID, isDerived: item.isDerived,
+                local: local, server: .refused
+            )
+        }
+        #endif
     }
 
     #if os(iOS)
@@ -266,24 +288,27 @@ struct PhotoCell: View {
     ///
     /// The stream is two-phase — PhotoKit sends a fast degraded frame and then
     /// the full one — so the tile fills almost immediately and then sharpens.
-    private func paintLocalOriginal() async {
-        guard image == nil || isLocalOriginal,
-              let localIdentifier = LocalOriginals.shared.localIdentifier(for: item.assetID),
-              let asset = PhotoLibraryScanner.asset(for: localIdentifier)
-        else { return }
+    @discardableResult
+    private func paintLocalOriginal() async -> ThumbnailWatch.Local {
+        guard image == nil || isLocalOriginal else { return .painted }
+        guard let localIdentifier = LocalOriginals.shared.localIdentifier(for: item.assetID)
+        else { return .noMapping }
+        guard let asset = PhotoLibraryScanner.asset(for: localIdentifier)
+        else { return .notOnDevice }
 
         let pixels = CGFloat(PhotoGridMetrics.thumbnailPixels)
         for await thumbnail in PhotoLibraryScanner.thumbnails(
             for: asset, targetSize: CGSize(width: pixels, height: pixels)
         ) {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return .painted }
             // The server's rendering may have landed while this stream was
             // still delivering. It wins: stop, rather than paint over it with
             // the borrowed copy.
-            guard image == nil || isLocalOriginal else { return }
+            guard image == nil || isLocalOriginal else { return .painted }
             image = thumbnail
             isLocalOriginal = true
         }
+        return image == nil ? .empty : .painted
     }
     #endif
 

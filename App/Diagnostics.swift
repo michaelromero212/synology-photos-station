@@ -27,6 +27,8 @@ final class Diagnostics {
         case launch = "Launch"
         /// Anything that moves the grid when the user didn't. See `LayoutWatch`.
         case layout = "Layout"
+        /// A tile that ended up with no picture, and why. See `ThumbnailWatch`.
+        case thumbnail = "Thumbnail"
 
         /// Read at a glance when skimming a long log.
         var symbol: String {
@@ -39,6 +41,7 @@ final class Diagnostics {
             case .measurement: return "📊"
             case .launch: return "🚀"
             case .layout: return "📐"
+            case .thumbnail: return "🖼️"
             }
         }
     }

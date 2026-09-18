@@ -25,6 +25,11 @@ struct DiagnosticsExportButton: View {
     var body: some View {
         Button {
             do {
+                // Flush what the watchers are holding before the file is
+                // written, so a log exported the moment something looks wrong
+                // carries the tally rather than the last twenty-second one.
+                ThumbnailWatch.shared.summarise()
+                ThumbnailWatch.shared.noteCoverage(LocalOriginals.shared.coverage)
                 report = Report(url: try Diagnostics.shared.exportFile())
             } catch {
                 failure = error.localizedDescription
