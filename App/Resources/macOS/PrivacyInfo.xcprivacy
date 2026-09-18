@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Apple requires this of every app submitted since May 2024, and refuses the
+  upload without it when the binary touches a "required reason" API. Two of them
+  are reached here, and both for the plainest possible reason.
+
+  Nothing is collected. That is a real answer rather than an omission: the
+  photographs go to the family's own NAS over their own network, and neither
+  they nor anything about them reaches the developer or any third party. There
+  is no analytics SDK, no crash reporter and no tracking, which is why
+  NSPrivacyCollectedDataTypes is empty and NSPrivacyTracking is false.
+
+  Kept per platform rather than shared, because each target excludes the other
+  platforms' Resources directory — see project.yml. The three files are
+  identical and should be changed together.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <!-- Appearance, playback quality, backup settings, the last
+                 registered push token. This app's own preferences and nothing
+                 else, which is exactly what CA92.1 covers. -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- The thumbnail cache stamps and reads modification dates to
+                 decide what to evict — see ThumbnailLoader. Every file it
+                 touches is inside this app's own container, which is C617.1. -->
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

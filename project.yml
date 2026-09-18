@@ -32,7 +32,18 @@ settings:
     SWIFT_VERSION: "5.9"
     # SOURCE OF TRUTH for version + build. XcodeGen overwrites Xcode's General
     # tab on every `xcodegen generate`, so ALWAYS set these here, not in Xcode.
-    MARKETING_VERSION: "0.1"
+    #
+    # These only became the source of truth when each target's Info.plist was
+    # pointed at them. XcodeGen writes its own defaults — 1.0 and 1, as
+    # literals — into any plist that doesn't say otherwise, so for a while this
+    # said 0.1 while every build came out 1.0 and nothing reported the
+    # disagreement. That is a quiet way to lose an afternoon to TestFlight:
+    # App Store Connect refuses a build number it has already seen, and bumping
+    # the number here would have changed nothing at all.
+    MARKETING_VERSION: "1.0"
+    # Bumped for every upload. App Store Connect will not take the same build
+    # number twice against one version, and the error it gives arrives after
+    # the upload rather than before it.
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: "47453G7Q89"
     CODE_SIGN_STYLE: Automatic
@@ -66,6 +77,16 @@ targets:
         # separate app — see its own bundle id in the Debug config below — but it
         # is kept apart by identity, not by wearing a different name.
         CFBundleDisplayName: $(APP_DISPLAY_NAME)
+        # Pointed at the build settings rather than left to XcodeGen's literals
+        # — see MARKETING_VERSION above for what that cost.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Required at the top level of the built plist, and `actool` only wrote
+        # it *nested* inside CFBundleIcons here — verified by reading the
+        # archive. Declaring it is identical to what the catalog produces, so it
+        # is free either way, and it is the difference between an upload that
+        # goes through and ITMS-90713.
+        CFBundleIconName: AppIcon
         # Pinned to the app's own background rather than left as `{}`.
         #
         # An empty launch screen follows the *device's* appearance, while the
@@ -188,6 +209,8 @@ targets:
       path: App/Resources/macOS/Info.plist
       properties:
         CFBundleDisplayName: FrameStation
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network to browse your family library.
@@ -223,6 +246,8 @@ targets:
       path: App/Resources/tvOS/Info.plist
       properties:
         CFBundleDisplayName: FrameStation
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network to browse your family library.
         NSBonjourServices:
