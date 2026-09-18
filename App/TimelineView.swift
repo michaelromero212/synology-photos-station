@@ -1880,7 +1880,7 @@ struct TimelineView: View {
     /// scroll content at all. See the note at the call site.
     @ViewBuilder
     private var libraryFooter: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             #if os(iOS)
             if let engine, isBackingUp(engine) {
                 Text(backingUpTitle(engine))
@@ -1908,9 +1908,17 @@ struct TimelineView: View {
         #endif
     }
 
-    /// Two lines' worth, held whether or not the second line is drawn — see
-    /// `libraryFooter`.
-    private static let footerHeight: CGFloat = 44
+    /// Two lines' worth and not a point more, held whether or not the second
+    /// line is drawn — see `libraryFooter`.
+    ///
+    /// The distance this controls is the one people actually see: the last row
+    /// of photographs sits the bar's clearance *plus this* above the tab bar, so
+    /// every point here is a point of emptiness at the end of the library. At 44
+    /// it measured fifty-four points from the last photo to the bar, which is
+    /// more than a third of a tile of nothing. Twenty-eight holds the tallest
+    /// state — a line of text, four points, and the hairline — with a couple of
+    /// points to spare, and brings that distance to thirty-six.
+    private static let footerHeight: CGFloat = 28
 
     private var countLine: some View {
         Text(
@@ -1943,11 +1951,11 @@ struct TimelineView: View {
         let fraction = progress.total > 0 ? Double(done) / Double(progress.total) : 0
         return Capsule()
             .fill(.quaternary)
-            .frame(width: 140, height: 3)
+            .frame(width: 140, height: 2)
             .overlay(alignment: .leading) {
                 Capsule()
                     .fill(.tint)
-                    .frame(width: 140 * fraction, height: 3)
+                    .frame(width: 140 * fraction, height: 2)
             }
             .animation(.easeOut(duration: 0.25), value: fraction)
     }
