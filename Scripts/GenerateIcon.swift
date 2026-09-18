@@ -190,6 +190,47 @@ func drawGradientLayer(width: CGFloat, height: CGFloat) -> CGImage? {
     return context.makeImage()
 }
 
+/// Gradient and mark together, for the wide banner an Apple TV shows above the
+/// app grid.
+///
+/// Not the layer stack: the top shelf is one flat image, and it is very wide —
+/// 1920×720 up to 4640×1440 — so `drawMarkLayer`'s "fill the short edge" rule
+/// would put a mark the full height of the banner, which reads as a logo
+/// shouting rather than a home screen. `markHeight` keeps it to a fraction of
+/// the height, centred, with the gradient carrying the rest.
+func drawBanner(width: CGFloat, height: CGFloat, markHeight: CGFloat = 0.52) -> CGImage? {
+    guard let context = CGContext(
+        data: nil,
+        width: Int(width),
+        height: Int(height),
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+    ) else { return nil }
+    context.setAllowsAntialiasing(true)
+    context.interpolationQuality = .high
+
+    let gradient = CGGradient(
+        colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+        colors: [deepCrimson.cg(), crimson.cg(), coral.cg()] as CFArray,
+        locations: [0.0, 0.62, 1.0]
+    )!
+    context.drawLinearGradient(
+        gradient,
+        start: CGPoint(x: 0, y: height),
+        end: CGPoint(x: width, y: 0),
+        options: []
+    )
+
+    let side = height * markHeight
+    let plate = CGRect(
+        x: (width - side) / 2, y: (height - side) / 2, width: side, height: side
+    )
+    drawFrames(in: context, plate: plate)
+    return context.makeImage()
+}
+
 // MARK: - Output
 
 func write(_ image: CGImage, to url: URL) {
@@ -296,6 +337,59 @@ for entry in macOSSizes {
         write(image, to: appRoot.appendingPathComponent(
             "macOS/Assets.xcassets/AppIcon.appiconset/\(entry.name).png"
         ))
+    }
+}
+
+// tvOS: the brand assets, which are the reason a tvOS build can be uploaded at
+// all. Without an "App Icon & Top Shelf Image" collection `actool` warns and the
+// App Store refuses the build — and for a long time this script drew the layers
+// into Design/Icon and stopped there, with no catalog for them to go into.
+//
+// The shapes are fixed by tvOS and are not guesses: the icon is 400×240 at 1x,
+// the App Store copy of it is a single 1280×768, and the two top shelves are
+// 1920×720 and 2320×720 at 1x. Each is a *layer stack* rather than a flat
+// image, which is what lets the focus engine part the frames from their
+// background as you move the remote across the row.
+let tvBrand = appRoot.appendingPathComponent(
+    "tvOS/Assets.xcassets/App Icon & Top Shelf Image.brandassets", isDirectory: true
+)
+
+/// One layer stack: the gradient behind, the frames in front, at every scale
+/// the catalog declares.
+func writeStack(_ stack: String, sizes: [(suffix: String, width: CGFloat, height: CGFloat)]) {
+    for size in sizes {
+        if let image = drawGradientLayer(width: size.width, height: size.height) {
+            write(image, to: tvBrand.appendingPathComponent(
+                "\(stack)/Back.imagestacklayer/Content.imageset/Back\(size.suffix).png"
+            ))
+        }
+        // Transparent outside the mark, or the front layer would hide the
+        // background it is supposed to float above.
+        if let image = drawMarkLayer(width: size.width, height: size.height) {
+            write(image, to: tvBrand.appendingPathComponent(
+                "\(stack)/Front.imagestacklayer/Content.imageset/Front\(size.suffix).png"
+            ))
+        }
+    }
+}
+
+writeStack("App Icon.imagestack", sizes: [("", 400, 240), ("@2x", 800, 480)])
+writeStack("App Icon - App Store.imagestack", sizes: [("", 1280, 768)])
+
+for shelf in [
+    (name: "TopShelf", width: CGFloat(1920), height: CGFloat(720)),
+    (name: "TopShelfWide", width: CGFloat(2320), height: CGFloat(720)),
+] {
+    for scale in [(suffix: "", factor: CGFloat(1)), (suffix: "@2x", factor: CGFloat(2))] {
+        if let image = drawBanner(
+            width: shelf.width * scale.factor, height: shelf.height * scale.factor
+        ) {
+            let folder = shelf.name == "TopShelf"
+                ? "Top Shelf Image.imageset" : "Top Shelf Image Wide.imageset"
+            write(image, to: tvBrand.appendingPathComponent(
+                "\(folder)/\(shelf.name)\(scale.suffix).png"
+            ))
+        }
     }
 }
 

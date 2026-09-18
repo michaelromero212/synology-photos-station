@@ -212,6 +212,11 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
+        # Required of every Mac App Store submission, and the rejection for
+        # omitting it arrives after the upload rather than during it. There is
+        # no ambiguity about which one this is.
+        LSApplicationCategoryType: public.app-category.photography
+        NSHumanReadableCopyright: © 2026 Michael Romero
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: FrameStation connects to your NAS over your home network to browse your family library.
         NSBonjourServices:
@@ -226,6 +231,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.michaelromero.FrameStation
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Required to notarise a direct download, which is the other way this
+        # app could reach a Mac, and harmless on the App Store path — where the
+        # sandbox above is the requirement. Off by default in a generated
+        # project, and the failure arrives from the notary service long after
+        # the build succeeded, which is a bad time to learn it.
+        #
+        # Nothing here needs an exception to it: no JIT, no unsigned executable
+        # memory, no loading of plug-ins the app did not ship.
+        ENABLE_HARDENED_RUNTIME: "YES"
     dependencies:
       - package: FrameStationKit
         product: FrameStationKit

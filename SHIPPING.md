@@ -86,10 +86,44 @@ plainly — that it is a client for a self-hosted server on the tester's own
 network, and give them a test host and invite code if one can be exposed, or
 explain that sign-in cannot be completed without one.
 
-## Not ready
+## The other two platforms
 
-- **tvOS.** Its asset catalog has no App Icon & Top Shelf Image brand assets, so
-  the build warns and an upload would be refused. That is layered-image design
-  work rather than a configuration fix.
-- **macOS.** It builds and is sandboxed, but the Mac App Store also wants
-  hardened runtime and notarization, neither of which has been set up.
+Both archive clean in Release, with dSYMs and the privacy manifest in the
+bundle. Each is its own app record in App Store Connect and its own upload;
+they share a bundle identifier, which is allowed and is what makes them one
+product to a buyer.
+
+### tvOS
+
+An Apple TV app is refused without an **App Icon & Top Shelf Image** brand
+assets collection, and for a long time there wasn't one — `Scripts/GenerateIcon.swift`
+drew the layers into `Design/Icon` and stopped, with no catalog for them to go
+into. The catalog exists now and the generator fills it, so the artwork cannot
+drift from what ships:
+
+- **App Icon**, 400×240 and 800×480, as a two-layer stack — gradient behind,
+  frames in front. The stack is not decoration: it is what lets the focus
+  engine part the layers as the remote moves across the row.
+- **App Icon – App Store**, a single 1280×768, same two layers.
+- **Top Shelf Image** at 1920×720, **Top Shelf Image Wide** at 2320×720, each
+  with a @2x. These are flat rather than layered, and the mark is kept to about
+  half the height — a top shelf is a backdrop, not a poster.
+
+Re-run `swift Scripts/GenerateIcon.swift` after any change to the mark; it
+writes every platform's catalog in one pass, which is the point of it.
+
+### macOS
+
+- **`LSApplicationCategoryType`** is required of every Mac App Store submission
+  and the rejection for omitting it arrives after the upload. Set to
+  photography.
+- **Hardened runtime** is on. It is what notarisation needs if this is ever
+  distributed directly, and it costs nothing on the App Store path — where the
+  sandbox is the requirement, and that was already set.
+- Distribution needs a **Mac App Distribution** certificate and a provisioning
+  profile carrying the sandbox entitlement. Same account, same first-time
+  automatic creation as iOS.
+
+TestFlight covers macOS, so family can test the Mac app the same way. tvOS has
+no TestFlight of its own — testers install it from the App Store tab on the
+Apple TV once they are in a TestFlight group for the app.
