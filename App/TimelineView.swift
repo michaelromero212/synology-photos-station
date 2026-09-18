@@ -521,6 +521,9 @@ struct TimelineView: View {
         .onChange(of: session.pendingUploads.completedBatches) { _, _ in
             Task { await store?.refresh() }
         }
+        .onChange(of: uploadingDay) { previous, current in
+            followUpload(from: previous, to: current)
+        }
         #endif
         #if os(macOS)
         // The same courtesy for a Mac upload, which had none.
@@ -1312,6 +1315,44 @@ struct TimelineView: View {
         let localIdentifier: String
         let state: UploadState
         let capturedAt: Date
+    }
+
+    /// The day holding whatever is on the wire right now, or nil when nothing is.
+    ///
+    /// Read from the tiles this grid is already drawing rather than from the
+    /// engine, which means it is right for a shared album as well as for the
+    /// library: `queuedByDay` is scoped to this space, so an upload bound
+    /// somewhere else never moves this screen.
+    private var uploadingDay: String? {
+        let zoom = store?.zoom ?? .day
+        for (_, tiles) in queuedByDay {
+            if let sending = tiles.first(where: { $0.state == .uploading }) {
+                return Self.dayKey(sending.capturedAt, zoom: zoom)
+            }
+        }
+        return nil
+    }
+
+    /// Goes to meet the photographs as they arrive.
+    ///
+    /// The grid opens on the newest day, and an upload very often isn't there —
+    /// a backlog being backed up, or a folder of last summer being added — so
+    /// without this the tiles appear correctly and invisibly, somewhere up the
+    /// library, and you would have to go looking for the thing you just started.
+    ///
+    /// Once per run, and only on the way *up*: `previous == nil` is the moment
+    /// the first item goes on the wire. Following each item instead would drag
+    /// the grid along behind a backup, one jump per photograph, which is the
+    /// opposite of helpful.
+    ///
+    /// And never while you are doing something else with the screen. A jump is
+    /// worth it when you are watching the grid and not when you are choosing
+    /// photos in it or looking at one full-screen — moving the floor under
+    /// either of those is how a nicety becomes a bug report.
+    private func followUpload(from previous: String?, to current: String?) {
+        guard previous == nil, let current else { return }
+        guard !selection.isActive, openItem == nil else { return }
+        pendingJump = current
     }
 
     /// The photo's own wall clock, matching how the server buckets it.
