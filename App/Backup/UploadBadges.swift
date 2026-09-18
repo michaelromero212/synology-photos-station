@@ -46,8 +46,18 @@ struct UploadStateBadge: View {
                     )
                     .onAppear { spin = true }
             case .uploaded:
+                // Green, and the only colour on any of these badges.
+                //
+                // The other two states are in progress and read fine in white:
+                // they are the app saying "working". This one is the app saying
+                // "safe", which is the single fact somebody watching a backup
+                // is waiting for, and it deserves to be findable at a glance
+                // across a screenful of tiles rather than legible only once you
+                // look straight at it. Synology uses green here for the same
+                // reason and it is the right call.
                 Image(systemName: "checkmark.icloud.fill")
                     .font(.system(size: size * 0.55, weight: .semibold))
+                    .foregroundStyle(.green)
             }
         }
         .foregroundStyle(.white)

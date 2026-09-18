@@ -174,41 +174,44 @@ struct PhotoCell: View {
         // task re-runs and should go and get it.
         if image != nil, !isLocalOriginal { return }
 
-        // The ThumbHash placeholder was seeded in `init`, so it is already on
-        // screen — no decode here, and no grey frame before it.
+        #if os(iOS)
+        // The copy on this phone, first — before asking anybody for anything.
         //
-        // 202 while the derivation queue is behind: keep the placeholder rather
+        // This is the pause. While a photograph uploads, `PendingTile` draws it
+        // from the camera roll, so it is on screen with its badge. The instant
+        // the upload commits that tile retires and a `PhotoCell` takes its
+        // place — a different view, starting from nothing, which then has to
+        // ask the NAS for a picture the phone is still holding. The photograph
+        // never changed. The view that draws it did, and the new one threw away
+        // what the old one had.
+        //
+        // For one photo that is a blink. During a bulk backup it happens once
+        // per photograph, continuously, which is what fills the grid with grey
+        // squares that carry no badge — they are not "waiting to upload", they
+        // are already uploaded and momentarily pictureless.
+        //
+        // Painting the local copy up front closes it. No network, same
+        // photograph, and the server's own rendering replaces it below when it
+        // arrives.
+        await paintLocalOriginal()
+        #endif
+
+        // 202 while the derivation queue is behind: keep what we have rather
         // than requesting an image that isn't there yet. The grid is told when
         // that changes — see DerivationWorker — and this task is keyed on it.
         guard item.isDerived, let loader else {
-            // Except when the picture is already on this phone.
-            //
-            // "Keep the placeholder" assumed there was one. For anything just
-            // uploaded there isn't: the ThumbHash is made *by* derivation, so
-            // until that runs the item has no thumbnail and no stand-in for one,
-            // and the tile is plain grey. Uploading a few hundred photos filled
-            // the grid with grey squares — at exactly the moment somebody is
-            // watching to see that their photographs arrived safely.
-            //
-            // So if this device is the one that uploaded it, draw it from the
-            // camera roll. Same photograph, no network, no waiting on the NAS.
-            #if os(iOS)
-            await paintLocalOriginal()
-            #endif
-
-            // And then ask the server anyway, once.
+            // Ask the server anyway, once.
             //
             // `isDerived` is what the *client* last heard, not what is true.
-            // A delta that never arrived, or one applied to a copy that was
-            // later replaced by a stale snapshot, leaves this false on an asset
-            // the NAS finished long ago — and nothing re-asks, because the
-            // task is keyed on this very flag. That is the difference between a
-            // tile that is briefly grey and one that is grey for good.
+            // A delta that never arrived, or one applied to a copy later
+            // replaced by a stale snapshot, leaves this false on an asset the
+            // NAS finished long ago — and nothing re-asks, because the task is
+            // keyed on this very flag. That is the difference between a tile
+            // that is briefly grey and one that is grey for good.
             //
             // One request, and a 202 if it really isn't ready, which costs the
-            // NAS almost nothing and cannot cache a miss. Worth it: the rule is
-            // that a photograph on the server always ends up drawn.
-            if image == nil, let loader,
+            // NAS almost nothing and cannot cache a miss.
+            if let loader,
                let loaded = await loader.thumbnail(
                    assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
                    version: item.thumbnailVersion
@@ -244,23 +247,6 @@ struct PhotoCell: View {
             guard !Task.isCancelled else { return }
         }
 
-        // Three tries is about a second, and the server can easily need longer.
-        //
-        // `isDerived` says the row has been marked derived; it does not promise
-        // the bytes are servable this instant, and during a large backup they
-        // often are not — the queue is minutes deep and the answer is a 202.
-        // So a tile can burn all three attempts in the first second of being
-        // looked at and then wait, grey, until the item changes and re-runs
-        // this task.
-        //
-        // Caught on a device: an asset the server was serving perfectly well by
-        // then still had a grey tile, because the cell had given up a minute
-        // earlier and nothing had asked again since.
-        //
-        // If the photograph is on this phone, that wait is unnecessary.
-        #if os(iOS)
-        await paintLocalOriginal()
-        #endif
     }
 
     #if os(iOS)
@@ -291,6 +277,10 @@ struct PhotoCell: View {
             for: asset, targetSize: CGSize(width: pixels, height: pixels)
         ) {
             guard !Task.isCancelled else { return }
+            // The server's rendering may have landed while this stream was
+            // still delivering. It wins: stop, rather than paint over it with
+            // the borrowed copy.
+            guard image == nil || isLocalOriginal else { return }
             image = thumbnail
             isLocalOriginal = true
         }
