@@ -32,7 +32,7 @@ public enum CacheLimit: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Decimal MB/GB, the same convention the Settings app and every storage
-    /// readout on the device use. A cache labelled 500 MB that reports itself
+    /// readout on the device use. A cache labeled 500 MB that reports itself
     /// as 476 MB elsewhere reads as a bug.
     public var title: String {
         switch self {

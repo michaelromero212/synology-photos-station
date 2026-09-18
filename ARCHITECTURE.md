@@ -191,7 +191,7 @@ right photos in the right libraries, EXIF dates and dimensions read off the
 files, SHA-256 matching the bytes on disk, and `@eaDir`, `#recycle` and
 everything outside `Photos` correctly left out.
 
-**What does not come back.** Favourites, ratings, tags, captions and albums are
+**What does not come back.** Favorites, ratings, tags, captions and albums are
 in the database and nowhere else; a folder has no place to keep them. Shared
 libraries come back with one member — their owner — because the folder says a
 library exists and what it is called, but not who was in it, and guessing that
@@ -208,7 +208,7 @@ nothing is lost, it was that *the photos* are never lost.
 The chunked resumable upload protocol, the probe/commit handshake, EXIF and
 media probing, derivation, ThumbHash, timeline bucketing, spaces, albums, and
 the security model are all unchanged. SHA-256 is still computed and stored —
-it is how a re-upload is recognised and how integrity can be checked — it just
+it is how a re-upload is recognized and how integrity can be checked — it just
 no longer decides where the file lives.
 
 ## 4. Storage layout
@@ -324,7 +324,7 @@ hour ago are the same silence. The phone therefore reports: `PUT
 reports is simply never woken.
 
 The restraint is the design. Apple meters background pushes to a handful an hour
-per device and deprioritises apps that spend them on nothing, so a device is a
+per device and deprioritizes apps that spend them on nothing, so a device is a
 candidate only if it *said* it has work, is a phone or an iPad, has been quiet
 for a while (`FRAMESTATION_BACKUP_QUIET_SECONDS`, default fifteen minutes) with
 no upload arriving, and has not been nudged inside the cooldown
@@ -429,7 +429,7 @@ confirm that a space or asset exists.
 
 An album belongs to a *person*, not to a library. Nobody else can read one,
 list one, or learn that it exists — including members of a shared library whose
-photos it contains. That is the whole point: an album is how you organise, not
+photos it contains. That is the whole point: an album is how you organize, not
 something you publish.
 
 `album_assets` references a `space_asset` — the placement — rather than the bare
@@ -1000,9 +1000,9 @@ Two things had to be fixed for that split to hold, and one of them was my own
 testing. The zoom navigation transition installs an interactive dismiss that
 took a rightward drag before the pager's scroll view saw it — the data source
 was never asked for the previous page and the swipe popped the viewer back to
-the grid. Making the dismiss recognisers wait for the pager's pan
+the grid. Making the dismiss recognizers wait for the pager's pan
 (`claimHorizontalDrags`) settles that: a horizontal drag is one the pan
-recognises, so it pages; a vertical one it fails, so the dismiss runs.
+recognizes, so it pages; a vertical one it fails, so the dismiss runs.
 
 `updateUIViewController` also must not touch the pager mid-drag. During an
 interactive transition `viewControllers.first` already reports the *incoming*
@@ -1138,7 +1138,7 @@ of watching progress bars before anything is evaluable.
 | **M1a** ✅ | Upload protocol | Content-addressed blob store, hash-first idempotent probe, resumable 16 MB chunking, hash-verified commit, dedup, browse-tree hardlinks, advisory-locked `change_log`, activity rollup. 33 end-to-end assertions green. |
 | **M1b** ✅ | Media pipeline | EXIF (exiftool), video probe + poster frames (ffmpeg/ffprobe), thumbnails (libvips), ThumbHash, resumable derivation queue, thumb/preview/original serving. 33 end-to-end assertions green. **Offline reverse geocode deferred** — `place_name` is still null. |
 | **M2** ✅ | Import existing library | `import` CLI: resumable walk, `@eaDir`/`#recycle` exclusion, batched exiftool, Live Photo pairing, dedup, copy or hardlink placement. 29 assertions green. |
-| **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favourites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
+| **M3** 🟡 | Timeline | **Server done** — manifest at year/month/day zoom, per-bucket items, delta sync, asset detail with camera card + attribution. 34 assertions green. **Client** — sectioned grid with ThumbHash placeholders, two-tier thumbnail cache, Keychain credentials, space switcher, full-screen viewer, and the Information panel (camera card, MapKit location, per-user favorites, Added-by attribution). Offline reverse geocoding via a bundled GeoNames dataset. **Remaining:** `UICollectionView` swap for 100k scale. |
 | **M4** ✅ | Spaces | Create shared spaces, household directory, owner-gated membership and rename, "Add to Family Shared" from the viewer, per-member contribution counts. 34 assertions green. |
 | **M5** 🟡 | iOS backup engine | **Foreground pass done** — Photos authorisation (including an explicit limited-access warning), full library scan, durable SwiftData queue that survives termination, export → streamed SHA-256 → probe → chunked send → commit, dedup via content hash, retry cap, settings screen and grid status banner. Verified in the simulator: 11 library items → 10 blobs (a duplicate linked rather than re-sent), EXIF/GPS/place names/ThumbHashes/attribution all intact. **Background transfers done** — every chunk goes through a background `URLSession`, and a `BGProcessingTask` wakes the app to keep going. **Remaining:** `PHPersistentChangeToken` incremental rescan, Live Photo pairing, and server-side reflink placement into `/volume1/homes/<user>/…` (needs the container running as root). |
 | **M5b** ✅ | DSM login | Server-side credential exchange against `SYNO.API.Auth`, account + personal space created on first sign-in, `dsm_uid` recorded for home-directory placement. Invite flow retained as fallback. |

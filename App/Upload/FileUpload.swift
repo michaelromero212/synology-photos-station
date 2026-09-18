@@ -180,7 +180,7 @@ enum FileUpload {
             // `AssetUploader`, where PhotoKit gives a better rendering than
             // anything read back off disk; a Mac has only the file, so it
             // renders from that. Without this, everything dropped on the Mac is
-            // a grey tile on every phone until the NAS derives it.
+            // a gray tile on every phone until the NAS derives it.
             await sendThumbnail(
                 file: file, mediaType: descriptor.mediaType,
                 assetID: committed.assetID, client: client
@@ -291,7 +291,7 @@ enum FileUpload {
     /// lands, so `/changes` offers it to the grid immediately and the grid
     /// builds a tile for it about six hundred milliseconds later. The tile
     /// therefore asked whether this phone had the original a full second or
-    /// more before anything had said that it did, found nothing, and drew grey.
+    /// more before anything had said that it did, found nothing, and drew gray.
     ///
     /// A device log named it exactly: every blank tile read `no mapping`, while
     /// the same run reported sixteen mappings known and fetched each blank

@@ -88,7 +88,7 @@ public struct TimelineManifest: Codable, Sendable, Hashable {
 
 /// A single grid cell. Deliberately lean — this is multiplied by bucket size.
 public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
-    /// `space_assets.id` — the placement. Use for favourites, delete, attribution.
+    /// `space_assets.id` — the placement. Use for favorites, delete, attribution.
     public let id: UUID
     /// Which library this placement lives in. Constant across a timeline, but
     /// an album may draw from several.
@@ -112,13 +112,13 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// `PHAsset.localIdentifier` on the device that uploaded this, when there
     /// was one.
     ///
-    /// Here so a phone can recognise its own photographs without keeping a
+    /// Here so a phone can recognize its own photographs without keeping a
     /// register of them. It used to keep one, built as each upload committed,
     /// and it was always slightly too late: a commit can take seconds, the
     /// asset exists on the server for most of that, and `/changes` will hand
     /// the item to the grid before the commit response gets back to the phone.
     /// The tile then asked "is this one of mine" before anything had said yes
-    /// and drew grey. Narrowing that race is possible; closing it is not, while
+    /// and drew gray. Narrowing that race is possible; closing it is not, while
     /// the answer travels separately from the question.
     ///
     /// Sent with the item, it cannot be late. It also survives a relaunch, and
@@ -244,7 +244,7 @@ public struct SpaceChanges: Codable, Sendable, Hashable {
 
 // MARK: - Extended metadata
 
-/// One labelled value in the extended-metadata dump — a single row of the
+/// One labeled value in the extended-metadata dump — a single row of the
 /// Information panel's technical section.
 public struct MetadataEntry: Codable, Sendable, Hashable {
     /// A human label, e.g. "Focal Length" or "Handler Vendor ID".

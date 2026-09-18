@@ -22,7 +22,7 @@ import Vapor
 /// ## What comes back, and what does not
 ///
 /// The photos come back, with their EXIF, dates, places, dimensions and
-/// attribution-by-folder. Everything a person typed does not: favourites,
+/// attribution-by-folder. Everything a person typed does not: favorites,
 /// ratings, tags, captions and albums live only in the database, and a folder
 /// has nowhere to keep them. That is a real limit of the design and this
 /// command says so out loud rather than implying a clean recovery.

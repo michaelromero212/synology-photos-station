@@ -185,7 +185,7 @@ struct CollectionHeroCard: View {
                     )
 
                     // Three stops rather than two. A straight black-to-clear ramp
-                    // greys the middle of the photograph to hold text that only
+                    // grays the middle of the photograph to hold text that only
                     // sits at the bottom; weighting it low keeps the picture and
                     // still carries white type.
                     LinearGradient(
@@ -252,7 +252,7 @@ struct CollectionHeroCard: View {
         case .season: return "LOOKING BACK"
         case .recentlyDeleted: return "REMOVED"
         case .recentlyAdded: return "JUST ARRIVED"
-        case .favourites: return "YOUR FAVORITES"
+        case .favorites: return "YOUR FAVORITES"
         }
     }
 }
@@ -269,7 +269,7 @@ struct CollectionRowCard: View {
     var body: some View {
         HStack(spacing: 14) {
             // Large enough to be a photograph rather than an icon. At the 54pt
-            // it started out, every cover read as a coloured square and the row
+            // it started out, every cover read as a colored square and the row
             // looked like a settings screen.
             CollectionCover(
                 assetIDs: collection.coverAssetIDs, loader: loader, size: 256

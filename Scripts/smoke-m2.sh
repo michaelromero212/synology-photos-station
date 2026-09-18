@@ -101,7 +101,7 @@ check "group has one photo and one video" "1|1" \
 echo
 echo "=== 6. EXIF survived the batch probe ==="
 check "camera model" "iPhone 15" "$(q "select coalesce(camera_model,'-') from assets where sha256=(select sha256 from import_records where source_path like '%IMG_001.jpg' limit 1);")"
-check "capture time honours -04:00 offset" "2024-08-12 14:30:00" \
+check "capture time honors -04:00 offset" "2024-08-12 14:30:00" \
   "$(q "select to_char(captured_at at time zone 'UTC','YYYY-MM-DD HH24:MI:SS') from assets where camera_model='iPhone 15';")"
 check "videos got a duration" "1" "$(q "select count(*) from assets where media_type='video' and duration_ms > 0;")"
 

@@ -3,7 +3,7 @@ import Foundation
 
 /// Why a tile ended up with no picture.
 ///
-/// Two rounds of reasoning have now failed to explain grey tiles during a bulk
+/// Two rounds of reasoning have now failed to explain gray tiles during a bulk
 /// upload — the first blamed the derivation queue, the second blamed the handoff
 /// from the uploading tile to the uploaded one. Both were real and both are
 /// fixed, and the tiles are still there, which means the remaining cause is
@@ -25,7 +25,7 @@ import Foundation
 /// while it is busy, and the retry ladder gives up too early. `not derived ·
 /// mapped · on device` means the local paint itself is failing.
 ///
-/// Budgeted and summarised rather than unbounded: a thousand grey tiles would
+/// Budgeted and summarized rather than unbounded: a thousand gray tiles would
 /// bury the answer in its own evidence. The first few dozen are written out in
 /// full and the rest are counted, which is enough to tell a pattern from an
 /// accident.
@@ -75,13 +75,13 @@ final class ThumbnailWatch {
         // without one line per photograph.
         if Date().timeIntervalSince(lastSummary) > 20 {
             lastSummary = Date()
-            summarise()
+            summarize()
         }
     }
 
     /// Written on demand too, so exporting the log right after seeing the
     /// problem captures the tally even if the timer hasn't come round.
-    func summarise() {
+    func summarize() {
         guard !counts.isEmpty else { return }
         let body = counts.sorted { $0.value > $1.value }
             .map { "\($0.value)× \($0.key)" }

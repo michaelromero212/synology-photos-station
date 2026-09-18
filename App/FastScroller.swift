@@ -77,7 +77,7 @@ struct FastScroller: View {
                             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                             #endif
                         }
-                        // Centre the thumb on the finger rather than pinning its
+                        // Center the thumb on the finger rather than pinning its
                         // top there, or the grid sits half a thumb off from
                         // where you're pointing.
                         let raw = Double(value.location.y - thumbHeight / 2)
@@ -127,7 +127,7 @@ struct FastScroller: View {
         }
     }
 
-    /// The band, centred on the thumb, where a touch may begin a scrub.
+    /// The band, centered on the thumb, where a touch may begin a scrub.
     ///
     /// Everything outside it falls through to the scroll view, which is what
     /// keeps an ordinary swipe near the right edge from being hijacked into a
@@ -250,7 +250,7 @@ final class ScrollProgress {
 
     /// Was true while the chrome "stood down" on scroll; a constant now. Hiding
     /// a bar resizes the scroll view's safe area, and on a short library that
-    /// resize re-realised a grid row, which changed the content height, which
+    /// resize re-realized a grid row, which changed the content height, which
     /// toggled the chrome again — a feedback loop that flung the grid past its
     /// end (confirmed on device). Static bars break it. Left in place, rather
     /// than deleted from every reader, so the nav bar, tab bar and zoom pill
@@ -324,7 +324,7 @@ final class ScrollProgress {
         guard abs(delta) > 0.5 else { return }
         // A jump this big is not a finger.
         //
-        // The lazy grid's content height changes as buckets realise, and the
+        // The lazy grid's content height changes as buckets realize, and the
         // scroll view keeps your position by moving the offset to match — a
         // single report can shift by thousands of points without the grid
         // appearing to move at all. Counting that as travel is how the bar came
@@ -397,7 +397,7 @@ final class LayoutWatch {
     static let shared = LayoutWatch()
 
     /// Content-height changes below this are the lazy stack breathing as rows
-    /// realise, and would drown the signal.
+    /// realize, and would drown the signal.
     private static let heightNoise: Double = 1
     /// An offset move larger than this between two reports is not a finger.
     /// A hard fling is ~80pt per frame; 400 leaves five times the headroom, and

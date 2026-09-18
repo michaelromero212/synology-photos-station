@@ -53,7 +53,7 @@ struct CacheManagementView: View {
                                     .fontWeight(.semibold)
                             }
                         }
-                        // Without this the row takes the accent colour like a
+                        // Without this the row takes the accent color like a
                         // link. These are choices in a list, not actions, and
                         // the only red on this screen should be Clear Cache.
                         .contentShape(Rectangle())

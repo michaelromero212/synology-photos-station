@@ -11,7 +11,7 @@ import UIKit
 /// keeps its own log and hands it over as a file.
 ///
 /// Deliberately *not* `print`. These entries are structured, survive the debug
-/// session, and are summarised into measurements at the end rather than being a
+/// session, and are summarized into measurements at the end rather than being a
 /// wall of lines to read by eye.
 @MainActor
 final class Diagnostics {
@@ -263,7 +263,7 @@ final class ConnectionMetrics: NSObject, URLSessionTaskDelegate, @unchecked Send
 
 /// The session every API call goes through, so the metrics above are collected.
 ///
-/// A plain `.default` configuration — the same behaviour `URLSession.shared`
+/// A plain `.default` configuration — the same behavior `URLSession.shared`
 /// gave — with a delegate attached, which `shared` does not allow.
 @MainActor
 enum InstrumentedSession {

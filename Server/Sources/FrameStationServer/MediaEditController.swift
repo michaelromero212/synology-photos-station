@@ -436,7 +436,7 @@ struct MediaEditController: RouteCollection {
     /// Only rewrites a trailing `YYYY/MM`, and only when those components really
     /// do look like a year and a month. A library laid out some other way — or a
     /// file sitting somewhere unexpected — is left exactly where it is rather
-    /// than being reorganised on a guess.
+    /// than being reorganized on a guess.
     static func relocationTarget(for path: String, newDate: Date) -> String? {
         let url = URL(fileURLWithPath: path)
         let filename = url.lastPathComponent

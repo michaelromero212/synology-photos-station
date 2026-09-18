@@ -3,11 +3,11 @@ import Foundation
 import SQLKit
 import Vapor
 
-/// Per-user favourites.
+/// Per-user favorites.
 ///
 /// Stored in `space_asset_favorites` keyed on (placement, user) rather than as a
-/// boolean column, because in a shared space "Mom favourited this" and "I
-/// favourited this" are different facts and a single column can only hold one.
+/// boolean column, because in a shared space "Mom favorited this" and "I
+/// favorited this" are different facts and a single column can only hold one.
 struct FavoriteController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
         let protected = routes

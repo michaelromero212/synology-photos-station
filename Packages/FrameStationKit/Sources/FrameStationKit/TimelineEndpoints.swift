@@ -192,7 +192,7 @@ extension FrameStationClient {
 }
 
 extension FrameStationClient {
-    /// Per-user favourite. Idempotent in both directions.
+    /// Per-user favorite. Idempotent in both directions.
     public func setFavorite(
         spaceID: UUID, assetID: UUID, _ favorite: Bool
     ) async throws {

@@ -207,7 +207,7 @@ struct RootTabView: View {
     /// first and where it did nothing: tab-bar visibility travels upwards from
     /// the content of a tab to the bar that owns it, so a modifier sitting
     /// outside the container is above the thing meant to read it. A screenshot
-    /// is what caught it — the system's bar drawn centred behind ours, the same
+    /// is what caught it — the system's bar drawn centered behind ours, the same
     /// three labels twice, a few points apart.
     ///
     /// Hiding it also takes away the room it reserved, which every screen under

@@ -343,7 +343,7 @@ struct MediaProbe {
                 || group.hasPrefix("APP") || group == "Adobe" {
                 return "Advanced"
             }
-            // Anything unrecognised is kept under its own cleaned name rather
+            // Anything unrecognized is kept under its own cleaned name rather
             // than lost — a camera maker's private group is exactly the kind of
             // thing someone digs into the panel to find.
             return spaced(group)
@@ -383,7 +383,7 @@ struct MediaProbe {
             }
         }
 
-        // Known sections first in a fixed order, then any unrecognised group's
+        // Known sections first in a fixed order, then any unrecognized group's
         // own title alphabetically. Rows within a section are sorted so the
         // panel is stable across probes rather than in hash order.
         let known = sectionOrder.filter { bySection[$0] != nil }
@@ -415,7 +415,7 @@ struct MediaProbe {
     }
 
     /// Binary blobs and over-long values exiftool emits for embedded thumbnails,
-    /// colour profiles and the like — a row of "(Binary data 20564 bytes …)" or
+    /// color profiles and the like — a row of "(Binary data 20564 bytes …)" or
     /// a 4 KB base64 string is noise, not information.
     private static func isNoisy(_ text: String) -> Bool {
         text.count > 160

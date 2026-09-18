@@ -30,7 +30,14 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     /// The ones this person reached over and marked. Not computed at all, and
     /// that is the point of it: everything else here is the library's opinion,
     /// and this is theirs.
-    case favourites
+    ///
+    /// The wire keeps the spelling it shipped with, and that is not an oversight
+    /// — `CollectionSummary.kind` is not optional, so a deployed server sending
+    /// `"favourites"` to a client that only knows `"favorites"` does not lose one
+    /// shelf, it fails to decode the Albums page entirely. Pinning the raw value
+    /// lets the Swift read like the rest of the codebase without that mattering.
+    /// It becomes a one-word change the day the server and the app ship together.
+    case favorites = "favourites"
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -144,7 +151,14 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     ///
     /// Its own field for the same reason as `recentlyAdded`: an older client
     /// ignores a key it doesn't know and so never meets the new kind.
-    public let favourites: CollectionSummary?
+    public let favorites: CollectionSummary?
+
+    /// Spelled out only to hold `favorites` to the key it shipped as — see
+    /// `CollectionKind.favorites`. Everything else is its own name.
+    enum CodingKeys: String, CodingKey {
+        case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
+        case favorites = "favourites"
+    }
 
     public init(
         hero: CollectionSummary?,
@@ -154,7 +168,7 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         mediaTypes: [CollectionSummary] = [],
         recentlyDeleted: CollectionSummary?,
         recentlyAdded: CollectionSummary? = nil,
-        favourites: CollectionSummary? = nil
+        favorites: CollectionSummary? = nil
     ) {
         self.hero = hero
         self.trips = trips
@@ -163,14 +177,14 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.mediaTypes = mediaTypes
         self.recentlyDeleted = recentlyDeleted
         self.recentlyAdded = recentlyAdded
-        self.favourites = favourites
+        self.favorites = favorites
     }
 
     /// Whether the page has anything to *show* — as opposed to anything at all.
     ///
     /// Media types and Recently Deleted are deliberately excluded. They are
     /// always-on utilities rather than things that happened, and counting them
-    /// meant a young library rendered as two grey rows over a screen of black
+    /// meant a young library rendered as two gray rows over a screen of black
     /// while the page insisted it wasn't empty. A library of scans with no
     /// dates and no coordinates legitimately has none of this, and deserves to
     /// be told so.

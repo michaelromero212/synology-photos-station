@@ -4,7 +4,7 @@ import SwiftUI
 import MapKit
 #endif
 
-/// The Information panel, modelled on Apple Photos.
+/// The Information panel, modeled on Apple Photos.
 ///
 /// Deliberately richer than Synology's, which shows no camera, no lens, no
 /// exposure and no map at all. And it carries one row neither reference app

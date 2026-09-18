@@ -164,7 +164,7 @@ final class BackupEngine {
         let before = progress.done
         await scanLibrary()
         await start()
-        // Chain the next window from the end of this one; iOS only ever honours
+        // Chain the next window from the end of this one; iOS only ever honors
         // one pending request at a time.
         BackupScheduler.schedule(requiresPower: settings.chargingOnly)
         return progress.done > before
@@ -316,7 +316,7 @@ final class BackupEngine {
             // Left to the server. PHAsset records the capture *instant*, not the
             // offset the photographer's clock was on, so the phone's current
             // offset is not evidence about a photo from 2009 — it travels as a
-            // labelled fallback below and only applies when the file records no
+            // labeled fallback below and only applies when the file records no
             // offset of its own.
             capturedTZOffset: nil,
             capturedTZOffsetFallback: asset.creationDate.map {
@@ -488,7 +488,7 @@ final class BackupEngine {
     /// reason this exists: back up two thousand photos, get force-quit or simply
     /// come back tomorrow, and the NAS may still be deriving thumbnails for
     /// them. Without this the grid would forget it has the originals sitting
-    /// right here and go back to drawing grey squares.
+    /// right here and go back to drawing gray squares.
     ///
     /// Newest first and bounded, because those are the ones whose derivations
     /// are plausibly still outstanding. Failure is silent: every entry is an
@@ -607,7 +607,7 @@ final class BackupEngine {
 
     /// Takes the next retryable row and marks it in-flight, atomically.
     ///
-    /// Synchronous and on the main actor, so the pool's lanes are serialised
+    /// Synchronous and on the main actor, so the pool's lanes are serialized
     /// through it and can never claim the same row: the `.uploading` mark lands
     /// before any other lane's `nextItem` runs, and `nextItem` skips anything
     /// already uploading.

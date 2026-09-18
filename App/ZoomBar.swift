@@ -7,7 +7,7 @@ import SwiftUI
 /// haven't moved: the control still changes how the server groups the timeline
 /// *and* how many photos fit across, and those still belong together, because a
 /// year at four across is a wall of scrolling and a day at eleven across is
-/// thumbnails nobody can recognise.
+/// thumbnails nobody can recognize.
 ///
 /// What changed is that the names are gone, because they were answering a
 /// question nobody asks. Standing in front of a wall of photographs you want
@@ -38,14 +38,14 @@ struct ZoomBar: View {
         }
         // Drives the capsule's width as a step appears or leaves. Without it the
         // pill jumps between one button and two, which is a worse artefact than
-        // the greyed-out button this replaced.
+        // the grayed-out button this replaced.
         .animation(.snappy(duration: 0.26), value: zoom)
     }
 
     /// One step along the ladder, drawn only when there is a step to take.
     ///
     /// A direction that has run out leaves entirely rather than sitting there
-    /// greyed out. Dimming was the obvious move and it looked wrong: over glass
+    /// grayed out. Dimming was the obvious move and it looked wrong: over glass
     /// this transparent, a disabled label reads as half-rendered rather than as
     /// deliberately off, and at four across — where the library opens, and where
     /// it therefore spends most of its life — one of the two was always in that

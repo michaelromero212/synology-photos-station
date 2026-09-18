@@ -772,7 +772,7 @@ struct PlayerLayerView: UIViewRepresentable {
 }
 
 /// Playback controls, laid out the way Synology lays them out: a transport row
-/// centred on the video itself, and a single row underneath carrying elapsed
+/// centered on the video itself, and a single row underneath carrying elapsed
 /// time, the scrubber, time remaining, and mute.
 struct VideoControls: View {
     let model: VideoPlaybackModel
@@ -940,7 +940,7 @@ private struct Scrubber: View {
 /// lie on their side. Nothing therefore rotates on its own, which means filling
 /// the screen with a landscape video is something we have to do by hand: swap
 /// the box's width and height, spin it, then drop it back into the portrait
-/// bounds centred, so it pivots on the middle of the screen and lands on the
+/// bounds centered, so it pivots on the middle of the screen and lands on the
 /// glass rather than being cropped to the portrait box it was drawn into.
 private struct VideoTilt: ViewModifier {
     // Shared rather than passed in: the pager keeps each page's controller, so

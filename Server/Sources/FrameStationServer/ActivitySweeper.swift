@@ -14,7 +14,7 @@ import Vapor
 /// There is no "the user is finished" signal to wait for and there can't be —
 /// the phone that would send it is the one being backgrounded, killed and
 /// relaunched throughout. So a burst is judged over rather than announced over,
-/// and `sweep()` is where that judgement lives.
+/// and `sweep()` is where that judgment lives.
 actor ActivitySweeper {
     private let app: Application
     private let apns: APNsClient

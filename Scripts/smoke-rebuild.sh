@@ -137,7 +137,7 @@ check "thumbnails queued" "7" "$(q "select count(*) from derivation_jobs where k
 echo
 echo "=== 9. running it again changes nothing ==="
 OUT2=$(rebuild)
-check "it recognises what it indexed" "1" "$(echo "$OUT2" | grep -c 'every file on disk is already indexed')"
+check "it recognizes what it indexed" "1" "$(echo "$OUT2" | grep -c 'every file on disk is already indexed')"
 check "still seven assets" "7" "$(q "select count(*) from assets;")"
 check "still seven placements" "7" "$(q "select count(*) from space_assets;")"
 check "still three people" "3" "$(q "select count(*) from users;")"

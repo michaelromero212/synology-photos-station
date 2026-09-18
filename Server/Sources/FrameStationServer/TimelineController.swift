@@ -34,7 +34,7 @@ struct TimelineController: RouteCollection {
     /// with each other.
     static let visible = "NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)"
 
-    /// Everything `ItemRow` decodes, except the favourite flag.
+    /// Everything `ItemRow` decodes, except the favorite flag.
     ///
     /// Shared because it drifted, and drifted silently. Five queries across four
     /// controllers build a `TimelineItem`, each with its own hand-written column
@@ -52,7 +52,7 @@ struct TimelineController: RouteCollection {
     /// absent meant a phone that would not draw its own copy — both degraded
     /// quietly, in two places, for as long as the lists disagreed.
     ///
-    /// The favourite flag stays out because it needs the asking user's id as a
+    /// The favorite flag stays out because it needs the asking user's id as a
     /// bound parameter, and a shared raw string cannot carry one safely. Every
     /// caller adds that `EXISTS` itself; it is the one column that is genuinely
     /// per-request, and it is the column nobody has ever forgotten.

@@ -19,7 +19,7 @@ struct BackupSettings: Equatable {
 
     /// Always your own library, and never anyone else's.
     ///
-    /// This used to honour `targetSpaceID`, so backup could be pointed at a
+    /// This used to honor `targetSpaceID`, so backup could be pointed at a
     /// shared space — which meant one setting, chosen once and then forgotten,
     /// could quietly publish an entire camera roll to the family. Backup runs
     /// unattended on everything the phone takes; the blast radius of getting
@@ -31,7 +31,7 @@ struct BackupSettings: Equatable {
     /// with the photos in front of you.
     ///
     /// `targetSpaceID` is left on the type rather than deleted so an existing
-    /// stored preference deserialises; it is simply no longer consulted.
+    /// stored preference deserializes; it is simply no longer consulted.
     func targetSpace(in spaces: [SpaceDTO]) -> SpaceDTO? {
         spaces.first { $0.kind == .personal }
     }
@@ -189,7 +189,7 @@ struct BackupSettingsView: View {
                 await registrar.refreshAuthorization()
                 // Retires any destination a previous version stored. Nothing
                 // reads it now, but leaving a shared space's id sitting in
-                // preferences invites a future change to honour it again.
+                // preferences invites a future change to honor it again.
                 if settings.targetSpaceID != nil {
                     settings.targetSpaceID = nil
                     settings.save()

@@ -308,7 +308,7 @@ struct AssetDetailView: View {
         // rotation takes the composed viewer with it and the transition matches
         // what the viewer sees.
         //
-        // Unconditional, so photos turn too. That is the Apple Photos behaviour
+        // Unconditional, so photos turn too. That is the Apple Photos behavior
         // and the only coherent one available: the pager carries stills and
         // clips in the same stack, and gating on media type would snap the whole
         // view upright mid-swipe on reaching a photo.
@@ -514,7 +514,7 @@ struct AssetDetailView: View {
     private var detailToolbar: some ToolbarContent {
         let model = cache.model(for: displayedItem, spaceID: space.id)
 
-        // Capture date and time, centred — the one thing the Mac viewer had no
+        // Capture date and time, centered — the one thing the Mac viewer had no
         // room for before. The phone shows it in the bottom chrome; a window
         // shows it in the title area, which is what `.principal` is. Follows the
         // swipe because it reads `displayedItem`, and reads the item's own

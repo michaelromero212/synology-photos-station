@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 /// ImageIO for a picture, one frame for a video.
 ///
 /// Why it is worth doing at all: without it, anything dragged in from the Mac
-/// is a grey tile on every phone in the house until the NAS works through its
+/// is a gray tile on every phone in the house until the NAS works through its
 /// derivation queue. The handover exists precisely so nobody waits for that,
 /// and a photo library where the fast path depends on *which device* put the
 /// photo in is not a fast path, it is a coincidence.

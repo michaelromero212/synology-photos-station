@@ -30,7 +30,7 @@ public enum TransferFailure: Equatable, Sendable {
 extension TransferFailure {
     /// Classifies anything the upload path can throw.
     ///
-    /// Unrecognised errors are treated as the item's fault. That is the
+    /// Unrecognized errors are treated as the item's fault. That is the
     /// conservative direction: a misfiled item stops after three attempts,
     /// whereas a misfiled outage retries forever.
     public static func classify(_ error: any Error) -> TransferFailure {

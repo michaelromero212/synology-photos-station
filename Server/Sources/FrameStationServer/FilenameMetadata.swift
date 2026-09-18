@@ -8,7 +8,7 @@ import Foundation
 /// silent, the name is the only capture time there is, and it is the one Finder
 /// itself shows. The same name is also proof the file is a screenshot.
 ///
-/// Deliberately conservative: it recognises a few fixed shapes and returns nil
+/// Deliberately conservative: it recognizes a few fixed shapes and returns nil
 /// for anything else rather than guessing a date out of an arbitrary string. A
 /// wrong date is worse than none — it would sort a photo into the wrong day.
 enum FilenameMetadata {

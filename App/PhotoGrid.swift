@@ -111,7 +111,7 @@ enum PhotoGridMetrics {
 /// every single time anybody looks at a photo.
 ///
 /// iOS 18 added exactly this transition. Below 18 the push is what's left, which
-/// is the behaviour the app already had.
+/// is the behavior the app already had.
 extension View {
     /// The tile the transition grows *from*.
     @ViewBuilder

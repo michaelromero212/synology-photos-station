@@ -136,7 +136,7 @@ public struct CommitUploadRequest: Codable, Sendable {
     /// `PHAsset.burstIdentifier`, drives grid stacks.
     public let burstID: String?
     public let burstPick: Bool
-    /// `PHAsset.mediaSubtypes`, normalised. Screenshot, panorama, slo-mo and
+    /// `PHAsset.mediaSubtypes`, normalized. Screenshot, panorama, slo-mo and
     /// the rest — facts the device recorded at capture, which the server used
     /// to infer from pixel dimensions and the absence of a camera make.
     ///
@@ -226,7 +226,7 @@ public struct LinkAssetRequest: Codable, Sendable {
 ///
 /// The gap this closes: a committed asset has no thumbnail and no ThumbHash
 /// until the derivation queue reaches it, so every client — not only the one
-/// that uploaded — draws a grey square until then. On a NAS with a modest CPU
+/// that uploaded — draws a gray square until then. On a NAS with a modest CPU
 /// and a backup of several thousand items, "until then" is a long time, and it
 /// is precisely when people are watching to see their photographs arrive.
 ///

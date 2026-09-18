@@ -11,7 +11,7 @@ will take it. The server has its own document — see DEPLOY.md.
    and it tells you *after* the upload rather than before it.
 2. `xcodegen generate`
 3. Xcode → **Product → Archive**, with the scheme set to `FrameStation-iOS` and
-   the destination to **Any iOS Device**. A simulator destination greys Archive
+   the destination to **Any iOS Device**. A simulator destination grays Archive
    out, which is the usual reason it looks broken.
 4. Organizer → **Distribute App → TestFlight & App Store**.
 5. Answer the export-compliance question **No**. `ITSAppUsesNonExemptEncryption`

@@ -16,8 +16,8 @@ extension SetLocationResponse: @retroactive Content {}
 /// doesn't rate it in the other. That is deliberate: a tag is what this library
 /// calls the photo, not a property of the bytes.
 ///
-/// Unlike favourites they are not per-user either. "Mom favourited this" and
-/// "I favourited this" are separate facts, but a shared space agreeing that a
+/// Unlike favorites they are not per-user either. "Mom favorited this" and
+/// "I favorited this" are separate facts, but a shared space agreeing that a
 /// photo is tagged Beach is the entire point of tagging it — so these are
 /// contributor-gated writes to one shared value, scoped exactly the way
 /// `AssetController.remove` is.

@@ -4,7 +4,7 @@
 # What this is really testing is restraint. Sending the push is the easy half;
 # the half that matters is not sending it — to a device that is already
 # uploading, to one that never answers, to a Mac, to a phone with nothing left
-# to do. Apple meters background pushes per device and quietly deprioritises
+# to do. Apple meters background pushes per device and quietly deprioritizes
 # apps that spend them on nothing, so every gate in `BackupNudger` is checked
 # here individually.
 #

@@ -208,7 +208,7 @@ fine-grained one needs Packages → Read. Without it `docker login` still report
 proves who you are, not what you may read.
 
 **Where it lands.** `/root/.docker/config.json` on the NAS, base64-encoded rather
-than encrypted — normal Docker behaviour, but it means root on the NAS can read
+than encrypted — normal Docker behavior, but it means root on the NAS can read
 the token. Give it the narrowest scope, and note the expiry date somewhere: this
 failure returns on that day.
 

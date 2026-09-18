@@ -54,7 +54,7 @@ public final class TimelineStore {
     ///
     /// A photo arrives in the timeline before it has a thumbnail — derivation is
     /// a queue, and on a J4125 a 4K video can sit in it for a while. Until it
-    /// finishes there is no thumbnail *and* no ThumbHash, so the tile is a grey
+    /// finishes there is no thumbnail *and* no ThumbHash, so the tile is a gray
     /// rectangle, and the person guaranteed to be looking at it is whoever just
     /// uploaded.
     ///
@@ -89,7 +89,7 @@ public final class TimelineStore {
             // The snapshot holds the items, and their thumbnails are already in
             // the on-disk cache from previous runs, so restoring it puts real
             // photographs on screen at once. Waiting for the network instead
-            // meant a cold launch went spinner → a grid of grey tiles → photos:
+            // meant a cold launch went spinner → a grid of gray tiles → photos:
             // the manifest arrives first and only knows the day names and how
             // many, so the grid can draw the shape of the library a beat before
             // it can draw any of it. Caught in three frames of a screen
@@ -98,7 +98,7 @@ public final class TimelineStore {
             //
             // Stale for the moment it takes the fetch below to answer, and then
             // replaced. For a photo library that is the right trade: last
-            // night's grid is a far better thing to show than a grey one.
+            // night's grid is a far better thing to show than a gray one.
             if !restoreSnapshot() { state = .loading }
         }
         do {
@@ -216,7 +216,7 @@ public final class TimelineStore {
 
     /// Pulls everything that changed since `cursor` and applies it in place.
     ///
-    /// Applied idempotently on purpose: the server serialises `change_log`
+    /// Applied idempotently on purpose: the server serializes `change_log`
     /// sequence assignment per space, but a client that replays a range after a
     /// dropped connection must not double-insert.
     public func refresh() async {
@@ -289,7 +289,7 @@ public final class TimelineStore {
                 //
                 // The grid therefore healed itself while the app was open and
                 // forgot every time it was killed: cold launch restores the
-                // snapshot taken *before* derivation landed, the tile is grey
+                // snapshot taken *before* derivation landed, the tile is gray
                 // because `isDerived` is false, the delta arrives a moment
                 // later and fills it, and the cycle repeats forever because
                 // that correction is never the thing being saved.

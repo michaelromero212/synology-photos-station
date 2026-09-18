@@ -138,7 +138,7 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
         ///
         /// Rather than switching either gesture off, the dismiss ones are made
         /// to *wait* for the pager's pan to fail. A horizontal drag is one the
-        /// pan recognises, so it pages; a vertical drag is one it fails, so the
+        /// pan recognizes, so it pages; a vertical drag is one it fails, so the
         /// dismiss runs. That is Photos' split exactly — sideways moves between
         /// photos, downwards puts them away — and it keeps the zoom animation,
         /// which is the whole reason the transition is there.
@@ -148,7 +148,7 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
                 .first?.panGestureRecognizer
             else { return }
 
-            // Ancestors only. The pager's own recognisers must not be told to
+            // Ancestors only. The pager's own recognizers must not be told to
             // wait for themselves, and nothing below this screen is ours to
             // reorder.
             var ancestor = controller.view.superview

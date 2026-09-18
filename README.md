@@ -171,8 +171,8 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
 | GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
 | DELETE | `/v1/spaces/:id/assets/:id` | Bearer | Soft delete; kept 29 days, then purged |
-| PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favourite, not a shared boolean |
-| PUT | `/v1/spaces/:id/assets/:id/rating` | Bearer | Stars 0–5. Shared, unlike favourites |
+| PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favorite, not a shared boolean |
+| PUT | `/v1/spaces/:id/assets/:id/rating` | Bearer | Stars 0–5. Shared, unlike favorites |
 | POST | `/v1/spaces/:id/assets/:id/tags` | Bearer | Add and remove in one call; returns the result |
 | GET | `/v1/spaces/:id/tags` | Bearer | Every tag in use, for the editor to offer |
 | POST | `/v1/spaces/:id/assets/capture-time` | Bearer | Re-time a selection, moving files to match |

@@ -11,7 +11,7 @@ bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FA
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 # Denied is what matters. The server answers 404 rather than 403 for a space
 # you're not in, so the response can't be used to confirm it exists — asserting
-# one exact code would lock in the weaker behaviour.
+# one exact code would lock in the weaker behavior.
 denied(){ case "$2" in 400|401|403|404) ok "$1";; *) bad "$1" "denied (4xx)" "$2";; esac }
 jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -46,7 +46,7 @@ check "original"  "404" "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$
 check "preview"   "404" "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$APRIV/preview")"
 check "thumbnail" "404" "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$APRIV/thumb")"
 check "playback"  "404" "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$APRIV/playback")"
-check "favourite" "404" "$(code -X PUT -H "Authorization: Bearer $TB" "$API/v1/spaces/$PA/assets/$APRIV/favorite")"
+check "favorite" "404" "$(code -X PUT -H "Authorization: Bearer $TB" "$API/v1/spaces/$PA/assets/$APRIV/favorite")"
 check "no token at all" "401" "$(code "$API/v1/assets/$APRIV/original")"
 
 echo

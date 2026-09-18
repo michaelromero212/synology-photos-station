@@ -13,6 +13,6 @@
 ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_sha256_key;
 
 -- Still indexed, just no longer unique. The hash is how a re-upload is
--- recognised and how a file can be checked against what we believe it to be;
+-- recognized and how a file can be checked against what we believe it to be;
 -- it simply no longer decides identity.
 CREATE INDEX IF NOT EXISTS assets_sha256 ON assets (sha256);

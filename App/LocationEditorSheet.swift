@@ -172,7 +172,7 @@ struct LocationEditorSheet: View {
         }
     }
 
-    // MARK: - Behaviour
+    // MARK: - Behavior
 
     private func search() async {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)

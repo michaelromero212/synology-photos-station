@@ -104,7 +104,7 @@ struct SharedAlbumRoute: Hashable {
 ///
 /// The ordering is the argument. Apple's Albums tab reaches roughly twenty-five
 /// rows before your own albums, most of them media types, and it reads as a
-/// filing cabinet — organised by what a file *is* rather than by what happened.
+/// filing cabinet — organized by what a file *is* rather than by what happened.
 /// So this opens on one hero, keeps the automatic sections few, drops any that
 /// would be thin, and puts your own albums above the file-shaped stuff rather
 /// than below it.
@@ -351,7 +351,7 @@ struct AlbumsView: View {
     /// volunteering something.
     @ViewBuilder
     private func standing(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
-        let shelves = [found.recentlyAdded, found.favourites].compactMap { $0 }
+        let shelves = [found.recentlyAdded, found.favorites].compactMap { $0 }
         if !shelves.isEmpty {
             VStack(spacing: 8) {
                 ForEach(shelves, id: \.key) { shelf in

@@ -46,7 +46,7 @@ struct UploadStateBadge: View {
                     )
                     .onAppear { spin = true }
             case .uploaded:
-                // Green, and the only colour on any of these badges.
+                // Green, and the only color on any of these badges.
                 //
                 // The other two states are in progress and read fine in white:
                 // they are the app saying "working". This one is the app saying

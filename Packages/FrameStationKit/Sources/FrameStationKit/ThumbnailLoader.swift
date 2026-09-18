@@ -89,7 +89,7 @@ public actor ThumbnailLoader {
     /// Everything else here is `async`, which means even a tile whose image is
     /// sitting decoded in memory has to wait for two actor hops — one to build
     /// the URL, one to reach this cache — before it can be drawn. Across a
-    /// screenful that is a frame or two of grey on every appearance, and leaving
+    /// screenful that is a frame or two of gray on every appearance, and leaving
     /// a tab and coming back re-runs all of it: the grid is rebuilt from
     /// scratch, so every visible cell pays the round trip again at once.
     ///
@@ -113,7 +113,7 @@ public actor ThumbnailLoader {
     ///
     /// The technique Apple Photos leans on hardest: by the time a tile is on
     /// screen its bytes should already be local, so scrolling reveals pictures
-    /// rather than grey squares that fill in afterwards.
+    /// rather than gray squares that fill in afterwards.
     ///
     /// Fire-and-forget, and deliberately lower priority than anything visible —
     /// see `acquire`. A prefetch that competed with the tiles someone is

@@ -6,7 +6,7 @@ import Foundation
 /// purges on it, the API hands out a purge date computed from it, and Recently
 /// Deleted tells you the number in words. Three copies of `29` would eventually
 /// disagree, and the one that disagreed would be the sentence promising the
-/// user something the sweeper had no intention of honouring.
+/// user something the sweeper had no intention of honoring.
 public enum Retention {
     public static let days = 29
 }

@@ -5,7 +5,7 @@ import Foundation
 /// The cheapest meaning in the whole library, and the reason it comes first:
 /// forty photographs on the 25th of December is Christmas, and knowing that
 /// takes a lookup table rather than a model. No inference, no training, no
-/// overnight job — and it works on the entire back catalogue the moment it
+/// overnight job — and it works on the entire back catalog the moment it
 /// ships, including the scans from before anyone had a phone.
 ///
 /// Deliberately a short list. Every entry here has to be a day people

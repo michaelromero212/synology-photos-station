@@ -21,13 +21,13 @@ enum Derivatives {
     /// v2: an unsharp mask after the downscale, so detailed content (screenshots,
     /// text, UI) reads crisp in a small tile instead of soft — the step Apple
     /// and Synology use to make a grid look premium. See migration 0022.
-    /// v3: converted to sRGB instead of having the colour profile thrown away.
+    /// v3: converted to sRGB instead of having the color profile thrown away.
     /// See `exportProfile`.
     static let thumbnailVersion = 3
 
     /// The widest aspect a thumbnail is sized for. Past this a panorama would
     /// turn into an enormous strip for no gain — the square grid only ever shows
-    /// its centre — so the short edge is allowed to fall a little below target.
+    /// its center — so the short edge is allowed to fall a little below target.
     static let maxThumbnailAspect = 3.0
 
     /// Unsharp-mask parameters for the post-downscale sharpen, as vips `sharpen`
@@ -51,13 +51,13 @@ enum Derivatives {
     /// thumbnail that matches the photograph and one that doesn't.
     ///
     /// Every photograph an iPhone takes is Display P3. `vips thumbnail` does not
-    /// colour-manage unless asked: without this it resized the P3 numbers and
+    /// color-manage unless asked: without this it resized the P3 numbers and
     /// copied the profile through, and then `strip` — which removes the ICC
     /// profile along with the EXIF — threw the profile away. What reached the
     /// grid was P3 pixel data in an untagged file, and an untagged file is read
-    /// as sRGB. The same numbers mean *less* saturated colours in sRGB than in
+    /// as sRGB. The same numbers mean *less* saturated colors in sRGB than in
     /// P3, so every thumbnail came out duller and a shade darker than the
-    /// original, worst on exactly the colours people notice: foliage, a red
+    /// original, worst on exactly the colors people notice: foliage, a red
     /// jacket, a sunlit wall.
     ///
     /// Measured on a six-patch P3 target through this pipeline. Yellow
@@ -114,7 +114,7 @@ enum Derivatives {
         )
 
         // Long edge over short edge, ≥ 1. Defaults to 1 — the old fit-the-box
-        // behaviour — if the render can't be read, so a decode failure degrades
+        // behavior — if the render can't be read, so a decode failure degrades
         // to a square fit rather than sizing wrong.
         var aspect = 1.0
         logger.debug("derive \(sha256.prefix(8)): encoding thumbhash")

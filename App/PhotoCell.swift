@@ -6,7 +6,7 @@ import SwiftUI
 ///
 /// Paints the ThumbHash immediately — it ships inside the timeline payload, so
 /// there is a recognisable image on screen before any network request — then
-/// crossfades to the real thumbnail when it arrives. A cell that starts grey
+/// crossfades to the real thumbnail when it arrives. A cell that starts gray
 /// and pops is the single most obvious way a photo grid feels cheap.
 struct PhotoCell: View {
     let item: TimelineItem
@@ -27,7 +27,7 @@ struct PhotoCell: View {
     /// in memory draws it in the very first frame rather than after two actor
     /// hops. That is what a tab switch costs otherwise: the grid is rebuilt, so
     /// every visible cell starts from nothing at the same moment and the whole
-    /// screen greys before it fills.
+    /// screen grays before it fills.
     init(item: TimelineItem, loader: ThumbnailLoader?, size: CGSize) {
         self.item = item
         self.loader = loader
@@ -38,10 +38,10 @@ struct PhotoCell: View {
         )
         _image = State(initialValue: cached)
         // Decode the ThumbHash here too, so a tile with no cached picture opens
-        // on its blurred preview instead of a grey square. This is the whole of
+        // on its blurred preview instead of a gray square. This is the whole of
         // "thumbnails appear instantly": the sharp image still arrives over the
         // network in `load`, but there is a recognisable picture from the first
-        // frame rather than grey → blur → sharp. The decode is 32px on bytes
+        // frame rather than gray → blur → sharp. The decode is 32px on bytes
         // already in the item — no network, no actor hop — cheap enough to run
         // as each lazy cell is created. Skipped when the sharp image is already
         // in hand, since then there is nothing to stand in for.
@@ -65,12 +65,12 @@ struct PhotoCell: View {
             .frame(width: size.width, height: size.height)
             .clipped()
             .overlay(alignment: .top) { durationBadge }
-            .overlay(alignment: .bottom) { favouriteBadge }
+            .overlay(alignment: .bottom) { favoriteBadge }
             .contentShape(Rectangle())
             // Keyed on the derivation state as well as the identity. Keyed on
             // the id alone, a tile drawn before its thumbnail existed never
             // asked again: the id doesn't change when the derivation lands, so
-            // the task never re-ran and the cell sat grey until the app was
+            // the task never re-ran and the cell sat gray until the app was
             // relaunched. The id still has to be in the key — cells are recycled
             // between photos and must reload when the photo changes.
             .task(id: LoadKey(assetID: item.assetID, isDerived: item.isDerived)) {
@@ -148,7 +148,7 @@ struct PhotoCell: View {
 
     /// Bottom-left, where Photos keeps it, and the last free corner.
     @ViewBuilder
-    private var favouriteBadge: some View {
+    private var favoriteBadge: some View {
         if item.isFavorite {
             ZStack(alignment: .bottomLeading) {
                 LinearGradient(
@@ -186,7 +186,7 @@ struct PhotoCell: View {
         // what the old one had.
         //
         // For one photo that is a blink. During a bulk backup it happens once
-        // per photograph, continuously, which is what fills the grid with grey
+        // per photograph, continuously, which is what fills the grid with gray
         // squares that carry no badge — they are not "waiting to upload", they
         // are already uploaded and momentarily pictureless.
         //
@@ -207,7 +207,7 @@ struct PhotoCell: View {
             // replaced by a stale snapshot, leaves this false on an asset the
             // NAS finished long ago — and nothing re-asks, because the task is
             // keyed on this very flag. That is the difference between a tile
-            // that is briefly grey and one that is grey for good.
+            // that is briefly gray and one that is gray for good.
             //
             // One request, and a 202 if it really isn't ready, which costs the
             // NAS almost nothing and cannot cache a miss.
@@ -237,7 +237,7 @@ struct PhotoCell: View {
         //
         // It used to be final: one dropped connection, one request cancelled by
         // navigating away mid-flight, or one coalesced caller inheriting a
-        // failure, and that tile stayed grey for the life of the cell. Nothing
+        // failure, and that tile stayed gray for the life of the cell. Nothing
         // ever asked again, which is why thumbnails "sometimes" didn't come back
         // after leaving a tab and returning.
         //

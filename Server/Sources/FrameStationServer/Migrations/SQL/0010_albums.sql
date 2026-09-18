@@ -8,7 +8,7 @@ CREATE TABLE albums (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   space_id      uuid NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
   name          text NOT NULL CHECK (length(trim(name)) > 0),
-  -- Denormalised so the album grid doesn't need a per-album query for its
+  -- Denormalized so the album grid doesn't need a per-album query for its
   -- cover. Nullable: an empty album has nothing to show.
   cover_asset_id uuid REFERENCES assets(id) ON DELETE SET NULL,
   created_by    uuid NOT NULL REFERENCES users(id),

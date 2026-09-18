@@ -27,7 +27,7 @@ import SwiftUI
 ///
 /// Collected through a preference rather than computed, because the two layouts
 /// this grid uses — square on iPhone, justified rows everywhere else — have
-/// nothing in common to compute *from*. Only realised cells report, and only
+/// nothing in common to compute *from*. Only realized cells report, and only
 /// while selecting, so browsing pays nothing for this.
 struct TileFrameKey: PreferenceKey {
     static var defaultValue: [TimelineItem: CGRect] = [:]

@@ -93,7 +93,7 @@ approx "latitude"  "38.3487"  "$($PSQL "select lat from assets where id='$PHOTO'
 approx "longitude" "-77.9797" "$($PSQL "select lon from assets where id='$PHOTO';")" "0.001"
 
 echo
-echo "=== 3. capture time honours OffsetTimeOriginal (-04:00) ==="
+echo "=== 3. capture time honors OffsetTimeOriginal (-04:00) ==="
 # 2026:07:04 15:55:00 -04:00  ==  19:55:00Z
 check "captured_at in UTC" "2026-07-04 19:55:00+00" \
   "$($PSQL "select to_char(captured_at at time zone 'UTC','YYYY-MM-DD HH24:MI:SS')||'+00' from assets where id='$PHOTO';")"

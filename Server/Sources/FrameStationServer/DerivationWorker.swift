@@ -195,13 +195,13 @@ actor DerivationWorker {
 
                 // Announced, not just recorded.
                 //
-                // This is the moment a grey tile becomes a picture: before it,
+                // This is the moment a gray tile becomes a picture: before it,
                 // the asset has no thumbnail and no ThumbHash, so the grid draws
                 // a blank rectangle and `PhotoCell` won't even request an image
                 // because `isDerived` is false. Setting `derived_at` silently
                 // left every client holding a cached item that still said
                 // false — and since nothing changes the item's id, the cell
-                // never reloads either. The tile stayed grey until the app was
+                // never reloads either. The tile stayed gray until the app was
                 // relaunched, which hit hardest the one person guaranteed to be
                 // looking: whoever just uploaded.
                 //

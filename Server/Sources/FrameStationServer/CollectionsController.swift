@@ -67,7 +67,7 @@ struct CollectionsController: RouteCollection {
         // Days already inside a trip are not also "days worth keeping". The
         // fortnight in the Outer Banks is one card, not one card plus fourteen —
         // and every day of a holiday is busy by definition, so without this the
-        // busy-day rule would flood the page with the trip it just summarised.
+        // busy-day rule would flood the page with the trip it just summarized.
         let claimed = Set(found.flatMap { Self.days(inKey: $0.key) })
 
         let days = try await busyDays(
@@ -76,7 +76,7 @@ struct CollectionsController: RouteCollection {
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
-        let marked = try await favourites(
+        let marked = try await favorites(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
         let away = try await revisits(spaceID: spaceID, seed: seed, on: req.sql)
@@ -135,7 +135,7 @@ struct CollectionsController: RouteCollection {
             mediaTypes: types,
             recentlyDeleted: deleted,
             recentlyAdded: arrived,
-            favourites: marked
+            favorites: marked
         )
     }
 
@@ -152,7 +152,7 @@ struct CollectionsController: RouteCollection {
     /// Matched on `local_captured_at` — the photo's own wall clock — so a
     /// picture taken at 9pm in Rome belongs to that evening and not to the next
     /// morning UTC. Getting this wrong shows the wrong day once a year to
-    /// anyone who has travelled, which is the whole audience.
+    /// anyone who has traveled, which is the whole audience.
     private func onThisDayCollections(
         spaceID: UUID, today: Date, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
@@ -209,13 +209,13 @@ struct CollectionsController: RouteCollection {
 
     /// Runs of consecutive days spent a long way from home.
     ///
-    /// The whole of it is arithmetic. Home is the coordinate centre of wherever
+    /// The whole of it is arithmetic. Home is the coordinate center of wherever
     /// the library has most of its photographs — for a family that is the house,
     /// and it needs no setting up and no asking. A day whose photographs average
-    /// more than eighty kilometres from there was a day away. Consecutive days
+    /// more than eighty kilometers from there was a day away. Consecutive days
     /// away are one trip.
     ///
-    /// Eighty kilometres rather than ten: the bar has to clear the ordinary
+    /// Eighty kilometers rather than ten: the bar has to clear the ordinary
     /// radius of a life. Work, school, the shops and the next town over are all
     /// "not home" and none of them are trips, and a threshold that called them
     /// trips would bury the fortnight in the Outer Banks under two hundred
@@ -238,7 +238,7 @@ struct CollectionsController: RouteCollection {
                   AND sa.deleted_at IS NULL
                   AND a.lat IS NOT NULL AND a.lon IS NOT NULL
             ),
-            -- Home: the centre of the place the library holds most of.
+            -- Home: the center of the place the library holds most of.
             busiest AS (
                 SELECT place_name FROM located
                 WHERE place_name IS NOT NULL
@@ -291,7 +291,7 @@ struct CollectionsController: RouteCollection {
                     sin(radians(p.lat)) * sin(radians(h.lat))
                   + cos(radians(p.lat)) * cos(radians(h.lat))
                   * cos(radians(p.lon - h.lon))
-                  ))) > \(bind: Self.awayKilometres)
+                  ))) > \(bind: Self.awayKilometers)
             ORDER BY p.day DESC
             LIMIT 400
             """).all(decoding: TripDay.self)
@@ -303,7 +303,7 @@ struct CollectionsController: RouteCollection {
     }
 
     /// How far from home stops being an errand.
-    static let awayKilometres = 80
+    static let awayKilometers = 80
 
     /// Groups consecutive days into trips. Rows arrive newest-first.
     ///
@@ -788,7 +788,7 @@ struct CollectionsController: RouteCollection {
     /// The app cannot know a date is a birthday. It can notice that you have
     /// photographs on it most years, which is the moment "name this, every year"
     /// stops being a question out of nowhere and becomes an observation the
-    /// person will recognise. Three years rather than two: two is a coincidence
+    /// person will recognize. Three years rather than two: two is a coincidence
     /// often enough to make the prompt feel wrong.
     private func recurringDates(
         spaceID: UUID, on sql: any SQLDatabase
@@ -1164,14 +1164,14 @@ struct CollectionsController: RouteCollection {
     /// The photographs this person marked, in this space.
     ///
     /// The only collection on the page that is nobody's inference. Everything
-    /// else is the library saying "you might want this"; a favourite is the
+    /// else is the library saying "you might want this"; a favorite is the
     /// person having already said so, which is why it belongs near the top and
     /// why it never needs a rule about when to show it — if it is empty there
     /// is nothing to show, and if it is not, they put it there on purpose.
     ///
     /// Keyed on the viewer as well as the space, so two people in one shared
     /// album each see their own.
-    private func favourites(
+    private func favorites(
         spaceID: UUID, userID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
         struct Row: Decodable {
@@ -1192,7 +1192,7 @@ struct CollectionsController: RouteCollection {
 
         guard let row, row.count > 0 else { return nil }
         return CollectionSummary(
-            kind: .favourites,
+            kind: .favorites,
             key: "all",
             title: "Favorites",
             subtitle: nil,
@@ -1544,7 +1544,7 @@ struct CollectionsController: RouteCollection {
                 throw Abort(.badRequest, reason: "No such media type.")
             }
             filter = predicate
-        case .favourites:
+        case .favorites:
             filter = """
                 AND EXISTS (
                     SELECT 1 FROM space_asset_favorites f
@@ -1595,7 +1595,7 @@ struct CollectionsController: RouteCollection {
     ///
     /// A photo the NAS has not rendered yet comes last, whatever else it has
     /// going for it. A cover is the one image on a card, and choosing one that
-    /// cannot be drawn produces a grey rectangle where a photograph should be —
+    /// cannot be drawn produces a gray rectangle where a photograph should be —
     /// while a perfectly good alternative sits in the same collection.
     ///
     /// The seed is the current date, so covers hold still all day and differ

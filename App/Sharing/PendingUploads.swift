@@ -12,7 +12,7 @@ import SwiftData
 /// drew its own tiles from it; sharing straight from the library had nothing —
 /// the picker held the screen behind a progress bar until the last byte landed,
 /// and only then let go. Share a four-minute video and you watched a progress
-/// bar, then arrived at a grey square, and the photograph appeared some seconds
+/// bar, then arrived at a gray square, and the photograph appeared some seconds
 /// after that when the NAS finished rendering it.
 ///
 /// So the upload moves here, out of the sheet's lifetime, and the sheet closes
@@ -48,7 +48,7 @@ final class PendingUploads {
     ///
     /// Optional because this object is built with the session, long before the
     /// SwiftData container exists — and because an unopenable store must
-    /// degrade to the old in-memory behaviour rather than take the app with it.
+    /// degrade to the old in-memory behavior rather than take the app with it.
     /// Everything below works either way; without a context the queue simply
     /// does not survive termination, which is exactly where this started.
     private var context: ModelContext?

@@ -49,7 +49,7 @@ struct MacRootView: View {
                     // Applied outside, the field stayed in the toolbar after
                     // you opened a photograph — so a viewer showing one image
                     // carried a "Search Places" box wedged against its rotate
-                    // and favourite buttons. Searching a library you are not
+                    // and favorite buttons. Searching a library you are not
                     // looking at is not a thing anyone wants, and it crowded
                     // the controls that were.
                     .searchable(

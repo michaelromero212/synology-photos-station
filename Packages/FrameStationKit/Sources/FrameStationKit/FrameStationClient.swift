@@ -74,7 +74,7 @@ public actor FrameStationClient {
         try await sendNoContent(method, path, body: body)
     }
 
-    /// Authenticated request with no body either way (favourite toggles).
+    /// Authenticated request with no body either way (favorite toggles).
     func sendEmpty(_ method: Method, _ path: String) async throws {
         _ = try await run(makeRequest(method, path))
     }

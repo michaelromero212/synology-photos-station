@@ -228,7 +228,7 @@ struct AssetController: RouteCollection {
         return try await streamFile(req, at: blob, contentType: asset.mime, immutable: true)
     }
 
-    /// Honours a reverse proxy, so a link minted behind DSM points at the
+    /// Honors a reverse proxy, so a link minted behind DSM points at the
     /// public host rather than the container's own address.
     private func baseURL(_ req: Request) -> URL {
         if let configured = Environment.get("FRAMESTATION_PUBLIC_URL"),
@@ -291,7 +291,7 @@ struct AssetController: RouteCollection {
     ///
     /// The point is *whose* screen it fills. A device that uploads can draw the
     /// photo from its own camera roll while the NAS catches up; nobody else
-    /// can, so on every other phone in the family the tile is grey until the
+    /// can, so on every other phone in the family the tile is gray until the
     /// derivation queue gets there. On a modest NAS mid-backup that is a long
     /// time, and it is exactly when people are watching to see that the photos
     /// arrived. Handing the picture over with the upload turns that wait into
@@ -324,7 +324,7 @@ struct AssetController: RouteCollection {
             throw Abort(.badRequest,
                         reason: "size must be one of \(Derivatives.eagerSizes.map(String.init).joined(separator: ", ")).")
         }
-        // Cheap shape check so a mislabelled body cannot land where a JPEG is
+        // Cheap shape check so a mislabeled body cannot land where a JPEG is
         // served with `image/jpeg`. Two bytes, and it is the whole of what we
         // can honestly verify without decoding.
         guard body.jpeg.count > 2, body.jpeg[body.jpeg.startIndex] == 0xFF,

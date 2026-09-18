@@ -24,7 +24,7 @@ ALTER TABLE devices
     -- How many we have spent since it last said anything.
     --
     -- The budget is real: Apple throttles background pushes to a handful an hour
-    -- per device and quietly deprioritises apps that burn them for nothing. A
+    -- per device and quietly deprioritizes apps that burn them for nothing. A
     -- phone that is switched off, out of the house, or has Background App
     -- Refresh disabled would otherwise be nudged every half hour for ever. So
     -- this counts up, the nudger stops at a small number, and *any* report from

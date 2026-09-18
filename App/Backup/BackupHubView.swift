@@ -80,7 +80,7 @@ struct BackupHubView: View {
 
                 // Absent when there is nothing to focus on. A Start button over
                 // an empty queue is a control that cannot do anything, and this
-                // app drops those rather than greying them out.
+                // app drops those rather than graying them out.
                 if access == .authorized, settings.enabled, engine.progress.pending > 0 {
                     Section {
                         VStack(alignment: .leading, spacing: 10) {

@@ -354,7 +354,7 @@ struct UploadController: RouteCollection {
         // thumbnails still exist (purge deletes content-addressed derivatives
         // while leaving the asset row) and never that this fresh row carries its
         // own derived_at/thumbhash. Keying the work on dedup left a re-upload of
-        // purged content grey forever, with no derivation job at all. So this
+        // purged content gray forever, with no derivation job at all. So this
         // runs for every commit; a genuine duplicate just regenerates identical
         // thumbnails, which is rare because the .have fast path links instead.
         do {
@@ -423,7 +423,7 @@ struct UploadController: RouteCollection {
     /// by content hash, so the copy needs no re-probe and no new thumbnails.
     ///
     /// Returns nil when the library layout is off, in which case the caller
-    /// falls back to sharing the asset row — the pre-§3a behaviour.
+    /// falls back to sharing the asset row — the pre-§3a behavior.
     /// Internal rather than private: the batch share endpoint in
     /// `MediaEditController` is the same operation done fifty times, and two
     /// implementations of "copy a photo into a space" would drift.
@@ -535,7 +535,7 @@ struct UploadController: RouteCollection {
             """).first(decoding: IDRow.self)
 
         // Sharing copies the file. Falls back to sharing the row when the
-        // library layout is off, which is the pre-§3a behaviour.
+        // library layout is off, which is the pre-§3a behavior.
         let targetAssetID: UUID
         if alreadyPlaced != nil {
             targetAssetID = assetID

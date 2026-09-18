@@ -8,7 +8,7 @@
 # photographs across five days correctly produces *nothing*, which is right and
 # also impossible to look at. This produces a library with something in it.
 #
-# The rows carry no blobs, so their tiles render grey. That is fine for what
+# The rows carry no blobs, so their tiles render gray. That is fine for what
 # this is for — the titles, the grouping, the thresholds and the empty-state
 # rules are all exercised, and none of them care what the picture looks like.
 # Upload a handful of real photographs through the app if you want covers.

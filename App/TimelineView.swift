@@ -101,7 +101,7 @@ struct TimelineView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
 
-    /// Whether there is room for a labelled rail rather than a bare scrubber.
+    /// Whether there is room for a labeled rail rather than a bare scrubber.
     ///
     /// Size class rather than idiom: an iPad in a narrow split view is a phone
     /// as far as available width is concerned, and a rail that eats sixty
@@ -185,7 +185,7 @@ struct TimelineView: View {
     ///
     /// Deliberately *not* a `.scrollPosition(id:)` binding. That binding is
     /// two-way: SwiftUI rewrote it on every content-size change, and each
-    /// rewrite re-scrolled the view, which re-realised rows in the lazy grid,
+    /// rewrite re-scrolled the view, which re-realized rows in the lazy grid,
     /// which changed the content size again — a feedback loop that never
     /// settled and flung the grid past its end (confirmed on device).
     /// Imperative `scrollTo`, the way the scrubber already jumps, does not loop.
@@ -273,7 +273,7 @@ struct TimelineView: View {
         //
         // It used to be the last item in the scroll content so it would scroll
         // away with the photographs. That is a nicer idea than it is a
-        // behaviour — dismissing it made the content shorter, and a grid
+        // behavior — dismissing it made the content shorter, and a grid
         // anchored to its own end has to take up the slack, so the library
         // jumped by the banner's height every time someone pressed the X.
         //
@@ -565,7 +565,7 @@ struct TimelineView: View {
             guard phase == .active else { return }
             Task { await store?.refresh() }
             #if os(iOS)
-            // Returning to the app is the acknowledgement pull-to-refresh used
+            // Returning to the app is the acknowledgment pull-to-refresh used
             // to be — the "just uploaded" cloud badges are no longer news, so
             // they retire.
             engine?.clearUploadBadges()
@@ -621,7 +621,7 @@ struct TimelineView: View {
     ///
     /// But a grid holding an undelivered photo is *waiting for a specific
     /// answer*, and it is nearly always the person who just uploaded it who is
-    /// staring at the grey square. Fifteen seconds of that reads as a broken
+    /// staring at the gray square. Fifteen seconds of that reads as a broken
     /// upload — which is exactly the complaint, and why "it appears if I leave
     /// the tab and come back" was the workaround. So while anything is
     /// undelivered this polls at two seconds and stops the moment the last one
@@ -689,9 +689,9 @@ struct TimelineView: View {
                 }
             }
             .contentShape(Rectangle())
-            // One gesture, and the second click recognised by timing.
+            // One gesture, and the second click recognized by timing.
             //
-            // Any double-tap recogniser — competing *or* simultaneous — makes
+            // Any double-tap recognizer — competing *or* simultaneous — makes
             // a single click wait to see whether a second one is coming, so
             // the highlight always arrived a visible beat after the press.
             // Measured: the ring was absent immediately after the click and
@@ -699,7 +699,7 @@ struct TimelineView: View {
             //
             // AppKit does not work that way and neither does the Finder: the
             // first click selects at once, and a second one soon after means
-            // open. Deciding from the interval is that behaviour exactly, and
+            // open. Deciding from the interval is that behavior exactly, and
             // it leaves one gesture on the tile, which fires immediately.
             .onTapGesture {
                 let now = Date()
@@ -985,7 +985,7 @@ struct TimelineView: View {
     ///
     /// Capped rather than the whole bucket: a day with six hundred photos would
     /// otherwise queue six hundred fetches on the strength of one section
-    /// scrolling into view, which is the unbounded behaviour this is meant to
+    /// scrolling into view, which is the unbounded behavior this is meant to
     /// replace. A couple of screens' worth is what "about to be seen" means.
     private func prefetchThumbnails(for key: String, in store: TimelineStore) async {
         guard let loader = session.loader, let items = store.items[key] else { return }
@@ -1439,7 +1439,7 @@ struct TimelineView: View {
     #endif
 
     /// The count of media in this grid, closing the scroll the way Photos and
-    /// Synology both do. Centred, quiet, and given real vertical room so it
+    /// Synology both do. Centered, quiet, and given real vertical room so it
     /// reads as an ending rather than another row.
     #if os(iOS)
     /// How the bottom tab bar shows and hides.
@@ -1580,7 +1580,7 @@ struct TimelineView: View {
             //
             // Assigning is how a density change keeps its place. The imperative
             // alternative — `scrollTo` right after swapping every bucket —
-            // cannot work: at that instant the lazy stack has realised almost
+            // cannot work: at that instant the lazy stack has realized almost
             // nothing, so the scroll finds no such section and silently does
             // nothing. Timing it with sleeps only turns that into a race, and a
             // race that fights the layout is how the grid ended up frozen.
@@ -1667,7 +1667,7 @@ struct TimelineView: View {
             // A *constant* margin, and that distinction is the whole safety
             // argument. What stormed the layout before was an inset that
             // changed as you scrolled: each change resized the scroll view,
-            // which re-realised rows, which resized it again. This one is the
+            // which re-realized rows, which resized it again. This one is the
             // same on every frame, so there is no loop to enter — the bar still
             // hides by sliding, as an overlay, touching nothing.
             .contentMargins(
@@ -1683,7 +1683,7 @@ struct TimelineView: View {
             )
             #endif
             // Reads the scroll view's own offset rather than inferring it from
-            // content geometry: a LazyVStack only measures realised rows, so a
+            // content geometry: a LazyVStack only measures realized rows, so a
             // background GeometryReader reports a height that grows as you
             // scroll and a fraction that never leaves zero.
             .modifier(ScrollActivityReporter(progress: scrollProgress))
@@ -1808,7 +1808,7 @@ struct TimelineView: View {
                     // A phone gets the scrubber that stays out of the way; a
                     // Mac or an iPad gets the rail that says something while
                     // nobody is touching it. The difference is available width,
-                    // not preference — a labelled rail costs horizontal space a
+                    // not preference — a labeled rail costs horizontal space a
                     // phone has already given to photographs.
                     //
                     // No animation on the scroll in either: an animated scroll
@@ -1877,7 +1877,7 @@ struct TimelineView: View {
             // thing that makes an app feel like it is selling you something.
             //
             // The connection banner above is not the same kind of thing and
-            // stays — that one explains why the tiles are grey, which is the app
+            // stays — that one explains why the tiles are gray, which is the app
             // accounting for its own state rather than nagging about a choice.
             EmptyView()
         } else {
@@ -2030,7 +2030,7 @@ struct TimelineView: View {
     /// piece of the screen that is plain text on the page, so its typography is
     /// carrying the whole thing. Three deliberate choices:
     ///
-    /// **Baselines, not centres.** Two sizes on one line aligned by their boxes
+    /// **Baselines, not centers.** Two sizes on one line aligned by their boxes
     /// sit at visibly different heights, which is what made the date and the
     /// place read as two things that happened to collide rather than one line.
     ///
@@ -2070,7 +2070,7 @@ struct TimelineView: View {
         // competed with the photographs instead of labelling them.
         //
         // The place keeps its own size and stays secondary. Both halves at one
-        // size is what the reference does; the greyer place is ours, and it is
+        // size is what the reference does; the grayer place is ours, and it is
         // the part that makes a long county name read as a caption rather than
         // as more heading.
         // Eight, not eleven, because the line box adds about four points of
@@ -2464,13 +2464,13 @@ private struct TopEdgeClip: Shape {
 #if os(iOS)
 /// The fade Photos runs across the top of the library.
 ///
-/// Blur rather than a tint: a flat colour over a photograph reads as a panel
+/// Blur rather than a tint: a flat color over a photograph reads as a panel
 /// laid on top of it, and what is being imitated here is the library carrying on
 /// underneath.
 ///
 /// It reaches full strength at the very top rather than easing in from nothing,
 /// because the clock and the battery have to stay readable over a bright photo,
-/// and it is a material rather than a colour so they stay readable over a dark
+/// and it is a material rather than a color so they stay readable over a dark
 /// one too.
 ///
 /// Where full strength has to reach is not negotiable: the controls sit on it,
@@ -2522,7 +2522,7 @@ private struct TopEdgeFade: View {
         // merely going transparent. That is true, and it was the wrong trade. A
         // material in dark mode does not only blur — it darkens — and two of
         // them compound the darkening as surely as the blur, which is how the
-        // top of the library ended up a grey slab you could not read a
+        // top of the library ended up a gray slab you could not read a
         // photograph through. Apple's is a blur with almost no tint at all: on
         // theirs you can still make out the turf, the netting, the map.
         //

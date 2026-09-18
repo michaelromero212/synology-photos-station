@@ -132,7 +132,7 @@ enum MetadataBackfill {
     /// Two cases. `derived_at IS NULL` is a row that reached a live placement
     /// without derivatives at all — chiefly the dedup/purge bug, where a
     /// re-upload of purged content was treated as "already derived" and stayed
-    /// grey. `thumb_version < current` is a row whose thumbnails were built with
+    /// gray. `thumb_version < current` is a row whose thumbnails were built with
     /// an older *sizing* — the long-edge fit that left odd-aspect images blurry
     /// on the square grid — and wants rebuilding with the current short-edge
     /// sizing. Either way this re-pends any stale job or creates a fresh one.

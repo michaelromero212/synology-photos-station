@@ -19,7 +19,7 @@ public struct JustifiedRow: Equatable, Sendable {
 ///
 /// The point is shape: a landscape frame comes out wider than a portrait one, so
 /// you can tell how a photo was taken without opening it. A square grid throws
-/// that away and centre-crops everything into the same tile, which is why a
+/// that away and center-crops everything into the same tile, which is why a
 /// panorama and a portrait look identical until you tap them.
 ///
 /// Works off `aspectRatio`, which rides in the timeline manifest — so a whole
@@ -35,7 +35,7 @@ public enum JustifiedLayout {
     ///
     /// A 10:1 panorama laid out honestly gets a row to itself one tenth of the
     /// width tall — a letterbox slit with nothing readable in it. Clamping caps
-    /// how far one frame can distort a row; the cell fills and centre-crops the
+    /// how far one frame can distort a row; the cell fills and center-crops the
     /// remainder, which still reads unmistakably as a panorama.
     public static let ratioBounds: ClosedRange<Double> = 0.4...3.5
 

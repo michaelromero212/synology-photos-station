@@ -64,13 +64,13 @@ enum FloatingTabBarMetrics {
 /// Hand-rolling it removes that dependency entirely: the bar is the same
 /// wherever it runs, and it is something that can be checked on a simulator and
 /// trusted on a phone. It also fixes a shape the system would not give us — with
-/// the search tab removed, the system centres a three-item pill and leaves about
+/// the search tab removed, the system centers a three-item pill and leaves about
 /// sixty-nine points beside it, which a sixty-two point circle cannot sit in
 /// without touching. Leading-aligned, the pill and the circle both have room.
 ///
 /// The cost is real and worth naming: no system search-field transformation on
-/// 26, and no tab-bar minimise behaviour. Neither was happening on his device
-/// anyway, and the minimise behaviour is one this app already turns off — it
+/// 26, and no tab-bar minimize behavior. Neither was happening on his device
+/// anyway, and the minimize behavior is one this app already turns off — it
 /// resizes the scroll view's safe area on every toggle and feeds a layout storm.
 /// See `ScrollProgress`.
 struct FloatingTabBar<Tab: Hashable>: View {
@@ -143,7 +143,7 @@ struct FloatingTabBar<Tab: Hashable>: View {
             Image(systemName: item.symbol)
                 .font(.system(size: Metrics.glyph, weight: .regular))
                 // A fixed box, so the three labels share a baseline. Without it
-                // the stack centres each item on its own glyph and "More" — an
+                // the stack centers each item on its own glyph and "More" — an
                 // ellipsis a third the height of a photograph icon — rides up
                 // level with its neighbours' pictures.
                 .frame(height: Metrics.glyphBox)
@@ -155,9 +155,9 @@ struct FloatingTabBar<Tab: Hashable>: View {
         .foregroundStyle(selection == item.tab ? Color.accentColor : Color.primary)
         .frame(maxWidth: Metrics.itemWidth)
         .frame(height: Metrics.height - Metrics.pillPadding * 2)
-        // The selected item gets a lozenge rather than only a colour, which is
+        // The selected item gets a lozenge rather than only a color, which is
         // what makes the current tab findable at a glance over a bright photo
-        // — colour alone disappears against a red sunset.
+        // — color alone disappears against a red sunset.
         .background {
             if selection == item.tab {
                 Capsule().fill(.primary.opacity(0.12))
@@ -197,7 +197,7 @@ extension View {
     ///
     /// A constant, and that is the safety argument. What stormed this app's
     /// layout twice was an inset that *changed* as you scrolled: each change
-    /// resized the scroll view, which re-realised rows, which resized it again.
+    /// resized the scroll view, which re-realized rows, which resized it again.
     /// This one is the same on every frame, so there is no loop to enter.
     ///
     /// `when` is for the handful of screens that are shown both ways — pushed

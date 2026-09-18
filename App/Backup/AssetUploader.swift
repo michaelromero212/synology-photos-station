@@ -82,7 +82,7 @@ enum AssetUploader {
         // Hand over a thumbnail while we still have the photo in our hands.
         //
         // Drawing it from the camera roll covers *this* device; it does nothing
-        // for anyone else in the family, who sees a grey tile until the NAS
+        // for anyone else in the family, who sees a gray tile until the NAS
         // works through its derivation queue. This is the half that fixes that,
         // and it is nearly free: the pixels are already here, and a 512px JPEG
         // is a rounding error next to the original that just went up.

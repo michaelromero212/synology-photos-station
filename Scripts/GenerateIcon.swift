@@ -12,7 +12,7 @@
 // deep crimson-to-coral gradient. Two rather than three because a third stroke
 // turns to mush at the 40pt size the Settings list uses.
 //
-// App Store constraints honoured here:
+// App Store constraints honored here:
 //   • 1024×1024, square, NO alpha channel, sRGB
 //   • corners left square — the system applies the mask, pre-rounding double-masks
 //   • no text, no Apple hardware, no photographic detail
@@ -35,7 +35,7 @@ struct RGB {
 }
 
 // Dark to vivid to bright, so the plate has depth rather than reading as one
-// flat fill at Settings-row size. The mid tone is the brand colour and is
+// flat fill at Settings-row size. The mid tone is the brand color and is
 // mirrored by the AccentColor asset, which is what keeps the sign-in mark and
 // the icon the same red instead of the system blue the app used to inherit.
 let deepCrimson = RGB(r: 74, g: 12, b: 24)
@@ -197,7 +197,7 @@ func drawGradientLayer(width: CGFloat, height: CGFloat) -> CGImage? {
 /// 1920×720 up to 4640×1440 — so `drawMarkLayer`'s "fill the short edge" rule
 /// would put a mark the full height of the banner, which reads as a logo
 /// shouting rather than a home screen. `markHeight` keeps it to a fraction of
-/// the height, centred, with the gradient carrying the rest.
+/// the height, centered, with the gradient carrying the rest.
 func drawBanner(width: CGFloat, height: CGFloat, markHeight: CGFloat = 0.52) -> CGImage? {
     guard let context = CGContext(
         data: nil,

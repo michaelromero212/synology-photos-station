@@ -22,7 +22,7 @@ import Vapor
 /// the scheduled windows carry on underneath.
 ///
 /// What it costs, and why the restraint. Apple meters background pushes to a
-/// small number an hour per device and deprioritises apps that spend them on
+/// small number an hour per device and deprioritizes apps that spend them on
 /// nothing. Three things keep this honest:
 ///
 ///   * a device is only a candidate if it *said* it has work outstanding,
@@ -30,7 +30,7 @@ import Vapor
 ///   * and each device gets a handful of attempts before it is dropped until it
 ///     next reports in — so answering a nudge buys more, and silence does not.
 ///
-/// Modelled on `ActivitySweeper`, down to claiming rows with `SKIP LOCKED` so a
+/// Modeled on `ActivitySweeper`, down to claiming rows with `SKIP LOCKED` so a
 /// second server process, or a restart mid-send, cannot double-spend a budget
 /// that is measured per device.
 actor BackupNudger {

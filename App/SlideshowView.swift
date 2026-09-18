@@ -9,7 +9,7 @@ import SwiftUI
 /// There used to be a second mode here, "Play All Videos", which played a
 /// day's clips back to back. It is gone: watching the videos from a day is not
 /// a *mode* you pick up front, it is what you want the moment you tap the
-/// first one. That behaviour now lives in the viewer, governed by the Auto
+/// first one. That behavior now lives in the viewer, governed by the Auto
 /// Play setting — see `PlaybackSettings`. One slideshow, and videos that
 /// simply continue.
 @Observable

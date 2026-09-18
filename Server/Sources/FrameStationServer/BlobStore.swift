@@ -204,7 +204,7 @@ struct BlobStore: Sendable {
     ///
     /// `attributesOfItem` returns `[FileAttributeKey: Any]`, and the numeric
     /// values arrive as `NSNumber` on Darwin but not always with the same
-    /// bridging behaviour under swift-corelibs-foundation. Casting straight to
+    /// bridging behavior under swift-corelibs-foundation. Casting straight to
     /// `Int` works on macOS and can silently return nil on Linux — which here
     /// would mean every hardlink comparison failing and the browse tree
     /// accumulating `-2`, `-3` duplicates of files it already had.

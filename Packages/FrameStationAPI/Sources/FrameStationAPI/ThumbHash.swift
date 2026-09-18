@@ -29,7 +29,7 @@ public enum ThumbHash {
 
         let pixelCount = width * height
 
-        // Alpha-weighted average colour.
+        // Alpha-weighted average color.
         var avgR = 0.0, avgG = 0.0, avgB = 0.0, avgA = 0.0
         for i in 0..<pixelCount {
             let j = i * 4
@@ -264,7 +264,7 @@ public enum ThumbHash {
         return Decoded(width: w, height: h, rgba: rgba)
     }
 
-    /// Average colour without rendering — enough for an instant single-colour
+    /// Average color without rendering — enough for an instant single-color
     /// fill before the blur is even computed.
     public static func averageRGBA(_ hash: [UInt8]) -> (r: Double, g: Double, b: Double, a: Double)? {
         guard hash.count >= 5 else { return nil }
