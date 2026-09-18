@@ -282,9 +282,20 @@ struct TimelineView: View {
         // library case still puts it in the stack in `body`, where there is no
         // scroll view for it to disturb.
         .overlay(alignment: .bottom) {
-            if let engine, showsGrid {
+            // Not while selecting. The selection bar goes here too, and of the
+            // two only one is something to act on — "Photo Backup Complete" can
+            // wait the few seconds it takes to choose some photographs. Without
+            // this it was drawn straight through the Share and Delete labels.
+            if let engine, showsGrid, !selection.isActive {
                 backupBanner(engine)
-                    .padding(.bottom, 8)
+                    // Above the floating bar, not through it. Eight points off
+                    // the safe area was right when the system drew the tab bar
+                    // and reserved its own space; ours floats twenty-one points
+                    // from the bottom of the *display* and reserves nothing, so
+                    // the banner was being drawn straight across the pill —
+                    // "Photo Backup Complete" legible through "Albums". This is
+                    // the same measurement every screen already keeps clear.
+                    .padding(.bottom, FloatingTabBarMetrics.contentInset)
                     .allowsHitTesting(true)
             }
         }
@@ -296,6 +307,11 @@ struct TimelineView: View {
         .navigationTitle(selectionTitle)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        // While you are choosing photographs, the selection bar is the only bar
+        // that matters — see `floatingTabBarHidden`. Inside the iOS guard
+        // because `selection` does not exist on a television: there is no
+        // selecting there, and no floating bar to get out of its way.
+        .floatingTabBarHidden(whileSelecting: selection.isActive)
         #endif
         .toolbar { toolbar }
         #if os(macOS)

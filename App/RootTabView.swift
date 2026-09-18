@@ -83,16 +83,25 @@ struct RootTabView: View {
         // coming to *rest* under it is a constant margin on each screen — see
         // `floatingTabBarClearance`.
         .overlay(alignment: .bottom) {
-            FloatingTabBar(
-                items: [
-                    .init(tab: Tabs.photos, title: "Photos", symbol: "photo.on.rectangle"),
-                    .init(tab: Tabs.albums, title: "Albums", symbol: "rectangle.stack"),
-                    .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
-                ],
-                selection: $tab,
-                onSearch: { showSearch = true }
-            )
+            // Gone while a grid is selecting, because that grid puts its own bar
+            // in exactly this place and two of them there is one too many. See
+            // `GridChrome`.
+            if !GridChrome.shared.isSelecting {
+                FloatingTabBar(
+                    items: [
+                        .init(tab: Tabs.photos, title: "Photos", symbol: "photo.on.rectangle"),
+                        .init(tab: Tabs.albums, title: "Albums", symbol: "rectangle.stack"),
+                        .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
+                    ],
+                    selection: $tab,
+                    onSearch: { showSearch = true }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        // Moves the bar and nothing else: it is an overlay, so neither its
+        // arrival nor its departure resizes a scroll view.
+        .animation(.easeInOut(duration: 0.22), value: GridChrome.shared.isSelecting)
         .sheet(isPresented: $showSearch) {
             NavigationStack {
                 searchTab

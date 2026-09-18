@@ -50,6 +50,25 @@ enum FloatingTabBarMetrics {
     }
 }
 
+/// Whether a grid on screen is selecting, so the bar can get out of its way.
+///
+/// Selecting puts a second bar at the bottom of the screen — Share, Add to
+/// Album, Delete — and the two were being drawn in the same place, one over the
+/// other, both illegible. Two bars competing for one strip is not a stacking
+/// problem to be spaced out of; only one of them is the answer to "what do I do
+/// now", and while you are choosing photographs it is not this one.
+///
+/// A singleton because the two ends are far apart and cannot be wired together
+/// directly: the selection lives in a `TimelineView`'s `@State`, and the bar is
+/// an overlay on the `TabView` well above it, with a tab and a navigation stack
+/// in between — neither of which carries a preference up reliably.
+@Observable
+@MainActor
+final class GridChrome {
+    static let shared = GridChrome()
+    var isSelecting = false
+}
+
 /// The bar along the bottom: three places in a pill, and search on its own.
 ///
 /// Drawn here rather than by the system, which is a decision worth the cost of
@@ -212,6 +231,27 @@ extension View {
     ///
     /// Nothing outside iOS: a Mac has a sidebar and a television keeps the
     /// system's own bar.
+    /// Tells the floating bar to step aside while this screen is selecting.
+    ///
+    /// Three moments rather than one, because a selection can leave the screen
+    /// without ending: `onAppear` covers arriving at a grid that is *still*
+    /// selecting after a tab switch, `onChange` the selection starting and
+    /// ending under your finger, and `onDisappear` backing out of a shared album
+    /// mid-selection — which would otherwise leave the bar hidden on a screen
+    /// with nothing to replace it.
+    @ViewBuilder
+    func floatingTabBarHidden(whileSelecting selecting: Bool) -> some View {
+        #if os(iOS)
+        onAppear { GridChrome.shared.isSelecting = selecting }
+            .onChange(of: selecting) { _, active in
+                GridChrome.shared.isSelecting = active
+            }
+            .onDisappear { GridChrome.shared.isSelecting = false }
+        #else
+        self
+        #endif
+    }
+
     @ViewBuilder
     func floatingTabBarClearance(when apply: Bool = true) -> some View {
         #if os(iOS)
