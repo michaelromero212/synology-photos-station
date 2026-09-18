@@ -205,6 +205,30 @@ struct PhotoGridSection<Cell: View>: View {
 
     private var square: some View {
         let side = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        let rows = Int((Double(entries.count) / Double(columns)).rounded(.up))
+        // Declared, not discovered, and this is the fix for a scrubber that
+        // lurched while the grid scrolled smoothly.
+        //
+        // A `LazyVGrid` does not know its own height until it has realized its
+        // rows, and this one sits inside the timeline's `LazyVStack`, which
+        // therefore cannot know a day's height until it draws that day. So the
+        // scroll view guesses, and its guess was not close: measured on a
+        // library of 582 photographs across 168 days, it first reported the
+        // content as 26,956 points — about right — and then, in the frame the
+        // top content margin landed, as 474,634. It settled at 191,364, seven
+        // times the truth, and was still changing thirteen seconds later.
+        //
+        // The scrubber's position is the offset over that number, so every time
+        // an unrealized day was realized and its guess collapsed to reality, the
+        // thumb moved without the grid moving. At section boundaries. Which is
+        // exactly where it was seen to jump.
+        //
+        // A square grid's height needs nothing realized to be known: the rows
+        // are the entry count over the columns, and every tile is `side` tall.
+        // Saying so leaves the stack nothing to estimate. The grid stays lazy
+        // inside — a day of six hundred photographs still builds its rows as
+        // they arrive — it simply no longer lies about how tall it will be.
+        let height = CGFloat(rows) * side + CGFloat(max(rows - 1, 0)) * spacing
         return LazyVGrid(
             columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
             spacing: spacing
@@ -213,5 +237,6 @@ struct PhotoGridSection<Cell: View>: View {
                 cell(entry, CGSize(width: side, height: side))
             }
         }
+        .frame(height: height)
     }
 }
