@@ -307,12 +307,14 @@ struct AlbumsView: View {
                 // list of settings.
                 VStack(alignment: .leading, spacing: 30) {
                     if let space = session.personalSpace, let found = collections?.page {
-                        // First, and above the hero, because it answers a
-                        // different question from everything below it. The rest
-                        // of this page is about remembering; this one is about
-                        // reassurance — "did the photographs I took this week
-                        // actually get here" — and somebody asking that should
-                        // not have to scroll past a card about 2019.
+                        // The hero opens the page. It sat third for a while,
+                        // under the two standing shelves, on the argument that
+                        // reassurance — "did this week's photographs get here" —
+                        // beats a card about 2019. His call was the other way,
+                        // and it is the better one: this is the only thing on
+                        // the page you could not have gone looking for, so it
+                        // has to be the thing you see without looking.
+                        hero(found, space: space)
                         standing(found, space: space)
                         automatic(found, space: space)
                     }
@@ -344,9 +346,9 @@ struct AlbumsView: View {
     /// thousandth. A page made only of suggestions has nothing to stand on when
     /// it has nothing to suggest.
     ///
-    /// Above the hero deliberately. The hero is the most interesting thing
-    /// today; these are the things somebody came to the page *for*, and making
-    /// them scroll past a card about 2019 to reach one is the wrong order.
+    /// Directly under the hero, and nothing else above them. These are what
+    /// somebody came to the page *for*; everything below is the library
+    /// volunteering something.
     @ViewBuilder
     private func standing(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
         let shelves = [found.recentlyAdded, found.favourites].compactMap { $0 }
@@ -365,11 +367,14 @@ struct AlbumsView: View {
         }
     }
 
-    /// Everything the server worked out. Each section is absent rather than
-    /// empty when it found nothing — a heading with nothing under it is worse
-    /// than no heading.
+    /// The one card the page opens on.
+    ///
+    /// Picked by the server, which also takes whatever it picked out of the
+    /// sections below so the same place is never offered twice — see its
+    /// `heroKey`. Absent rather than empty on a library too young to have
+    /// noticed anything, in which case the page simply starts with the shelves.
     @ViewBuilder
-    private func automatic(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+    private func hero(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
         if let hero = found.hero {
             NavigationLink {
                 CollectionDetailView(session: session, space: space, collection: hero)
@@ -380,7 +385,13 @@ struct AlbumsView: View {
             .nameable(hero) { naming = $0 }
             .padding(.horizontal, spacing)
         }
+    }
 
+    /// Everything else the server worked out. Each section is absent rather than
+    /// empty when it found nothing — a heading with nothing under it is worse
+    /// than no heading.
+    @ViewBuilder
+    private func automatic(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
         // Trips before days: a fortnight away is a bigger thing than a busy
         // Saturday, and the page should be ordered by what mattered rather than
         // by what happened most recently.
