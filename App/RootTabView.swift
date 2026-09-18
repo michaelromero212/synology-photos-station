@@ -37,6 +37,7 @@ struct RootTabView: View {
     /// the Photos tab — and the review belongs to the grid you arrive at. A tab
     /// cannot hand state to a screen inside another tab; their parent can.
     @State private var review: MoveReview?
+    @Environment(\.scenePhase) private var scenePhase
     #endif
 
     /// Which tab is on screen. Bound so following a share can move you.
@@ -103,6 +104,16 @@ struct RootTabView: View {
             }
         }
         .environment(\.connectionMonitor, connection)
+        // Leaving the app is when the NAS most needs the truth about this
+        // device's backlog, and the one moment a run cannot report it itself: a
+        // run that is interrupted by being backgrounded never reaches its own
+        // end. Without this, somebody who adds five hundred photographs and then
+        // switches apps leaves the server believing there is nothing to wake
+        // them for. See `BackupEngine.reportBackupState`.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .background else { return }
+            engine?.reportBackupState(force: true)
+        }
         .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
             // `session` is captured explicitly above so this weak capture reads

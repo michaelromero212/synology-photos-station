@@ -1,4 +1,5 @@
 import BackgroundTasks
+import FrameStationAPI
 import SwiftData
 import SwiftUI
 #if os(iOS)
@@ -27,9 +28,98 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         // exist for iOS to hand back transfers that finished while we were gone.
         BackgroundTransfers.shared.reconnect()
         BackupScheduler.register {
-            await MainActor.run { BackupEngine.backgroundRunner?() }
+            _ = await BackupEngine.backgroundRunner?()
         }
         return true
+    }
+
+    /// A silent push: the NAS believes this device has a backup it hasn't
+    /// finished, and has asked iOS to give us a moment to get on with it.
+    ///
+    /// This is the one wake-up we can influence. A `BGProcessingTask` window
+    /// arrives when iOS decides — often overnight, sometimes not for most of a
+    /// day — which is why a first backup of a few thousand photographs can
+    /// appear to have stopped. See the server's `BackupNudger` for what decides
+    /// to send one, and for the restraint that keeps Apple's background budget
+    /// from being spent on a phone that is switched off.
+    ///
+    /// The completion handler's answer is not a formality. iOS reads it to
+    /// decide how generous to be next time, so this reports `.newData` only when
+    /// photographs actually moved; claiming it every time is how an app teaches
+    /// the system to stop waking it.
+    ///
+    /// Anything that is not ours is answered `.noData` rather than ignored —
+    /// iOS suspends the app rather harshly if the handler is never called.
+    /// The completion-handler form rather than the `async` one, which is the
+    /// same choice `handleEventsForBackgroundURLSession` above makes. UIKit
+    /// hands over a `[AnyHashable: Any]`, which is not `Sendable`: taken as an
+    /// `async` method the payload has to cross an isolation boundary to be read
+    /// at all, and no amount of annotation makes that clean. This form is
+    /// ordinary main-actor code, so the dictionary is read where it arrives and
+    /// only the decision travels on.
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification payload: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        // `backgroundRunner` is nil when iOS woke us before the app had built an
+        // engine — signed out, or launched straight into the background. The
+        // scheduled window is still booked, so that costs promptness rather than
+        // the backup.
+        guard payload[PushPayloadKey.kind] as? String == PushPayloadKey.kindBackup else {
+            completionHandler(.noData)
+            return
+        }
+        guard let runner = BackupEngine.backgroundRunner else {
+            Diagnostics.shared.log(.backup, "woken by the NAS, but backup isn't running here")
+            completionHandler(.noData)
+            return
+        }
+        // Written down because this is the only record there will be. A silent
+        // push arrives while the phone is in somebody's pocket, hours from the
+        // nearest console, and "did the wake-ups actually happen?" is the first
+        // question to ask of a backup that still looks stuck.
+        Diagnostics.shared.log(.backup, "woken by the NAS to finish backing up")
+        let box = UncheckedSendableBox(completionHandler)
+        Task {
+            // Unstructured, and left running on purpose. iOS wants the handler
+            // called within about thirty seconds and a backup is not a
+            // thirty-second job; chunks sent while backgrounded go over a
+            // background `URLSession` that outlives this handler and outlives
+            // the process, so returning hands the work over rather than
+            // abandoning it. See `BackgroundTransfers`.
+            let work = Task { await runner() }
+            let moved = await Self.answer(for: work)
+            Diagnostics.shared.log(
+                .backup, moved ? "wake-up moved photographs" : "wake-up found nothing to do"
+            )
+            box.value(moved ? .newData : .noData)
+        }
+    }
+
+    /// What to tell iOS about a wake-up that may not be finished.
+    ///
+    /// Waits for the run, or for the budget to run out, whichever comes first —
+    /// and does not cancel the run when it is the latter, which is the whole
+    /// reason `work` is unstructured rather than a child of this group.
+    ///
+    /// Out of time is reported as `.newData`. It means the run found something
+    /// to do and is still doing it, and the question iOS is really asking is
+    /// whether waking us was worth it. Answering `.noData` to a productive
+    /// wake-up is how an app teaches the system to stop bothering.
+    private static func answer(for work: Task<Bool, Never>) async -> Bool {
+        await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { await work.value }
+            group.addTask {
+                // Twenty-five of the thirty, leaving margin for the handler
+                // itself to be called and for iOS to act on it.
+                try? await Task.sleep(for: .seconds(25))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? true
+        }
     }
 
     /// iOS relaunched us purely to say background uploads finished.
@@ -290,9 +380,11 @@ struct RootView: View {
                 if !UserDefaults.standard.bool(forKey: "push.didAsk") {
                     UserDefaults.standard.set(true, forKey: "push.didAsk")
                     await registrar.requestAuthorization()
-                } else {
-                    await registrar.registerIfAuthorized()
                 }
+                // Whatever was said to the prompt. A token is needed either way
+                // — the silent push that finishes a stalled backup travels on
+                // it and shows nothing. See `registerForPushes`.
+                await registrar.registerForPushes()
                 await registrar.flushPendingRegistration()
             }
             #endif

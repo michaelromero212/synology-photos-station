@@ -16,6 +16,13 @@ enum BackupScheduler {
     )
 
     /// Must be called before the app finishes launching, or iOS throws.
+    ///
+    /// `run` is awaited to completion before the task is reported finished, and
+    /// that is load-bearing. It used to hand back a closure that merely *started*
+    /// the backup, so `setTaskCompleted` fired within milliseconds — iOS was told
+    /// the window had been used while nothing had been sent, and was free to
+    /// suspend us mid-upload. Every window was thrown away and the record showed
+    /// a long line of successful background runs.
     static func register(run: @escaping @Sendable () async -> Void) {
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: taskIdentifier, using: nil

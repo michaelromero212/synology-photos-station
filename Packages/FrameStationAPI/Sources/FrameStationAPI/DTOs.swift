@@ -107,6 +107,25 @@ public struct RegisterPushTokenRequest: Codable, Sendable {
     }
 }
 
+/// How much of this device's backup is still waiting.
+///
+/// The only reason the server is told is so it can wake the device back up —
+/// see the nudger. Nothing else reads it, and a device that never reports is a
+/// device that is simply never nudged.
+///
+/// Reported rather than inferred because it cannot be inferred: the queue lives
+/// on the phone, and from the server's side a phone with four thousand photos
+/// left to send and a phone that finished an hour ago look exactly alike.
+public struct ReportBackupStateRequest: Codable, Sendable {
+    /// Items still to upload. Zero means finished, or turned off — either way,
+    /// nothing to wake up for.
+    public let pending: Int
+
+    public init(pending: Int) {
+        self.pending = pending
+    }
+}
+
 // MARK: - Health
 
 public struct HealthResponse: Codable, Sendable, Hashable {

@@ -306,6 +306,50 @@ environment travels with the token and the client reports it per build
 configuration.
 
 
+### The silent push: waking a backup iOS has forgotten about
+
+The second thing push is for, and the one that took longest to admit was
+missing. A backup runs inside the windows iOS grants a `BGProcessingTask`, and
+iOS grants them on its own schedule — often overnight on charge, sometimes not
+for most of a day. A first backup of a few thousand photographs therefore
+arrives in fits and starts across days, and the person watching it concludes the
+app has stopped. Synology's client has had a `content-available` push for exactly
+this since the beginning; `BackupNudger` is ours.
+
+It needs a fact the server cannot derive. The queue lives on the phone, so from
+the NAS's side a device with four thousand items left and one that finished an
+hour ago are the same silence. The phone therefore reports: `PUT
+/v1/devices/backup-state` with what it still has outstanding, written to
+`devices.backup_pending`. Nothing else reads that column, and a device that never
+reports is simply never woken.
+
+The restraint is the design. Apple meters background pushes to a handful an hour
+per device and deprioritises apps that spend them on nothing, so a device is a
+candidate only if it *said* it has work, is a phone or an iPad, has been quiet
+for a while (`FRAMESTATION_BACKUP_QUIET_SECONDS`, default fifteen minutes) with
+no upload arriving, and has not been nudged inside the cooldown
+(`FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS`, default thirty). `backup_nudges`
+counts attempts and stops at `FRAMESTATION_BACKUP_NUDGE_LIMIT` (six); *any*
+report resets it to zero. So a phone that answers earns more attempts and one
+that is switched off, out of the house or has Background App Refresh disabled
+costs a handful of pushes and is then left alone. `Scripts/smoke-nudge.sh` checks
+each of those gates individually.
+
+Two consequences worth stating. A silent push needs a token but no notification
+permission and displays nothing, so the app registers for remote notifications
+whatever was said to the banner prompt — gating registration on authorization
+meant somebody who declined banners also quietly gave up having their backup
+rescued. And the background task now *awaits* the run before reporting itself
+complete: it used to start the work and call `setTaskCompleted` within
+milliseconds, which told iOS the window had been used while nothing had been
+sent, so every window was thrown away and the record showed a long line of
+successful background runs.
+
+Delivery is best-effort by definition — Apple may delay, coalesce or drop it, and
+none of that comes back. Nothing here is required for a backup to finish; the
+scheduled windows carry on underneath.
+
+
 ### Why playback URLs are signed rather than bearer-authenticated
 
 AVPlayer fetches media itself, outside the `URLSession` the rest of the API uses,

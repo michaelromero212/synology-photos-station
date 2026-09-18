@@ -138,7 +138,7 @@ actor ActivitySweeper {
             return
         }
 
-        let notification = APNsClient.Notification(
+        let notification = APNsClient.Notification.alert(
             title: session.spaceName,
             body: ActivityMessage.body(
                 name: session.uploaderName,

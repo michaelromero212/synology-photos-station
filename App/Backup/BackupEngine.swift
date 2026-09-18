@@ -124,34 +124,60 @@ final class BackupEngine {
 
     func update(settings: BackupSettings) { self.settings = settings }
 
-    /// How the background task reaches whichever engine the app built.
+    /// How a wake-up — a scheduled window, or a silent push — reaches whichever
+    /// engine the app built. Answers whether anything actually moved.
     ///
     /// A closure rather than a shared instance: the engine needs the session and
     /// model container that only the view tree has, and iOS may launch us
     /// straight into a background task before any of that exists — in which case
     /// this is nil and the wake-up is a no-op rather than a crash.
-    nonisolated(unsafe) static var backgroundRunner: (() -> Void)?
+    ///
+    /// `async` and not `() -> Void`, which is what it was and which quietly
+    /// wasted every window it was given. The old closure started a detached
+    /// `Task` and returned immediately, so `BackupScheduler` called
+    /// `setTaskCompleted` before a single photograph had been sent — telling iOS
+    /// the work was finished while it was still being started, and inviting
+    /// suspension mid-upload. Both callers now wait for the run.
+    nonisolated(unsafe) static var backgroundRunner: (@Sendable () async -> Bool)?
 
     /// Installs `backgroundRunner` and asks for the first window.
     func enableBackgroundRuns() {
         Self.backgroundRunner = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.scanLibrary()
-                await self.start()
-                // Chain the next window from the end of this one; iOS only ever
-                // honours one pending request at a time.
-                BackupScheduler.schedule(requiresPower: self.settings.chargingOnly)
-            }
+            guard let self else { return false }
+            return await self.runInBackground()
         }
         BackupScheduler.schedule(requiresPower: settings.chargingOnly)
         startObservingLibrary()
+        // So the NAS knows from the start whether this device is one worth
+        // waking — see `reportBackupState`.
+        reportBackupState(force: true)
+    }
+
+    /// One wake-up's worth of work: catch up on what the library gained, drain
+    /// what is queued, and book the next window.
+    ///
+    /// The return value is what iOS is told, and telling it honestly is the
+    /// point: `.newData` for a window that moved photographs earns more windows,
+    /// and claiming it for a window that did nothing is how an app ends up
+    /// getting none.
+    private func runInBackground() async -> Bool {
+        let before = progress.done
+        await scanLibrary()
+        await start()
+        // Chain the next window from the end of this one; iOS only ever honours
+        // one pending request at a time.
+        BackupScheduler.schedule(requiresPower: settings.chargingOnly)
+        return progress.done > before
     }
 
     func disableBackgroundRuns() {
         Self.backgroundRunner = nil
         BackupScheduler.cancel()
         stopObservingLibrary()
+        // Nothing to wake this device for any more. Said plainly rather than
+        // left to expire, or the NAS spends its push budget on a phone that has
+        // switched backup off.
+        reportBackupState(force: true)
     }
 
     /// Starts watching the photo library so a photo taken with the app open is
@@ -373,6 +399,12 @@ final class BackupEngine {
         try? context.save()
         refreshProgress(context)
         statusText = "Queued \(added) new item\(added == 1 ? "" : "s")"
+        // Before the run rather than after it, and throttled rather than forced.
+        // A photograph taken with the app open moves this device from "nothing
+        // to wake for" to "something to wake for", and that transition is worth
+        // telling the NAS *now* — the run about to start may well be cut short
+        // by the app being put away, and then nothing else would say so.
+        reportBackupState()
         await start()
     }
 
@@ -506,6 +538,39 @@ final class BackupEngine {
 
         statusText = progress.summary
         completedRuns += 1
+        // The end of a run is the one moment this device knows something the
+        // NAS cannot work out for itself: whether there is more to come.
+        reportBackupState(force: true)
+    }
+
+    /// The last backlog reported to the NAS, and when — so a quiet phone is not
+    /// re-sending the same number every time a run ends.
+    private var reportedPending: Int?
+    private var reportedAt: Date?
+    private static let reportInterval: TimeInterval = 5 * 60
+
+    /// Tells the NAS how much is left, so it can wake this device to finish it.
+    ///
+    /// Fire-and-forget, and deliberately so: this is an optimisation on top of a
+    /// backup that completes without it, and a phone on a bad connection must
+    /// not have a run held up by a status ping. A failed report costs one
+    /// nudge's worth of promptness and nothing else.
+    ///
+    /// `force` is for the moments that genuinely change the answer — a run
+    /// ending, backup being switched on or off. Everything else is throttled,
+    /// because the interesting transition is between "some" and "none" rather
+    /// than between four thousand and three thousand nine hundred.
+    func reportBackupState(force: Bool = false) {
+        let pending = Self.backgroundRunner == nil ? 0 : progress.pending
+        if !force, let reportedPending, let reportedAt,
+           (reportedPending > 0) == (pending > 0),
+           Date().timeIntervalSince(reportedAt) < Self.reportInterval {
+            return
+        }
+        guard let client = session.client else { return }
+        reportedPending = pending
+        reportedAt = Date()
+        Task { try? await client.reportBackupState(ReportBackupStateRequest(pending: pending)) }
     }
 
     /// One upload lane: claim, send, repeat until the queue is empty, the Wi-Fi

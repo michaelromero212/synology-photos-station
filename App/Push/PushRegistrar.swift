@@ -38,22 +38,33 @@ final class PushRegistrar: NSObject {
             .notificationSettings().authorizationStatus
     }
 
-    /// Asks, then registers. Safe to call repeatedly.
+    /// Asks whether banners are welcome. Safe to call repeatedly.
+    ///
+    /// Only about what is *shown*: registering for a token is separate and
+    /// unconditional — see `registerForPushes`.
     func requestAuthorization() async {
         do {
-            let granted = try await UNUserNotificationCenter.current()
+            _ = try await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound, .badge])
             await refreshAuthorization()
-            if granted { UIApplication.shared.registerForRemoteNotifications() }
         } catch {
             lastError = error.localizedDescription
         }
     }
 
-    /// Registers only if the user already said yes — never prompts.
-    func registerIfAuthorized() async {
+    /// Gets a token. Never prompts, and does not wait to be allowed to.
+    ///
+    /// It used to return early unless banners had been permitted, which was the
+    /// obvious reading and the wrong one: the same token carries the *silent*
+    /// push that wakes a stalled backup, and that needs no permission and shows
+    /// nothing. Gating it on notification authorization meant somebody who
+    /// declined banners — a perfectly ordinary choice — also silently gave up
+    /// having their overnight backup rescued. See `BackupNudger` on the server.
+    ///
+    /// Registering shows no prompt of its own; what a person agreed or declined
+    /// to still governs whether anything is ever *displayed*.
+    func registerForPushes() async {
         await refreshAuthorization()
-        guard authorization == .authorized || authorization == .provisional else { return }
         UIApplication.shared.registerForRemoteNotifications()
     }
 

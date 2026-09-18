@@ -1,11 +1,15 @@
 import Foundation
 
-/// What a push carries besides its text, so a tap can open the right place.
+/// What a push carries besides its text, so a tap can open the right place —
+/// and, for a silent one, so the device knows what it was woken for.
 public enum PushPayloadKey {
     public static let spaceID = "spaceID"
     public static let kind = "kind"
     /// Someone added photos or videos to a shared space.
     public static let kindActivity = "activity"
+    /// Nothing to show. The server believes this device has a backup it hasn't
+    /// finished, and is asking iOS for a moment in which to finish it.
+    public static let kindBackup = "backup"
 }
 
 /// The wording of an upload notification.

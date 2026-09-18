@@ -111,6 +111,12 @@ func configure(_ app: Application) async throws {
         app.storage[ActivitySweeperKey.self] = sweeper
         await sweeper.start()
 
+        // The other half of what push is for: telling people what arrived, and
+        // getting a phone that stalled overnight moving again.
+        let nudger = BackupNudger(app: app, apns: apns)
+        app.storage[BackupNudgerKey.self] = nudger
+        await nudger.start()
+
         let retention = RetentionWorker(app: app)
         app.storage[RetentionWorkerKey.self] = retention
         await retention.start()

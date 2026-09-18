@@ -101,6 +101,12 @@ public actor FrameStationClient {
         try await sendNoContent(.put, "v1/devices/push-token", body: body)
     }
 
+    /// Tells the NAS how much of this device's backup is still outstanding, so
+    /// it can wake the device up to finish it. See the server's `BackupNudger`.
+    public func reportBackupState(_ body: ReportBackupStateRequest) async throws {
+        try await sendNoContent(.put, "v1/devices/backup-state", body: body)
+    }
+
     /// The read endpoint takes no arguments, but the no-content helper is
     /// body-shaped; an empty object is a valid, forward-compatible payload.
     private struct ActivityReadBody: Encodable {}

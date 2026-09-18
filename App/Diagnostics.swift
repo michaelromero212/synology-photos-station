@@ -29,6 +29,10 @@ final class Diagnostics {
         case layout = "Layout"
         /// A tile that ended up with no picture, and why. See `ThumbnailWatch`.
         case thumbnail = "Thumbnail"
+        /// Being woken to finish a backup, and what came of it. The only record
+        /// of a silent push there is: it arrives while the phone is in a pocket,
+        /// where the console cannot reach. See `BackupNudger` on the server.
+        case backup = "Backup"
 
         /// Read at a glance when skimming a long log.
         var symbol: String {
@@ -42,6 +46,7 @@ final class Diagnostics {
             case .launch: return "🚀"
             case .layout: return "📐"
             case .thumbnail: return "🖼️"
+            case .backup: return "☁️"
             }
         }
     }

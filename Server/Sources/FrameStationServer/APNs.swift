@@ -43,11 +43,49 @@ actor APNsClient {
     }
 
     struct Notification {
-        var title: String
-        var body: String
-        var threadID: String?
-        /// Merged into the payload alongside `aps`.
+        /// A banner, or nothing at all.
+        ///
+        /// The difference is not cosmetic and Apple enforces it: a silent push
+        /// must carry `content-available` and *no* alert, sound or badge, must
+        /// be sent with `apns-push-type: background`, and must be priority 5 —
+        /// a background push at priority 10 is rejected outright. Making it a
+        /// choice in the type rather than a flag means neither half can be set
+        /// without the other.
+        enum Content {
+            case alert(title: String, body: String, threadID: String?)
+            /// Asks iOS for a moment of background time. Best-effort by
+            /// definition: Apple may delay it, coalesce it, or drop it if the
+            /// device is low on power, and none of that is reported back.
+            case silent
+        }
+
+        var content: Content
+        /// Merged into the payload alongside `aps`. For a silent push this is
+        /// the only thing carrying meaning — it is how the app knows what it
+        /// was woken for.
         var custom: [String: String] = [:]
+
+        static func alert(
+            title: String, body: String, threadID: String? = nil,
+            custom: [String: String] = [:]
+        ) -> Notification {
+            Notification(
+                content: .alert(title: title, body: body, threadID: threadID),
+                custom: custom
+            )
+        }
+
+        static func silent(custom: [String: String] = [:]) -> Notification {
+            Notification(content: .silent, custom: custom)
+        }
+
+        /// For the log line a server with no APNs key writes instead of sending.
+        var describedForLog: String {
+            switch content {
+            case .alert(let title, let body, _): return "\(title): \(body)"
+            case .silent: return "silent push \(custom)"
+            }
+        }
     }
 
     /// What Apple said about one token.
@@ -83,8 +121,8 @@ actor APNsClient {
     ) async -> Outcome {
         guard let configuration else {
             logger.info("""
-                push not configured — would have sent "\(notification.title): \
-                \(notification.body)" to \(deviceToken.prefix(8))…
+                push not configured — would have sent "\(notification.describedForLog)" \
+                to \(deviceToken.prefix(8))…
                 """)
             return .delivered
         }
@@ -93,14 +131,29 @@ actor APNsClient {
             ? "api.push.apple.com" : "api.sandbox.push.apple.com"
         let url = URI(string: "https://\(host)/3/device/\(deviceToken)")
 
-        var payload: [String: Any] = [
-            "aps": [
-                "alert": ["title": notification.title, "body": notification.body],
+        let aps: [String: Any]
+        let pushType: String
+        let priority: String
+        switch notification.content {
+        case .alert(let title, let body, let threadID):
+            aps = [
+                "alert": ["title": title, "body": body],
                 "sound": "default",
                 // Lets iOS group a space's notifications together.
-                "thread-id": notification.threadID ?? notification.title,
-            ] as [String: Any]
-        ]
+                "thread-id": threadID ?? title,
+            ]
+            pushType = "alert"
+            priority = "10"
+        case .silent:
+            aps = ["content-available": 1]
+            pushType = "background"
+            // Five, not ten. Apple rejects a background push sent at ten, and
+            // the low priority is the deal being struck: we are asking for time
+            // when it suits the device rather than demanding it now.
+            priority = "5"
+        }
+
+        var payload: [String: Any] = ["aps": aps]
         for (key, value) in notification.custom { payload[key] = value }
 
         do {
@@ -110,8 +163,8 @@ actor APNsClient {
             let response = try await client.post(url) { request in
                 request.headers.replaceOrAdd(name: "authorization", value: "bearer \(jwt)")
                 request.headers.replaceOrAdd(name: "apns-topic", value: configuration.topic)
-                request.headers.replaceOrAdd(name: "apns-push-type", value: "alert")
-                request.headers.replaceOrAdd(name: "apns-priority", value: "10")
+                request.headers.replaceOrAdd(name: "apns-push-type", value: pushType)
+                request.headers.replaceOrAdd(name: "apns-priority", value: priority)
                 request.headers.contentType = .json
                 request.body = ByteBuffer(data: body)
             }

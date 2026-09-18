@@ -3,7 +3,8 @@ import Foundation
 import SQLKit
 import Vapor
 
-/// APNs token registration.
+/// What the server needs in order to reach a device: its APNs token, and
+/// whether there is anything worth reaching it about.
 ///
 /// The token belongs to the *device* row, not the user: one person's phone,
 /// iPad and Mac each get their own, and a token is only ever valid for the
@@ -16,6 +17,7 @@ struct PushController: RouteCollection {
 
         protected.put("devices", "push-token", use: register)
         protected.delete("devices", "push-token", use: unregister)
+        protected.put("devices", "backup-state", use: reportBackupState)
     }
 
     private func register(_ req: Request) async throws -> HTTPStatus {
@@ -51,6 +53,33 @@ struct PushController: RouteCollection {
             UPDATE devices SET apns_token = NULL, apns_env = NULL
             WHERE id = \(bind: device.deviceID)
             """).run()
+        return .noContent
+    }
+
+    /// "I still have this many photographs to send."
+    ///
+    /// Resets `backup_nudges` on every report, including a report of zero, and
+    /// that reset is the whole rate-limiting scheme. A device that is being
+    /// woken and is getting on with it keeps re-arming its own budget; a device
+    /// that never answers spends its handful of pushes and is left alone until
+    /// it speaks for itself. See `BackupNudger`.
+    private func reportBackupState(_ req: Request) async throws -> HTTPStatus {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let input = try req.content.decode(ReportBackupStateRequest.self)
+
+        // Clamped rather than rejected. This number only decides whether to
+        // spend a push, so a client that reports nonsense should be ignored,
+        // not given an error to handle in the middle of a backup.
+        let pending = max(0, input.pending)
+
+        try await req.sql.raw("""
+            UPDATE devices
+            SET backup_pending = \(bind: pending),
+                backup_reported_at = now(),
+                backup_nudges = 0
+            WHERE id = \(bind: device.deviceID)
+            """).run()
+
         return .noContent
     }
 }

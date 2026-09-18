@@ -10,6 +10,7 @@ extension RedeemInviteRequest: @retroactive Content {}
 extension RedeemInviteResponse: @retroactive Content {}
 extension MeResponse: @retroactive Content {}
 extension RegisterPushTokenRequest: @retroactive Content {}
+extension ReportBackupStateRequest: @retroactive Content {}
 
 // MARK: - Health
 
