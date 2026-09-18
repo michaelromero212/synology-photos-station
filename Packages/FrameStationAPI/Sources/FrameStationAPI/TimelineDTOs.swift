@@ -109,6 +109,25 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// True once thumbnails exist. While false the client should keep showing
     /// the ThumbHash rather than requesting an image that will 202.
     public let isDerived: Bool
+    /// `PHAsset.localIdentifier` on the device that uploaded this, when there
+    /// was one.
+    ///
+    /// Here so a phone can recognise its own photographs without keeping a
+    /// register of them. It used to keep one, built as each upload committed,
+    /// and it was always slightly too late: a commit can take seconds, the
+    /// asset exists on the server for most of that, and `/changes` will hand
+    /// the item to the grid before the commit response gets back to the phone.
+    /// The tile then asked "is this one of mine" before anything had said yes
+    /// and drew grey. Narrowing that race is possible; closing it is not, while
+    /// the answer travels separately from the question.
+    ///
+    /// Sent with the item, it cannot be late. It also survives a relaunch, and
+    /// does not depend on the upload queue still holding the row.
+    ///
+    /// Meaningless on any device other than the one that uploaded it — local
+    /// identifiers are per-device — which costs nothing: the lookup simply
+    /// finds no such photograph and the tile waits for the NAS as it always did.
+    public let sourceLocalID: String?
     /// One frame of a burst. The tile says so, because ten near-identical
     /// photographs in a row otherwise read as a mistake rather than a moment.
     public let isBurst: Bool
@@ -152,7 +171,7 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
         isFavorite: Bool, uploadedBy: UUID, isDerived: Bool,
         isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil,
-        thumbVersion: Int? = nil
+        thumbVersion: Int? = nil, sourceLocalID: String? = nil
     ) {
         self.id = id
         self.spaceID = spaceID
@@ -169,6 +188,7 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         self.isDerived = isDerived
         self.purgeAt = purgeAt
         self.thumbVersion = thumbVersion
+        self.sourceLocalID = sourceLocalID
     }
 
     public var thumbHashBytes: [UInt8]? {

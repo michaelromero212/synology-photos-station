@@ -291,7 +291,20 @@ struct PhotoCell: View {
     @discardableResult
     private func paintLocalOriginal() async -> ThumbnailWatch.Local {
         guard image == nil || isLocalOriginal else { return .painted }
-        guard let localIdentifier = LocalOriginals.shared.localIdentifier(for: item.assetID)
+        // The item's own answer first, and the registry only as a fallback.
+        //
+        // `sourceLocalID` travels *with* the photograph, so it cannot arrive
+        // after the tile that needs it. The registry can and did: a commit takes
+        // seconds, the asset exists on the server for most of that, and
+        // `/changes` hands the item to the grid before the commit response gets
+        // back to the phone — so the tile asked "is this one of mine" before
+        // anything had said yes. Recording earlier narrowed that race; only
+        // sending the answer alongside the question closes it.
+        //
+        // The registry stays for assets uploaded by a server that predates the
+        // field, and costs nothing when the item already knows.
+        guard let localIdentifier = item.sourceLocalID
+            ?? LocalOriginals.shared.localIdentifier(for: item.assetID)
         else { return .noMapping }
         guard let asset = PhotoLibraryScanner.asset(for: localIdentifier)
         else { return .notOnDevice }

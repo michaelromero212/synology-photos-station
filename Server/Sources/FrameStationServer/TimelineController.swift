@@ -108,6 +108,10 @@ struct TimelineController: RouteCollection {
         /// The thumbnail generation, so the client can cache-bust to a
         /// regenerated thumbnail. Nil where a query doesn't select it.
         var thumbVersion: Int?
+        /// What the uploading device called this photograph. Lets that device
+        /// draw its own copy while the NAS is still deriving — see
+        /// `TimelineItem.sourceLocalID`.
+        var sourceLocalID: String?
 
         func toItem() -> TimelineItem {
             // Orientation is applied here rather than baked into the stored
@@ -137,7 +141,8 @@ struct TimelineController: RouteCollection {
                 isBurst: isBurst,
                 liveVideoAssetID: liveVideoAssetID,
                 purgeAt: purgeAt,
-                thumbVersion: thumbVersion
+                thumbVersion: thumbVersion,
+                sourceLocalID: sourceLocalID
             )
         }
     }
@@ -171,6 +176,7 @@ struct TimelineController: RouteCollection {
                    (a.derived_at IS NOT NULL) AS "isDerived",
                    (a.burst_id IS NOT NULL) AS "isBurst",
                    a.thumb_version AS "thumbVersion",
+                   sa.source_local_id AS "sourceLocalID",
                    -- The paired half of a Live Photo, so the viewer can play it
                    -- from the still rather than from a tile of its own.
                    (SELECT v.id FROM assets v
@@ -243,6 +249,7 @@ struct TimelineController: RouteCollection {
                        (a.derived_at IS NOT NULL) AS "isDerived",
                    (a.burst_id IS NOT NULL) AS "isBurst",
                    a.thumb_version AS "thumbVersion",
+                   sa.source_local_id AS "sourceLocalID",
                    -- The paired half of a Live Photo, so the viewer can play it
                    -- from the still rather than from a tile of its own.
                    (SELECT v.id FROM assets v
