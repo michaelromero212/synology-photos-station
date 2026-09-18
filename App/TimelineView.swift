@@ -1632,6 +1632,14 @@ struct TimelineView: View {
             .contentMargins(
                 .top, windowTopInset + TopEdgeFade.barHeight, for: .scrollContent
             )
+            // And the same trick at the other end, for the floating tab bar.
+            // Photographs still pass *under* the glass as you scroll — a content
+            // margin moves where the grid comes to rest, not where it is drawn —
+            // but the last row of the library now stops on top of the bar rather
+            // than half beneath it.
+            .contentMargins(
+                .bottom, FloatingTabBarMetrics.contentInset, for: .scrollContent
+            )
             #endif
             // Reads the scroll view's own offset rather than inferring it from
             // content geometry: a LazyVStack only measures realised rows, so a

@@ -127,10 +127,12 @@ struct SpacesView: View {
                                 SpaceMembersView(
                                     space: space,
                                     model: model,
-                                    currentUserID: session.user?.id
-                                ) {
-                                    Task { await session.refreshSpaces() }
-                                }
+                                    currentUserID: session.user?.id,
+                                    onMembershipChanged: {
+                                        Task { await session.refreshSpaces() }
+                                    },
+                                    underTabBar: onDone == nil
+                                )
                             } label: {
                                 Label {
                                     VStack(alignment: .leading, spacing: 1) {
@@ -151,6 +153,11 @@ struct SpacesView: View {
                 }
             }
             .navigationTitle("Shared Albums")
+            // Pushed from More the floating tab bar is over this; presented as
+            // a sheet from the grid there is no bar, and the room would be a
+            // gap at the bottom of a card. `onDone` already tells the two apart
+            // — it is the Done button the sheet needs and the push does not.
+            .floatingTabBarClearance(when: onDone == nil)
             #if !os(tvOS)
             .toolbar {
                 if let onDone {
@@ -190,6 +197,10 @@ private struct SpaceMembersView: View {
     /// Leaving takes this screen's own space away, so the list behind it has to
     /// be told before this pops.
     let onMembershipChanged: () -> Void
+    /// Whether the floating tab bar is over this. Carried down rather than
+    /// worked out here: this is pushed inside whichever presentation
+    /// `SpacesView` is itself in, and only that screen knows which.
+    let underTabBar: Bool
 
     @Environment(\.dismiss) private var dismiss
     /// The name as it stands, which is not `space.name`.
@@ -217,6 +228,7 @@ private struct SpaceMembersView: View {
             }
         }
         .navigationTitle(currentName)
+        .floatingTabBarClearance(when: underTabBar)
         .task {
             currentName = space.name
             draftName = space.name

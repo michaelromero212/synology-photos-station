@@ -194,6 +194,8 @@ struct AlbumsView: View {
             }
         }
         .navigationTitle("Albums")
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {

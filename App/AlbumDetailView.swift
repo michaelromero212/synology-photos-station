@@ -52,6 +52,8 @@ struct AlbumDetailView: View {
             }
         }
         .navigationTitle(album.name)
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

@@ -337,6 +337,8 @@ struct CollectionDetailView: View {
             }
         }
         .navigationTitle(collection.title)
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -640,6 +642,8 @@ struct RecentlyDeletedView: View {
             }
         }
         .navigationTitle("Recently Deleted")
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -798,6 +802,8 @@ struct MediaTypesView: View {
             }
         }
         .navigationTitle("Media Types")
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

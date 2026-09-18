@@ -51,6 +51,12 @@ struct RootTabView: View {
     /// switch tabs and push.
     @State private var albumsPath: [SharedAlbumRoute] = []
 
+    #if os(iOS)
+    /// Whether the search sheet is up. Search is the circle beside the bar
+    /// rather than a tab in it — see `FloatingTabBar`.
+    @State private var showSearch = false
+    #endif
+
     private enum Tabs: Hashable { case photos, albums, more, search }
 
     var body: some View {
@@ -65,10 +71,37 @@ struct RootTabView: View {
     #if !os(macOS)
     private var tabs: some View {
         tabContainer
-        // On the TabView rather than per-tab: the bar is one control shared by
-        // all of them, and setting it four times is four chances to miss one.
-        .glassTabBar()
         #if os(iOS)
+        // Ours takes the system bar's place — the system's own is hidden per
+        // tab, in `tabContainer`. See `FloatingTabBar` for why it is drawn by
+        // hand rather than declared.
+        //
+        // An overlay rather than an inset, so nothing about the bar's own
+        // presence resizes a scroll view: photographs pass under the glass as
+        // you scroll, which is the whole point of it floating. What stops them
+        // coming to *rest* under it is a constant margin on each screen — see
+        // `floatingTabBarClearance`.
+        .overlay(alignment: .bottom) {
+            FloatingTabBar(
+                items: [
+                    .init(tab: Tabs.photos, title: "Photos", symbol: "photo.on.rectangle"),
+                    .init(tab: Tabs.albums, title: "Albums", symbol: "rectangle.stack"),
+                    .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
+                ],
+                selection: $tab,
+                onSearch: { showSearch = true }
+            )
+        }
+        .sheet(isPresented: $showSearch) {
+            NavigationStack {
+                searchTab
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showSearch = false }
+                        }
+                    }
+            }
+        }
         .environment(\.connectionMonitor, connection)
         .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
@@ -102,58 +135,85 @@ struct RootTabView: View {
         #endif
     }
 
-    /// Three places and a search button.
+    /// The screens, and who draws the bar over them.
     ///
-    /// Two shapes of the same four screens. The `Tab` builder is iOS 18, and
-    /// it is worth branching for exactly one reason: a tab declared with
-    /// `role: .search` is drawn by the system as a detached circle at the
-    /// trailing end of the bar, which is where Photos puts search and what was
-    /// asked for. Hand-rolling that as a floating button would mean guessing
-    /// the bar's height, its inset and its glass, and guessing again every
-    /// time the system changed them.
+    /// On iOS the system's own bar is hidden and `FloatingTabBar` takes its
+    /// place — the reasoning is there, not here. This still uses `TabView`
+    /// because it is what switches the screens and keeps each one's navigation
+    /// stack alive; only the chrome is ours.
     ///
-    /// On 17 the same four tabs render as four ordinary items. Search is then
-    /// simply the last one rather than a separate control — a plainer bar, not
-    /// a broken one.
+    /// A television keeps the system bar and the fourth tab. There is no corner
+    /// to float a button in, and the focus engine should own the bar rather
+    /// than compete with something hand-drawn.
     @ViewBuilder
     private var tabContainer: some View {
         if #available(iOS 18.0, tvOS 18.0, *) {
             TabView(selection: $tab) {
                 Tab("Photos", systemImage: "photo.on.rectangle", value: Tabs.photos) {
-                    NavigationStack { photosTab }
+                    systemBarHidden { NavigationStack { photosTab } }
                 }
                 Tab("Albums", systemImage: "rectangle.stack", value: Tabs.albums) {
-                    albumsTab
+                    systemBarHidden { albumsTab }
                 }
                 Tab("More", systemImage: "ellipsis", value: Tabs.more) {
-                    NavigationStack { moreTab }
+                    systemBarHidden { NavigationStack { moreTab } }
                 }
-                Tab(
-                    "Search", systemImage: "magnifyingglass",
-                    value: Tabs.search, role: .search
-                ) {
+                #if os(tvOS)
+                // A television keeps the system's fourth tab: there is no
+                // corner to put a floating button in, and the focus engine
+                // should own the bar.
+                Tab("Search", systemImage: "magnifyingglass", value: Tabs.search) {
                     NavigationStack { searchTab }
                 }
+                #endif
             }
         } else {
             TabView(selection: $tab) {
-                NavigationStack { photosTab }
+                systemBarHidden { NavigationStack { photosTab } }
                     .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
                     .tag(Tabs.photos)
 
-                albumsTab
+                systemBarHidden { albumsTab }
                     .tabItem { Label("Albums", systemImage: "rectangle.stack") }
                     .tag(Tabs.albums)
 
-                NavigationStack { moreTab }
+                systemBarHidden { NavigationStack { moreTab } }
                     .tabItem { Label("More", systemImage: "ellipsis") }
                     .tag(Tabs.more)
 
+                #if os(tvOS)
                 NavigationStack { searchTab }
                     .tabItem { Label("Search", systemImage: "magnifyingglass") }
                     .tag(Tabs.search)
+                #endif
             }
         }
+    }
+
+    /// Takes the system's bar out from under ours.
+    ///
+    /// Set on a tab's *content* and not on the `TabView`, which is where it was
+    /// first and where it did nothing: tab-bar visibility travels upwards from
+    /// the content of a tab to the bar that owns it, so a modifier sitting
+    /// outside the container is above the thing meant to read it. A screenshot
+    /// is what caught it — the system's bar drawn centred behind ours, the same
+    /// three labels twice, a few points apart.
+    ///
+    /// Hiding it also takes away the room it reserved, which every screen under
+    /// our bar now has to ask for itself — `floatingTabBarClearance`. It cannot
+    /// be done here for the same reason the hiding *has* to be: what a tab sets
+    /// does not reach the screens a navigation stack shows inside it.
+    ///
+    /// A television keeps its bar, so this is nothing there.
+    @ViewBuilder
+    private func systemBarHidden(
+        @ViewBuilder _ content: () -> some View
+    ) -> some View {
+        #if os(iOS)
+        content().toolbar(.hidden, for: .tabBar)
+        #else
+        content()
+        #endif
     }
 
     @ViewBuilder
@@ -325,6 +385,8 @@ struct MoreView: View {
     var body: some View {
         container
         .navigationTitle("More")
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
         #if os(iOS)
         .sheet(isPresented: $showBackup) {
             if let engine {
@@ -377,6 +439,9 @@ struct MoreView: View {
             .tint(.primary)
             #endif
             NavigationLink {
+                // Pushed, so it needs the bar's room; the same screen opened as
+                // a sheet from the grid does not — hence the flag rather than a
+                // modifier on the screen itself.
                 SpacesView(session: session)
             } label: {
                 Label("Manage Shared Albums", systemImage: "person.2.badge.gearshape")
