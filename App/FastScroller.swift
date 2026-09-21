@@ -16,8 +16,12 @@ struct FastScroller: View {
     /// Where the viewport sits, 0…1. An object rather than a `Double` so that
     /// reading it invalidates *this* view and not the grid — see `ScrollProgress`.
     let progress: ScrollProgress
-    /// Called continuously while dragging, with the bucket under the finger.
-    let onScrub: (TimelineBucket) -> Void
+    /// Called continuously while dragging: the day under the thumb, for the
+    /// pill and the fetch, and where to send the grid — see
+    /// `LibrarySpan.target(atFraction:viewport:)`. The target is nil until the
+    /// library has been measured, and the grid then falls back to landing on
+    /// whole days the way it always did.
+    let onScrub: (TimelineBucket, LibrarySpan.Target?) -> Void
     let onScrubEnd: () -> Void
 
     @State private var isDragging = false
@@ -84,13 +88,26 @@ struct FastScroller: View {
                             / Double(max(track, 1))
                         dragFraction = raw.clamped(to: 0...1)
                         if let bucket = bucket(at: dragFraction) {
-                            if label != Self.label(for: bucket) {
+                            // The day under the thumb, measured the way the
+                            // grid is measured — by height, not by photograph
+                            // count. The pill was naming one month while the
+                            // scroll went to another; see
+                            // `LibrarySpan.target`. Falls back to the item
+                            // count only before the library has been measured.
+                            let target = progress.span?.target(
+                                atFraction: dragFraction, viewport: progress.viewport
+                            )
+                            let named = target.flatMap { spot in
+                                buckets.first { $0.key == spot.day }
+                            } ?? bucket
+
+                            if label != Self.label(for: named) {
                                 #if os(iOS)
                                 UISelectionFeedbackGenerator().selectionChanged()
                                 #endif
                             }
-                            label = Self.label(for: bucket)
-                            onScrub(bucket)
+                            label = Self.label(for: named)
+                            onScrub(named, target)
                         }
                     }
                     .onEnded { _ in
@@ -231,29 +248,6 @@ struct ScrollReport: Equatable {
 /// scrubber alone, while `chromeHidden` flips a handful of times per scroll and
 /// is the only property the grid itself reads. `@Observable` tracks per
 /// property, so the grid is invalidated by the flip and never by the frame.
-/// The library's true shape, so the scrubber need not ask the scroll view how
-/// tall the content is.
-///
-/// It cannot ask, and that is the whole reason this exists. A `LazyVStack`
-/// guesses at the sections it has not built, and measured on a real library the
-/// guess came out at seven times the truth and never settled — so a thumb
-/// positioned by `offset / contentHeight` lurched whenever a guess collapsed,
-/// and rested a third of the way down a track at the end of the library.
-///
-/// The manifest knows better than the scroll view ever will. It carries every
-/// day and its count before a single photograph loads, and on a square grid a
-/// day's height follows from its count exactly. So the heights come from there
-/// and the scroll view is asked only where it is, never how big it is.
-struct LibrarySpan: Equatable {
-    /// Height of the whole library, in points.
-    var total: Double
-    /// Where each day begins, and how tall it is.
-    var start: [String: Double]
-    var height: [String: Double]
-
-    static let empty = LibrarySpan(total: 0, start: [:], height: [:])
-}
-
 @Observable
 @MainActor
 final class ScrollProgress {
@@ -263,6 +257,14 @@ final class ScrollProgress {
     /// the scroll view's own geometry, which is what every platform without a
     /// square grid still uses.
     @ObservationIgnored var span: LibrarySpan?
+
+    /// How tall the scroll view is, as it last reported itself.
+    ///
+    /// Kept here because the scrubber needs it and has no way to ask: it is an
+    /// overlay beside the grid, not inside it, so its own `GeometryReader`
+    /// measures the track and not the viewport. Both ends of the library are
+    /// one screen wide in this arithmetic — see `LibrarySpan.target`.
+    @ObservationIgnored var viewport: Double = 0
 
     /// The topmost day on screen, reported one-way by the scroll view.
     ///
@@ -349,6 +351,7 @@ final class ScrollProgress {
     private var travel: Double = 0
 
     func apply(_ report: ScrollReport) {
+        viewport = report.container
         let next = trueFraction(report) ?? (
             report.scrollable > 1
                 ? (report.offset / report.scrollable).clamped(to: 0...1)

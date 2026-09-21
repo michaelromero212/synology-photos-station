@@ -22,7 +22,9 @@ import SwiftUI
 struct TimelineRail: View {
     let buckets: [TimelineBucket]
     let progress: ScrollProgress
-    let onScrub: (TimelineBucket) -> Void
+    /// The day under the pointer, and where to send the grid — see
+    /// `LibrarySpan.target(atFraction:viewport:)`.
+    let onScrub: (TimelineBucket, LibrarySpan.Target?) -> Void
     let onScrubEnd: () -> Void
 
     @State private var isDragging = false
@@ -87,7 +89,19 @@ struct TimelineRail: View {
                         dragFraction = (value.location.y / max(height, 1))
                             .clamped(to: 0...1)
                         if let bucket = buckets.bucket(atFraction: dragFraction) {
-                            onScrub(bucket)
+                            // The day under the pointer, measured the way the
+                            // grid is measured — by height, not by photograph
+                            // count. The pill was naming one month while the
+                            // scroll went to another; see `LibrarySpan.target`.
+                            // Falls back to the item count only before the
+                            // library has been measured.
+                            let target = progress.span?.target(
+                                atFraction: dragFraction, viewport: progress.viewport
+                            )
+                            let named = target.flatMap { spot in
+                                buckets.first { $0.key == spot.day }
+                            } ?? bucket
+                            onScrub(named, target)
                         }
                     }
                     .onEnded { _ in

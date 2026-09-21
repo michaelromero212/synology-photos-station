@@ -1004,6 +1004,60 @@ struct TimelineView: View {
     @State private var scrubTarget: String?
     @State private var scrubLoad: Task<Void, Never>?
 
+    /// Names a day's rows, as distinct from its heading.
+    ///
+    /// Two ids per day rather than one: the heading is what a jump lands on when
+    /// it should show a date, and the rows are what a scrub is measured against
+    /// when it should land between two of them. See `moveGrid`.
+    private static func rowsID(_ day: String) -> String { "rows:\(day)" }
+
+    /// Moves the grid to a point inside a day, or to a day's heading.
+    ///
+    /// Which of the two runs is the difference between a drag that glides and
+    /// one that lurches, and how the first works is worth setting out, because
+    /// two more obvious routes to it are dead ends.
+    ///
+    /// `scrollTo` can only reach a view that has an id, and the only ids in this
+    /// grid were the day headings — so a drag could only ever land on one, and
+    /// on a holiday of three hundred photographs that is eight screens of travel
+    /// in a single step. Tagging every *row* with an id was the first answer and
+    /// does not work: those anchors register only once their cells are realized,
+    /// and a scrub from this year to 2019 is by definition a jump into content
+    /// nothing has ever built, so `scrollTo` finds nothing and the grid does not
+    /// move at all. Two probe jumps, to row 0 and to row 2 of the same day,
+    /// landed on pixel-identical screens.
+    ///
+    /// Aiming at the whole stack with a fractional anchor was the second answer
+    /// and is subtler. `scrollTo(_:anchor:)` aligns the same relative point in
+    /// the target view and in the viewport, so anchoring the entire library at
+    /// `t` should come to rest at `t` of the way through it. It does not,
+    /// because a lazy stack does not know how tall it is: it has built a handful
+    /// of days and guesses the other few hundred from them, so the same fraction
+    /// lands somewhere different depending on where you have already been.
+    /// Measured on a 582-photograph library — asking for a tenth of the way down
+    /// arrived at 0.27, and repeating a sweep gave a different answer each pass.
+    ///
+    /// What works is anchoring on **one day's rows**. A day's height is known
+    /// exactly the moment that day is built, `scrollTo` builds what it is sent
+    /// to, and the arithmetic then depends on nothing but that one day — no
+    /// estimate of the library as a whole enters into it. `LibrarySpan.target`
+    /// picks the day and the anchor; this puts the grid there.
+    ///
+    /// The heading is the fallback, and it is what the whole grid still does
+    /// under the justified layout on iPad: those rows are sized from aspect
+    /// ratios nobody knows until the photographs load, so there is no honest
+    /// height to anchor against and a day is the best that can be done.
+    private func moveGrid(to target: LibrarySpan.Target?, day: String, scroller: ScrollViewProxy) {
+        if let rows = target?.rows, let unit = target?.unit {
+            scroller.scrollTo(
+                Self.rowsID(rows),
+                anchor: UnitPoint(x: 0, y: CGFloat(unit.clamped(to: 0...1)))
+            )
+        } else {
+            scroller.scrollTo(day, anchor: .top)
+        }
+    }
+
     /// Follows the thumb without fetching everything it passes over.
     ///
     /// This used to ask the NAS for every day the thumb crossed. Dragging from
@@ -1023,9 +1077,13 @@ struct TimelineView: View {
     /// leaves the screen a frame later. The difference is between work that can
     /// be called off and work that cannot.
     private func scrub(
-        to bucket: TimelineBucket, in store: TimelineStore, scroller: ScrollViewProxy
+        to bucket: TimelineBucket, target: LibrarySpan.Target?,
+        in store: TimelineStore, scroller: ScrollViewProxy
     ) {
-        scroller.scrollTo(bucket.key, anchor: .top)
+        // Where the thumb is if the library has been measured, the day's
+        // heading if it has not — see `moveGrid`. The heading is what this
+        // always did, and what made the drag lurch from one day to the next.
+        moveGrid(to: target, day: bucket.key, scroller: scroller)
         scrubTarget = bucket.key
         scrubLoad?.cancel()
         scrubLoad = Task {
@@ -1068,28 +1126,49 @@ struct TimelineView: View {
     private func librarySpan(_ store: TimelineStore, width: CGFloat) -> LibrarySpan? {
         guard !PhotoGridMetrics.usesJustifiedRows, width > 0 else { return nil }
         let side = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        // Asked for once and walked once. The order the days come back in is
+        // part of the answer — `LibrarySpan` turns a point in the library back
+        // into a day by scanning it — so taking it from a second call would be
+        // a second list that could disagree with the first.
+        let days = sections(store)
         var start: [String: Double] = [:]
         var height: [String: Double] = [:]
         var running: Double = 0
-        for bucket in sections(store) {
+        for bucket in days {
             let rows = Int((Double(bucket.count) / Double(columns)).rounded(.up))
             let grid = Double(rows) * Double(side)
                 + Double(max(rows - 1, 0)) * Double(spacing)
-            let whole = Double(Self.headerHeight) + grid
+            let whole = Double(headerHeight) + grid
             start[bucket.key] = running
             height[bucket.key] = whole
             running += whole
         }
-        return LibrarySpan(total: running, start: start, height: height)
+        return LibrarySpan(
+            total: running, start: start, height: height,
+            order: days.map(\.key),
+            header: Double(headerHeight)
+        )
     }
+
+    /// A day heading's line box, before the eight points above and below it.
+    ///
+    /// Scaled rather than fixed at the eighteen points that `.subheadline` comes
+    /// to by default, because `headerHeight` is *imposed* on the heading and a
+    /// fixed number would crop the date at accessibility text sizes. Growing
+    /// both together keeps the heading legible and the arithmetic true.
+    @ScaledMetric(relativeTo: .subheadline) private var headerLine: CGFloat = 18
 
     /// What a day's heading costs, top padding to bottom padding.
     ///
-    /// A constant rather than a measurement: it is the same on every row, it is
-    /// already pinned by the padding in `header`, and reading it back would mean
-    /// a geometry reader per day to refine a number that only ever shifts the
-    /// thumb by a hair.
-    private static let headerHeight: CGFloat = 34
+    /// Given to the heading as a frame *and* used to measure the library, which
+    /// is the point of it being one number. The scrubber's whole model of where
+    /// the days are is a running total of heading plus rows, so a heading that
+    /// measures four points more than this on screen is four points of error per
+    /// day — nothing on the first day and fifteen hundred points by the four
+    /// hundredth, which is where the thumb would start naming a month the grid
+    /// does not go to. Declaring it makes the two agree by construction rather
+    /// than by luck.
+    private var headerHeight: CGFloat { headerLine + 16 }
 
     /// Asks the loader to warm a day's thumbnails.
     ///
@@ -1628,6 +1707,10 @@ struct TimelineView: View {
                             ) { entry, size in
                                 cell(entry, size: size, dayItems: items)
                             }
+                            // The scrubber's fine target: this day's rows,
+                            // separate from its heading so a scrub can land
+                            // partway down them. See `moveGrid`.
+                            .id(Self.rowsID(bucket.key))
                             .task {
                                 await store.loadBucket(bucket.key)
                                 // Warm this day's thumbnails as soon as its
@@ -1946,8 +2029,8 @@ struct TimelineView: View {
                         TimelineRail(
                             buckets: store.buckets,
                             progress: scrollProgress
-                        ) { bucket in
-                            scrub(to: bucket, in: store, scroller: scroller)
+                        ) { bucket, target in
+                            scrub(to: bucket, target: target, in: store, scroller: scroller)
                         } onScrubEnd: {
                             scrubEnded(in: store)
                         }
@@ -1956,8 +2039,8 @@ struct TimelineView: View {
                         FastScroller(
                             buckets: store.buckets,
                             progress: scrollProgress
-                        ) { bucket in
-                            scrub(to: bucket, in: store, scroller: scroller)
+                        ) { bucket, target in
+                            scrub(to: bucket, target: target, in: store, scroller: scroller)
                         } onScrubEnd: {
                             scrubEnded(in: store)
                         }
@@ -2211,6 +2294,11 @@ struct TimelineView: View {
         .padding(.top, 8)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Declared, not discovered — see `headerHeight`. This is the half of
+        // "stop the grid lying about how tall it is" that the rows got and the
+        // headings did not: a section's rows have always known their own height,
+        // and its heading was whatever the type happened to measure.
+        .frame(height: headerHeight)
     }
 
     #if os(iOS)
