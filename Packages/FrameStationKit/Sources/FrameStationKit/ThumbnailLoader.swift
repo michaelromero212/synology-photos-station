@@ -26,6 +26,10 @@ public actor ThumbnailLoader {
     /// exemption is safe for *this* type specifically, not for the rest of the
     /// actor's state, which genuinely does need the isolation.
     nonisolated(unsafe) private let memory = NSCache<NSString, CacheEntry>()
+    /// Decoded ThumbHash previews. Counted rather than weighed — each one is
+    /// thirty-two pixels square, so a few thousand is a rounding error beside
+    /// the picture cache above. See `cachedPlaceholder`.
+    nonisolated(unsafe) private let previews = NSCache<NSString, CacheEntry>()
     private let diskRoot: URL
     private var inFlight: [URL: Task<Fetched, Never>] = [:]
 
@@ -53,6 +57,7 @@ public actor ThumbnailLoader {
         self.client = client
         self.session = .shared
         self.memory.totalCostLimit = memoryLimitBytes
+        self.previews.countLimit = 4000
         self.diskLimitBytes = diskLimitBytes
 
         let base = diskRoot ?? FileManager.default
@@ -100,6 +105,42 @@ public actor ThumbnailLoader {
         assetID: UUID, size: Int, version: Int = 0
     ) -> PlatformImage? {
         memory.object(forKey: "\(assetID)-\(size)-\(version)" as NSString)?.image
+    }
+
+    /// An already-decoded ThumbHash preview, without suspending.
+    ///
+    /// The same bargain as `cachedThumbnail` above, for the blurred stand-in
+    /// rather than the picture. One preview is thirty-two pixels square and
+    /// costs almost nothing, which is why it was decoded inline as each cell was
+    /// built; the flaw in that reasoning is that a fling builds thirty cells in
+    /// a frame, and thirty of almost-nothing is main-thread work in the middle
+    /// of a scroll.
+    ///
+    /// Worth being accurate about the size of it, because it was chased as the
+    /// cause of a stutter and is not: on the measured fling it was one dropped
+    /// frame of eight. The badges on `PhotoCell` were three, and two more are
+    /// still unaccounted for. This is right on principle — decoding on the main
+    /// thread while scrolling is never correct — rather than decisive.
+    ///
+    /// The cache is the part that earns its keep. A tile seen before opens on
+    /// its blur with a dictionary lookup, which is the case that motivated
+    /// decoding eagerly in the first place: leaving a tab and coming back
+    /// rebuilds every visible cell at once.
+    nonisolated public func cachedPlaceholder(assetID: UUID) -> PlatformImage? {
+        previews.object(forKey: assetID.uuidString as NSString)?.image
+    }
+
+    /// Decodes a ThumbHash away from the caller's thread and keeps the result.
+    ///
+    /// `nonisolated` so it runs on the generic executor rather than queueing
+    /// behind whatever this actor is doing — the fetches it serializes are
+    /// network work, and a preview should not have to wait in that line.
+    nonisolated public func placeholder(assetID: UUID, hash: [UInt8]) async -> PlatformImage? {
+        let key = assetID.uuidString as NSString
+        if let held = previews.object(forKey: key) { return held.image }
+        guard let decoded = Self.placeholder(from: hash) else { return nil }
+        previews.setObject(CacheEntry(image: decoded, cost: 1), forKey: key, cost: 1)
+        return decoded
     }
 
     public func preview(assetID: UUID, targetPixels: Int = 2048) async -> PlatformImage? {

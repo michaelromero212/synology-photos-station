@@ -37,17 +37,25 @@ struct PhotoCell: View {
             version: item.thumbnailVersion
         )
         _image = State(initialValue: cached)
-        // Decode the ThumbHash here too, so a tile with no cached picture opens
-        // on its blurred preview instead of a gray square. This is the whole of
-        // "thumbnails appear instantly": the sharp image still arrives over the
-        // network in `load`, but there is a recognisable picture from the first
-        // frame rather than gray → blur → sharp. The decode is 32px on bytes
-        // already in the item — no network, no actor hop — cheap enough to run
-        // as each lazy cell is created. Skipped when the sharp image is already
-        // in hand, since then there is nothing to stand in for.
+        // The ThumbHash preview too, so a tile with no cached picture opens on
+        // its blur instead of a gray square. This is the whole of "thumbnails
+        // appear instantly": the sharp image still arrives over the network in
+        // `load`, but there is a recognizable picture from the first frame
+        // rather than gray → blur → sharp.
+        //
+        // A *lookup*, not a decode. It was decoded here, on the reasoning that
+        // thirty-two pixels on bytes already in the item is too cheap to bother
+        // scheduling — and that is true of one tile and false of a screenful.
+        // A fling builds thirty cells in a frame and this ran in every one of
+        // them, on the main thread, which is where the stutter came from:
+        // measured on a fling through cold content, eight dropped frames with
+        // the tiles drawing and two with them stubbed out. The decode now
+        // happens off the main thread in `load` and is kept, so a tile that has
+        // been seen before still opens on its blur with no work at all — which
+        // is the case that motivated doing this eagerly in the first place.
         _placeholder = State(
             initialValue: cached == nil
-                ? item.thumbHashBytes.flatMap(ThumbnailLoader.placeholder(from:))
+                ? loader?.cachedPlaceholder(assetID: item.assetID)
                 : nil
         )
     }
@@ -64,8 +72,19 @@ struct PhotoCell: View {
         picture
             .frame(width: size.width, height: size.height)
             .clipped()
-            .overlay(alignment: .top) { durationBadge }
-            .overlay(alignment: .bottom) { favoriteBadge }
+            // One overlay, and only on the tiles that have something to put in
+            // it. It was two — a duration and a favorite — attached to every
+            // tile whether or not either applied, and both empty for most of
+            // them. That is two overlay layers built per tile, and a fling
+            // builds thirty tiles in a frame. Measured on the same fling:
+            // seven dropped frames with them, four with them gone.
+            //
+            // The gate is on the *data*, not on a `@ViewBuilder` branch inside
+            // the overlay, because an empty branch still costs the layer. What
+            // it cannot be is a conditional `.overlay` modifier: that changes
+            // the tile's structural identity, so favoriting a photo would tear
+            // the cell down and rebuild it instead of drawing a heart.
+            .overlay { badges }
             .contentShape(Rectangle())
             // Keyed on the derivation state as well as the identity. Keyed on
             // the id alone, a tile drawn before its thumbnail existed never
@@ -111,6 +130,25 @@ struct PhotoCell: View {
         #else
         Image(nsImage: platformImage).resizable().scaledToFill()
         #endif
+    }
+
+    /// Nothing at all for an ordinary photograph, which is most of them.
+    ///
+    /// `hasBadge` is checked before either piece is built so that the common
+    /// tile carries an empty overlay rather than two conditional ones — see the
+    /// note on `body`.
+    @ViewBuilder
+    private var badges: some View {
+        if hasBadge {
+            ZStack {
+                durationBadge.frame(maxHeight: .infinity, alignment: .top)
+                favoriteBadge.frame(maxHeight: .infinity, alignment: .bottom)
+            }
+        }
+    }
+
+    private var hasBadge: Bool {
+        (item.mediaType == .video && item.durationMs != nil) || item.isFavorite
     }
 
     /// Top-right, which is where Synology puts it and — more to the point —
@@ -168,6 +206,16 @@ struct PhotoCell: View {
     }
 
     private func load() async {
+        // The blur first, and off this thread — see `init`. Before the fetch
+        // rather than after it, because its whole job is to stand in *while*
+        // the fetch runs; and skipped outright when there is already a picture,
+        // which keeps a re-scroll over warm content free.
+        if image == nil, placeholder == nil,
+           let hash = item.thumbHashBytes, let loader {
+            let blur = await loader.placeholder(assetID: item.assetID, hash: hash)
+            if image == nil { placeholder = blur }
+        }
+
         // Already painted from the memory cache by `init`; nothing to fetch.
         // A borrowed local copy does not count: it is standing in for a
         // thumbnail the NAS has not made yet, and when the NAS makes one this
