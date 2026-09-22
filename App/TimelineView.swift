@@ -1107,6 +1107,22 @@ struct TimelineView: View {
     /// resized under an iPad.
     private struct LibraryShapeKey: Equatable {
         let buckets: Int
+        /// Photographs, not just days.
+        ///
+        /// Days alone is not enough and the gap is the ordinary case, not an
+        /// exotic one: backing up this afternoon's forty photographs adds them
+        /// to a day that already exists, so the day *count* never moves. The
+        /// span would keep yesterday's heights — today measured short, every
+        /// day below it misplaced by the difference — and the thumb would drift
+        /// away from the grid a little more with every day's uploads, which is
+        /// the one way a photo library is guaranteed to change.
+        ///
+        /// Summed rather than taken from the manifest's own total so that a
+        /// photograph *moving* between days counts too: both days change size,
+        /// and neither the day count nor the grand total notices. The walk is
+        /// over a few thousand integers at worst and runs when this view's body
+        /// does, which is rarely by design — see `ScrollProgress`.
+        let items: Int
         let zoom: TimelineZoom
         let width: CGFloat
     }
@@ -1891,7 +1907,9 @@ struct TimelineView: View {
             // a bucket arriving, the zoom changing, the window resizing. See
             // `librarySpan`.
             .onChange(of: LibraryShapeKey(
-                buckets: store.buckets.count, zoom: store.zoom, width: proxy.size.width
+                buckets: store.buckets.count,
+                items: store.buckets.reduce(0) { $0 + $1.count },
+                zoom: store.zoom, width: proxy.size.width
             ), initial: true) { _, _ in
                 scrollProgress.span = librarySpan(store, width: proxy.size.width)
             }
