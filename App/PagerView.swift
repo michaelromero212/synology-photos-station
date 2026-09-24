@@ -17,8 +17,32 @@ import UIKit
 final class PagerFocus {
     var currentID: UUID
 
+    /// Whether the next move should cut straight to its page instead of
+    /// sliding there. Consumed by the move it applies to.
+    ///
+    /// Set only by `cut(to:)`. Ignored by observation because it only ever
+    /// changes together with `currentID`, which is what triggers the move.
+    @ObservationIgnored fileprivate(set) var cutsNextMove = false
+
     init(currentID: UUID) {
         self.currentID = currentID
+    }
+
+    /// Goes to a page with no slide — the way one video follows another.
+    ///
+    /// A player moving to the next clip is not the same act as a person
+    /// swiping to the next photograph. The slide says "you moved along the
+    /// library"; between two videos it put a quarter-second of the first
+    /// sliding off and the second sliding on — both still frames — in the
+    /// middle of what should read as one continuous watch.
+    func cut(to id: UUID) {
+        cutsNextMove = true
+        currentID = id
+    }
+
+    fileprivate func consumeCut() -> Bool {
+        defer { cutsNextMove = false }
+        return cutsNextMove
     }
 }
 
@@ -106,8 +130,10 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
         // forward animation looks like the library jumped somewhere else.
         let from = showing.flatMap { context.coordinator.index(of: $0) } ?? 0
         let to = context.coordinator.index(of: target) ?? 0
+        // A cut when one video is following another — see `PagerFocus.cut`.
         controller.setViewControllers(
-            [target], direction: to >= from ? .forward : .reverse, animated: true
+            [target], direction: to >= from ? .forward : .reverse,
+            animated: !focus.consumeCut()
         )
     }
 

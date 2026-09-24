@@ -665,7 +665,8 @@ struct AssetDetailView: View {
             dismiss()
             return
         }
-        focus.currentID = next
+        // Cut, not slide: the next clip should simply start. See `PagerFocus.cut`.
+        focus.cut(to: next)
     }
 
     /// Stops at the end of the day by returning nil — the last clip stays on
@@ -697,7 +698,9 @@ struct AssetDetailView: View {
     private func goToAdjacentVideo(forward: Bool) {
         guard currentItem.mediaType == .video else { return }
         guard let target = videoID(from: currentID, forward: forward) else { return }
-        focus.currentID = target
+        // The skip buttons are the same hop auto-play makes, pressed by hand,
+        // so they cut the same way — a player's next-track control, not a swipe.
+        focus.cut(to: target)
     }
 
     /// `dayItems` when the grid supplied it. The fallback matters for the
