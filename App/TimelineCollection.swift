@@ -890,6 +890,27 @@ final class TimelineCollectionView: UICollectionView {
     fileprivate weak var coordinator: TimelineCollection.Coordinator?
     private var lastWidth: CGFloat = 0
 
+    /// The grid has no safe area, and neither does anything inside it.
+    ///
+    /// This is what keeps every tile inside its own slot, and it was found on
+    /// his phone: tiles near the bottom of the screen slid *up* out of their
+    /// slots as they scrolled toward the home indicator, over the gap and into
+    /// the row above — and at the top, under the bars, they slid down. The grid
+    /// runs edge to edge, so the cells there overlap the window's safe area, and
+    /// UIKit hands each such cell the overlap as its own safe-area inset. The
+    /// view that `matchedTransitionSource` wraps every tile in — the zoom's
+    /// anchor — lays itself out inside that inset, centered, so a tile hanging
+    /// thirty-four points into the home indicator's strip was drawn seventeen
+    /// points high. Measured exactly that: frame y −17.0 in a cell with a bottom
+    /// inset of 34.
+    ///
+    /// Telling SwiftUI to ignore the safe area only halved it (−17 → −8.7) —
+    /// the wrapping view is UIKit's and places itself before SwiftUI's modifiers
+    /// apply. Removing the inset at its source fixed it outright: every cell
+    /// reads zero and every tile's frame starts at 0. Nothing here needs a safe
+    /// area — the grid sets every inset it keeps clear of by hand.
+    override var safeAreaInsets: UIEdgeInsets { .zero }
+
     override func layoutSubviews() {
         let widthChanged = lastWidth != 0 && bounds.width != lastWidth
         // Read before the layout recomputes for the new width — it still
@@ -905,29 +926,30 @@ final class TimelineCollectionView: UICollectionView {
 /// One tile or heading. Remembers what it was last drawn from, so a cell that
 /// was prepared ahead of time can tell it has gone stale.
 final class TimelineTileCell: UICollectionViewCell {
+    /// None, ever — see `TimelineCollectionView.safeAreaInsets`.
+    override var safeAreaInsets: UIEdgeInsets { .zero }
     var shown: GridEntry?
     /// The same for a heading: the day it was drawn for, place name included.
     var shownDay: TimelineBucket?
 }
 
-/// Runs its content's builder in a view's body, edge to edge in its cell.
+/// Runs its content's builder in a view's body, filling its cell.
 ///
 /// The body is what lets a hosted tile follow `@Observable` state — the
 /// selection, the upload badges — on its own: reads made in a body are observed,
 /// reads made while building a configuration are not.
 ///
-/// The safe area is the other half, and it was found by a tile drawing in the
-/// wrong place. Every cell is its own SwiftUI root, and a root keeps its content
-/// out of the safe area — so a tile sitting under the status bar or the
-/// navigation bar had its picture pushed *down inside its own cell* by however
-/// much of the bar it was under. Browsing, that was hidden by the fade. Selecting
-/// brings the system bar back, the safe area grows, and the last photograph of
-/// the day above was drawn fifty-five points low, across the next day's heading,
-/// while its frame was exactly where the layout put it. The grid already keeps
-/// clear of every bar with its own insets; the tiles must not do it a second
-/// time.
+/// Filling the cell and ignoring the safe area is the SwiftUI half of keeping a
+/// tile in its slot. It is not the half that fixed it — that is
+/// `TimelineCollectionView.safeAreaInsets` — but a hosted root that centered
+/// itself in whatever inset it was handed is how a tile first went astray, and
+/// it costs nothing to rule out here too.
 private struct TileHost<Content: View>: View {
     let content: () -> Content
-    var body: some View { content().ignoresSafeArea() }
+    var body: some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+    }
 }
 #endif
