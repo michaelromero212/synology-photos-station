@@ -154,6 +154,20 @@ final class LibrarySpanTests: XCTestCase {
         }
     }
 
+    func testTheOffsetIsTheExactPointTheThumbAskedFor() {
+        // What the collection-view grid scrolls to directly. It has to be the
+        // thumb's own fraction of the travel — the library less one screen —
+        // at every point, or the grid and the thumb disagree about where the
+        // library ends.
+        let library = span([900, 120, 4000, 300] + Array(repeating: 150, count: 30))
+        let travel = library.total - screen
+        for step in 0...20 {
+            let fraction = Double(step) / 20
+            let target = library.target(atFraction: fraction, viewport: screen)!
+            XCTAssertEqual(target.offset, fraction * travel, accuracy: 0.001)
+        }
+    }
+
     // MARK: - Nothing to go on
 
     func testAnUnmeasuredLibraryHasNoTarget() {

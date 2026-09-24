@@ -179,6 +179,13 @@ struct TimelineView: View {
     /// Held, not read. The grid hands this to the fast scroller and to the
     /// reporter and never touches `.fraction` itself — see `ScrollProgress`.
     @State private var scrollProgress = ScrollProgress()
+    #if os(iOS)
+    /// How the iPhone grid is moved — see `TimelineGridController`.
+    @State private var gridController = TimelineGridController()
+    /// The height of whatever bar has taken the bottom of the screen, so the
+    /// iPhone grid can keep its newest row above it. See `collectionGrid`.
+    @State private var bottomBarHeight: CGFloat = 0
+    #endif
     /// A one-shot request to scroll a section to the top. Zoom re-anchoring and
     /// moved-item review set it; an `.onChange` inside the `ScrollViewReader`
     /// performs the jump with `scrollTo` and clears it.
@@ -673,7 +680,15 @@ struct TimelineView: View {
             )
 
         case .loaded:
+            #if os(iOS)
+            if PhotoGridMetrics.usesJustifiedRows {
+                grid(store)
+            } else {
+                collectionGrid(store)
+            }
+            #else
             grid(store)
+            #endif
         }
     }
 
@@ -683,9 +698,16 @@ struct TimelineView: View {
     /// Selection and navigation are different enough that they'd read as two
     /// cells, but the branch lives inside the builder rather than across a
     /// `#if` — braces have to balance within each conditional block.
+    ///
+    /// `transition` and `sweeps` exist for the iPhone grid, whose tiles are
+    /// drawn in cells hosted outside this view's body. A `@Namespace` is only
+    /// dependable when read *in* a body, so that grid reads it there and hands
+    /// the value in; and its drag-to-select is done by the collection view
+    /// itself, so the tiles have no frames to report.
     @ViewBuilder
     private func gridCell(
-        _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = []
+        _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = [],
+        transition: Namespace.ID? = nil, sweeps: Bool = true
     ) -> some View {
         #if os(macOS)
         // One branch, always. There used to be two — a selecting cell and a
@@ -763,7 +785,7 @@ struct TimelineView: View {
                 // Lets a drag across the grid find this tile. Reports only
                 // while selecting, so browsing pays nothing for it.
                 #if os(iOS)
-                .sweepTarget(item, in: Self.gridSpace, active: selection.isActive)
+                .sweepTarget(item, in: Self.gridSpace, active: sweeps && selection.isActive)
                 #endif
         } else {
             #if os(iOS)
@@ -802,7 +824,7 @@ struct TimelineView: View {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     selection.begin(with: item)
                 }
-                .photoTransitionSource(id: item.id, in: photoTransition)
+                .photoTransitionSource(id: item.id, in: transition ?? photoTransition)
             #endif
         }
         #else
@@ -1221,25 +1243,35 @@ struct TimelineView: View {
     /// moving anything.
     private func entries(for bucket: TimelineBucket, items: [TimelineItem]) -> [GridEntry] {
         #if os(iOS)
-        let queued = queuedByDay[bucket.key] ?? []
+        return entries(for: bucket, items: items, queued: queuedByDay[bucket.key] ?? [])
+        #else
+        return items.isEmpty
+            ? (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) }
+            : items.map(GridEntry.item)
         #endif
+    }
 
+    #if os(iOS)
+    /// The same, with this day's queued tiles already in hand.
+    ///
+    /// `queuedByDay` walks every queued upload to group them, which during a
+    /// backup of a few thousand photographs is a few thousand iterations — and
+    /// the grid asks for one day's entries at a time. The collection-view grid
+    /// groups once per render and hands each day its own slice.
+    private func entries(
+        for bucket: TimelineBucket, items: [TimelineItem], queued: [QueuedTile]
+    ) -> [GridEntry] {
         if items.isEmpty {
             // Placeholders keep the section the right height so the scrollbar
             // doesn't jump when the bucket lands. Nothing to interleave with
             // yet, so the pending tiles lead — there is no order to be wrong
             // about.
-            var entries: [GridEntry] = []
-            #if os(iOS)
-            entries = queued.map {
-                .pending(localIdentifier: $0.localIdentifier, state: $0.state)
+            let pending = queued.map {
+                GridEntry.pending(localIdentifier: $0.localIdentifier, state: $0.state)
             }
-            #endif
-            entries.append(contentsOf: (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) })
-            return entries
+            return pending + (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) }
         }
 
-        #if os(iOS)
         guard !queued.isEmpty else { return items.map(GridEntry.item) }
 
         // Sorted on `(date, id)` rather than date alone. `sorted(by:)` is not a
@@ -1260,19 +1292,34 @@ struct TimelineView: View {
         return dated
             .sorted { ($0.date, $0.id) < ($1.date, $1.id) }
             .map(\.entry)
-        #else
-        return items.map(GridEntry.item)
-        #endif
     }
+
+    /// How many tiles a day draws, without building them.
+    ///
+    /// The collection-view grid needs every day's count to lay the library out,
+    /// and building every day's entries just to count them would be a few
+    /// thousand arrays per render. Must agree with `entries(for:items:queued:)`
+    /// exactly — a day that draws one tile more than it was measured for runs
+    /// into the next day's heading.
+    private func entryCount(
+        for bucket: TimelineBucket, items: [TimelineItem], queued: Int
+    ) -> Int {
+        (items.isEmpty ? max(bucket.count, 0) : items.count) + queued
+    }
+    #endif
 
     /// Draws one entry at the size the layout worked out for it.
     @ViewBuilder
     private func cell(
-        _ entry: GridEntry, size: CGSize, dayItems: [TimelineItem]
+        _ entry: GridEntry, size: CGSize, dayItems: [TimelineItem],
+        transition: Namespace.ID? = nil, sweeps: Bool = true
     ) -> some View {
         switch entry {
         case .item(let item):
-            gridCell(item, size: size, dayItems: dayItems)
+            gridCell(
+                item, size: size, dayItems: dayItems,
+                transition: transition, sweeps: sweeps
+            )
         case .placeholder:
             Rectangle().fill(.quaternary)
                 .frame(width: size.width, height: size.height)
@@ -1561,16 +1608,33 @@ struct TimelineView: View {
     }
 
     /// The photo's own wall clock, matching how the server buckets it.
+    ///
+    /// Kept formatters, for the reason `displayDate` keeps its own — and more
+    /// so here: this runs once per *queued upload* each time the grid groups
+    /// them, so during a backup of three thousand photographs it was three
+    /// thousand formatters built and thrown away per render.
     static func dayKey(_ date: Date, zoom: TimelineZoom) -> String {
+        switch zoom {
+        case .year: return yearKeyFormatter.string(from: date)
+        case .month: return monthKeyFormatter.string(from: date)
+        case .day: return dayKeyFormatter.string(from: date)
+        }
+    }
+
+    private static func keyFormatter(_ format: String) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        switch zoom {
-        case .year: formatter.dateFormat = "yyyy"
-        case .month: formatter.dateFormat = "yyyy-MM"
-        case .day: formatter.dateFormat = "yyyy-MM-dd"
-        }
-        return formatter.string(from: date)
+        // Follows the phone's zone as it changes, the way a formatter made per
+        // call did — kept, a formatter would otherwise stay in whatever zone
+        // the app launched in, and a trip abroad would file new photos a day off.
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = format
+        return formatter
     }
+
+    private static let yearKeyFormatter = keyFormatter("yyyy")
+    private static let monthKeyFormatter = keyFormatter("yyyy-MM")
+    private static let dayKeyFormatter = keyFormatter("yyyy-MM-dd")
     #endif
 
     /// Whether the grid itself is on screen, as opposed to a spinner, an error,
@@ -1674,6 +1738,252 @@ struct TimelineView: View {
                 count == 1 ? "1 item in this library" : "\(count) items in this library"
             )
     }
+
+    #if !os(macOS)
+    /// The bar that takes the bottom of the screen from the tab bar: the
+    /// selection's actions while selecting, a moved batch's review otherwise,
+    /// and on a television the density pill. Shared by both grids — the
+    /// SwiftUI one insets its scroll view by it, the iPhone one measures it.
+    @ViewBuilder
+    private func bottomBar(_ store: TimelineStore) -> some View {
+        #if !os(tvOS)
+        if selection.isActive {
+            SelectionBar(selection: selection) {
+                Task {
+                    shareFiles = await selection.downloadOriginals(
+                        from: space, client: session.client
+                    )
+                    if !shareFiles.isEmpty { showShare = true }
+                }
+            } onAddToAlbum: {
+                showAddToAlbum = true
+            } onDelete: {
+                confirmDelete = true
+            } moreMenu: {
+                // First, and on its own, because it is the only entry
+                // here that puts photos in front of other people rather
+                // than annotating them where they sit.
+                #if os(iOS)
+                Button {
+                    showMoveTo = true
+                } label: {
+                    Label("Add to Shared Album", systemImage: "person.2.badge.plus")
+                }
+                Divider()
+                #endif
+
+                Button {
+                    showTagEditor = true
+                } label: {
+                    Label("Edit Tags", systemImage: "tag")
+                }
+
+                Divider()
+                // Corrections to what the photo says about itself,
+                // grouped away from the library actions above: these
+                // two change the file on the NAS, not just this library's
+                // opinion of it.
+                Button {
+                    editingItems = selection.picked
+                    showDateEditor = true
+                } label: {
+                    Label("Edit Date & Time", systemImage: "calendar")
+                }
+                Button {
+                    rotate(.left)
+                } label: {
+                    Label("Rotate Left", systemImage: "rotate.left")
+                }
+                Button {
+                    rotate(.right)
+                } label: {
+                    Label("Rotate Right", systemImage: "rotate.right")
+                }
+            }
+        } else {
+            #if os(iOS)
+            // A review bar when a batch has just landed and wants
+            // checking; otherwise nothing. The zoom pill used to sit
+            // here — density is a rare, deliberate change, not a bar
+            // worth floating over every photo — so with it gone the
+            // newest row (or the backup banner) meets the tab bar
+            // directly, which is what the library opening on the newest
+            // wants underneath it.
+            if let review, let onReviewDone {
+                MoveReviewBar(
+                    review: review, onDone: onReviewDone,
+                    onRemoveOriginals: onRemoveOriginals
+                )
+            }
+            #endif
+        }
+        #else
+        // tvOS keeps its pill up. Hiding chrome on scroll is a gesture
+        // idiom; on a remote the bar is somewhere you *navigate* to,
+        // and one that disappears as you move down the grid is one you
+        // can no longer reach.
+        zoomBar(store)
+        #endif
+    }
+    #endif
+
+    #if os(iOS)
+    /// The iPhone grid: every day's position known before anything loads, so
+    /// nothing moves while you scroll. See `TimelineCollection` for why it had
+    /// to be a collection view, and for what was measured.
+    ///
+    /// The tiles, headings, bars and scrubber are the same views the SwiftUI
+    /// grid below draws; only the container differs. So is every way the grid
+    /// gets moved — each still sets `pendingJump`, and only the last step, the
+    /// jump itself, goes through the collection view instead of `scrollTo`.
+    private func collectionGrid(_ store: TimelineStore) -> some View {
+        // Read here, in the body, and handed on as values — the tiles and
+        // headings are drawn in cells hosted outside it. See `gridCell`.
+        let transition = photoTransition
+        let headingHeight = headerHeight
+        let libraryHeight = headerLine + 60
+        // Grouped once per render, not once per day. See `entries(for:items:queued:)`.
+        let queued = queuedByDay
+        let days = Self.mergedBuckets(store, queued: queued)
+        let sections = days.map { bucket in
+            TimelineCollection.Section(
+                bucket: bucket,
+                count: entryCount(
+                    for: bucket,
+                    items: store.items[bucket.key] ?? [],
+                    queued: queued[bucket.key]?.count ?? 0
+                )
+            )
+        }
+
+        return ZStack {
+            TimelineCollection(
+                sections: sections,
+                columns: columns,
+                spacing: spacing,
+                headerHeight: headingHeight,
+                libraryHeaderHeight: store.total > 0 ? libraryHeight : 0,
+                // The same two margins the SwiftUI grid sets as content margins,
+                // for the same reasons: clear of the floating bar at the top,
+                // clear of the tab bar at the bottom — plus whichever bar is
+                // standing in for the tab bar, which the SwiftUI grid got for
+                // free from `safeAreaInset` and this one measures.
+                topInset: windowTopInset + TopEdgeFade.barHeight,
+                bottomInset: WindowMetrics.bottomInset + FloatingTabBarMetrics.contentInset
+                    + bottomBarHeight,
+                progress: scrollProgress,
+                controller: gridController,
+                selection: selection,
+                // The review is observed by the tiles; *which* review it is
+                // arrives by value, so a new one has to redraw them.
+                cellContext: review.map { AnyHashable(ObjectIdentifier($0)) },
+                entries: { bucket in
+                    entries(
+                        for: bucket,
+                        items: store.items[bucket.key] ?? [],
+                        queued: queued[bucket.key] ?? []
+                    )
+                },
+                dayItems: { store.items[$0.key] ?? [] },
+                cell: { entry, size, items in
+                    AnyView(cell(
+                        entry, size: size, dayItems: items,
+                        transition: transition, sweeps: false
+                    ))
+                },
+                header: { AnyView(header($0, height: headingHeight)) },
+                libraryHeader: { AnyView(gridFooter(store.total).frame(height: libraryHeight)) },
+                load: { key in
+                    await store.loadBucket(key)
+                    await prefetchThumbnails(for: key, in: store)
+                }
+            )
+            // Edge to edge, under the clock and the tab bar, the way the
+            // SwiftUI grid's content ran — every inset is applied inside.
+            .ignoresSafeArea()
+            // One grid per library. Switching shared albums reuses this
+            // screen, and a collection view carried across would keep the old
+            // library's scroll position — and would not open the new one on
+            // its newest photograph, which it only does once, on first layout.
+            .id(space.id)
+        }
+        // Where the SwiftUI grid puts the same bar. The grid runs on beneath it;
+        // its height comes back through `bottomBarHeight` as an inset.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) { bottomBar(store) }
+                .frame(maxWidth: .infinity)
+                .background { HeightReader(height: $bottomBarHeight) }
+        }
+        .overlay(alignment: .trailing) {
+            if store.buckets.count > 1 {
+                // As in the SwiftUI grid: a phone gets the scrubber, and a
+                // phone wide enough to call itself regular gets the rail.
+                if wantsRail {
+                    TimelineRail(buckets: store.buckets, progress: scrollProgress) { bucket, target in
+                        scrubCollection(to: bucket, target: target, in: store)
+                    } onScrubEnd: {
+                        scrubEnded(in: store)
+                    }
+                    .padding(.vertical, 6)
+                } else {
+                    FastScroller(buckets: store.buckets, progress: scrollProgress) { bucket, target in
+                        scrubCollection(to: bucket, target: target, in: store)
+                    } onScrubEnd: {
+                        scrubEnded(in: store)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+        .onChange(of: pendingJump) { _, target in
+            guard let target else { return }
+            gridController.jump(toDay: target)
+            pendingJump = nil
+        }
+        // Walks the grid to whichever moved item is being pointed at — see the
+        // same handler on the SwiftUI grid.
+        .onChange(of: review?.index) { _, _ in
+            guard let assetID = review?.current else { return }
+            Task {
+                if let key = await bucketKey(for: assetID, in: store) {
+                    pendingJump = key
+                }
+            }
+        }
+        .onChange(of: store.buckets.count) { old, new in
+            LayoutWatch.shared.note("buckets \(old) → \(new)")
+        }
+        .onChange(of: store.state) { _, new in
+            LayoutWatch.shared.note("store state → \(new)")
+        }
+        .onChange(of: loadedCount(store)) { old, new in
+            LayoutWatch.shared.note("loaded items \(old) → \(new)")
+        }
+    }
+
+    /// The scrubber, driving the iPhone grid.
+    ///
+    /// To the exact point the thumb names rather than to a day or a day's rows:
+    /// a collection view can be told how far to go, which is the thing the
+    /// SwiftUI grid's `moveGrid` had to approximate. The debounced fetch is the
+    /// same as `scrub`'s, for the same reason.
+    private func scrubCollection(
+        to bucket: TimelineBucket, target: LibrarySpan.Target?, in store: TimelineStore
+    ) {
+        if let target {
+            gridController.scroll(toContentY: target.offset)
+        } else {
+            gridController.jump(toDay: bucket.key)
+        }
+        scrubTarget = bucket.key
+        scrubLoad?.cancel()
+        scrubLoad = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            await store.loadBucket(bucket.key)
+        }
+    }
+    #endif
 
     private func grid(_ store: TimelineStore) -> some View {
         GeometryReader { proxy in
@@ -1944,84 +2254,7 @@ struct TimelineView: View {
             // selection transplanted; right-click carries these actions there.
             #if !os(macOS)
             .safeAreaInset(edge: .bottom) {
-                #if !os(tvOS)
-                if selection.isActive {
-                    SelectionBar(selection: selection) {
-                        Task {
-                            shareFiles = await selection.downloadOriginals(
-                                from: space, client: session.client
-                            )
-                            if !shareFiles.isEmpty { showShare = true }
-                        }
-                    } onAddToAlbum: {
-                        showAddToAlbum = true
-                    } onDelete: {
-                        confirmDelete = true
-                    } moreMenu: {
-                        // First, and on its own, because it is the only entry
-                        // here that puts photos in front of other people rather
-                        // than annotating them where they sit.
-                        #if os(iOS)
-                        Button {
-                            showMoveTo = true
-                        } label: {
-                            Label("Add to Shared Album", systemImage: "person.2.badge.plus")
-                        }
-                        Divider()
-                        #endif
-
-                        Button {
-                            showTagEditor = true
-                        } label: {
-                            Label("Edit Tags", systemImage: "tag")
-                        }
-
-                        Divider()
-                        // Corrections to what the photo says about itself,
-                        // grouped away from the library actions above: these
-                        // two change the file on the NAS, not just this library's
-                        // opinion of it.
-                        Button {
-                            editingItems = selection.picked
-                            showDateEditor = true
-                        } label: {
-                            Label("Edit Date & Time", systemImage: "calendar")
-                        }
-                        Button {
-                            rotate(.left)
-                        } label: {
-                            Label("Rotate Left", systemImage: "rotate.left")
-                        }
-                        Button {
-                            rotate(.right)
-                        } label: {
-                            Label("Rotate Right", systemImage: "rotate.right")
-                        }
-                    }
-                } else {
-                    #if os(iOS)
-                    // A review bar when a batch has just landed and wants
-                    // checking; otherwise nothing. The zoom pill used to sit
-                    // here — density is a rare, deliberate change, not a bar
-                    // worth floating over every photo — so with it gone the
-                    // newest row (or the backup banner) meets the tab bar
-                    // directly, which is what the library opening on the newest
-                    // wants underneath it.
-                    if let review, let onReviewDone {
-                        MoveReviewBar(
-                            review: review, onDone: onReviewDone,
-                            onRemoveOriginals: onRemoveOriginals
-                        )
-                    }
-                    #endif
-                }
-                #else
-                // tvOS keeps its pill up. Hiding chrome on scroll is a gesture
-                // idiom; on a remote the bar is somewhere you *navigate* to,
-                // and one that disappears as you move down the grid is one you
-                // can no longer reach.
-                zoomBar(store)
-                #endif
+                bottomBar(store)
             }
             #endif
             // No pull-to-refresh. With the library running oldest→newest and
@@ -2280,7 +2513,12 @@ struct TimelineView: View {
     /// scroll now, so nothing passes beneath — and having none is what lets a
     /// date wash out under the top fade on its way off screen, exactly as the
     /// photographs around it do, instead of riding up as a solid black bar.
-    private func header(_ bucket: TimelineBucket) -> some View {
+    ///
+    /// `height` is handed in by the iPhone grid, which draws its headings
+    /// outside this view's body where `@ScaledMetric` can't be relied on to
+    /// read the text size — see `gridCell` for the same problem with the
+    /// namespace.
+    private func header(_ bucket: TimelineBucket, height: CGFloat? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(Self.displayDate(bucket.key))
                 .font(.subheadline.weight(.semibold))
@@ -2316,7 +2554,7 @@ struct TimelineView: View {
         // "stop the grid lying about how tall it is" that the rows got and the
         // headings did not: a section's rows have always known their own height,
         // and its heading was whatever the type happened to measure.
-        .frame(height: headerHeight)
+        .frame(height: height ?? headerHeight)
     }
 
     #if os(iOS)
@@ -2646,27 +2884,49 @@ struct TimelineView: View {
     }
 
     /// `2026-07-18` → `Jul 18`, `2026-07` → `July 2026`, `2026` → `2026`.
+    ///
+    /// The formatters are kept rather than made per call. This runs for every
+    /// heading that scrolls into view, and a `DateFormatter` is one of the more
+    /// expensive things Foundation will build for you — two per heading was
+    /// work in the middle of a fling that bought nothing.
     static func displayDate(_ key: String) -> String {
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.timeZone = TimeZone(identifier: "UTC")
-        let display = DateFormatter()
-
+        let parser: DateFormatter
+        let display: DateFormatter
         switch key.count {
         case 4:
             return key
         case 7:
-            parser.dateFormat = "yyyy-MM"
-            display.dateFormat = "MMMM yyyy"
+            parser = monthKeyParser
+            display = monthDisplay
         default:
-            parser.dateFormat = "yyyy-MM-dd"
-            display.dateFormat = "MMM d"
+            parser = dayKeyParser
+            display = dayDisplay
         }
-
         guard let date = parser.date(from: key) else { return key }
-        display.timeZone = TimeZone(identifier: "UTC")
         return display.string(from: date)
     }
+
+    private static func keyParser(_ format: String) -> DateFormatter {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = TimeZone(identifier: "UTC")
+        parser.dateFormat = format
+        return parser
+    }
+
+    private static func keyDisplay(_ format: String) -> DateFormatter {
+        let display = DateFormatter()
+        // The reader's language, followed as it changes — see `keyFormatter`.
+        display.locale = .autoupdatingCurrent
+        display.timeZone = TimeZone(identifier: "UTC")
+        display.dateFormat = format
+        return display
+    }
+
+    private static let monthKeyParser = keyParser("yyyy-MM")
+    private static let dayKeyParser = keyParser("yyyy-MM-dd")
+    private static let monthDisplay = keyDisplay("MMMM yyyy")
+    private static let dayDisplay = keyDisplay("MMM d")
 }
 
 #if !os(iOS)
@@ -2722,6 +2982,24 @@ private struct TopEdgeClip: Shape {
 /// scroll. Verified by removing this view on 26 and finding the photographs
 /// sharp and unwashed right up to the clock. Do not re-add it expecting it to
 /// take over; it will look correct in the source and do nothing on screen.
+/// Reports a view's height back into state, including when it falls to zero.
+///
+/// Measured on a container rather than on the bar itself: when nothing is
+/// selected the bar is not there at all, and a reader attached to a view that
+/// doesn't exist never gets the chance to say it's gone — the grid would keep
+/// its inset for a bar nobody can see.
+private struct HeightReader: View {
+    @Binding var height: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { height = proxy.size.height }
+                .onChange(of: proxy.size.height) { _, next in height = next }
+        }
+    }
+}
+
 private struct TopEdgeFade: View {
     /// 38pt button + 8pt above and below, from `floatingTopBar`. Also what the
     /// grid holds clear at the top of its content, so the pinned date comes to

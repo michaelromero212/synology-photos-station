@@ -3,7 +3,11 @@ import FrameStationKit
 import SwiftUI
 
 /// Anything that can occupy a slot in the grid, in draw order.
-enum GridEntry: Identifiable {
+///
+/// Equatable so the collection-view grid can tell which of its visible days
+/// actually changed — a day finishing loading, a pending tile starting to send —
+/// and redraw only those. See `TimelineCollection`.
+enum GridEntry: Identifiable, Equatable {
     case item(TimelineItem)
     /// Keeps an unloaded bucket the right height so the scrollbar doesn't jump
     /// when its contents land.

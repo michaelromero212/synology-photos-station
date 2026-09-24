@@ -51,6 +51,13 @@ public struct LibrarySpan: Equatable {
         public let rows: String?
         /// Where in those rows to aim, 0…1.
         public let unit: Double
+        /// The same place as a plain distance from the top of the library.
+        ///
+        /// What a grid that can be scrolled to an exact point uses instead of
+        /// `rows` and `unit` — see `TimelineCollection`. Those two exist because
+        /// a SwiftUI scroll view can only be sent to a *view*; a collection view
+        /// knows where everything is and can simply be told how far to go.
+        public let offset: Double
     }
 
     /// Where the grid should go for a given point down the track.
@@ -119,10 +126,10 @@ public struct LibrarySpan: Equatable {
             guard abs(room) > 1 else { continue }
             let unit = (offset - begin - header) / room
             if unit >= 0, unit <= 1 {
-                return Target(day: day, rows: key, unit: unit)
+                return Target(day: day, rows: key, unit: unit, offset: offset)
             }
         }
-        return Target(day: day, rows: nil, unit: 0)
+        return Target(day: day, rows: nil, unit: 0, offset: offset)
     }
 }
 
