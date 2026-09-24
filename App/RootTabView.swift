@@ -56,6 +56,9 @@ struct RootTabView: View {
     /// Whether the search sheet is up. Search is the circle beside the bar
     /// rather than a tab in it — see `FloatingTabBar`.
     @State private var showSearch = false
+    /// Backup setup, offered after sign-in the way a fresh install offers it.
+    /// See `BackupAccount`.
+    @State private var showBackupSetup = false
     #endif
 
     private enum Tabs: Hashable { case photos, albums, more, search }
@@ -112,6 +115,19 @@ struct RootTabView: View {
                     }
             }
         }
+        // The same screen as More → Photo Backup → Settings, not a lighter
+        // version of it: everything a first backup needs to decide — photo
+        // access, on or off, all photos or only new ones, Wi-Fi and power — is
+        // already there, and a second copy would drift from the first.
+        // Dismissing it by any route counts as having been offered; backup stays
+        // off unless it was switched on.
+        .sheet(isPresented: $showBackupSetup, onDismiss: { BackupAccount.setupOffered = true }) {
+            if let engine {
+                BackupSettingsView(
+                    session: session, engine: engine, settings: $backupSettings
+                ) { showBackupSetup = false }
+            }
+        }
         .environment(\.connectionMonitor, connection)
         // Leaving the app is when the NAS most needs the truth about this
         // device's backlog, and the one moment a run cannot report it itself: a
@@ -125,6 +141,11 @@ struct RootTabView: View {
         }
         .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
+            // Before anything reads the ledger: it may belong to whoever was
+            // signed in last. See `BackupAccount.adopt`.
+            if let userID = session.user?.id {
+                BackupAccount.adopt(userID: userID, container: container)
+            }
             // `session` is captured explicitly above so this weak capture reads
             // as what it is: the monitor outlives this task and must not
             // retain the session, even though the task itself holds it.
@@ -140,6 +161,21 @@ struct RootTabView: View {
             monitor.onReconnect = { [weak created] in await created?.start() }
             connection = monitor
             engine = created
+            // Signing out has to stop this engine, and the session is what
+            // knows about the sign-out. See `BackupEngine.retire`.
+            session.willSignOut = { [weak created] in created?.retire() }
+            // Offered once per sign-in, the way a fresh install offers it —
+            // and not to someone who already has backup running.
+            //
+            // After the notification question, never on top of it. On a first
+            // launch both arrive together, and the alert landed over the sheet.
+            // Its own task so waiting for that answer holds up nothing below.
+            if !BackupAccount.setupOffered, !backupSettings.enabled {
+                Task {
+                    await PushRegistrar.shared.askOnce()
+                    showBackupSetup = true
+                }
+            }
             // Before the first grid draws, and whether or not backup is on:
             // this is what lets a tile whose thumbnail the NAS has not made yet
             // be drawn from the copy still on the phone. See `LocalOriginals`.

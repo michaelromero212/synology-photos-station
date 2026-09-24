@@ -38,6 +38,32 @@ final class PushRegistrar: NSObject {
             .notificationSettings().authorizationStatus
     }
 
+    private static let askedKey = "push.didAsk"
+    /// The one-time question, while it is on screen.
+    @ObservationIgnored private var asking: Task<Void, Never>?
+
+    /// Asks the one-time notification question on this install, or waits for
+    /// the answer if it is already being asked. Returns at once ever after.
+    ///
+    /// One entry point for everyone who needs the question out of the way,
+    /// because on a first launch two things want the screen: this, and backup
+    /// setup. Each is a reasonable question and together they were one sitting
+    /// on top of the other — the system's alert over a half-read settings sheet.
+    /// Whoever gets here first starts the question; anyone else waits for the
+    /// same answer, so the next thing appears only once the alert has gone.
+    func askOnce() async {
+        if let asking {
+            await asking.value
+            return
+        }
+        guard !UserDefaults.standard.bool(forKey: Self.askedKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.askedKey)
+        let task = Task { await requestAuthorization() }
+        asking = task
+        await task.value
+        asking = nil
+    }
+
     /// Asks whether banners are welcome. Safe to call repeatedly.
     ///
     /// Only about what is *shown*: registering for a token is separate and

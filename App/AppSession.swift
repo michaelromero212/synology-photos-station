@@ -315,12 +315,27 @@ final class AppSession {
         defaults.set(true, forKey: key)
     }
 
+    /// Run at the start of `signOut`, before the connection is dropped.
+    ///
+    /// For work owned somewhere the session can't see — the backup engine lives
+    /// in the view tree — that has to finish talking to the NAS on the way out.
+    @ObservationIgnored var willSignOut: (() -> Void)?
+
     /// Signs out without forgetting who you are.
     ///
     /// The token goes and the password was never stored, but the address and
     /// username stay — signing out of a family photo library is routine, and
     /// retyping a NAS hostname every time is a small punishment for it.
     func signOut() {
+        // First, while the connection still exists — whatever is registered
+        // here may need it one last time. See `BackupEngine.retire`.
+        willSignOut?()
+        willSignOut = nil
+        #if os(iOS)
+        // Backup goes back to how a fresh install has it, and is offered again
+        // after the next sign-in. See `BackupAccount`.
+        BackupAccount.signedOut()
+        #endif
         credentials.clear()
         // The cached timeline is this family's dates and places. It must not
         // outlive the session that fetched it, and it must not be sitting

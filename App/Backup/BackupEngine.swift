@@ -180,6 +180,22 @@ final class BackupEngine {
         reportBackupState(force: true)
     }
 
+    /// Stops everything this engine does for the account that is signing out.
+    ///
+    /// Called before the session lets go of its connection, because the last
+    /// thing it does needs it: telling the NAS this phone no longer has a
+    /// backlog, so the silent pushes that nudge a stalled backup stop coming to a
+    /// phone that isn't backing anything up for anyone. Without it the engine
+    /// outlived the sign-out in every way that mattered — its background window
+    /// still booked with iOS, its library observer still registered.
+    ///
+    /// A transfer already on the wire finishes into the library it was going to;
+    /// nothing new is claimed.
+    func retire() {
+        stop()
+        disableBackgroundRuns()
+    }
+
     /// Starts watching the photo library so a photo taken with the app open is
     /// discovered and queued the moment it lands — no waiting for a background
     /// window or a manual "Back Up Now". Idempotent; safe to call again.

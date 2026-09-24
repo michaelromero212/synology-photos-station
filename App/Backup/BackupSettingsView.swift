@@ -60,6 +60,18 @@ struct BackupSettings: Equatable {
         return settings
     }
 
+    /// Back to what a fresh install has: every preference removed, so `load`
+    /// returns the defaults — backup off. See `BackupAccount.signedOut`.
+    static func reset() {
+        let defaults = UserDefaults.standard
+        for key in [
+            Key.enabled, Key.wifiOnly, Key.chargingOnly, Key.includeVideos,
+            Key.target, Key.rule, Key.cutoff,
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     func save() {
         let defaults = UserDefaults.standard
         defaults.set(enabled, forKey: Key.enabled)

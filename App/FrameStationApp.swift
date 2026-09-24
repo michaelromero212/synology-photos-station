@@ -376,11 +376,10 @@ struct RootView: View {
                 registrar.attach(to: session)
                 // Ask once. Being told a family member shared photos is the
                 // point of a shared space, so this is worth a prompt — but only
-                // after sign-in, when the app can explain itself.
-                if !UserDefaults.standard.bool(forKey: "push.didAsk") {
-                    UserDefaults.standard.set(true, forKey: "push.didAsk")
-                    await registrar.requestAuthorization()
-                }
+                // after sign-in, when the app can explain itself. Shared with
+                // backup setup, which waits for this answer before it appears —
+                // see `PushRegistrar.askOnce`.
+                await registrar.askOnce()
                 // Whatever was said to the prompt. A token is needed either way
                 // — the silent push that finishes a stalled backup travels on
                 // it and shows nothing. See `registerForPushes`.
