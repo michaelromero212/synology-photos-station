@@ -49,9 +49,9 @@ enum AssetUploader {
 
     /// Exports, then hands the file to `FileUpload`.
     ///
-    /// `resource` names which half of the asset to send. Defaults to the one
-    /// holding the photo or video itself; the Live Photo path passes the paired
-    /// video instead, which is the same asset and different bytes.
+    /// `resource` names which file of the asset to send. Defaults to the one
+    /// holding the photo or video itself; backup also sends a Live Photo's
+    /// paired video and a later edit's render — the same asset, different bytes.
     static func send(
         _ asset: PHAsset,
         descriptor: UploadDescriptor,

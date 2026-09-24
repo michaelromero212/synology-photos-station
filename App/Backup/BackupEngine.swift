@@ -213,10 +213,18 @@ final class BackupEngine {
         // Capture the stream, not the monitor: the stream is `Sendable`, so the
         // task carries nothing that must not cross actors, and `enqueueNewAssets`
         // hops back to the main actor on its own.
-        let inserted = monitor.inserted
+        //
+        // Edits first: queueing them doesn't wait, and queueing new photos
+        // waits for the run it starts to finish.
+        let changes = monitor.changes
         observationTask = Task { @MainActor [weak self] in
-            for await ids in inserted {
-                await self?.enqueueNewAssets(withIdentifiers: ids)
+            for await change in changes {
+                if !change.changed.isEmpty {
+                    self?.enqueueEdits(withIdentifiers: change.changed)
+                }
+                if !change.inserted.isEmpty {
+                    await self?.enqueueNewAssets(withIdentifiers: change.inserted)
+                }
             }
         }
     }
@@ -243,6 +251,10 @@ final class BackupEngine {
 
         statusText = "Scanning library…"
         var candidates = PhotoLibraryScanner.scan(includeVideos: settings.includeVideos)
+        // Edits follow their photo whichever rule is in force: a rule decides
+        // which photos backup takes on, and a photo with an edit to send is one
+        // it took on already. See `queueEdits`.
+        let library = candidates
         let context = ModelContext(container)
 
         let known = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
@@ -287,6 +299,7 @@ final class BackupEngine {
         }
 
         added += backfillLivePhotos(candidates, known: known, context: context)
+        added += queueEdits(library, known: known, context: context)
 
         try? context.save()
         refreshProgress(context)
@@ -355,8 +368,7 @@ final class BackupEngine {
             // is a different size to the still, and `descriptor` reads zero as
             // "ask the server" rather than as a measurement.
             let video = BackupItem(
-                localIdentifier: asset.localIdentifier
-                    + PhotoLibraryScanner.pairedVideoSuffix,
+                localIdentifier: BackupKey.pairedVideo(of: asset.localIdentifier),
                 filename: pairedVideo.filename,
                 byteSize: pairedVideo.byteSize,
                 mediaType: MediaType.video.rawValue,
@@ -424,6 +436,127 @@ final class BackupEngine {
         await start()
     }
 
+    // MARK: - Edits
+
+    /// Sends an edit made after a photo went up as a photo of its own, beside
+    /// the one already on the NAS.
+    ///
+    /// The ledger only ever asked "has this photo been sent?", so a photo edited
+    /// after its backup was never looked at again: the NAS kept the version it
+    /// had, the phone showed another, and nothing said so. The backup rules
+    /// promised otherwise — "changes to previous photos will be backed up as new
+    /// files" is Synology's wording, copied onto the settings screen, and until
+    /// now nothing did it.
+    ///
+    /// An edit is keyed on when it was made (see `BackupKey`), so editing again
+    /// is another new photo and finding the same edit again is nothing. The
+    /// photo already on the NAS is never touched, and reverting on the phone
+    /// sends nothing and removes nothing.
+    ///
+    /// Only once the photo itself has gone. Until then its own upload sends
+    /// whatever the phone shows at the time, edits and all — which is also why
+    /// a photo edited before its backup, a portrait's blur included, arrives
+    /// once rather than twice.
+    private func queueEdits(
+        _ candidates: [PhotoLibraryScanner.Candidate],
+        known: [BackupItem],
+        context: ModelContext
+    ) -> Int {
+        let edited = candidates.filter { $0.editedAt != nil }
+        guard !edited.isEmpty else { return 0 }
+        let rows = Dictionary(
+            known.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+
+        var added = 0
+        for candidate in edited {
+            guard let editedAt = candidate.editedAt else { continue }
+            let asset = candidate.asset
+            let photo = asset.localIdentifier
+            guard let row = rows[photo], row.state == .done else { continue }
+            let key = BackupKey.edit(of: photo, editedAt: editedAt)
+            guard rows[key] == nil else { continue }
+            if let sent = row.sentVersion {
+                // The edit the photo's own upload showed.
+                guard sent != key else { continue }
+            } else if let completedAt = row.completedAt, editedAt <= completedAt {
+                // Went up before versions were recorded, and after this edit
+                // was made — so it went up showing it.
+                continue
+            }
+
+            context.insert(BackupItem(
+                localIdentifier: key,
+                filename: BackupKey.editedFilename(
+                    original: candidate.filename,
+                    renderExtension: (candidate.filename as NSString).pathExtension
+                ),
+                byteSize: candidate.byteSize,
+                mediaType: candidate.mediaType.rawValue,
+                mime: candidate.mime,
+                // The edit is what PhotoKit's size and duration describe.
+                width: asset.pixelWidth,
+                height: asset.pixelHeight,
+                durationMs: asset.duration > 0 ? Int(asset.duration * 1000) : nil,
+                // The same moment as the photo, so the two sit side by side.
+                capturedAt: asset.creationDate,
+                capturedTZOffset: nil,
+                capturedTZOffsetFallback: asset.creationDate.map {
+                    TimeZone.current.secondsFromGMT(for: $0)
+                },
+                latitude: asset.location?.coordinate.latitude,
+                longitude: asset.location?.coordinate.longitude,
+                isRaw: candidate.isRaw,
+                // A photo of its own, so no burst and no Live Photo pairing: in
+                // the burst it would be a frame the camera never took.
+                subtypes: candidate.subtypes
+            ))
+            added += 1
+        }
+        return added
+    }
+
+    /// Picks up an edit made while the app is open, without a full scan.
+    ///
+    /// Fed by every change PhotoKit reports, and most of those are not edits —
+    /// a favorite, an album, iCloud catching up — so a photo PhotoKit says has
+    /// no edits is passed over before anything else is read, and only the rows
+    /// of the few that do are fetched.
+    func enqueueEdits(withIdentifiers ids: [String]) {
+        guard PhotoLibraryScanner.access == .authorized, !ids.isEmpty else { return }
+        let includeVideos = settings.includeVideos
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var candidates: [PhotoLibraryScanner.Candidate] = []
+        fetched.enumerateObjects { asset, _, _ in
+            guard asset.hasAdjustments,
+                  asset.mediaType == .image || (asset.mediaType == .video && includeVideos),
+                  let candidate = PhotoLibraryScanner.describe(asset),
+                  candidate.editedAt != nil
+            else { return }
+            candidates.append(candidate)
+        }
+        guard !candidates.isEmpty else { return }
+
+        // Each photo's own row, and the row its edit would have if queued.
+        let wanted = candidates.flatMap { candidate -> [String] in
+            let photo = candidate.asset.localIdentifier
+            guard let editedAt = candidate.editedAt else { return [photo] }
+            return [photo, BackupKey.edit(of: photo, editedAt: editedAt)]
+        }
+        let context = ModelContext(container)
+        let known = (try? context.fetch(FetchDescriptor<BackupItem>(
+            predicate: #Predicate { wanted.contains($0.localIdentifier) }
+        ))) ?? []
+
+        let added = queueEdits(candidates, known: known, context: context)
+        guard added > 0 else { return }
+        try? context.save()
+        refreshProgress(context)
+        statusText = "Queued \(added) edit\(added == 1 ? "" : "s")"
+        reportBackupState()
+        Task { await start() }
+    }
+
     /// Gives the motion back to Live Photos queued before pairing existed.
     ///
     /// The scan skips assets it has already seen, so without this a library
@@ -448,7 +581,7 @@ final class BackupEngine {
 
         for candidate in candidates {
             let asset = candidate.asset
-            let videoID = asset.localIdentifier + PhotoLibraryScanner.pairedVideoSuffix
+            let videoID = BackupKey.pairedVideo(of: asset.localIdentifier)
             guard let still = rows[asset.localIdentifier],
                   still.state != .done,
                   still.liveGroupID == nil,
@@ -680,11 +813,11 @@ final class BackupEngine {
         ))
         defer { clearActive(item.localIdentifier) }
 
-        // A Live Photo's video half is queued under a suffixed id, because the
-        // queue keys on a unique identifier and one asset holds both halves.
-        // Photos only knows the asset by its real id.
-        let isPairedVideo = PhotoLibraryScanner.isPairedVideo(item.localIdentifier)
-        let assetIdentifier = PhotoLibraryScanner.baseIdentifier(item.localIdentifier)
+        // One photo can be several rows — a Live Photo's video half, each later
+        // edit — because the queue keys on a unique identifier and every file
+        // needs one. Photos only knows the asset by its real id. See `BackupKey`.
+        let kind = BackupKey.kind(item.localIdentifier)
+        let assetIdentifier = BackupKey.photo(item.localIdentifier)
 
         guard let asset = PHAsset.fetchAssets(
             withLocalIdentifiers: [assetIdentifier], options: nil
@@ -702,8 +835,18 @@ final class BackupEngine {
             // Resolved now rather than at scan time: a `PHAssetResource` is a
             // handle into the library, not something a queue row can hold
             // across a relaunch.
-            var resource: PHAssetResource?
-            if isPairedVideo {
+            let resource: PHAssetResource?
+            // Which version the photo's own upload shows, kept once it has gone
+            // so that a later edit can be told from it. See `queueEdits`.
+            var shows: String?
+            switch kind {
+            case .main:
+                // Read before the export rather than after it: an edit landing
+                // in between then looks newer than what went, and is sent again
+                // — where the NAS recognizes the bytes — instead of being missed.
+                resource = PhotoLibraryScanner.primaryResource(for: asset)
+                shows = resource.map { PhotoLibraryScanner.versionKey(of: asset, sending: $0) }
+            case .pairedVideo:
                 guard let paired = PhotoLibraryScanner.livePhotoResource(for: asset) else {
                     // The Live Photo lost its motion since the scan — usually
                     // "Convert to Still" in Photos. Nothing to send, and never
@@ -714,6 +857,16 @@ final class BackupEngine {
                     return nil
                 }
                 resource = paired
+            case .edit:
+                guard let render = PhotoLibraryScanner.editedResource(for: asset) else {
+                    // Reverted in Photos before it went. The photo is on the NAS
+                    // as it was; there is nothing else to send.
+                    item.state = .skipped
+                    item.lastError = "The edit was undone before it was backed up"
+                    try? context.save()
+                    return nil
+                }
+                resource = render
             }
 
             let result = try await AssetUploader.send(
@@ -754,6 +907,7 @@ final class BackupEngine {
             item.sha256 = result.sha256
             item.byteSize = result.byteSize
             item.assetID = result.assetID
+            if let shows { item.sentVersion = shows }
             if let assetID = result.assetID {
                 recentlyUploaded.insert(assetID)
                 // The NAS has the file but not yet a thumbnail of it, and this
@@ -889,10 +1043,16 @@ final class BackupEngine {
         next.bytesRemaining = rows.reduce(0) { $0 + $1.byteSize }
         // The grid only shows the head of the queue; a thousand-item backlog
         // doesn't need a thousand tiles laid out at once.
-        queued = rows.prefix(500).map {
+        //
+        // Not a Live Photo's video half: it plays inside the still rather than
+        // having a tile of its own, and there is no picture of it to draw — it
+        // held a gray square in the grid until it went.
+        queued = Array(rows.lazy.filter {
+            BackupKey.kind($0.localIdentifier) != .pairedVideo
+        }.prefix(500).map {
             ($0.localIdentifier, $0.capturedAt ?? Date(),
              $0.state == .uploading ? .uploading : .pending)
-        }
+        })
 
         progress = next
     }

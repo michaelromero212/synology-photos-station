@@ -49,6 +49,15 @@ final class BackupItem {
     var subtypesRaw: [String] = []
     /// Shared by a Live Photo's still and its paired video.
     var liveGroupID: UUID?
+    /// Which version of the photo this row's upload showed, as a ledger key:
+    /// the photo's own when it went up as the camera made it, an edit's when it
+    /// went up edited. What tells a later edit from the one already on the NAS.
+    ///
+    /// Nil until it has gone, and on rows that went before this was recorded —
+    /// for those `completedAt` stands in. See `BackupEngine.queueEdits`.
+    ///
+    /// Optional so an existing queue opens unchanged.
+    var sentVersion: String?
 
     var stateRaw: String
     var attempts: Int

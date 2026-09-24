@@ -106,9 +106,11 @@ struct PendingTile: View {
             // a placeholder first and the real thumbnail after it. Taking only
             // the first left every badge showing the blurry one — see
             // `PhotoLibraryScanner.thumbnails`.
-            guard let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [localIdentifier], options: nil
-            ).firstObject else { return }
+            //
+            // By ledger key: a queued edit is its photo on this phone, and the
+            // photo is found by the key's identifier. See `BackupKey`.
+            guard let asset = PhotoLibraryScanner.asset(forKey: localIdentifier)
+            else { return }
 
             let scale = UIScreen.main.scale
             for await next in PhotoLibraryScanner.thumbnails(

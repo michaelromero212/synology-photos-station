@@ -354,7 +354,9 @@ struct PhotoCell: View {
         guard let localIdentifier = item.sourceLocalID
             ?? LocalOriginals.shared.localIdentifier(for: item.assetID)
         else { return .noMapping }
-        guard let asset = PhotoLibraryScanner.asset(for: localIdentifier)
+        // A backup ledger key, which for an edit sent after its photo carries
+        // more than the identifier. See `BackupKey`.
+        guard let asset = PhotoLibraryScanner.asset(forKey: localIdentifier)
         else { return .notOnDevice }
 
         let pixels = CGFloat(PhotoGridMetrics.thumbnailPixels)

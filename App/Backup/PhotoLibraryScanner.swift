@@ -1,5 +1,6 @@
 #if os(iOS)
 import FrameStationAPI
+import FrameStationKit
 import Foundation
 import Photos
 import UIKit
@@ -44,6 +45,9 @@ enum PhotoLibraryScanner {
         let mime: String
         let isRaw: Bool
         let subtypes: [MediaSubtype]
+        /// When the photo was edited, if the file described is an edit. See
+        /// `editedAt(of:)`.
+        var editedAt: Date? = nil
     }
 
     /// The fetch the full scan and the change observer both use, so "inserted"
@@ -83,8 +87,9 @@ enum PhotoLibraryScanner {
     /// One asset's file facts. Shared with the share picker so a photo carries
     /// the same filename, MIME and RAW flag whichever way it reaches the NAS.
     static func describe(_ asset: PHAsset) -> Candidate? {
-        guard let primary = primaryResource(for: asset) else { return nil }
-        let filename = primary.originalFilename
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let primary = primaryResource(in: resources, for: asset) else { return nil }
+        let filename = Self.filename(of: primary, in: resources)
         let ext = (filename as NSString).pathExtension.lowercased()
         return Candidate(
             asset: asset,
@@ -93,8 +98,69 @@ enum PhotoLibraryScanner {
             mediaType: asset.mediaType == .video ? .video : .photo,
             mime: mimeType(for: ext, uti: primary.uniformTypeIdentifier),
             isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext),
-            subtypes: subtypes(of: asset)
+            subtypes: subtypes(of: asset),
+            editedAt: isRender(primary) ? editedAt(of: asset) : nil
         )
+    }
+
+    /// The name a file goes to the NAS under.
+    ///
+    /// An edited render takes its photo's name — see
+    /// `BackupKey.renderFilename` — because PhotoKit's own name for one is the
+    /// same for every photo. Anything else keeps the name it has.
+    private static func filename(
+        of resource: PHAssetResource, in resources: [PHAssetResource]
+    ) -> String {
+        let source: PHAssetResourceType
+        switch resource.type {
+        case .fullSizePhoto: source = .photo
+        case .fullSizeVideo: source = .video
+        case .fullSizePairedVideo: source = .pairedVideo
+        default: return resource.originalFilename
+        }
+        guard let original = resources.first(where: { $0.type == source }) else {
+            return resource.originalFilename
+        }
+        return BackupKey.renderFilename(
+            original: original.originalFilename,
+            renderExtension: (resource.originalFilename as NSString).pathExtension
+        )
+    }
+
+    /// Whether a file is an edited render rather than something the camera made.
+    private static func isRender(_ resource: PHAssetResource) -> Bool {
+        [.fullSizePhoto, .fullSizeVideo, .fullSizePairedVideo].contains(resource.type)
+    }
+
+    /// When the photo was last edited, or nil when it shows what the camera made.
+    ///
+    /// iOS 18's own record of the edit where there is one. Before that, the last
+    /// time anything about the photo changed — a favorite as much as a crop —
+    /// which only ever errs toward looking again: an edit found twice is sent
+    /// twice, and the NAS recognizes the bytes the second time.
+    ///
+    /// Behind a compiler check as well as an availability one. The header marks
+    /// `adjustmentTimestamp` iOS 18, but that does not say which SDK first
+    /// declared it — see `subtypes(of:)` for a pair of constants that were
+    /// marked older than their SDK — and CI builds on Xcode 16.4.
+    static func editedAt(of asset: PHAsset) -> Date? {
+        guard asset.hasAdjustments else { return nil }
+        #if compiler(>=6.2)
+        if #available(iOS 18, *), let stamp = asset.adjustmentTimestamp {
+            return stamp
+        }
+        #endif
+        return asset.modificationDate ?? asset.creationDate
+    }
+
+    /// The ledger key for the version of a photo a file shows: the photo's own
+    /// key when it is what the camera made, the key of the edit when it is an
+    /// edited render. See `BackupKey`.
+    static func versionKey(of asset: PHAsset, sending resource: PHAssetResource) -> String {
+        guard isRender(resource), let stamp = editedAt(of: asset) else {
+            return asset.localIdentifier
+        }
+        return BackupKey.edit(of: asset.localIdentifier, editedAt: stamp)
     }
 
     /// What the device recorded about this asset at capture.
@@ -143,11 +209,16 @@ enum PhotoLibraryScanner {
     /// The resource holding the bytes we actually want to archive.
     ///
     /// Prefers the *edited* render when one exists, because that is what the
-    /// user sees in Photos — but keeps the original's filename and type. RAW
-    /// pairs report `.alternatePhoto` for the JPEG alongside `.photo` for the
-    /// RAW; we take the RAW.
+    /// user sees in Photos — under the original's name, which `describe` gives
+    /// it. RAW pairs report `.alternatePhoto` for the JPEG alongside `.photo`
+    /// for the RAW; we take the RAW.
     static func primaryResource(for asset: PHAsset) -> PHAssetResource? {
-        let resources = PHAssetResource.assetResources(for: asset)
+        primaryResource(in: PHAssetResource.assetResources(for: asset), for: asset)
+    }
+
+    private static func primaryResource(
+        in resources: [PHAssetResource], for asset: PHAsset
+    ) -> PHAssetResource? {
         let preferred: [PHAssetResourceType] = asset.mediaType == .video
             ? [.fullSizeVideo, .video]
             : [.fullSizePhoto, .photo]
@@ -155,6 +226,12 @@ enum PhotoLibraryScanner {
             if let match = resources.first(where: { $0.type == type }) { return match }
         }
         return resources.first
+    }
+
+    /// The photo as edited — present only while it is.
+    static func editedResource(for asset: PHAsset) -> PHAssetResource? {
+        let type: PHAssetResourceType = asset.mediaType == .video ? .fullSizeVideo : .fullSizePhoto
+        return PHAssetResource.assetResources(for: asset).first { $0.type == type }
     }
 
     /// Every image PhotoKit sends for an asset, in the order it sends them.
@@ -215,34 +292,27 @@ enum PhotoLibraryScanner {
 
     /// The paired video half of a Live Photo, if there is one.
     static func livePhotoResource(for asset: PHAsset) -> PHAssetResource? {
+        livePhotoResource(in: PHAssetResource.assetResources(for: asset), for: asset)
+    }
+
+    private static func livePhotoResource(
+        in resources: [PHAssetResource], for asset: PHAsset
+    ) -> PHAssetResource? {
         guard asset.mediaSubtypes.contains(.photoLive) else { return nil }
         // Full size first: `.pairedVideo` is the original, `.fullSizePairedVideo`
         // the render that matches an edited still. Taking the wrong one pairs a
         // cropped photo with uncropped motion.
-        let resources = PHAssetResource.assetResources(for: asset)
         return resources.first { $0.type == .fullSizePairedVideo }
             ?? resources.first { $0.type == .pairedVideo }
     }
 
-    // MARK: - Live Photo identity
-
-    /// Marks the queue row holding a Live Photo's video half.
+    /// The photo on this phone behind a ledger key. See `BackupKey`.
     ///
-    /// One `PHAsset`, two resources, and a queue keyed on a unique local
-    /// identifier — so the second half needs an id of its own. A PHAsset
-    /// identifier is a UUID with a `/Lnn/nnn` suffix, so `#` cannot occur in one
-    /// and this cannot collide with a real asset.
-    static let pairedVideoSuffix = "#pairedVideo"
-
-    /// The `PHAsset` identifier behind a queue row, with any pairing mark
-    /// removed. Fetching by the suffixed id finds nothing.
-    static func baseIdentifier(_ identifier: String) -> String {
-        guard identifier.hasSuffix(pairedVideoSuffix) else { return identifier }
-        return String(identifier.dropLast(pairedVideoSuffix.count))
-    }
-
-    static func isPairedVideo(_ identifier: String) -> Bool {
-        identifier.hasSuffix(pairedVideoSuffix)
+    /// Nil for a Live Photo's video half: there is no picture of it to draw,
+    /// and it has no tile of its own anyway.
+    static func asset(forKey key: String) -> PHAsset? {
+        guard BackupKey.kind(key) != .pairedVideo else { return nil }
+        return asset(for: BackupKey.photo(key))
     }
 
     /// The file facts for a Live Photo's motion half.
@@ -253,14 +323,16 @@ enum PhotoLibraryScanner {
     /// numbers would write a wrong answer the server's own probe then refuses
     /// to correct, because it only fills what is missing.
     static func pairedVideoCandidate(for asset: PHAsset) -> Candidate? {
-        guard let resource = livePhotoResource(for: asset) else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = livePhotoResource(in: resources, for: asset) else { return nil }
+        let filename = Self.filename(of: resource, in: resources)
         return Candidate(
             asset: asset,
-            filename: resource.originalFilename,
+            filename: filename,
             byteSize: byteSize(of: resource),
             mediaType: .video,
             mime: mimeType(
-                for: (resource.originalFilename as NSString).pathExtension.lowercased(),
+                for: (filename as NSString).pathExtension.lowercased(),
                 uti: resource.uniformTypeIdentifier
             ),
             isRaw: false,
@@ -323,27 +395,35 @@ enum PhotoLibraryScanner {
     }
 }
 
-/// Watches the photo library for new assets so backup discovers them the moment
-/// they appear, instead of only on a full rescan.
+/// Watches the photo library for new and edited assets so backup discovers them
+/// the moment they appear, instead of only on a full rescan.
 ///
 /// PhotoKit delivers `photoLibraryDidChange` on its own serial queue, off the
 /// main actor, with an incremental diff against a held fetch result — so a new
 /// photo costs one small callback, not a re-enumeration of the whole library.
-/// The new assets' local identifiers (the only thing that has to cross threads,
-/// and `Sendable`) are published on `inserted`; the engine consumes them on the
-/// main actor. Assets *removed* from the library are deliberately ignored here —
-/// a backed-up photo the user later deletes locally is a separate concern from
+/// The assets' local identifiers (the only thing that has to cross threads, and
+/// `Sendable`) are published on `changes`; the engine consumes them on the main
+/// actor. Assets *removed* from the library are deliberately ignored here — a
+/// backed-up photo the user later deletes locally is a separate concern from
 /// discovery, not something to unqueue.
 final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
-    /// Local identifiers of assets added since the previous change.
-    let inserted: AsyncStream<[String]>
+    /// One change's worth of identifiers.
+    struct Change: Sendable {
+        /// Assets added to the library.
+        let inserted: [String]
+        /// Assets changed in place — an edit, but just as often a favorite, an
+        /// album, or iCloud catching up. The engine works out which.
+        let changed: [String]
+    }
+
+    let changes: AsyncStream<Change>
 
     private var fetchResult: PHFetchResult<PHAsset>
-    private let continuation: AsyncStream<[String]>.Continuation
+    private let continuation: AsyncStream<Change>.Continuation
 
     init(options: PHFetchOptions) {
-        let stream = AsyncStream<[String]>.makeStream()
-        self.inserted = stream.stream
+        let stream = AsyncStream<Change>.makeStream()
+        self.changes = stream.stream
         self.continuation = stream.continuation
         self.fetchResult = PHAsset.fetchAssets(with: options)
         super.init()
@@ -351,15 +431,18 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         // Serial and off-main. Mutating `fetchResult` here is safe because
-        // PhotoKit never overlaps these calls; only `[String]` leaves the method.
+        // PhotoKit never overlaps these calls; only identifiers leave the method.
         guard let details = changeInstance.changeDetails(for: fetchResult) else { return }
         fetchResult = details.fetchResultAfterChanges
-        let ids = details.insertedObjects.map(\.localIdentifier)
-        guard !ids.isEmpty else { return }
-        continuation.yield(ids)
+        let change = Change(
+            inserted: details.insertedObjects.map(\.localIdentifier),
+            changed: details.changedObjects.map(\.localIdentifier)
+        )
+        guard !change.inserted.isEmpty || !change.changed.isEmpty else { return }
+        continuation.yield(change)
     }
 
-    /// Ends the `inserted` stream so its consumer's `for await` loop finishes.
+    /// Ends the `changes` stream so its consumer's `for await` loop finishes.
     func finish() { continuation.finish() }
 }
 #endif
