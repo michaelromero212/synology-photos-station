@@ -53,9 +53,14 @@ struct RootTabView: View {
     @State private var albumsPath: [SharedAlbumRoute] = []
 
     #if os(iOS)
-    /// Whether the search sheet is up. Search is the circle beside the bar
-    /// rather than a tab in it — see `FloatingTabBar`.
-    @State private var showSearch = false
+    /// The library the search sheet is searching, and whether it is up at all.
+    /// Search is the circle beside the bar rather than a tab in it — see
+    /// `FloatingTabBar`.
+    ///
+    /// The sheet's item rather than a flag beside a value. A value read only
+    /// inside `sheet(isPresented:)` is captured from before it was set, so the
+    /// first search from a shared album searched the personal library.
+    @State private var searchSpace: SpaceDTO?
     /// Backup setup, offered after sign-in the way a fresh install offers it.
     /// See `BackupAccount`.
     @State private var showBackupSetup = false
@@ -97,7 +102,7 @@ struct RootTabView: View {
                         .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
                     ],
                     selection: $tab,
-                    onSearch: { showSearch = true }
+                    onSearch: { searchSpace = spaceOnScreen }
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -105,12 +110,12 @@ struct RootTabView: View {
         // Moves the bar and nothing else: it is an overlay, so neither its
         // arrival nor its departure resizes a scroll view.
         .animation(.easeInOut(duration: 0.22), value: GridChrome.shared.isSelecting)
-        .sheet(isPresented: $showSearch) {
+        .sheet(item: $searchSpace) { space in
             NavigationStack {
-                searchTab
+                search(in: space)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showSearch = false }
+                            Button("Done") { searchSpace = nil }
                         }
                     }
             }
@@ -219,7 +224,7 @@ struct RootTabView: View {
                 // corner to put a floating button in, and the focus engine
                 // should own the bar.
                 Tab("Search", systemImage: "magnifyingglass", value: Tabs.search) {
-                    NavigationStack { searchTab }
+                    NavigationStack { search(in: nil) }
                 }
                 #endif
             }
@@ -238,7 +243,7 @@ struct RootTabView: View {
                     .tag(Tabs.more)
 
                 #if os(tvOS)
-                NavigationStack { searchTab }
+                NavigationStack { search(in: nil) }
                     .tabItem { Label("Search", systemImage: "magnifyingglass") }
                     .tag(Tabs.search)
                 #endif
@@ -295,21 +300,37 @@ struct RootTabView: View {
         }
     }
 
-    /// Search, scoped to the personal library.
+    /// Search, scoped to one library — the personal one unless told otherwise.
     ///
-    /// The same screen the magnifier in the grid's top bar used to open, which
-    /// is why it takes a space at all. Searching every library at once is a
-    /// server question rather than a navigation one — `/search` is per-space —
-    /// so this searches the one people mean when they say "my photos", and
-    /// finding something inside a shared album still means opening it.
+    /// Searching every library at once is a server question rather than a
+    /// navigation one — `/search` is per-space — so the button searches the
+    /// library you are looking at. See `spaceOnScreen`.
     @ViewBuilder
-    private var searchTab: some View {
-        if let personal = session.personalSpace {
-            SearchView(session: session, space: personal)
+    private func search(in space: SpaceDTO?) -> some View {
+        if let space = space ?? session.personalSpace {
+            SearchView(session: session, space: space)
         } else {
             ProgressView()
         }
     }
+
+    #if os(iOS)
+    /// The library on screen, which is the one the search button searches.
+    ///
+    /// A shared album open in the Albums tab searches itself; everywhere else —
+    /// the Photos tab, the Albums page, More — is the personal library. Shared
+    /// albums used to carry a magnifier of their own in their top bar, because
+    /// this button only ever searched the personal library; one button in one
+    /// place, searching whatever you are looking at, is simpler, and it is where
+    /// Photos keeps it.
+    private var spaceOnScreen: SpaceDTO? {
+        if tab == .albums, let route = albumsPath.last,
+           let shared = session.spaces.first(where: { $0.id == route.spaceID }) {
+            return shared
+        }
+        return session.personalSpace
+    }
+    #endif
 
     @ViewBuilder
     private var moreTab: some View {

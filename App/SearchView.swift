@@ -74,7 +74,10 @@ struct SearchView: View {
                 placesList
             }
         }
-        .navigationTitle(selected ?? "Search")
+        // A shared album's name, because the same button searches whichever
+        // library you pressed it over, and "Search" alone would claim all of
+        // them.
+        .navigationTitle(selected ?? (space.kind == .shared ? space.name : "Search"))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

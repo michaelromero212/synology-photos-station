@@ -150,7 +150,6 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var showFocusedBackup = false
     @State private var showPicker = false
-    @State private var showSearch = false
     #if os(iOS)
     /// The pending pull-the-grid, so a stream of landings coalesces into one.
     @State private var landingRefresh: Task<Void, Never>?
@@ -454,19 +453,6 @@ struct TimelineView: View {
         }
         // "Set Up Now" is a promise to set backup up, so it opens the settings
         // rather than a hub the settings are one more tap inside.
-        // Its own stack rather than a push: search is a place you go and come
-        // back from, and pushing it would leave the grid's scroll position and
-        // the viewer's navigation tangled up with it.
-        .sheet(isPresented: $showSearch) {
-            NavigationStack {
-                SearchView(session: session, space: space)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showSearch = false }
-                        }
-                    }
-            }
-        }
         .sheet(isPresented: $showMoveTo) {
             MoveToSheet(session: session, source: space, count: selection.count) {
                 showMoveTo = false
@@ -2653,27 +2639,10 @@ struct TimelineView: View {
                     Spacer(minLength: 8)
                 }
 
-                // Only on a shared album, and that asymmetry is deliberate.
-                //
-                // Search is a button in the corner of the tab bar now, the way
-                // Photos has it, and the personal library's magnifier moved
-                // there. But a tab can only search one library and `/search` is
-                // per-space, so the tab searches the personal one — which would
-                // leave a shared album with no way to search itself at all.
-                // Until search can span libraries, the album that the corner
-                // button cannot reach keeps its own.
-                if space.kind == .shared {
-                    Button { showSearch = true } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.body.weight(.medium))
-                            .frame(width: 38, height: 38)
-                            .glassCircle(fallback: .regularMaterial)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Search \(space.name)")
-                }
-
+                // No magnifier, on a shared album either. Search is the button in
+                // the corner of the tab bar, the way Photos has it, and it
+                // searches whichever library is on screen — see
+                // `RootTabView.spaceOnScreen`.
                 Button { showPicker = true } label: {
                     Image(systemName: "plus")
                         .font(.body.weight(.medium))
@@ -2814,22 +2783,7 @@ struct TimelineView: View {
             }
 
             #if os(iOS)
-            // Declared before `+` so it lands to its left: adding a control
-            // beside one people already reach for is fine, sliding that one
-            // over is not.
-            //
-            // Shared albums only — see the note in `floatingTopBar`. The
-            // personal library's search is the button in the tab bar's corner.
-            if space.kind == .shared {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showSearch = true
-                    } label: {
-                        Label("Search \(space.name)", systemImage: "magnifyingglass")
-                    }
-                }
-            }
-
+            // No search here either — see the note in `floatingTopBar`.
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showPicker = true
