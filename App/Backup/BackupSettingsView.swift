@@ -292,6 +292,12 @@ struct BackupSettingsView: View {
             if engine.progress.bytesRemaining > 0 {
                 LabeledContent("To upload", value: Self.bytes(engine.progress.bytesRemaining))
             }
+            if let throughput = engine.throughput, throughput.bytesPerSecond > 0 {
+                LabeledContent("Speed", value: throughput.speed)
+                if let timeLeft = throughput.timeLeft() {
+                    LabeledContent("Time left", value: timeLeft)
+                }
+            }
 
             if engine.isRunning {
                 Button("Pause") { engine.stop() }

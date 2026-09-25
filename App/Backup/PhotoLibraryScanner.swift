@@ -395,6 +395,77 @@ enum PhotoLibraryScanner {
     }
 }
 
+/// How far through the photo library's own history of changes backup has read.
+///
+/// Photos records every addition and edit, and hands back just the part after a
+/// mark saved earlier (iOS 16). That is how photos taken while the app wasn't
+/// running are found when it opens, without reading every photo on the phone —
+/// see `BackupEngine.catchUp`. The live observer below covers the time it is
+/// running; this covers the time it wasn't.
+///
+/// The mark is kept in preferences as an archived `PHPersistentChangeToken`,
+/// which is all it is: a position in one phone's library, meaningless anywhere
+/// else, and safe to lose — without it the next catch-up simply starts from
+/// wherever the library is then.
+enum LibraryChangeHistory {
+    /// What changed after the saved mark.
+    struct Changes: Sendable {
+        /// Added to the library.
+        let inserted: [String]
+        /// Changed in place — edits among them, and much else. `enqueueEdits`
+        /// sorts out which.
+        let updated: [String]
+    }
+
+    private static let key = "backup.libraryChangeMark"
+
+    /// Where the library's history stands right now, ready to be saved once
+    /// everything before it has been dealt with.
+    static func currentMark() -> Data? {
+        try? NSKeyedArchiver.archivedData(
+            withRootObject: PHPhotoLibrary.shared().currentChangeToken,
+            requiringSecureCoding: true
+        )
+    }
+
+    static func save(_ mark: Data) {
+        UserDefaults.standard.set(mark, forKey: key)
+    }
+
+    /// For a ledger that has been emptied: the mark says what the old one had
+    /// seen, which is no longer true of anything.
+    static func forget() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    /// Everything after the saved mark, or nil when Photos can't say — nothing
+    /// saved yet, or a mark so old that its history has been let go.
+    ///
+    /// Something added and then edited while the app was away is reported as
+    /// added only: to backup it is a new photo, whatever happened to it since.
+    /// Deletions are ignored, as they are live — see `PhotoLibraryChangeMonitor`.
+    static func changesSinceMark() -> Changes? {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let mark = try? NSKeyedUnarchiver.unarchivedObject(
+                  ofClass: PHPersistentChangeToken.self, from: data
+              )
+        else { return nil }
+        do {
+            var inserted = Set<String>()
+            var updated = Set<String>()
+            for change in try PHPhotoLibrary.shared().fetchPersistentChanges(since: mark) {
+                let details = try change.changeDetails(for: .asset)
+                inserted.formUnion(details.insertedLocalIdentifiers)
+                updated.formUnion(details.updatedLocalIdentifiers)
+            }
+            updated.subtract(inserted)
+            return Changes(inserted: Array(inserted), updated: Array(updated))
+        } catch {
+            return nil
+        }
+    }
+}
+
 /// Watches the photo library for new and edited assets so backup discovers them
 /// the moment they appear, instead of only on a full rescan.
 ///

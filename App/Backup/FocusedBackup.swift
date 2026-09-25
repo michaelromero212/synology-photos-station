@@ -19,8 +19,8 @@ import UIKit
 /// that for an hour is a flat battery and a distraction on the side.
 ///
 /// It does not make any single photograph upload faster, and does not pretend
-/// to. Uploads stay one at a time — see ARCHITECTURE.md §8, a phone pushing six
-/// files at once over home wifi finishes later and saturates the link for
+/// to. Uploads stay a few at a time — see `UploadConcurrency`; a phone pushing
+/// many files at once over home wifi finishes later and saturates the link for
 /// everyone else. What changes is that the queue never stops moving.
 @Observable
 @MainActor
@@ -126,6 +126,22 @@ struct FocusedBackupView: View {
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.7))
                     .padding(.top, 4)
+
+                // How fast, and so how long — the two things somebody leaving a
+                // phone on the charger for a large backup actually wants to know.
+                if waiting > 0, let throughput = engine.throughput,
+                   throughput.bytesPerSecond > 0 {
+                    Text(
+                        [throughput.speed, throughput.timeLeft(remaining: true)]
+                            .compactMap { $0 }
+                            .joined(separator: " · ")
+                    )
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.top, 6)
+                    .contentTransition(.numericText())
+                }
 
                 if let active = engine.active, let fraction = active.fraction {
                     ProgressView(value: fraction)

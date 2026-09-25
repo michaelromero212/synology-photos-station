@@ -32,6 +32,10 @@ enum BackupAccount {
     static func signedOut() {
         BackupSettings.reset()
         setupOffered = false
+        // Where the library's change history was last read to belongs with the
+        // backup being reset: the next one starts from wherever the library is
+        // then, and its own first scan finds the rest.
+        LibraryChangeHistory.forget()
     }
 
     /// Makes the ledger this account's, emptying it if it was someone else's.
@@ -59,6 +63,7 @@ enum BackupAccount {
             try? context.delete(model: BackupItem.self)
             try? context.delete(model: ManualUpload.self)
             try? context.save()
+            LibraryChangeHistory.forget()
         }
         defaults.set(userID.uuidString, forKey: ownerKey)
     }

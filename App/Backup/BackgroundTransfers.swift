@@ -74,6 +74,21 @@ final class BackgroundTransfers: NSObject {
     /// equivalent.
     private var reporters: [Key: @Sendable (Int64) -> Void] = [:]
 
+    private var _bytesSent: Int64 = 0
+
+    /// Every byte this app has put on the wire since launch, whichever upload
+    /// it belonged to — what `BackupEngine` measures speed from.
+    ///
+    /// Counted here, from the delegate's own figure for each report, rather
+    /// than from an upload's progress: that jumps ahead by whatever the NAS
+    /// already had when an upload resumes, and a resumed video would read as
+    /// a burst of impossible speed.
+    var bytesSent: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _bytesSent
+    }
+
     /// Made once, under the lock — see `foregroundSession`.
     private var _foregroundSession: URLSession?
     private var _backgroundSession: URLSession?
@@ -174,6 +189,7 @@ extension BackgroundTransfers: URLSessionDataDelegate {
     ) {
         lock.lock()
         let reporter = reporters[Key(session, task)]
+        _bytesSent += bytesSent
         lock.unlock()
         reporter?(totalBytesSent)
     }

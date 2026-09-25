@@ -34,6 +34,47 @@ final class BackupEngine {
     /// one (the focused-backup progress line). The Task Queue lists them all.
     var active: ActiveUpload? { activeUploads.first }
 
+    /// How fast the running backup is going, and how long the rest should
+    /// take. Nil when no run is going, or it has only just started.
+    private(set) var throughput: Throughput?
+
+    struct Throughput: Equatable {
+        /// Over the last `throughputWindow`, counting the time spent between
+        /// transfers — reading a photo out of the library, the NAS filing it —
+        /// as well as the time spent sending. It is how fast the *backup* is
+        /// going, which is what the time left has to be worked out from.
+        var bytesPerSecond: Double
+        var secondsRemaining: Double?
+
+        /// "12.4 MB/s".
+        var speed: String {
+            ByteCountFormatter.string(
+                fromByteCount: Int64(bytesPerSecond), countStyle: .file
+            ) + "/s"
+        }
+
+        /// "About 14 minutes", or with `remaining`, "About 14 minutes
+        /// remaining". Nil until there is a rate to divide by.
+        func timeLeft(remaining: Bool = false) -> String? {
+            guard let secondsRemaining, secondsRemaining.isFinite else { return nil }
+            guard secondsRemaining >= 60 else {
+                return remaining ? "Less than a minute remaining" : "Less than a minute"
+            }
+            let formatter = DateComponentsFormatter()
+            formatter.unitsStyle = .full
+            formatter.allowedUnits = [.day, .hour, .minute]
+            formatter.maximumUnitCount = 2
+            formatter.includesApproximationPhrase = true
+            formatter.includesTimeRemainingPhrase = remaining
+            return formatter.string(from: secondsRemaining)
+        }
+    }
+
+    /// Long enough that a photo's pause between transfers doesn't read as the
+    /// backup stopping, short enough to follow a change of network.
+    private static let throughputWindow: Duration = .seconds(20)
+    private var throughputSamples: [(at: ContinuousClock.Instant, bytes: Int64)] = []
+
     /// How many transfers run at once. Small on purpose: enough that photos
     /// flow past a big video, not so many that a home uplink or the NAS is
     /// saturated and every one crawls. Shared with the manual upload paths via
@@ -251,6 +292,10 @@ final class BackupEngine {
         }
 
         statusText = "Scanning library…"
+        // Where the library's change history stands before the scan reads it,
+        // saved once the scan is done: everything up to here the scan has seen,
+        // so the next catch-up need only read what comes after. See `catchUp`.
+        let mark = LibraryChangeHistory.currentMark()
         var candidates = PhotoLibraryScanner.scan(includeVideos: settings.includeVideos)
         // Edits follow their photo whichever rule is in force: a rule decides
         // which photos backup takes on, and a photo with an edit to send is one
@@ -303,8 +348,44 @@ final class BackupEngine {
         added += queueEdits(library, known: known, context: context)
 
         try? context.save()
+        if let mark { LibraryChangeHistory.save(mark) }
         refreshProgress(context)
         statusText = added > 0 ? "Queued \(added) new item\(added == 1 ? "" : "s")" : "Up to date"
+    }
+
+    /// Queues what the library gained, or had edited, while the app wasn't
+    /// running.
+    ///
+    /// Synology Photos starts on a photo taken with the app closed the moment
+    /// it is opened. This didn't: the live observer only hears changes while
+    /// it is registered, so those photos waited for a full scan — the next
+    /// background window, or Back Up Now. Photos keeps its own history of
+    /// changes, though, and hands back just the part after a saved mark, so
+    /// catching up costs the photos that changed rather than a read of every
+    /// photo on the phone.
+    ///
+    /// With no mark saved yet, or one so old Photos has let its history go,
+    /// there is nothing to read — only a place to start from. What came before
+    /// it is the full scan's to find, exactly as it always was.
+    private func catchUp() async {
+        guard PhotoLibraryScanner.access == .authorized else { return }
+        // Taken before reading, so a photo arriving meanwhile is either in what
+        // is read or after the new mark — never lost between the two. Reading
+        // it twice costs nothing: the queue already knows it.
+        let now = LibraryChangeHistory.currentMark()
+        // Off the main actor. A long absence can be a long history.
+        let changes = await Task.detached(priority: .userInitiated) {
+            LibraryChangeHistory.changesSinceMark()
+        }.value
+        if let changes {
+            if !changes.inserted.isEmpty {
+                await enqueueNewAssets(withIdentifiers: changes.inserted)
+            }
+            if !changes.updated.isEmpty {
+                enqueueEdits(withIdentifiers: changes.updated)
+            }
+        }
+        if let now { LibraryChangeHistory.save(now) }
     }
 
     /// Turns one library asset into its queue rows — the still, and a paired
@@ -394,33 +475,47 @@ final class BackupEngine {
         return added
     }
 
-    /// Queues assets the change observer just reported — the live path that
-    /// makes a photo you just took start backing up while the app is still
-    /// open, without re-enumerating the whole library.
+    /// Queues assets the library has just gained — reported live by the change
+    /// observer while the app is open, or read from Photos' change history by
+    /// `catchUp` for the time it wasn't — without re-enumerating the library.
     ///
-    /// The identifiers cross from the observer as plain strings; the assets are
-    /// re-fetched here on the main actor. `start()` is re-entrant, so kicking it
-    /// is safe whether or not a run is already draining the queue.
+    /// The identifiers cross as plain strings; the assets are re-fetched here
+    /// on the main actor. `start()` is re-entrant, so kicking it is safe whether
+    /// or not a run is already draining the queue.
     func enqueueNewAssets(withIdentifiers ids: [String]) async {
         guard PhotoLibraryScanner.access == .authorized, !ids.isEmpty else { return }
 
+        let context = ModelContext(container)
+        // The ones already queued are set aside before anything is described.
+        // Describing reads each photo's files from Photos, and the catch-up
+        // hands this every photo added since it last looked — most of which the
+        // live observer has usually queued already.
+        var knownIDs = FetchDescriptor<BackupItem>()
+        knownIDs.propertiesToFetch = [\.localIdentifier]
+        let existing = Set(((try? context.fetch(knownIDs)) ?? []).map(\.localIdentifier))
+        let fresh = ids.filter { !existing.contains($0) }
+        guard !fresh.isEmpty else { return }
+
         let includeVideos = settings.includeVideos
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        let rule = settings.rule
+        let cutoff = settings.futureCutoff
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: fresh, options: nil)
         var candidates: [PhotoLibraryScanner.Candidate] = []
         fetched.enumerateObjects { asset, _, _ in
             guard asset.mediaType == .image || (asset.mediaType == .video && includeVideos) else {
                 return
             }
+            // The line the full scan draws, drawn here too. New to the library
+            // is not the same as newly taken: a photo saved from a message, or
+            // arriving from iCloud, can be years old, and "only new photos"
+            // means new photographs.
+            guard rule.queues(takenAt: asset.creationDate, cutoff: cutoff) else { return }
             if let candidate = PhotoLibraryScanner.describe(asset) { candidates.append(candidate) }
         }
         guard !candidates.isEmpty else { return }
 
-        let context = ModelContext(container)
-        let known = (try? context.fetch(FetchDescriptor<BackupItem>())) ?? []
-        let existing = Set(known.map(\.localIdentifier))
-
         var added = 0
-        for candidate in candidates where !existing.contains(candidate.asset.localIdentifier) {
+        for candidate in candidates {
             added += insertRows(for: candidate, into: context)
         }
         guard added > 0 else { return }
@@ -673,10 +768,20 @@ final class BackupEngine {
 
         let context = ModelContext(container)
         runContext = context
+        // Measured once a second for as long as the run goes. See `throughput`.
+        let meter = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.measureThroughput()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         defer {
             isRunning = false
             runContext = nil
             activeUploads.removeAll()
+            meter.cancel()
+            throughput = nil
+            throughputSamples.removeAll()
         }
         reclaimInterrupted(context)
         refreshProgress(context)
@@ -774,7 +879,8 @@ final class BackupEngine {
 
     func stop() { cancelled = true }
 
-    /// Picks the queue up again when the app comes to the front.
+    /// Picks backup up when the app comes to the front: the photos taken while
+    /// it was closed, and whatever was still queued.
     ///
     /// Nothing used to. A run started from a background window, a new photo, or
     /// Back Up Now — so photographs still queued when the app was last put away
@@ -782,10 +888,11 @@ final class BackupEngine {
     /// granting a background window. Synology Photos carries on the moment it is
     /// opened, and so does this now.
     ///
-    /// Only the queue, not a scan of the library: a scan describes every photo
-    /// on the phone, which is too much to do each time the app is opened.
-    /// Quietly does nothing when there is nothing to send, so opening the app
-    /// doesn't report to the NAS or refresh the grid for no reason.
+    /// Not a scan of the library: a scan describes every photo on the phone,
+    /// which is too much to do each time the app is opened. `catchUp` reads only
+    /// what changed. Quietly does nothing when there is nothing to send, so
+    /// opening the app doesn't report to the NAS or refresh the grid for no
+    /// reason.
     func resume() async {
         guard settings.enabled, allowedOnCurrentPower else { return }
         // At launch the path may not have reported yet, and until it has
@@ -797,16 +904,46 @@ final class BackupEngine {
             try? await Task.sleep(for: .milliseconds(50))
             waited += 1
         }
-        // Checked after the wait, not before it: a run that started meanwhile
-        // has lanes holding rows, and `reclaimInterrupted` must not touch them.
-        // From here to `start()` marking itself running there is no suspension,
-        // so nothing can start in between.
-        guard !isRunning, connection.hasReportedPath, allowedOnCurrentNetwork, hasDestination
-        else { return }
+        guard connection.hasReportedPath, hasDestination else { return }
+        // Queued whatever the network, like a photo taken with the app open:
+        // on cellular under "Wi-Fi Only" it waits in the grid as a tile rather
+        // than not being known about at all.
+        await catchUp()
+        // Checked after the catch-up, not before it: that suspends, and a run
+        // that started meanwhile has lanes holding rows `reclaimInterrupted`
+        // must not touch. From here to `start()` marking itself running there
+        // is no suspension, so nothing can start in between.
+        guard !isRunning, allowedOnCurrentNetwork else { return }
         let context = ModelContext(container)
         reclaimInterrupted(context)
         guard nextItem(context) != nil else { return }
         await start()
+    }
+
+    /// Takes one reading for `throughput`.
+    ///
+    /// Speed is the bytes that went out across the window, over the window.
+    /// Time left is what is still to go over that speed: every queued file's
+    /// size, less what the uploads in flight have already sent. Shown only
+    /// once there are five seconds to go on — the first moments of a run are
+    /// all reading photos out of the library, and a speed worked out from them
+    /// would promise hours.
+    private func measureThroughput() {
+        let now = ContinuousClock.now
+        throughputSamples.append((now, BackgroundTransfers.shared.bytesSent))
+        throughputSamples.removeAll { now - $0.at > Self.throughputWindow }
+        guard let first = throughputSamples.first,
+              now - first.at >= .seconds(5)
+        else { return }
+        let rate = Double(throughputSamples[throughputSamples.count - 1].bytes - first.bytes)
+            / ((now - first.at) / .seconds(1))
+        guard rate > 0 else {
+            throughput = Throughput(bytesPerSecond: 0, secondsRemaining: nil)
+            return
+        }
+        let inFlight = activeUploads.reduce(Int64(0)) { $0 + $1.sentBytes }
+        let left = max(progress.bytesRemaining - inFlight, 0)
+        throughput = Throughput(bytesPerSecond: rate, secondsRemaining: Double(left) / rate)
     }
 
     /// Whether there is anywhere to send to: signed in, with a space to back up
