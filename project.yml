@@ -154,8 +154,9 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        # Kept false on purpose: the justified grid was built to reflow into a
-        # narrow split-view column, and there is a test asserting it does.
+        # Kept false on purpose: the grid reflows into a narrow split-view
+        # column, down to a phone's three across — see
+        # PhotoGridMetrics.squareColumns.
         UIRequiresFullScreen: false
     settings:
       base:

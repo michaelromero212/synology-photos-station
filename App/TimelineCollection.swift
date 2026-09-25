@@ -9,7 +9,7 @@ import UIKit
 /// Places every day heading and every tile from the manifest's counts, before a
 /// single day has loaded.
 ///
-/// This is the reason the iPhone grid is a collection view at all. The SwiftUI
+/// This is the reason the grid is a collection view at all. The SwiftUI
 /// grid it replaces was a `LazyVStack` of days, and a lazy stack only knows the
 /// height of a day it has built; every other day's height is a guess, revised as
 /// days are built and torn down. On his phone the revisions were continuous — +2,
@@ -25,9 +25,9 @@ import UIKit
 /// up front and the content never changes size unless the library itself does.
 /// Nothing is estimated, so nothing is revised, so nothing moves.
 ///
-/// Square grids only, which is to say iPhone. The justified rows on iPad and the
-/// Mac are sized from aspect ratios that are unknown until a day loads, so there
-/// is nothing exact to compute there and they keep the SwiftUI grid.
+/// Square grids only: iPhone and iPad. The justified rows on the Mac and the
+/// television are sized from aspect ratios that are unknown until a day loads,
+/// so there is nothing exact to compute there and they keep the SwiftUI grid.
 final class TimelineGridLayout: UICollectionViewLayout {
     static let libraryHeaderKind = "library-header"
 
@@ -35,6 +35,8 @@ final class TimelineGridLayout: UICollectionViewLayout {
         /// Entries per day, in drawing order: loaded photographs, placeholders
         /// standing in for ones that aren't, and tiles still on this phone.
         var counts: [Int]
+        /// Tiles across a phone at this zoom. A wider grid fits more — see
+        /// `columnCount`.
         var columns: Int
         var spacing: CGFloat
         var headerHeight: CGFloat
@@ -47,6 +49,12 @@ final class TimelineGridLayout: UICollectionViewLayout {
     }
 
     private var width: CGFloat = 0
+    /// Tiles across, for the width the grid has now: `shape.columns` on a
+    /// phone, more on an iPad. Worked out here, from the collection view's own
+    /// width, so that turning an iPad or resizing it in Split View reflows the
+    /// grid in the same layout pass that `TimelineCollectionView` holds the
+    /// screen's place across.
+    private(set) var columnCount = 1
     private var side: CGFloat = 0
     /// Where each day's heading begins, in content coordinates.
     private var starts: [CGFloat] = []
@@ -68,7 +76,8 @@ final class TimelineGridLayout: UICollectionViewLayout {
         width = collectionView.bounds.width
         let displayScale = collectionView.traitCollection.displayScale
         scale = displayScale > 0 ? displayScale : 3
-        let columns = max(shape.columns, 1)
+        columnCount = PhotoGridMetrics.squareColumns(shape.columns, across: width)
+        let columns = columnCount
         // The same arithmetic `PhotoGridSection` used, so the tiles come out the
         // size they always were.
         side = max((width - shape.spacing * CGFloat(columns - 1)) / CGFloat(columns), 1)
@@ -83,7 +92,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
     }
 
     private func rows(_ count: Int) -> Int {
-        let columns = max(shape.columns, 1)
+        let columns = columnCount
         return (max(count, 0) + columns - 1) / columns
     }
 
@@ -99,9 +108,22 @@ final class TimelineGridLayout: UICollectionViewLayout {
         CGSize(width: width, height: height)
     }
 
+    /// Told that the width is about to change, while everything here still
+    /// describes the screen as it is. See `shouldInvalidateLayout`.
+    var widthWillChange: (() -> Void)?
+
     /// Only a change of width changes anything; scrolling changes nothing.
+    ///
+    /// Also the one moment to take the screen's place before a new width
+    /// moves it. By the time the collection view lays itself out, this layout
+    /// has already been prepared for the new width — asked for its content
+    /// size along the way — and a place read then describes the new layout at
+    /// the old offset: measured, it named whatever had moved under the old
+    /// offset, and putting that back moved nothing.
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
-        newBounds.width != width
+        guard newBounds.width != width else { return false }
+        widthWillChange?()
+        return true
     }
 
     /// The day holding a point in the content. A binary search, because this is
@@ -130,7 +152,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
         let gridTop = starts[section] + shape.headerHeight
         guard y >= gridTop else { return nil }
         let row = Int((y - gridTop) / (side + shape.spacing))
-        let item = row * max(shape.columns, 1)
+        let item = row * columnCount
         return item < shape.counts[section] ? item : nil
     }
 
@@ -141,7 +163,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
     }
 
     func frame(forItem item: Int, inSection section: Int) -> CGRect {
-        let columns = max(shape.columns, 1)
+        let columns = columnCount
         let row = item / columns
         let column = item % columns
         let gridTop = starts[section] + shape.headerHeight
@@ -167,7 +189,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
             result.append(library)
         }
         guard var section = section(at: max(rect.minY, 0)) else { return result }
-        let columns = max(shape.columns, 1)
+        let columns = columnCount
         let pitch = side + shape.spacing
         while section < starts.count, starts[section] < rect.maxY {
             let top = starts[section]
@@ -296,14 +318,11 @@ final class TimelineGridController {
 
 // MARK: - The grid
 
-/// The iPhone library grid: a collection view with SwiftUI cells.
+/// The library grid on iPhone and iPad: a collection view with SwiftUI cells.
 ///
 /// Everything a tile draws and does is still SwiftUI, built by `TimelineView`
-/// exactly as before — the tap, the long press, the selection mark, and the zoom
-/// into the viewer, which was the part most at risk and was proven first in an
-/// isolated build: `matchedTransitionSource` in a `UIHostingConfiguration` cell
-/// pairs with the viewer's zoom in both directions. What moved to UIKit is only
-/// the container, which is the part that was estimating.
+/// exactly as before — the tap, the long press, the selection mark. What moved
+/// to UIKit is only the container, which is the part that was estimating.
 struct TimelineCollection: UIViewRepresentable {
     struct Section: Equatable {
         let bucket: TimelineBucket
@@ -371,6 +390,9 @@ struct TimelineCollection: UIViewRepresentable {
         private var lastInsets = UIEdgeInsets.zero
         /// Opened on the newest photograph yet. Once, on first layout.
         private var hasLanded = false
+        /// What was at the top of the screen as the width began to change.
+        /// See `widthWillChange`.
+        private var placeBeforeWidthChange: Anchor?
         /// Inside `update`, where reporting has to wait — see `update`.
         private var isUpdating = false
         private var deferredJump: String?
@@ -403,6 +425,7 @@ struct TimelineCollection: UIViewRepresentable {
             self.view = view
             self.layout = layout
             view.coordinator = self
+            layout.widthWillChange = { [weak self] in self?.widthWillChange() }
             view.register(TimelineTileCell.self, forCellWithReuseIdentifier: Self.cellID)
             view.register(
                 TimelineTileCell.self,
@@ -883,6 +906,38 @@ struct TimelineCollection: UIViewRepresentable {
             }
         }
 
+        /// Takes the screen's place as the width is about to change. The first
+        /// capture stands until it is put back: a turn can pass through more
+        /// than one width before the grid is laid out again.
+        fileprivate func widthWillChange() {
+            guard hasLanded, placeBeforeWidthChange == nil else { return }
+            placeBeforeWidthChange = captureAnchor()
+        }
+
+        /// Puts back the place taken before the width changed, now that the
+        /// tiles have moved to their new columns.
+        fileprivate func restorePlaceAfterWidthChange() {
+            guard let place = placeBeforeWidthChange else { return }
+            placeBeforeWidthChange = nil
+            restore(place)
+        }
+
+        /// After the grid has changed width — an iPad turned, or resized in
+        /// Split View — and been laid out again for it.
+        ///
+        /// Every tile has a new size and often a new column, and two things
+        /// only hear about a change of shape, not of width: the tiles on screen,
+        /// whose picture is drawn at the size it was built with, and the
+        /// scrubber, whose map of where each day starts is the layout's. Both
+        /// are brought up to date here. Never on a phone, which doesn't turn.
+        fileprivate func widthDidChange() {
+            guard let layout, hasLanded else { return }
+            parent.progress.span = layout.span(keys: keys)
+            refreshVisible(forceAll: true)
+            report()
+            updateLoads()
+        }
+
         // MARK: Drag to select
 
         /// Dragging across tiles adds them to the selection, the way it did in
@@ -934,8 +989,9 @@ struct TimelineCollection: UIViewRepresentable {
 
 /// Holds its place when it changes width, and opens on the newest photograph.
 ///
-/// Both need the moment between the old layout and the new one, which only the
-/// collection view itself sees.
+/// Both are finished once a layout pass has run: the place is taken just
+/// before the width changes (see `TimelineGridLayout.widthWillChange`) and put
+/// back here, after the tiles have moved.
 final class TimelineCollectionView: UICollectionView {
     fileprivate weak var coordinator: TimelineCollection.Coordinator?
     private var lastWidth: CGFloat = 0
@@ -959,17 +1015,23 @@ final class TimelineCollectionView: UICollectionView {
     /// apply. Removing the inset at its source fixed it outright: every cell
     /// reads zero and every tile's frame starts at 0. Nothing here needs a safe
     /// area — the grid sets every inset it keeps clear of by hand.
+    ///
+    /// Tiles no longer carry that zoom anchor — a photo opens over the grid
+    /// now, see `ViewerStage` — but a hosted root handed an inset is how a tile
+    /// went astray, and ruling it out costs nothing.
     override var safeAreaInsets: UIEdgeInsets { .zero }
 
     override func layoutSubviews() {
         let widthChanged = lastWidth != 0 && bounds.width != lastWidth
-        // Read before the layout recomputes for the new width — it still
-        // describes what is on screen.
-        let anchor = widthChanged ? coordinator?.captureAnchor() : nil
         lastWidth = bounds.width
         super.layoutSubviews()
-        if let anchor { coordinator?.restore(anchor) }
+        coordinator?.restorePlaceAfterWidthChange()
         coordinator?.landIfNeeded()
+        // The next turn rather than now: redrawing the tiles reconfigures
+        // cells, which is not something to start from inside this pass.
+        if widthChanged {
+            DispatchQueue.main.async { [weak self] in self?.coordinator?.widthDidChange() }
+        }
     }
 }
 

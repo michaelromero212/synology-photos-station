@@ -38,19 +38,52 @@ enum GridEntry: Identifiable, Equatable {
 
 /// How the grid is proportioned on this platform.
 enum PhotoGridMetrics {
-    /// iPhone keeps the square grid; everywhere else gets justified rows.
+    /// The Mac and the television get justified rows; iPhone and iPad keep the
+    /// square grid, which is also what Photos draws on both.
     ///
-    /// Not a size class. An iPhone in landscape reports a regular width on the
-    /// larger models, and this is a decision about the device rather than about
-    /// how wide the window happens to be right now — the ask was that iPhone
-    /// stays exactly as it is.
+    /// The iPad had justified rows too, until the iPhone's grid became a
+    /// collection view that knows where every day is before any of them loads —
+    /// see `TimelineGridLayout`. That is only possible for squares: a justified
+    /// row is sized from the shapes of its photographs, which aren't known until
+    /// their day arrives. Left on the old grid, the iPad kept everything the
+    /// iPhone had been rid of — the photographs moving under your finger as days
+    /// were measured, the scrubber snapping — and none of what came after, like
+    /// the viewer that opens over the grid. Sharing the square grid, the iPad
+    /// gets all of it, and whatever the grid gets next.
     static var usesJustifiedRows: Bool {
         #if os(iOS)
-        return UIDevice.current.userInterfaceIdiom == .pad
+        return false
         #else
         return true
         #endif
     }
+
+    /// How many square tiles go across `width`, at a stop that puts
+    /// `phoneColumns` across a phone.
+    ///
+    /// A phone gets exactly `phoneColumns` — every iPhone is narrower than the
+    /// point where this would add one. Anything wider gets as many tiles as fit
+    /// at about the size a phone's would be on a bigger screen: at the
+    /// three-across stop, tiles of about 170 points, which on an iPad is five
+    /// across in portrait and seven in landscape, close to what Photos shows
+    /// there. Never fewer than a phone's, so a narrow Split View column is a
+    /// phone's grid.
+    ///
+    /// From the width rather than the device, so turning an iPad or resizing it
+    /// beside another app reflows the grid, and one rule serves every square
+    /// grid in the app.
+    static func squareColumns(_ phoneColumns: Int, across width: CGFloat) -> Int {
+        let phone = max(phoneColumns, 1)
+        guard width > 0 else { return phone }
+        // A tile of `tileBasis / phone` points: 170 at the three-across stop,
+        // 102 at five, 46 at eleven — the phone's stops in proportion.
+        let fitted = Int((width * CGFloat(phone) / tileBasis).rounded())
+        return max(phone, fitted)
+    }
+
+    /// The width that holds a stop's phone count at iPad size. See
+    /// `squareColumns`.
+    private static let tileBasis: CGFloat = 510
 
     /// Tighter on a phone, where two points of gap is already visible, and
     /// slightly looser where varied shapes need the separation to read.
@@ -104,51 +137,7 @@ enum PhotoGridMetrics {
     }
 }
 
-// MARK: - Opening a photo
-
-/// The zoom transition, where the platform has one.
-///
-/// Opening a photo was a plain navigation push — a new screen sliding in from
-/// the right. Photos lifts the tile you tapped and grows it into the full-screen
-/// image, then drops it back into the grid on the way out, and that one
-/// difference is most of why this app didn't feel like that one: it happens
-/// every single time anybody looks at a photo.
-///
-/// iOS 18 added exactly this transition. Below 18 the push is what's left, which
-/// is the behavior the app already had.
-extension View {
-    /// The tile the transition grows *from*.
-    @ViewBuilder
-    func photoTransitionSource(id: UUID, in namespace: Namespace.ID) -> some View {
-        if #available(iOS 18.0, macOS 15.0, tvOS 18.0, *) {
-            self.matchedTransitionSource(id: id, in: namespace)
-        } else {
-            self
-        }
-    }
-
-    /// The viewer the transition grows *into*. The id has to be the same
-    /// placement the tile registered, or the system quietly falls back to a
-    /// push and the whole thing looks like it isn't working.
-    ///
-    /// iOS and tvOS only — macOS has `matchedTransitionSource` but no zoom
-    /// transition to pair it with, and a Mac window doesn't push-and-pop the way
-    /// this is compensating for anyway.
-    @ViewBuilder
-    func photoZoomTransition(id: UUID, in namespace: Namespace.ID) -> some View {
-        #if os(macOS)
-        self
-        #else
-        if #available(iOS 18.0, tvOS 18.0, *) {
-            self.navigationTransition(.zoom(sourceID: id, in: namespace))
-        } else {
-            self
-        }
-        #endif
-    }
-}
-
-/// One section's tiles: justified rows, or the square grid on iPhone.
+/// One section's tiles: justified rows, or the square grid on iPhone and iPad.
 ///
 /// The two layouts live behind one view so callers build their cells once. What
 /// differs is only the frame each cell is handed — which is also why `cell`
@@ -159,7 +148,8 @@ struct PhotoGridSection<Cell: View>: View {
     let width: CGFloat
     let targetHeight: CGFloat
     let spacing: CGFloat
-    /// Columns for the square layout. Ignored when rows are justified.
+    /// Columns for the square layout across a phone; a wider screen fits more —
+    /// see `PhotoGridMetrics.squareColumns`. Ignored when rows are justified.
     let columns: Int
     @ViewBuilder let cell: (GridEntry, CGSize) -> Cell
 
@@ -208,6 +198,7 @@ struct PhotoGridSection<Cell: View>: View {
     // MARK: - Square
 
     private var square: some View {
+        let columns = PhotoGridMetrics.squareColumns(self.columns, across: width)
         let side = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
         let rows = Int((Double(entries.count) / Double(columns)).rounded(.up))
         // Declared, not discovered, and this is the fix for a scrubber that

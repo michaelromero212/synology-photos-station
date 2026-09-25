@@ -27,8 +27,8 @@ import UIKit
 /// if the grid has to move to show it. The black is a separate layer, which is
 /// what lets a drag fade it and uncover the grid.
 ///
-/// The iPhone grid only. The justified grid on iPad still pushes; see
-/// `PhotoGridMetrics.usesJustifiedRows`.
+/// The library grid on iPhone and iPad. Albums, collections and search still
+/// push their viewer.
 @Observable
 @MainActor
 final class ViewerStage {

@@ -1003,11 +1003,6 @@ struct AssetDetailView: View {
         }
     }
 
-    /// Back on its own, and the actions grouped — the split in screenshot one.
-    ///
-    /// Separate pieces rather than one bar across the top: a full-width bar
-    /// covers the top of the photo, and the whole point of hiding the
-    /// navigation bar was to stop doing that.
     /// Closes the viewer, handing the tab bar back as it goes.
     ///
     /// Returned at the start of the way out rather than at the end, which is
@@ -1028,17 +1023,7 @@ struct AssetDetailView: View {
             )
             return
         }
-        // The grid goes to the photo on screen before anything moves — usually
-        // it is there already (see `reportFocusSoon`); after a quick swipe and
-        // straight back, this is what puts it there. The close waits one turn
-        // of the run loop so that tile exists to be zoomed into when it starts.
-        if reportedFocus != currentItem.id {
-            reportedFocus = currentItem.id
-            onFocus(currentItem)
-            DispatchQueue.main.async { dismiss() }
-        } else {
-            dismiss()
-        }
+        dismiss()
     }
 
     /// Tells the grid which photo is on screen, once a swipe has settled.
@@ -1061,6 +1046,11 @@ struct AssetDetailView: View {
         }
     }
 
+    /// Back on its own, and the actions grouped — the split in screenshot one.
+    ///
+    /// Separate pieces rather than one bar across the top: a full-width bar
+    /// covers the top of the photo, and the whole point of hiding the
+    /// navigation bar was to stop doing that.
     private var topChrome: some View {
         HStack(alignment: .top) {
             ViewerButton(symbol: "chevron.left", label: "Back") { leave() }
