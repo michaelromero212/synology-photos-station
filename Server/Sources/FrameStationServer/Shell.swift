@@ -8,6 +8,25 @@ import Vapor
 /// `ffmpeg` — because each is far better at its job than anything available
 /// in-process, and because originals must never be re-encoded by us.
 enum Shell {
+    /// Whether commands started in this task run behind everything else for the
+    /// CPU. Set by `DerivationWorker` around each job; everything on a request
+    /// path — the metadata read at commit, a preview someone is waiting to see
+    /// — leaves it off and runs as it always did.
+    ///
+    /// The worker's lanes are four vips or ffmpeg processes on a four-core
+    /// J4125, each of which will happily use every core, and every upload in a
+    /// burst queues more of them. At normal priority they compete with the
+    /// server itself for the whole burst — the likeliest reason a phone's log
+    /// showed each upload's check taking most of a second and each commit two.
+    /// Lowered, they get whatever the uploads leave: the thumbnails still come,
+    /// after the burst rather than during it, and nothing about them changes.
+    /// Only when.
+    @TaskLocal static var isBackground = false
+
+    /// How far down `isBackground` puts a command: nearly to the bottom, where
+    /// it runs freely on an idle NAS and yields at once to anything else.
+    static let backgroundNiceness = 15
+
     struct Result {
         let status: Int32
         let stdout: Data
@@ -24,6 +43,16 @@ enum Shell {
     ) async throws -> Result {
         guard let executableURL = resolve(executable) else {
             throw ShellError.notFound(executable)
+        }
+
+        // Through `nice`, which execs the command in its own place, so the
+        // process a timeout terminates is still the tool itself. Without a
+        // `nice` to hand, the command simply runs as before.
+        var launchURL = executableURL
+        var launchArguments = arguments
+        if isBackground, let nice = resolve("nice") {
+            launchURL = nice
+            launchArguments = ["-n", String(backgroundNiceness), executableURL.path] + arguments
         }
 
         // Output goes to temporary FILES, not pipes.
@@ -58,8 +87,8 @@ enum Shell {
 
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
-            process.executableURL = executableURL
-            process.arguments = arguments
+            process.executableURL = launchURL
+            process.arguments = launchArguments
             process.standardOutput = outHandle
             process.standardError = errHandle
 

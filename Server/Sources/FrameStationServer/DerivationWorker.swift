@@ -98,7 +98,11 @@ actor DerivationWorker {
                     try await Task.sleep(for: idleDelay)
                     continue
                 }
-                await process(job: job, app: app)
+                // Every tool this job starts runs behind the server for the
+                // CPU — see `Shell.isBackground`.
+                await Shell.$isBackground.withValue(true) {
+                    await process(job: job, app: app)
+                }
             } catch is CancellationError {
                 return
             } catch {

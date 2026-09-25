@@ -184,9 +184,15 @@ struct UploadController: RouteCollection {
                         reason: "Chunk \(index) should be \(expected) bytes, got \(buffer.readableBytes).")
         }
 
-        try req.blobStore.writeChunk(
-            uploadID: uploadID, index: index, bytes: Data(buffer.readableBytesView)
-        )
+        // On the thread pool, not the task running this handler. Sixteen
+        // megabytes to a busy disk can take a while, and Swift's concurrency
+        // pool has one thread per core — four on the NAS — so a few chunk writes
+        // at once were enough to leave every other request waiting for a thread.
+        let store = req.blobStore
+        let bytes = Data(buffer.readableBytesView)
+        try await req.application.threadPool.runIfActive {
+            try store.writeChunk(uploadID: uploadID, index: index, bytes: bytes)
+        }
 
         try await req.sql.raw("""
             UPDATE upload_sessions
@@ -213,6 +219,9 @@ struct UploadController: RouteCollection {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let uploadID = try req.parameters.require("uploadID", as: UUID.self)
         let input = try req.content.decode(CommitUploadRequest.self)
+        // Where a commit's time goes, for the log line at the end. A phone saw
+        // commits of one to two seconds and nothing said which part was slow.
+        var timing = CommitTiming()
 
         let session = try await loadSession(uploadID: uploadID, userID: device.userID, on: req.sql)
         guard !session.committed else {
@@ -230,15 +239,26 @@ struct UploadController: RouteCollection {
             throw Abort(.badRequest, reason: "Still missing chunks: \(missing.prefix(10)).")
         }
 
+        timing.mark("checks")
+
         let fileExtension = BlobStore.fileExtension(for: session.filename)
         let blob: URL
         do {
-            blob = try req.blobStore.assemble(
-                uploadID: uploadID,
-                chunkCount: session.chunkCount,
-                expectedSHA256: session.sha256,
-                fileExtension: fileExtension
-            )
+            // On the thread pool — see `uploadChunk`. This reads every chunk
+            // back, hashes the whole file and writes it out again: for a large
+            // video, seconds of disk that used to hold one of the four threads
+            // every other request was waiting on.
+            let store = req.blobStore
+            let chunkCount = session.chunkCount
+            let sha256 = session.sha256
+            blob = try await req.application.threadPool.runIfActive {
+                try store.assemble(
+                    uploadID: uploadID,
+                    chunkCount: chunkCount,
+                    expectedSHA256: sha256,
+                    fileExtension: fileExtension
+                )
+            }
         } catch let error as BlobStoreError {
             // Staging is already discarded; clear the session so the client can
             // start clean rather than resuming into the same failure.
@@ -246,6 +266,8 @@ struct UploadController: RouteCollection {
             req.logger.error("upload \(uploadID) failed to assemble: \(error)")
             throw Abort(.unprocessableEntity, reason: String(describing: error))
         }
+
+        timing.mark("assemble")
 
         // The blob store is where the file lives; the browsable tree is a
         // mirror, and `BrowseTreeWorker` is now the only thing that writes it.
@@ -338,6 +360,8 @@ struct UploadController: RouteCollection {
             }
         }
 
+        timing.mark("record")
+
         // Best-effort and deliberately outside the transaction: the browse tree
         // is a convenience mirror, rebuildable from the database, and must never
         // fail an upload.
@@ -348,6 +372,7 @@ struct UploadController: RouteCollection {
             filename: session.filename,
             logger: req.logger
         )
+        timing.mark("tree")
 
         // Derivation is keyed on what this row actually has, not on the dedup
         // flag. `deduplicated` means the *bytes* were seen before — not that the
@@ -374,6 +399,7 @@ struct UploadController: RouteCollection {
         } catch {
             req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
         }
+        timing.mark("probe")
         // The exif dump in the background, and thumbnails too. Thumbnails outrank
         // metadata in the worker's claim, so the tiles a person is watching fill
         // before the deep metadata does.
@@ -405,10 +431,40 @@ struct UploadController: RouteCollection {
             )
         }
 
+        timing.mark("queue")
+
+        let summary = timing.summary
         req.logger.info(
-            "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated))"
+            "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated)) in \(summary)"
         )
         return result
+    }
+
+    /// Split times for one commit, logged with it: "1.84s — checks 0.03s,
+    /// assemble 0.12s, record 0.20s, …". Wall-clock from the handler's start,
+    /// so waiting for the CPU or a disk shows up in whichever step waited.
+    struct CommitTiming {
+        private let start = ContinuousClock.now
+        private var last = ContinuousClock.now
+        private var steps: [(String, Duration)] = []
+
+        mutating func mark(_ step: String) {
+            let now = ContinuousClock.now
+            steps.append((step, now - last))
+            last = now
+        }
+
+        var summary: String {
+            let total = Self.seconds(ContinuousClock.now - start)
+            let parts = steps.map { "\($0.0) \(Self.seconds($0.1))" }
+            return "\(total) — " + parts.joined(separator: ", ")
+        }
+
+        private static func seconds(_ duration: Duration) -> String {
+            let (whole, fraction) = duration.components
+            let value = Double(whole) + Double(fraction) / 1e18
+            return String(format: "%.2fs", value)
+        }
     }
 
 
