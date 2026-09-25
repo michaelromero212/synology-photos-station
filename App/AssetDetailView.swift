@@ -218,6 +218,9 @@ struct AssetDetailView: View {
     @State private var showDateEditor = false
     @State private var isWorking = false
     @Environment(\.dismiss) private var dismiss
+    /// This viewer's place among the open ones — what moves the floating tab
+    /// bar out of the way of the buttons along the bottom. See `GridChrome`.
+    @State private var tabBarToken = UUID()
     #else
     /// What the viewer is showing. A `let` on the outside, but the
     /// next/previous video controls have to be able to move it — there is no
@@ -273,19 +276,20 @@ struct AssetDetailView: View {
         // date come back as floating controls over the photo, which is what
         // lets the media run edge to edge underneath them.
         .toolbar(.hidden, for: .navigationBar)
-        // The tab bar deliberately stays. It used to be hidden here, which is
-        // the conventional thing for a full-screen viewer and cost more than it
-        // was worth: hiding it on push and restoring it on pop meant the bar
-        // animated itself back *after* the grid had already returned, so every
-        // trip into a photograph ended with the app visibly reassembling
-        // itself. A bar that never moves is worth more than a bar that is
-        // briefly out of the way.
+        // The tab bar steps aside while a photo is open — see `GridChrome` and
+        // the `onAppear` below. It once stayed, when it was the system's bar:
+        // that bar took its height out of the safe area, so the viewer's
+        // controls rode above it on their own. The bar drawn now is a floating
+        // overlay that takes nothing from the safe area — deliberately, so
+        // photographs pass beneath it in the grid — and here that put it
+        // squarely over Share, Favorite, Info and Delete, which could no longer
+        // be pressed.
         //
-        // Nothing has to move up to accommodate it. The picture is meant to run
-        // underneath — `AssetPage` ignores the safe area on purpose — and the
-        // viewer's own controls are floating layers that respect it, so they
-        // ride above the bar on their own now that it contributes to the safe
-        // area again.
+        // Hiding it used to have a cost worth remembering: restored on pop, the
+        // system bar animated back *after* the grid had returned, and every
+        // trip into a photograph ended with the app visibly reassembling itself.
+        // So the back button hands the bar back as the viewer starts to leave,
+        // not once it has gone — see `leave()` — and it returns with the grid.
         // Every piece of chrome in one layer, so it travels with the picture
         // when the viewer turns (see the `videoTilt` below). Chrome left upright
         // against a rotated picture read as broken — back button, transport and
@@ -339,9 +343,17 @@ struct AssetDetailView: View {
         // The window stays portrait; only the clip turns. Watching the tilt
         // costs an accelerometer subscription, so it runs while the viewer is
         // open and stops with it. See `MediaTilt`.
-        .onAppear { tilt.start() }
+        .onAppear {
+            tilt.start()
+            GridChrome.shared.viewerOpened(tabBarToken)
+        }
         .onDisappear {
             tilt.stop()
+            // Covers every way out that `leave()` doesn't see: the swipe back,
+            // dragging the photo down. Those are gestures that can be
+            // abandoned halfway, so the bar waits until one has actually
+            // finished.
+            GridChrome.shared.viewerClosed(tabBarToken)
             onClose(currentItem.assetID)
         }
         .fullScreenCover(isPresented: $showSlideshow) {
@@ -364,7 +376,7 @@ struct AssetDetailView: View {
                 // day, so the pager it was opened from no longer contains it
                 // where it sits. Better to land back on a correct grid than to
                 // keep swiping through a list that has quietly gone stale.
-                if done != nil { dismiss() }
+                if done != nil { leave() }
             }
         }
         .sheet(isPresented: $showTagEditor) {
@@ -387,7 +399,7 @@ struct AssetDetailView: View {
                     try? await session.client?.removeAsset(
                         spaceID: space.id, assetID: asset.assetID
                     )
-                    dismiss()
+                    leave()
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -682,7 +694,7 @@ struct AssetDetailView: View {
             // Only reached with auto-play on, which is the guard above. With it
             // off a clip was opened deliberately and one ending is not a reason
             // to take the viewer away.
-            dismiss()
+            leave()
             return
         }
         // Cut, not slide: the next clip should simply start. See `PagerFocus.cut`.
@@ -944,9 +956,20 @@ struct AssetDetailView: View {
     /// Separate pieces rather than one bar across the top: a full-width bar
     /// covers the top of the photo, and the whole point of hiding the
     /// navigation bar was to stop doing that.
+    /// Closes the viewer, handing the tab bar back as it goes.
+    ///
+    /// Returned at the start of the way out rather than at the end, which is
+    /// when `onDisappear` would: there, the bar slid back in after the grid had
+    /// already settled, and every trip into a photograph ended with the app
+    /// reassembling itself. Started together, the bar comes back with the grid.
+    private func leave() {
+        GridChrome.shared.viewerClosed(tabBarToken)
+        dismiss()
+    }
+
     private var topChrome: some View {
         HStack(alignment: .top) {
-            ViewerButton(symbol: "chevron.left", label: "Back") { dismiss() }
+            ViewerButton(symbol: "chevron.left", label: "Back") { leave() }
 
             Spacer()
 
