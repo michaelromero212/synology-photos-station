@@ -94,6 +94,13 @@ enum FileUpload {
         let assetID: UUID?
         /// The server already had these bytes, so only a placement was created.
         let deduplicated: Bool
+        /// Whether the space gained a photograph it didn't already hold — true
+        /// for every file actually sent, and for a link unless the space had it.
+        ///
+        /// Not the same question as `deduplicated`, which is about bytes: a
+        /// photo already backed up to Personal and then shared into a family
+        /// space sends nothing and still arrives there as a new photograph.
+        let addedToSpace: Bool
         let byteSize: Int64
         let sha256: String
     }
@@ -148,17 +155,22 @@ enum FileUpload {
         case .have:
             // Already on the NAS — another family member's copy, or an earlier
             // run. Link it rather than sending the bytes again.
+            var added = false
             if let assetID = probe.assetID {
-                _ = try await client.linkAsset(
+                let linked = try await client.linkAsset(
                     spaceID: spaceID, assetID: assetID,
                     LinkAssetRequest(sourceLocalID: descriptor.sourceLocalID)
                 )
+                // The server logs a change only when it placed something; a
+                // space that already held the photo gets a sequence of zero.
+                added = linked.changeSeq > 0
             }
             #if os(iOS)
             await rememberLocalOriginal(assetID: probe.assetID, descriptor: descriptor)
             #endif
             return Result(
-                assetID: probe.assetID, deduplicated: true, byteSize: size, sha256: digest
+                assetID: probe.assetID, deduplicated: true, addedToSpace: added,
+                byteSize: size, sha256: digest
             )
 
         case .need, .partial:
@@ -187,7 +199,8 @@ enum FileUpload {
             )
             #endif
             return Result(
-                assetID: committed.assetID, deduplicated: false, byteSize: size, sha256: digest
+                assetID: committed.assetID, deduplicated: false, addedToSpace: true,
+                byteSize: size, sha256: digest
             )
         }
     }

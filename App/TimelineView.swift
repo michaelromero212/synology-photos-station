@@ -1247,37 +1247,49 @@ struct TimelineView: View {
     private func entries(
         for bucket: TimelineBucket, items: [TimelineItem], queued: [QueuedTile]
     ) -> [GridEntry] {
+        // In the order they were taken, on `(date, id)` so it is stable from
+        // one redraw to the next — not the order the queues hold them in, which
+        // for photographs that have just landed is the order they *finished*.
+        let tiles = stillQueued(queued, among: items).sorted {
+            ($0.capturedAt, $0.localIdentifier) < ($1.capturedAt, $1.localIdentifier)
+        }
         if items.isEmpty {
             // Placeholders keep the section the right height so the scrollbar
             // doesn't jump when the bucket lands. Nothing to interleave with
-            // yet, so the pending tiles lead — there is no order to be wrong
-            // about.
-            let pending = queued.map {
+            // yet, so the pending tiles lead.
+            let pending = tiles.map {
                 GridEntry.pending(localIdentifier: $0.localIdentifier, state: $0.state)
             }
-            return pending + (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) }
+            return pending + (0..<placeholders(for: bucket, beside: tiles))
+                .map { GridEntry.placeholder($0) }
         }
 
-        guard !queued.isEmpty else { return items.map(GridEntry.item) }
+        guard !tiles.isEmpty else { return items.map(GridEntry.item) }
 
-        // Sorted on `(date, id)` rather than date alone. `sorted(by:)` is not a
-        // stable sort, and a day can easily hold several photos sharing a
-        // second — a burst, or a video and its still. Ties broken by anything
-        // that varies between body builds would let those tiles swap places on
-        // an unrelated redraw, which is the flicker this method exists to stop.
-        let dated: [(date: Date, id: String, entry: GridEntry)] =
-            items.map { ($0.capturedAt, "i\($0.id.uuidString)", .item($0)) }
-            + queued.map {
-                (
-                    $0.capturedAt,
-                    "p\($0.localIdentifier)",
-                    .pending(localIdentifier: $0.localIdentifier, state: $0.state)
+        // Merged into the day's photographs, not sorted in with them.
+        //
+        // The photographs keep exactly the order the store gave them, and each
+        // upload goes in ahead of the first one taken after it. Sorting the two
+        // together on `(date, id)` ordered photographs that share a second — a
+        // burst, a video and its still — by id, which isn't the store's order,
+        // so two of them swapped places the moment an upload appeared in their
+        // day and swapped back when it left.
+        var merged: [GridEntry] = []
+        merged.reserveCapacity(items.count + tiles.count)
+        var next = tiles.startIndex
+        for item in items {
+            while next < tiles.endIndex, tiles[next].capturedAt < item.capturedAt {
+                merged.append(
+                    .pending(localIdentifier: tiles[next].localIdentifier, state: tiles[next].state)
                 )
+                next += 1
             }
-
-        return dated
-            .sorted { ($0.date, $0.id) < ($1.date, $1.id) }
-            .map(\.entry)
+            merged.append(.item(item))
+        }
+        for tile in tiles[next...] {
+            merged.append(.pending(localIdentifier: tile.localIdentifier, state: tile.state))
+        }
+        return merged
     }
 
     /// How many tiles a day draws, without building them.
@@ -1288,9 +1300,37 @@ struct TimelineView: View {
     /// exactly — a day that draws one tile more than it was measured for runs
     /// into the next day's heading.
     private func entryCount(
-        for bucket: TimelineBucket, items: [TimelineItem], queued: Int
+        for bucket: TimelineBucket, items: [TimelineItem], queued: [QueuedTile]
     ) -> Int {
-        (items.isEmpty ? max(bucket.count, 0) : items.count) + queued
+        let queued = stillQueued(queued, among: items)
+        return queued.count
+            + (items.isEmpty ? placeholders(for: bucket, beside: queued) : items.count)
+    }
+
+    /// The local tiles a day still needs: those whose photograph isn't among
+    /// the day's items yet.
+    ///
+    /// The server hands each item back with the identity this phone uploaded it
+    /// under (`sourceLocalID`), so a tile and the server's copy of the same
+    /// photograph can be recognized as one. Before, nothing matched them: an
+    /// upload's tile and its server copy could both be up at once, and four
+    /// photographs showed as five or six until the uploads settled. Now the
+    /// copy arriving is what takes the tile away — in the same place, so the
+    /// photograph appears to finish rather than to move.
+    private func stillQueued(_ queued: [QueuedTile], among items: [TimelineItem]) -> [QueuedTile] {
+        guard !queued.isEmpty, !items.isEmpty else { return queued }
+        let arrived = Set(items.compactMap(\.sourceLocalID))
+        guard !arrived.isEmpty else { return queued }
+        return queued.filter { !arrived.contains($0.localIdentifier) }
+    }
+
+    /// Placeholders for a day whose items haven't loaded, less the photographs
+    /// already standing in as just-landed tiles — the day's count includes
+    /// those once the NAS has them, and drawing both was a gray square beside
+    /// every photo that had just arrived.
+    private func placeholders(for bucket: TimelineBucket, beside queued: [QueuedTile]) -> Int {
+        let landed = queued.filter { $0.state == .uploaded }.count
+        return max(bucket.count - landed, 0)
     }
     #endif
 
@@ -1521,29 +1561,30 @@ struct TimelineView: View {
         var grouped: [String: [QueuedTile]] = [:]
         let zoom = store?.zoom ?? .day
 
+        // One tile per photograph, whichever queue it is in. Adding photos with
+        // + while backup is on can queue the same ones in both, and they used
+        // to show twice until the uploads settled.
+        var listed = Set<String>()
+        func add(_ localIdentifier: String, _ state: UploadState, _ capturedAt: Date) {
+            guard listed.insert(localIdentifier).inserted else { return }
+            grouped[Self.dayKey(capturedAt, zoom: zoom), default: []].append(
+                QueuedTile(localIdentifier: localIdentifier, state: state, capturedAt: capturedAt)
+            )
+        }
+
         if let engine, backupSettings.enabled,
            backupSettings.targetSpace(in: session.spaces)?.id == space.id {
             for entry in engine.queued {
-                let key = Self.dayKey(entry.capturedAt, zoom: zoom)
-                grouped[key, default: []].append(
-                    QueuedTile(
-                        localIdentifier: entry.localIdentifier,
-                        state: entry.state,
-                        capturedAt: entry.capturedAt
-                    )
-                )
+                add(entry.localIdentifier, entry.state, entry.capturedAt)
             }
         }
-
         for entry in session.pendingUploads.items(in: space.id) {
-            let key = Self.dayKey(entry.capturedAt, zoom: zoom)
-            grouped[key, default: []].append(
-                QueuedTile(
-                    localIdentifier: entry.localIdentifier,
-                    state: entry.state,
-                    capturedAt: entry.capturedAt
-                )
-            )
+            add(entry.localIdentifier, entry.state, entry.capturedAt)
+        }
+        // And the ones that have just arrived, until the grid has the server's
+        // copy to put in their place — see `stillQueued`.
+        for entry in session.pendingUploads.landed(in: space.id) {
+            add(entry.localIdentifier, .uploaded, entry.capturedAt)
         }
         return grouped
     }
@@ -1837,7 +1878,7 @@ struct TimelineView: View {
                 count: entryCount(
                     for: bucket,
                     items: store.items[bucket.key] ?? [],
-                    queued: queued[bucket.key]?.count ?? 0
+                    queued: queued[bucket.key] ?? []
                 )
             )
         }

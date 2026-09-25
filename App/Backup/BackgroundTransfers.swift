@@ -47,22 +47,61 @@ final class BackgroundTransfers: NSObject {
 
     private let logger = Logger(subsystem: "com.michaelromero.FrameStation", category: "upload")
     private let lock = NSLock()
-    private var waiters: [Int: CheckedContinuation<(Data, URLResponse), any Error>] = [:]
-    private var bodies: [Int: Data] = [:]
+
+    /// A transfer, by the session that carries it as well as its number.
+    ///
+    /// A task identifier is only unique *within its session*, and there are two
+    /// sessions — each numbers its tasks from one. Keyed on the number alone, a
+    /// foreground chunk and a background chunk could share a slot: the second
+    /// overwrote the first's continuation, which then never resumed, and the
+    /// upload lane waiting on it waited for ever while the rest of the backup
+    /// queued behind it. Caught on the simulator as "leaked its continuation"
+    /// at the same instant two chunks both went out as task 1.
+    private struct Key: Hashable {
+        let session: ObjectIdentifier
+        let task: Int
+
+        init(_ session: URLSession, _ task: URLSessionTask) {
+            self.session = ObjectIdentifier(session)
+            self.task = task.taskIdentifier
+        }
+    }
+
+    private var waiters: [Key: CheckedContinuation<(Data, URLResponse), any Error>] = [:]
+    private var bodies: [Key: Data] = [:]
     /// Byte-progress reporters, keyed by task. iOS reports upload progress on
     /// the delegate, which is the only place it exists — there is no polling
     /// equivalent.
-    private var reporters: [Int: @Sendable (Int64) -> Void] = [:]
+    private var reporters: [Key: @Sendable (Int64) -> Void] = [:]
+
+    /// Made once, under the lock — see `foregroundSession`.
+    private var _foregroundSession: URLSession?
+    private var _backgroundSession: URLSession?
 
     /// Ordinary in-process session for foreground work.
-    private lazy var foregroundSession: URLSession = {
+    ///
+    /// Behind the lock, not a `lazy var`. A lazy property is not safe to
+    /// initialize from two threads at once, and the upload lanes reach for this
+    /// concurrently: the first two chunks after launch each built a session of
+    /// their own, both numbered their first task 1, and one lane lost its
+    /// continuation. Two background sessions under one identifier would be
+    /// worse still — iOS refuses the second outright.
+    private var foregroundSession: URLSession {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = _foregroundSession { return existing }
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 120
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+        let created = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        _foregroundSession = created
+        return created
+    }
 
-    private lazy var session: URLSession = {
+    private var session: URLSession {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = _backgroundSession { return existing }
         let configuration = URLSessionConfiguration.background(
             withIdentifier: "com.michaelromero.FrameStation.upload"
         )
@@ -73,19 +112,27 @@ final class BackgroundTransfers: NSObject {
         configuration.sessionSendsLaunchEvents = true
         configuration.allowsCellularAccess = true
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+        let created = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        _backgroundSession = created
+        return created
+    }
 
     /// Starts the background session early so iOS can hand back any transfers
     /// that completed while we weren't running.
     func reconnect() { _ = session }
 
     /// Which session to hand this transfer to.
+    ///
+    /// The background one only once the app is actually in the background. A
+    /// moment of `.inactive` — Control Center pulled down, a banner tapped, the
+    /// app switcher — used to send that chunk out of process in the middle of a
+    /// burst, for no gain: the app is still running and will be again in a
+    /// second.
     private func transport() async -> URLSession {
-        let active = await MainActor.run {
-            UIApplication.shared.applicationState == .active
+        let background = await MainActor.run {
+            UIApplication.shared.applicationState == .background
         }
-        return active ? foregroundSession : session
+        return background ? session : foregroundSession
     }
 
     /// Sends one chunk, waiting for it while the app is alive.
@@ -98,11 +145,13 @@ final class BackgroundTransfers: NSObject {
         fromFile fileURL: URL,
         onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> (Data, URLResponse) {
-        let task = await transport().uploadTask(with: request, fromFile: fileURL)
+        let carrier = await transport()
+        let task = carrier.uploadTask(with: request, fromFile: fileURL)
+        let key = Key(carrier, task)
         return try await withCheckedThrowingContinuation { continuation in
             lock.lock()
-            waiters[task.taskIdentifier] = continuation
-            reporters[task.taskIdentifier] = onProgress
+            waiters[key] = continuation
+            reporters[key] = onProgress
             lock.unlock()
             task.resume()
         }
@@ -112,7 +161,7 @@ final class BackgroundTransfers: NSObject {
 extension BackgroundTransfers: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
-        bodies[dataTask.taskIdentifier, default: Data()].append(data)
+        bodies[Key(session, dataTask), default: Data()].append(data)
         lock.unlock()
     }
 
@@ -124,7 +173,7 @@ extension BackgroundTransfers: URLSessionDataDelegate {
         totalBytesExpectedToSend: Int64
     ) {
         lock.lock()
-        let reporter = reporters[task.taskIdentifier]
+        let reporter = reporters[Key(session, task)]
         lock.unlock()
         reporter?(totalBytesSent)
     }
@@ -132,10 +181,11 @@ extension BackgroundTransfers: URLSessionDataDelegate {
     func urlSession(
         _ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?
     ) {
+        let key = Key(session, task)
         lock.lock()
-        let waiter = waiters.removeValue(forKey: task.taskIdentifier)
-        let body = bodies.removeValue(forKey: task.taskIdentifier) ?? Data()
-        reporters.removeValue(forKey: task.taskIdentifier)
+        let waiter = waiters.removeValue(forKey: key)
+        let body = bodies.removeValue(forKey: key) ?? Data()
+        reporters.removeValue(forKey: key)
         lock.unlock()
 
         // No waiter means we were relaunched after this finished. Nothing to do:

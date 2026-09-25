@@ -86,8 +86,16 @@ enum AssetUploader {
         // works through its derivation queue. This is the half that fixes that,
         // and it is nearly free: the pixels are already here, and a 512px JPEG
         // is a rounding error next to the original that just went up.
+        //
+        // Not waited for. The file is safe on the NAS the moment the commit
+        // returns, and rendering and sending this took about a second more —
+        // a second every upload lane spent on it before starting the next file,
+        // which in a burst of a hundred is most of two minutes. It goes
+        // alongside the next upload instead.
         if let assetID = result.assetID {
-            await sendThumbnail(for: asset, assetID: assetID, client: client)
+            Task.detached(priority: .utility) {
+                await sendThumbnail(for: asset, assetID: assetID, client: client)
+            }
         }
         return result
     }

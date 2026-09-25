@@ -140,9 +140,18 @@ struct RootTabView: View {
         // end. Without this, somebody who adds five hundred photographs and then
         // switches apps leaves the server believing there is nothing to wake
         // them for. See `BackupEngine.reportBackupState`.
+        //
+        // And coming back is when a backup left unfinished should carry on.
+        // See `BackupEngine.resume`.
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .background else { return }
-            engine?.reportBackupState(force: true)
+            switch phase {
+            case .background:
+                engine?.reportBackupState(force: true)
+            case .active:
+                Task { await engine?.resume() }
+            default:
+                break
+            }
         }
         .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
@@ -186,6 +195,10 @@ struct RootTabView: View {
             // be drawn from the copy still on the phone. See `LocalOriginals`.
             created.seedLocalOriginals()
             if backupSettings.enabled { created.enableBackgroundRuns() }
+            // The launch's own `.active` can arrive before this engine exists,
+            // so the first pick-up is asked for here as well. Not waited for:
+            // it runs for as long as the queue does.
+            Task { await created.resume() }
             // Finish anything a share left outstanding when the app was last
             // taken away. Automatic backup has always resumed itself; this is
             // the manual path getting the same treatment — see `ManualUpload`.

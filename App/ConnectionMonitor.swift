@@ -53,6 +53,11 @@ final class ConnectionMonitor {
     /// starting.
     private(set) var isMetered = false
 
+    /// Whether the path has reported at all. Until it has, `isMetered` is only
+    /// its default — the permissive answer — which is fine for anything already
+    /// under way and not good enough to *start* a backup on.
+    var hasReportedPath: Bool { lastSatisfied != nil }
+
     /// Called on the edge back to `.online`, so backup picks up where the
     /// outage stopped it rather than waiting for the next background window.
     var onReconnect: (@MainActor () async -> Void)?

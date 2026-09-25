@@ -36,6 +36,34 @@ final class PendingUploads {
     }
 
     private(set) var items: [Item] = []
+
+    /// A photograph that has just reached the NAS, from this queue or from
+    /// backup, held as a tile until the grid has the server's copy of it.
+    ///
+    /// Without this a tile vanished the moment its upload committed and came
+    /// back a moment later as the server's copy — and with several uploads in
+    /// flight, a refresh prompted by one of them could bring in the server's
+    /// copy of another while its own tile was still up, so four photos
+    /// briefly showed as five or six. Now the tile stays, shows it is safe,
+    /// and the grid swaps it for the real photograph in the same place. See
+    /// `TimelineView.stillQueued`, which does the swapping.
+    struct Landed {
+        /// The upload's own identity — what the server hands back as the
+        /// item's `sourceLocalID`, which is how the grid recognizes the swap.
+        let localIdentifier: String
+        let capturedAt: Date
+        let spaceID: UUID
+        fileprivate let token = UUID()
+    }
+
+    private(set) var landed: [Landed] = []
+
+    /// How long a landed tile may stand in before it is let go regardless. The
+    /// server's copy is normally in the grid within a second or two; this only
+    /// matters for a day the grid hasn't loaded, where there is nothing to
+    /// swap with and the day's placeholders account for the photograph instead.
+    private static let landedGrace: Duration = .seconds(60)
+
     /// Bumped whenever a batch finishes, so a grid can refresh once at the end
     /// rather than after each item.
     private(set) var completedBatches = 0
@@ -84,6 +112,26 @@ final class PendingUploads {
     /// What is still on its way into one space, in capture order.
     func items(in spaceID: UUID) -> [Item] {
         items.filter { $0.spaceID == spaceID }
+    }
+
+    /// What has just arrived in one space. See `Landed`.
+    func landed(in spaceID: UUID) -> [Landed] {
+        landed.filter { $0.spaceID == spaceID }
+    }
+
+    /// Records a photograph that has just reached the NAS — called by this
+    /// queue and by backup, before either lets go of its own tile, so there is
+    /// never a moment with neither.
+    func noteLanded(_ localIdentifier: String, capturedAt: Date, spaceID: UUID) {
+        let entry = Landed(
+            localIdentifier: localIdentifier, capturedAt: capturedAt, spaceID: spaceID
+        )
+        landed.removeAll { $0.spaceID == spaceID && $0.localIdentifier == localIdentifier }
+        landed.append(entry)
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.landedGrace)
+            self?.landed.removeAll { $0.token == entry.token }
+        }
     }
 
     func isEmpty(in spaceID: UUID) -> Bool {
@@ -183,6 +231,18 @@ final class PendingUploads {
                 if let assetID = result.assetID {
                     LocalOriginals.shared.record(
                         assetID: assetID, localIdentifier: claimed.localIdentifier
+                    )
+                }
+                // Before the `defer` above lets go of the pending tile, so the
+                // photograph is never absent from the grid in between. Not for
+                // a photo this space already had: nothing new arrives to take
+                // the tile's place, and it would stand beside the copy already
+                // there. A photo the NAS had *elsewhere* does count — sharing
+                // one that's already backed up still adds it here.
+                if result.addedToSpace {
+                    noteLanded(
+                        claimed.localIdentifier, capturedAt: claimed.capturedAt,
+                        spaceID: spaceID
                     )
                 }
                 forget(localIdentifier: claimed.localIdentifier, spaceID: spaceID)

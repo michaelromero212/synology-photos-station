@@ -5,6 +5,7 @@ import Foundation
 import Observation
 import Photos
 import SwiftData
+import UIKit
 
 /// Drives photos from the system library onto the NAS.
 ///
@@ -214,8 +215,8 @@ final class BackupEngine {
         // task carries nothing that must not cross actors, and `enqueueNewAssets`
         // hops back to the main actor on its own.
         //
-        // Edits first: queueing them doesn't wait, and queueing new photos
-        // waits for the run it starts to finish.
+        // Neither waits for the upload run it starts, so a burst of changes is
+        // queued as fast as PhotoKit reports it.
         let changes = monitor.changes
         observationTask = Task { @MainActor [weak self] in
             for await change in changes {
@@ -433,7 +434,12 @@ final class BackupEngine {
         // telling the NAS *now* — the run about to start may well be cut short
         // by the app being put away, and then nothing else would say so.
         reportBackupState()
-        await start()
+        // Started, not waited for. The observer calls this once per library
+        // change, and waiting here held the next change — the rest of a burst of
+        // photos — until this whole run had finished: three of four new photos
+        // didn't even appear in the grid until the first had uploaded. A run
+        // already going takes these rows as it claims its next ones.
+        Task { await start() }
     }
 
     // MARK: - Edits
@@ -672,6 +678,7 @@ final class BackupEngine {
             runContext = nil
             activeUploads.removeAll()
         }
+        reclaimInterrupted(context)
         refreshProgress(context)
 
         // A small pool of lanes rather than one serial loop. Each lane claims
@@ -679,11 +686,24 @@ final class BackupEngine {
         // network transfer, so while one lane holds a big video the others keep
         // photos moving. State still mutates only on the main actor between
         // those awaits, so nothing races.
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<Self.maxConcurrent {
-                group.addTask { @MainActor [weak self] in await self?.drainLane() }
+        //
+        // Again if anything arrived while the last lanes were finishing: a
+        // photograph queued in that moment found the run still marked as
+        // running, so its own `start()` returned at once — and without this it
+        // waited for the next trigger, which could be the next background
+        // window.
+        //
+        // Only while the lanes could actually take something. They return at
+        // once without a connection or a destination, and going round again
+        // then would spin on the main actor for as long as rows were waiting.
+        repeat {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<Self.maxConcurrent {
+                    group.addTask { @MainActor [weak self] in await self?.drainLane() }
+                }
             }
-        }
+        } while !cancelled && allowedOnCurrentNetwork && hasDestination
+            && nextItem(context) != nil
 
         statusText = progress.summary
         completedRuns += 1
@@ -753,6 +773,83 @@ final class BackupEngine {
     }
 
     func stop() { cancelled = true }
+
+    /// Picks the queue up again when the app comes to the front.
+    ///
+    /// Nothing used to. A run started from a background window, a new photo, or
+    /// Back Up Now — so photographs still queued when the app was last put away
+    /// waited, with the app open in front of them, until iOS next felt like
+    /// granting a background window. Synology Photos carries on the moment it is
+    /// opened, and so does this now.
+    ///
+    /// Only the queue, not a scan of the library: a scan describes every photo
+    /// on the phone, which is too much to do each time the app is opened.
+    /// Quietly does nothing when there is nothing to send, so opening the app
+    /// doesn't report to the NAS or refresh the grid for no reason.
+    func resume() async {
+        guard settings.enabled, allowedOnCurrentPower else { return }
+        // At launch the path may not have reported yet, and until it has
+        // `isMetered` is only its permissive default. "Wi-Fi Only" is the
+        // setting that must not fail open, so this waits for the real answer —
+        // it comes within milliseconds — rather than start on the guess.
+        var waited = 0
+        while !connection.hasReportedPath, waited < 40 {
+            try? await Task.sleep(for: .milliseconds(50))
+            waited += 1
+        }
+        // Checked after the wait, not before it: a run that started meanwhile
+        // has lanes holding rows, and `reclaimInterrupted` must not touch them.
+        // From here to `start()` marking itself running there is no suspension,
+        // so nothing can start in between.
+        guard !isRunning, connection.hasReportedPath, allowedOnCurrentNetwork, hasDestination
+        else { return }
+        let context = ModelContext(container)
+        reclaimInterrupted(context)
+        guard nextItem(context) != nil else { return }
+        await start()
+    }
+
+    /// Whether there is anywhere to send to: signed in, with a space to back up
+    /// into. What `drainLane` needs before it will claim anything.
+    private var hasDestination: Bool {
+        session.client != nil && settings.targetSpace(in: session.spaces) != nil
+    }
+
+    /// False when "Only While Charging" is on and the phone isn't. Background
+    /// windows are booked to require power already; this is the same rule for
+    /// a run started because the app was opened.
+    private var allowedOnCurrentPower: Bool {
+        guard settings.chargingOnly else { return true }
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        return device.batteryState == .charging || device.batteryState == .full
+    }
+
+    /// Puts back any row a run left marked as in flight.
+    ///
+    /// Only a lane marks a row `.uploading`, and only this process runs lanes,
+    /// so when no run is going a row in that state belongs to one that never
+    /// finished — the app was terminated mid-file, most often by iOS while it
+    /// was in the background. Nothing ever looked at those rows again: the
+    /// photograph was never retried, and sat in the queue as "uploading" for
+    /// good. Back to pending now, with the attempt `claimNext` spent refunded,
+    /// because being interrupted is not the photo's fault. The NAS kept every
+    /// chunk it received, so the upload resumes rather than starting over.
+    ///
+    /// Callers must hold the run — `start()` after marking itself running, or
+    /// `resume()` before calling it.
+    private func reclaimInterrupted(_ context: ModelContext) {
+        let uploading = BackupItem.State.uploading.rawValue
+        let stranded = (try? context.fetch(FetchDescriptor<BackupItem>(
+            predicate: #Predicate { $0.stateRaw == uploading }
+        ))) ?? []
+        guard !stranded.isEmpty else { return }
+        for item in stranded {
+            item.state = .pending
+            item.attempts = max(item.attempts - 1, 0)
+        }
+        try? context.save()
+    }
 
     /// Takes the next retryable row and marks it in-flight, atomically.
     ///
@@ -920,6 +1017,21 @@ final class BackupEngine {
             item.completedAt = Date()
             item.lastError = nil
             try? context.save()
+            // Holds the tile until the grid has the server's copy — see
+            // `PendingUploads.Landed`. Recorded before `drainLane` rebuilds
+            // `queued` without this row, so there is no moment with neither.
+            //
+            // Never for a Live Photo's video half. It had no tile on the way up
+            // (see `refreshProgress`), and the timeline never shows it as a
+            // photograph of its own, so there is no server copy to swap it
+            // for — it would stand beside its still as a stray extra tile until
+            // the grace period let it go.
+            if result.addedToSpace, kind != .pairedVideo {
+                session.pendingUploads.noteLanded(
+                    item.localIdentifier, capturedAt: item.capturedAt ?? Date(),
+                    spaceID: spaceID
+                )
+            }
             stalled = nil
             connection.noteSuccess()
             return nil
