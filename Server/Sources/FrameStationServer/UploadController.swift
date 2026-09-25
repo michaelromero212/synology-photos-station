@@ -280,6 +280,10 @@ struct UploadController: RouteCollection {
         // would only be a way for the two to disagree.
         let storagePath: String? = nil
 
+        // To the millisecond when the phone sent it that finely, so photos
+        // taken within one second keep the order they were taken in.
+        let capturedAt = input.preciseCapturedAt
+
         let result = try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
             do {
@@ -298,9 +302,9 @@ struct UploadController: RouteCollection {
                          \(bind: input.mediaType.rawValue), \(bind: input.mime),
                          \(bind: fileExtension),
                          \(bind: input.width), \(bind: input.height), \(bind: input.durationMs),
-                         \(bind: input.capturedAt), \(bind: input.capturedTZOffset),
+                         \(bind: capturedAt), \(bind: input.capturedTZOffset),
                          \(bind: input.capturedTZOffsetFallback), \(bind: input.capturedAtFallback),
-                         (\(bind: input.capturedAt)
+                         (\(bind: capturedAt)
                             + COALESCE(\(bind: input.capturedTZOffset), 0) * interval '1 second')
                             AT TIME ZONE 'UTC',
                          \(bind: input.latitude), \(bind: input.longitude), \(bind: input.isRaw),

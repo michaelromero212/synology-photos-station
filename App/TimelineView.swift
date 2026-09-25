@@ -1251,7 +1251,7 @@ struct TimelineView: View {
         // one redraw to the next — not the order the queues hold them in, which
         // for photographs that have just landed is the order they *finished*.
         let tiles = stillQueued(queued, among: items).sorted {
-            ($0.capturedAt, $0.localIdentifier) < ($1.capturedAt, $1.localIdentifier)
+            ($0.wallClock, $0.localIdentifier) < ($1.wallClock, $1.localIdentifier)
         }
         if items.isEmpty {
             // Placeholders keep the section the right height so the scrollbar
@@ -1278,7 +1278,7 @@ struct TimelineView: View {
         merged.reserveCapacity(items.count + tiles.count)
         var next = tiles.startIndex
         for item in items {
-            while next < tiles.endIndex, tiles[next].capturedAt < item.capturedAt {
+            while next < tiles.endIndex, tiles[next].wallClock < item.preciseCapturedAt {
                 merged.append(
                     .pending(localIdentifier: tiles[next].localIdentifier, state: tiles[next].state)
                 )
@@ -1593,7 +1593,22 @@ struct TimelineView: View {
     private struct QueuedTile {
         let localIdentifier: String
         let state: UploadState
+        /// The instant it was taken, as the phone's library records it.
         let capturedAt: Date
+
+        /// When it was taken by the clock on the wall, written as if that were
+        /// UTC — the form the server gives every item's `capturedAt` in, so
+        /// that a day is the same day wherever it is looked at from.
+        ///
+        /// What a tile is placed among the day's photographs by. Compared by
+        /// its instant instead, a tile sat hours away from where it belonged —
+        /// four in New York, where the instant reads four hours later than the
+        /// wall clock — and jumped into place when its upload finished.
+        var wallClock: Date {
+            capturedAt.addingTimeInterval(
+                TimeInterval(TimeZone.current.secondsFromGMT(for: capturedAt))
+            )
+        }
     }
 
     /// The day holding whatever is on the wire right now, or nil when nothing is.

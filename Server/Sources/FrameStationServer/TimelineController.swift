@@ -61,6 +61,10 @@ struct TimelineController: RouteCollection {
                sa.space_id   AS "spaceID",
                a.id          AS "assetID",
                \(localTime) AT TIME ZONE 'UTC' AS "capturedAt",
+               -- The same moment to the millisecond, which the whole-second
+               -- date on the wire cannot carry. See `TimelineItem.capturedAtMs`.
+               floor(extract(epoch FROM (\(localTime) AT TIME ZONE 'UTC')) * 1000)::bigint
+                             AS "capturedAtMs",
                a.width, a.height, a.orientation,
                a.media_type  AS "mediaType",
                a.duration_ms AS "durationMs",
@@ -155,6 +159,8 @@ struct TimelineController: RouteCollection {
         /// draw its own copy while the NAS is still deriving — see
         /// `TimelineItem.sourceLocalID`.
         var sourceLocalID: String?
+        /// `capturedAt` to the millisecond. Nil where a query doesn't select it.
+        var capturedAtMs: Int64?
 
         func toItem() -> TimelineItem {
             // Orientation is applied here rather than baked into the stored
@@ -185,7 +191,8 @@ struct TimelineController: RouteCollection {
                 liveVideoAssetID: liveVideoAssetID,
                 purgeAt: purgeAt,
                 thumbVersion: thumbVersion,
-                sourceLocalID: sourceLocalID
+                sourceLocalID: sourceLocalID,
+                capturedAtMs: capturedAtMs
             )
         }
     }
@@ -258,29 +265,15 @@ struct TimelineController: RouteCollection {
         let needsItem = page.filter { $0.op != "delete" }.map(\.entityID)
         var itemsByID: [UUID: TimelineItem] = [:]
         if !needsItem.isEmpty {
+            // The shared column list, like every other query that builds an
+            // item. This one kept a hand-written copy, which is how a new column
+            // reaches the grid by one road and not the other.
             let hydrated = try await req.sql.raw("""
-                SELECT sa.id,
-                    sa.space_id AS "spaceID",
-                       a.id          AS "assetID",
-                       \(unsafeRaw: Self.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                       a.width, a.height, a.orientation,
-                       a.media_type  AS "mediaType",
-                       a.duration_ms AS "durationMs",
-                       a.thumbhash   AS "thumbHash",
+                SELECT \(unsafeRaw: Self.itemColumns),
                        EXISTS (
                            SELECT 1 FROM space_asset_favorites f
                            WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: device.userID)
-                       ) AS "isFavorite",
-                       COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                       (a.derived_at IS NOT NULL) AS "isDerived",
-                   (a.burst_id IS NOT NULL) AS "isBurst",
-                   a.thumb_version AS "thumbVersion",
-                   sa.source_local_id AS "sourceLocalID",
-                   -- The paired half of a Live Photo, so the viewer can play it
-                   -- from the still rather than from a tile of its own.
-                   (SELECT v.id FROM assets v
-                    WHERE v.live_group_id = a.live_group_id
-                      AND v.media_type = 'video' LIMIT 1) AS "liveVideoAssetID"
+                       ) AS "isFavorite"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.id = ANY(\(bind: needsItem)) AND sa.deleted_at IS NULL

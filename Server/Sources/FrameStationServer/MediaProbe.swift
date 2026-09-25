@@ -64,7 +64,7 @@ struct MediaProbe {
         "-Make", "-Model", "-LensModel", "-LensID",
         "-ISO#", "-FNumber#", "-ExposureTime", "-FocalLength#", "-ExposureCompensation#",
         "-ImageWidth#", "-ImageHeight#",
-        "-DateTimeOriginal", "-CreateDate", "-OffsetTimeOriginal",
+        "-DateTimeOriginal", "-CreateDate", "-OffsetTimeOriginal", "-SubSecTimeOriginal",
         "-GPSLatitude#", "-GPSLongitude#", "-GPSLatitudeRef", "-GPSLongitudeRef",
         "-Orientation#", "-MIMEType", "-FileType",
         // Presence of a gain map is what distinguishes Apple Adaptive HDR from
@@ -145,10 +145,19 @@ struct MediaProbe {
         // A gain map means the file carries Adaptive HDR.
         metadata.dynamicRange = fields["HDRGainMapVersion"] != nil ? "hdr" : "standard"
 
-        let stamp = fields.string("DateTimeOriginal") ?? fields.string("CreateDate")
+        let original = fields.string("DateTimeOriginal")
+        let stamp = original ?? fields.string("CreateDate")
         let offset = fields.string("OffsetTimeOriginal")
         if let stamp {
             (metadata.capturedAt, metadata.capturedTZOffset) = parseEXIFDate(stamp, offset: offset)
+            // EXIF keeps the fraction of a second in a tag of its own, and
+            // without it every photo of a burst is taken at the same instant
+            // and the grid can put them in any order. Only with the stamp it
+            // belongs to.
+            if original != nil,
+               let fraction = subsecond(fields.string("SubSecTimeOriginal")) {
+                metadata.capturedAt = metadata.capturedAt?.addingTimeInterval(fraction)
+            }
         }
 
         if var latitude = fields.double("GPSLatitude"), var longitude = fields.double("GPSLongitude") {
@@ -170,6 +179,17 @@ struct MediaProbe {
         }
 
         return metadata
+    }
+
+    /// `SubSecTimeOriginal` as a fraction of a second: the digits are the ones
+    /// after the decimal point, so "098" is 0.098 and "98" is 0.98. exiftool
+    /// hands back "980" as the number 980 and "098" as a string, and either way
+    /// the digits survive, which is all this reads.
+    static func subsecond(_ digits: String?) -> TimeInterval? {
+        guard let digits, !digits.isEmpty, digits.count <= 9,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber })
+        else { return nil }
+        return TimeInterval("0." + digits)
     }
 
     /// EXIF stamps look like `2026:07:04 15:55:00` with the zone, if present at

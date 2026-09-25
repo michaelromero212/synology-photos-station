@@ -61,6 +61,9 @@ struct UploadDescriptor {
             height: height,
             durationMs: durationMs,
             capturedAt: capturedAt,
+            // The same instant to the millisecond, which the date itself loses
+            // on the wire — see `CommitUploadRequest.capturedAtMs`.
+            capturedAtMs: capturedAt.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) },
             capturedTZOffset: capturedTZOffset,
             capturedTZOffsetFallback: capturedTZOffsetFallback,
             capturedAtFallback: capturedAtFallback,

@@ -96,6 +96,11 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// `assets.id` — the file. Use for thumbnail, preview, and original URLs.
     public let assetID: UUID
     public let capturedAt: Date
+    /// `capturedAt` to the millisecond, as milliseconds since 1970 — separate
+    /// for the reason given on `CommitUploadRequest.capturedAtMs`. What orders
+    /// photographs taken within the same second: a burst, or a few quick shots
+    /// in a row. Nil where the server knows only the second.
+    public let capturedAtMs: Int64?
     /// width / height, already corrected for EXIF and video rotation. The
     /// justified-grid layout is computed from this without loading anything.
     public let aspectRatio: Double
@@ -154,6 +159,12 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// The thumbnail generation, with a missing value read as the baseline.
     public var thumbnailVersion: Int { thumbVersion ?? 0 }
 
+    /// `capturedAt`, to the millisecond where the server knows it. Order by
+    /// this; group into days by either.
+    public var preciseCapturedAt: Date {
+        capturedAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? capturedAt
+    }
+
     /// Whole days left, rounded up, floored at zero.
     ///
     /// Up rather than down: something deleted twenty minutes ago has 28 days
@@ -171,12 +182,13 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
         isFavorite: Bool, uploadedBy: UUID, isDerived: Bool,
         isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil,
-        thumbVersion: Int? = nil, sourceLocalID: String? = nil
+        thumbVersion: Int? = nil, sourceLocalID: String? = nil, capturedAtMs: Int64? = nil
     ) {
         self.id = id
         self.spaceID = spaceID
         self.assetID = assetID
         self.capturedAt = capturedAt
+        self.capturedAtMs = capturedAtMs
         self.aspectRatio = aspectRatio
         self.mediaType = mediaType
         self.durationMs = durationMs

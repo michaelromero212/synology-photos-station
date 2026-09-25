@@ -247,8 +247,11 @@ public final class TimelineStore {
                         if items[key] != nil { bucket.append(item) }
                     }
                     if items[key] != nil {
-                        // Oldest-first, matching `loadBucket` and `buckets`.
-                        items[key] = bucket.sorted { $0.capturedAt < $1.capturedAt }
+                        // Oldest-first, matching `loadBucket` and `buckets` —
+                        // to the millisecond, so photos taken within the same
+                        // second land in the order they were taken rather than
+                        // the order they arrived.
+                        items[key] = bucket.sorted { $0.preciseCapturedAt < $1.preciseCapturedAt }
                     }
                 case .delete:
                     membershipMoved = true

@@ -118,6 +118,20 @@ public struct CommitUploadRequest: Codable, Sendable {
     public let height: Int?
     public let durationMs: Int?
     public let capturedAt: Date?
+    /// `capturedAt` to the millisecond, as milliseconds since 1970.
+    ///
+    /// A field of its own rather than a finer `capturedAt`, because dates go
+    /// over the wire as whole-second ISO 8601 and a strict decoder refuses
+    /// anything finer: a phone sending "…:04.098Z" to a server that predates
+    /// this would fail every commit. An unknown key is simply ignored, so this
+    /// is safe in both directions. Nil from a client with nothing finer to say.
+    public let capturedAtMs: Int64?
+
+    /// The capture instant as finely as the client sent it.
+    public var preciseCapturedAt: Date? {
+        capturedAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? capturedAt
+    }
+
     /// The photographer's UTC offset, when the file actually records one.
     public let capturedTZOffset: Int?
     /// The uploading device's offset. Used only if the file records none — see
@@ -161,6 +175,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         height: Int? = nil,
         durationMs: Int? = nil,
         capturedAt: Date? = nil,
+        capturedAtMs: Int64? = nil,
         capturedTZOffset: Int? = nil,
         capturedTZOffsetFallback: Int? = nil,
         capturedAtFallback: Date? = nil,
@@ -180,6 +195,7 @@ public struct CommitUploadRequest: Codable, Sendable {
         self.height = height
         self.durationMs = durationMs
         self.capturedAt = capturedAt
+        self.capturedAtMs = capturedAtMs
         self.capturedTZOffset = capturedTZOffset
         self.capturedTZOffsetFallback = capturedTZOffsetFallback
         self.capturedAtFallback = capturedAtFallback
