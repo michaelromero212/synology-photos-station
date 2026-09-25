@@ -692,6 +692,16 @@ struct VideoPlayerView: View {
     /// Whether this is the page being looked at. False for a neighbour the
     /// pager has built ahead — those prepare but stay silent.
     var isActive: Bool = true
+    /// The page being looked at, not playing yet: the clip is still growing
+    /// out of its tile in the grid. It prepares, and claims the connection,
+    /// but starts once it has arrived.
+    ///
+    /// Starting is main-thread work — the audio session alone is tens of
+    /// milliseconds, and the whole of it came to ninety — and the flight out
+    /// of the grid is drawn by SwiftUI, on that same thread. Started in the
+    /// middle of it, the clip stopped the flight dead for five frames. Photos
+    /// starts a clip once it is open, too.
+    var holdsPlayback: Bool = false
     /// Supplied by the viewer so it survives this page scrolling out of view
     /// and back, and so a video can be prepared before it is watched.
     let model: VideoPlaybackModel
@@ -766,12 +776,18 @@ struct VideoPlayerView: View {
                     isLocal: NetworkLocality.shared.isLocal
                 )
             )
-            if isActive { model.start() }
+            // The values this task began with. A hold that has lifted since
+            // started the clip from the `onChange` below, and a clip asked to
+            // play before it was prepared starts itself — see `prepare`.
+            if isActive, !holdsPlayback { model.start() }
         }
         .onChange(of: isActive) { _, active in
             // Paused rather than stopped: the buffer is what makes coming back
             // — or arriving from the previous clip — instant.
             active ? model.start() : model.pause()
+        }
+        .onChange(of: holdsPlayback) { _, held in
+            if !held, isActive { model.start() }
         }
         .onDisappear { model.pause() }
         // The model already tracks this for the replay button; the viewer

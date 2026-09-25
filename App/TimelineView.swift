@@ -42,6 +42,41 @@ struct OpenedPhoto: Identifiable, Hashable {
 }
 #endif
 
+#if os(iOS)
+/// Which photo the open viewer is on, as far as the grid underneath knows.
+///
+/// Its own small object rather than state on `TimelineView`, so that a swipe
+/// in the viewer redraws the one view that reads it — the zoom — and not the
+/// whole grid behind.
+@Observable
+@MainActor
+final class ViewerFollow {
+    /// The tile the viewer zooms back into when it closes.
+    var currentID: UUID?
+    /// Whether the grid has been moved to follow the viewer this time round,
+    /// so closing it doesn't move the grid a second time.
+    var movedGrid = false
+}
+
+/// The viewer, zooming back into whichever photo it is showing when it closes.
+///
+/// The zoom was fixed at the photo you tapped. Swipe on a few photos, press
+/// Back, and the picture shrank into a tile that was no longer the one on
+/// screen, before the grid jumped to catch up. The grid now follows the viewer
+/// while it's hidden (see `TimelineView.followFocus`), and the zoom follows
+/// with it.
+private struct FollowingZoom<Content: View>: View {
+    let follow: ViewerFollow
+    let openedID: UUID
+    let namespace: Namespace.ID
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content.photoZoomTransition(id: follow.currentID ?? openedID, in: namespace)
+    }
+}
+#endif
+
 struct TimelineView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
@@ -181,6 +216,10 @@ struct TimelineView: View {
     #if os(iOS)
     /// How the iPhone grid is moved — see `TimelineGridController`.
     @State private var gridController = TimelineGridController()
+    /// Which photo the open viewer is on. See `followFocus`.
+    @State private var viewerFollow = ViewerFollow()
+    /// The photo viewer, as a layer over this grid. See `ViewerStage`.
+    @State private var viewerStage = ViewerStage()
     /// The height of whatever bar has taken the bottom of the screen, so the
     /// iPhone grid can keep its newest row above it. See `collectionGrid`.
     @State private var bottomBarHeight: CGFloat = 0
@@ -566,7 +605,18 @@ struct TimelineView: View {
             )
             #endif
             store = newStore
-            await newStore?.load()
+            // Loaded once, then kept current. This task also runs every time
+            // the grid comes back into view — from a photo, from another tab —
+            // and each time it fetched the library's whole outline from the NAS
+            // again and rebuilt the grid from it, which on the way back from a
+            // photo landed in the middle of the zoom out. What changed while it
+            // was out of view is all a return needs, and that is usually
+            // nothing: an unchanged library answers with an empty list.
+            if newStore?.state == .loaded {
+                await newStore?.refresh()
+            } else {
+                await newStore?.load()
+            }
         }
         // Coming back to the app should not mean coming back to a stale
         // library. Photos this device didn't upload — from a phone, from
@@ -615,6 +665,12 @@ struct TimelineView: View {
         // `readTopSafeArea` goes above it, because below it the answer is
         // always zero.
         .ignoresSafeArea(.container, edges: .top)
+        // The photo viewer, over everything the grid draws — its bars
+        // included — so that the grid stays on screen underneath while a photo
+        // is open. See `ViewerStage`.
+        .overlay {
+            ViewerStageView(stage: viewerStage) { opened in stagedViewer(for: opened) }
+        }
         #endif
     }
 
@@ -795,14 +851,27 @@ struct TimelineView: View {
                     }
                 }
                 .animation(.easeOut(duration: 0.2), value: review?.index)
+                // Out of the grid while its photo is open, so the photo has an
+                // empty place to fly back into. See `ViewerStage.liftedID`.
+                .opacity(viewerStage.liftedID == item.id ? 0 : 1)
                 .contentShape(Rectangle())
                 .onTapGesture {
+                    // Before the viewer exists, so its zoom grows out of this
+                    // tile and not whichever one the last viewer closed on.
+                    // See `followFocus`.
+                    viewerFollow.currentID = item.id
+                    viewerFollow.movedGrid = false
                     // Snapshotted at the tap rather than recomputed in the
                     // viewer: the pager's contents must not shuffle underneath
                     // a swipe because a bucket finished loading behind it.
-                    openItem = OpenedPhoto(
+                    let opened = OpenedPhoto(
                         item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
                     )
+                    if PhotoGridMetrics.usesJustifiedRows {
+                        openItem = opened
+                    } else {
+                        openInStage(opened)
+                    }
                 }
                 // Matches Photos: no mode to find first, and the photo you
                 // pressed is already picked.
@@ -1380,12 +1449,84 @@ struct TimelineView: View {
     /// single argument to the initializer was enough to tip it over.
     @ViewBuilder
     private func viewer(for opened: OpenedPhoto) -> some View {
+        FollowingZoom(follow: viewerFollow, openedID: opened.id, namespace: photoTransition) {
+            AssetDetailView(
+                item: opened.item, space: space, session: session,
+                dayItems: opened.dayItems, pageItems: opened.pageItems,
+                onClose: followViewer, onFocus: followFocus
+            )
+        }
+    }
+
+    /// Opens a photo over the grid, growing it out of its tile.
+    ///
+    /// The tile's own thumbnail is what flies, taken from the loader's memory
+    /// where the tile has just drawn it; its blurred stand-in when the picture
+    /// hasn't arrived. With neither, the viewer fades in instead.
+    private func openInStage(_ opened: OpenedPhoto) {
+        openedWith = opened.item.assetID
+        let item = opened.item
+        let image = session.loader?.cachedThumbnail(
+            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+            version: item.thumbnailVersion
+        ) ?? session.loader?.cachedPlaceholder(assetID: item.assetID)
+        viewerStage.tileFrame = { item in tileFrame(for: item) }
+        viewerStage.present(opened, from: tileFrame(for: item), image: image)
+    }
+
+    /// The viewer in the stage over the grid.
+    private func stagedViewer(for opened: OpenedPhoto) -> some View {
         AssetDetailView(
             item: opened.item, space: space, session: session,
             dayItems: opened.dayItems, pageItems: opened.pageItems,
-            onClose: followViewer
+            onClose: followViewer, onFocus: followFocus
         )
-        .photoZoomTransition(id: opened.id, in: photoTransition)
+        .staged(on: viewerStage)
+    }
+
+    /// Where a photo's tile is on screen, in window coordinates — scrolling
+    /// the grid to it first if it isn't showing. Nil when the grid has no
+    /// tile for it: a day it doesn't hold, or a grid that isn't the iPhone's.
+    private func tileFrame(for item: TimelineItem) -> CGRect? {
+        guard let position = gridPosition(of: item) else { return nil }
+        return gridController.frameOnScreen(item: position.index, inDay: position.key)
+    }
+
+    /// Which day, and which tile of it, a photo is in the iPhone grid.
+    private func gridPosition(of item: TimelineItem) -> (key: String, index: Int)? {
+        guard let store, !PhotoGridMetrics.usesJustifiedRows,
+              let day = store.items.first(where: { _, items in
+                  items.contains { $0.id == item.id }
+              }),
+              let bucket = Self.mergedBuckets(store, queued: queuedByDay)
+                  .first(where: { $0.key == day.key }),
+              let index = entries(for: bucket, items: day.value).firstIndex(where: {
+                  if case .item(let entry) = $0 { return entry.id == item.id }
+                  return false
+              })
+        else { return nil }
+        return (day.key, index)
+    }
+
+    /// Keeps the grid under the viewer on the photo the viewer is showing.
+    ///
+    /// Moved while it can't be seen, the grid is already where you are when
+    /// the viewer closes, and the photo zooms straight back into its own tile —
+    /// which is how Photos does it. Before, the zoom went back to the tile you
+    /// first tapped, and the grid jumped to where you'd got to only after the
+    /// viewer had gone.
+    ///
+    /// The iPhone grid only. The justified grid on iPad is positioned the old
+    /// way, by `followViewer`, once the viewer has closed.
+    private func followFocus(_ item: TimelineItem) {
+        guard let position = gridPosition(of: item),
+              gridController.reveal(item: position.index, inDay: position.key)
+        else { return }
+        viewerFollow.currentID = item.id
+        viewerFollow.movedGrid = true
+        // The empty place in the grid moves with the viewer, so the photo on
+        // screen is the one whose tile is waiting for it.
+        viewerStage.lift(item.id)
     }
 
     /// Walks the grid to the day of whatever the viewer finished on.
@@ -1401,6 +1542,16 @@ struct TimelineView: View {
     /// already at the type-checker's limit and an inline closure tipped it into
     /// "unable to type-check this expression in reasonable time".
     private func followViewer(to assetID: UUID) {
+        // The viewer is gone; make sure the navigation state knows it.
+        //
+        // Dragging a photo down closes the viewer through the zoom's own
+        // gesture, and SwiftUI never hears about it: `openItem` stayed set to
+        // the photo that had closed. The next tap only swapped which photo that
+        // viewer — no longer on screen — was showing, so it looked as if the
+        // app had stopped opening photos at all. The back button never had the
+        // problem because it closes through SwiftUI, which clears this itself.
+        if openItem != nil { openItem = nil }
+
         guard let store else { return }
         // Closing the viewer is a return to this screen, and a screen you have
         // just come back to shows its controls — whatever the scroll direction
@@ -1412,6 +1563,14 @@ struct TimelineView: View {
 
         let opened = openedWith
         openedWith = nil
+
+        // Already there: the grid followed the viewer while it was open, so the
+        // photo zoomed back into a tile already on screen. Moving it again now
+        // was the jump after the viewer had gone. See `followFocus`.
+        if viewerFollow.movedGrid {
+            viewerFollow.movedGrid = false
+            return
+        }
 
         // Only follow the viewer somewhere it actually went.
         //

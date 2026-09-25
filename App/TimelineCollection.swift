@@ -273,6 +273,25 @@ final class TimelineGridController {
     func scroll(toContentY y: Double) {
         coordinator?.scroll(toContentY: CGFloat(y))
     }
+
+    /// Brings one tile on screen, centered, if it isn't already — and leaves
+    /// the grid exactly where it is if it is. Returns whether the tile is on
+    /// screen afterwards.
+    ///
+    /// For the viewer, which keeps the grid underneath it following the photo
+    /// on screen: moved while it can't be seen, the grid is already in place
+    /// when the viewer closes, and the photo zooms straight back into its own
+    /// tile.
+    @discardableResult
+    func reveal(item: Int, inDay key: String) -> Bool {
+        coordinator?.reveal(item: item, inDay: key) ?? false
+    }
+
+    /// Where a tile is on screen, in window coordinates, after bringing it on
+    /// screen. What a photo closing in the viewer flies back to.
+    func frameOnScreen(item: Int, inDay key: String) -> CGRect? {
+        coordinator?.frameOnScreen(item: item, inDay: key)
+    }
 }
 
 // MARK: - The grid
@@ -781,6 +800,37 @@ struct TimelineCollection: UIViewRepresentable {
         func scroll(toContentY y: CGFloat) {
             guard hasLanded else { return }
             setContentY(y)
+        }
+
+        func reveal(item: Int, inDay key: String) -> Bool {
+            guard hasLanded, let view, let layout, let section = sectionIndex[key],
+                  section < view.numberOfSections,
+                  item >= 0, item < view.numberOfItems(inSection: section)
+            else { return false }
+            let frame = layout.frame(forItem: item, inSection: section)
+            // The band tiles are actually seen in: under the floating bar at the
+            // top, over the tab bar at the bottom.
+            let top = view.contentOffset.y + view.contentInset.top
+            let bottom = view.contentOffset.y + view.bounds.height - view.contentInset.bottom
+            guard frame.minY < top || frame.maxY > bottom else { return true }
+            // Centered rather than just nudged into view, the way Photos leaves
+            // its grid: the photo you come back to is in the middle of what
+            // surrounds it, not pinned against an edge.
+            setContentY(frame.midY - (bottom - top) / 2)
+            // Laid out now rather than on the next pass, so the tile is where
+            // the viewer is about to fly its photo.
+            view.layoutIfNeeded()
+            report()
+            updateLoads()
+            return true
+        }
+
+        /// A tile's frame in window coordinates, after bringing it on screen.
+        func frameOnScreen(item: Int, inDay key: String) -> CGRect? {
+            guard reveal(item: item, inDay: key), let view, let layout,
+                  let section = sectionIndex[key]
+            else { return nil }
+            return view.convert(layout.frame(forItem: item, inSection: section), to: nil)
         }
 
         /// The newest photograph, on first layout — the way Photos opens.

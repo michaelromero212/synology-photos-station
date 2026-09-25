@@ -79,8 +79,22 @@ private final class HostedPageViewController: UIPageViewController {
 /// hand-off this viewer depends on is unchanged: a pinched photo keeps the drag
 /// until its own content runs out, then the pager takes over.
 struct PagerView<Page: View>: UIViewControllerRepresentable {
+    /// A drag down that puts the viewer away — see `ViewerStage`.
+    struct DismissDrag {
+        /// Asked as a drag starts. False while a photo is zoomed, when a drag
+        /// down means looking at another part of it.
+        let canBegin: () -> Bool
+        let onChange: (CGSize) -> Void
+        /// With the translation and the velocity at release.
+        let onEnd: (CGSize, CGSize) -> Void
+    }
+
     let items: [TimelineItem]
     let focus: PagerFocus
+    /// Clear rather than black behind the pages, for a viewer over the grid:
+    /// the black there is a layer of its own, which a drag fades.
+    var transparent = false
+    var dismissDrag: DismissDrag?
     @ViewBuilder let page: (TimelineItem) -> Page
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -97,10 +111,11 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
         controller.onAppear = { [weak controller] in
             guard let controller else { return }
             context.coordinator.claimHorizontalDrags(in: controller)
+            context.coordinator.installDismissDrag(on: controller)
         }
         controller.dataSource = context.coordinator
         controller.delegate = context.coordinator
-        controller.view.backgroundColor = .black
+        controller.view.backgroundColor = transparent ? .clear : .black
 
         if let start = context.coordinator.controller(for: focus.currentID) {
             controller.setViewControllers([start], direction: .forward, animated: false)
@@ -139,11 +154,13 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, UIPageViewControllerDataSource,
-                             UIPageViewControllerDelegate {
+                             UIPageViewControllerDelegate, UIGestureRecognizerDelegate {
         var parent: PagerView
         /// Built once per item and kept, so paging back to a photo doesn't
         /// re-download its preview.
         private var hosted: [UUID: UIHostingController<Page>] = [:]
+        private var dismissPan: UIPanGestureRecognizer?
+        private weak var pagingPan: UIPanGestureRecognizer?
 
         /// True from the moment a swipe starts moving a page until it lands or
         /// springs back. `updateUIViewController` must keep its hands off the
@@ -188,11 +205,72 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
                 .interactivePopGestureRecognizer?.require(toFail: pan)
         }
 
+        /// Adds the drag down that closes the viewer, once, if there is one.
+        ///
+        /// On the pager's own view, so it sees a drag wherever it starts on the
+        /// photo. The paging pan waits for it to decline, which it does at once
+        /// for anything that isn't mostly downward — so a sideways swipe pages
+        /// as it always did, and only a drag down puts the photo away.
+        func installDismissDrag(on controller: UIPageViewController) {
+            guard parent.dismissDrag != nil, dismissPan == nil else { return }
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleDismissPan(_:)))
+            pan.maximumNumberOfTouches = 1
+            pan.delegate = self
+            controller.view.addGestureRecognizer(pan)
+            dismissPan = pan
+            if let paging = controller.view.subviews
+                .compactMap({ $0 as? UIScrollView }).first?.panGestureRecognizer {
+                paging.require(toFail: pan)
+                pagingPan = paging
+            }
+        }
+
+        @objc private func handleDismissPan(_ pan: UIPanGestureRecognizer) {
+            guard let drag = parent.dismissDrag, let view = pan.view else { return }
+            let translation = pan.translation(in: view)
+            let velocity = pan.velocity(in: view)
+            switch pan.state {
+            case .began, .changed:
+                drag.onChange(CGSize(width: translation.x, height: translation.y))
+            case .ended:
+                drag.onEnd(
+                    CGSize(width: translation.x, height: translation.y),
+                    CGSize(width: velocity.x, height: velocity.y)
+                )
+            case .cancelled, .failed:
+                drag.onEnd(.zero, .zero)
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard recognizer === dismissPan, let pan = recognizer as? UIPanGestureRecognizer,
+                  let drag = parent.dismissDrag
+            else { return true }
+            // Which way the finger has gone, rather than how fast: asked at
+            // the moment the pan decides, the speed can still read zero.
+            let moved = pan.translation(in: pan.view)
+            let direction = moved == .zero ? pan.velocity(in: pan.view) : moved
+            return direction.y > 0 && abs(direction.y) > abs(direction.x) * 1.2
+                && drag.canBegin()
+        }
+
+        func gestureRecognizer(
+            _ recognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool {
+            // Alongside anything inside the page — the photo's own zoom view,
+            // a video's taps — which can't use a drag down at rest anyway. Not
+            // alongside paging, which waits for this to decline instead.
+            recognizer === dismissPan && other !== pagingPan
+        }
+
         func controller(for id: UUID) -> UIHostingController<Page>? {
             guard let item = parent.items.first(where: { $0.id == id }) else { return nil }
             if let existing = hosted[id] { return existing }
             let created = UIHostingController(rootView: parent.page(item))
-            created.view.backgroundColor = .black
+            created.view.backgroundColor = parent.transparent ? .clear : .black
             // The viewer runs edge to edge under floating chrome.
             created.safeAreaRegions = []
             hosted[id] = created

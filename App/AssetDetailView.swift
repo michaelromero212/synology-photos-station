@@ -190,6 +190,16 @@ struct AssetDetailView: View {
     /// carries on past the day it opened from. Coming back to wherever the
     /// tap happened means hunting for where you actually got to.
     var onClose: (UUID) -> Void = { _ in }
+    /// The photo on screen, as you settle on it and as you leave — so the grid
+    /// underneath can follow while it's out of sight, and be where you are when
+    /// the viewer closes. See `TimelineView.followFocus`.
+    var onFocus: (TimelineItem) -> Void = { _ in }
+    #if os(iOS)
+    /// Set when the viewer is a layer over the grid rather than a pushed
+    /// screen: it then draws no black of its own, follows a drag down, and
+    /// closes by flying the photo back to its tile. See `ViewerStage`.
+    var stage: ViewerStage?
+    #endif
 
     @State private var cache = ViewerModelCache()
     /// Outlives any one page, which is the point: a video prepared as a
@@ -221,6 +231,11 @@ struct AssetDetailView: View {
     /// This viewer's place among the open ones — what moves the floating tab
     /// bar out of the way of the buttons along the bottom. See `GridChrome`.
     @State private var tabBarToken = UUID()
+    /// The pending report to the grid of which photo is on screen — see
+    /// `reportFocusSoon`.
+    @State private var focusReport: Task<Void, Never>?
+    /// The last photo the grid was told about, so leaving doesn't tell it again.
+    @State private var reportedFocus: UUID?
     #else
     /// What the viewer is showing. A `let` on the outside, but the
     /// next/previous video controls have to be able to move it — there is no
@@ -241,7 +256,8 @@ struct AssetDetailView: View {
         dayItems: [TimelineItem] = [],
         pageItems: [TimelineItem] = [],
         showsInfoInitially: Bool = false,
-        onClose: @escaping (UUID) -> Void = { _ in }
+        onClose: @escaping (UUID) -> Void = { _ in },
+        onFocus: @escaping (TimelineItem) -> Void = { _ in }
     ) {
         self.item = item
         self.space = space
@@ -250,8 +266,11 @@ struct AssetDetailView: View {
         self.pageItems = pageItems
         self.showsInfoInitially = showsInfoInitially
         self.onClose = onClose
+        self.onFocus = onFocus
         #if os(iOS)
         self._focus = State(initialValue: PagerFocus(currentID: item.id))
+        // The grid is already showing the photo that was tapped.
+        self._reportedFocus = State(initialValue: item.id)
         #else
         self._displayedItem = State(initialValue: item)
         #if os(macOS)
@@ -263,12 +282,23 @@ struct AssetDetailView: View {
         #endif
     }
 
+    #if os(iOS)
+    /// This viewer as a layer over the grid rather than a pushed screen. See
+    /// `stage`.
+    func staged(on stage: ViewerStage) -> Self {
+        var copy = self
+        copy.stage = stage
+        return copy
+    }
+    #endif
+
     // MARK: - Body
 
     #if os(iOS)
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Over the grid, the black is the stage's, so a drag can fade it.
+            (stage == nil ? Color.black : Color.clear).ignoresSafeArea()
             pager
         }
         .navigationBarBackButtonHidden(true)
@@ -307,7 +337,8 @@ struct AssetDetailView: View {
         // pass — viewer and pager evicting each other's players in a loop, which
         // froze the app on opening any video.
         .overlay {
-            if showChrome && !isZoomed {
+            // Gone for a drag down, as in Photos: only the photo moves.
+            if showChrome && !isZoomed && !(stage?.isDragging ?? false) {
                 ZStack {
                     VStack(spacing: 0) {
                         topChrome
@@ -349,6 +380,9 @@ struct AssetDetailView: View {
         }
         .onDisappear {
             tilt.stop()
+            // The slideshow covers the viewer rather than closing it, and it
+            // comes back when the slideshow ends: nothing below is true yet.
+            guard !showSlideshow else { return }
             // Covers every way out that `leave()` doesn't see: the swipe back,
             // dragging the photo down. Those are gestures that can be
             // abandoned halfway, so the bar waits until one has actually
@@ -759,7 +793,19 @@ struct AssetDetailView: View {
     /// hands the drag to the photo and only takes it back at the edge of the
     /// content, which is exactly the hand-off Photos has.
     private var pager: some View {
-        PagerView(items: pages, focus: focus) { entry in
+        PagerView(
+            items: pages, focus: focus,
+            transparent: stage != nil,
+            dismissDrag: stage.map { stage in
+                PagerView.DismissDrag(
+                    canBegin: { !isZoomed },
+                    onChange: { stage.dragChanged($0) },
+                    onEnd: { translation, velocity in
+                        if stage.dragEnded(translation, velocity: velocity) { leave() }
+                    }
+                )
+            }
+        ) { entry in
             AssetPage(
                 model: cache.model(for: entry, spaceID: space.id),
                 session: session,
@@ -768,10 +814,15 @@ struct AssetDetailView: View {
                 showsChrome: showChrome,
                 onSingleTap: { showChrome.toggle() },
                 onFinished: { advanceToNextVideo(after: entry) },
-                isZoomed: $isZoomed
+                isZoomed: $isZoomed,
+                transparent: stage != nil,
+                stage: stage
             )
         }
         .ignoresSafeArea()
+        // Where a drag down has taken the photo. Nothing moves otherwise.
+        .scaleEffect(stage?.dragScale ?? 1)
+        .offset(stage?.dragOffset ?? .zero)
         // A photo left zoomed shouldn't hold the pager hostage once you've
         // swiped away from it.
         .onChange(of: currentID) { _, _ in
@@ -781,6 +832,7 @@ struct AssetDetailView: View {
             preloader.playOnly(
                 currentItem.mediaType == .video ? currentItem.assetID : nil
             )
+            reportFocusSoon()
         }
         // No vertical gesture here on purpose. This briefly had swipe-up for
         // the next clip and swipe-down for the previous, which is the Reels
@@ -964,7 +1016,49 @@ struct AssetDetailView: View {
     /// reassembling itself. Started together, the bar comes back with the grid.
     private func leave() {
         GridChrome.shared.viewerClosed(tabBarToken)
-        dismiss()
+        focusReport?.cancel()
+        // Over the grid: the photo flies back into its tile, which the stage
+        // asks the grid to bring on screen first. See `ViewerStage.close`.
+        if let stage {
+            reportedFocus = currentItem.id
+            onFocus(currentItem)
+            stage.close(
+                current: currentItem,
+                image: currentModel.image ?? currentModel.placeholder
+            )
+            return
+        }
+        // The grid goes to the photo on screen before anything moves — usually
+        // it is there already (see `reportFocusSoon`); after a quick swipe and
+        // straight back, this is what puts it there. The close waits one turn
+        // of the run loop so that tile exists to be zoomed into when it starts.
+        if reportedFocus != currentItem.id {
+            reportedFocus = currentItem.id
+            onFocus(currentItem)
+            DispatchQueue.main.async { dismiss() }
+        } else {
+            dismiss()
+        }
+    }
+
+    /// Tells the grid which photo is on screen, once a swipe has settled.
+    ///
+    /// The grid underneath follows along while it can't be seen, so closing
+    /// the viewer zooms straight into the tile of the photo you ended on — not
+    /// back to the one you first tapped, with the grid then jumping to catch
+    /// up once the viewer had gone, which is what it used to do.
+    ///
+    /// A moment after settling rather than on every page: moving the grid lays
+    /// out a screen of tiles, and doing it between two quick swipes would be
+    /// work the swipe can feel.
+    private func reportFocusSoon() {
+        focusReport?.cancel()
+        focusReport = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, reportedFocus != currentItem.id else { return }
+            reportedFocus = currentItem.id
+            onFocus(currentItem)
+        }
     }
 
     private var topChrome: some View {
@@ -1251,12 +1345,20 @@ private struct AssetPage: View {
     let onSingleTap: () -> Void
     var onFinished: () -> Void = {}
     @Binding var isZoomed: Bool
+    /// Over the grid, the page draws no black: a drag down moves the photo
+    /// alone, over black the stage fades. See `ViewerStage`.
+    var transparent = false
+    #if os(iOS)
+    /// The stage this viewer is on, when it is on one. Read, not copied, for
+    /// the reason `focus` is.
+    var stage: ViewerStage?
+    #endif
 
     private var isCurrent: Bool { focus.currentID == model.item.id }
 
     var body: some View {
         ZStack {
-            Color.black
+            transparent ? Color.clear : Color.black
 
             if model.item.mediaType == .video {
                 video
@@ -1361,6 +1463,9 @@ private struct AssetPage: View {
                 onSingleTap: onSingleTap,
                 onFinished: onFinished,
                 isActive: true,
+                // Until the clip has finished growing out of its tile. See
+                // `holdsPlayback`.
+                holdsPlayback: stage.map { !$0.showsViewer } ?? false,
                 model: preloader.model(for: model.item.assetID)
             )
             .ignoresSafeArea()
