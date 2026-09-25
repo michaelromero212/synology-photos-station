@@ -194,12 +194,29 @@ struct UploadController: RouteCollection {
             try store.writeChunk(uploadID: uploadID, index: index, bytes: bytes)
         }
 
-        try await req.sql.raw("""
-            UPDATE upload_sessions
-            SET received_mask = set_bit(received_mask, \(bind: index), 1),
-                updated_at = now()
-            WHERE id = \(bind: uploadID)
-            """).run()
+        // Without waiting for the disk to confirm it. This is only a note of
+        // which chunks have arrived, and it is the one write here that can be
+        // lost without harm: after a power cut the chunk simply reads as
+        // missing, the phone sends it again, and the file is still checked
+        // against its SHA-256 before it is kept. Waiting cost every chunk — and
+        // so every photo — a trip to hard drives that were busy writing
+        // thumbnails. The commit that records the photo still waits, as it must.
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                try await sql.raw("SET LOCAL synchronous_commit TO OFF").run()
+                try await sql.raw("""
+                    UPDATE upload_sessions
+                    SET received_mask = set_bit(received_mask, \(bind: index), 1),
+                        updated_at = now()
+                    WHERE id = \(bind: uploadID)
+                    """).run()
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
 
         let missing = try await missingChunks(
             uploadID: uploadID, chunkCount: session.chunkCount, on: req.sql
@@ -269,6 +286,28 @@ struct UploadController: RouteCollection {
 
         timing.mark("assemble")
 
+        // Read before the photo is recorded rather than after, so that what it
+        // finds is recorded with it — see the transaction below. Lean on
+        // purpose — `dumpExif: false`. The timeline needs captured_at and
+        // dimensions at once (a Mac upload sends no dimensions, so the grid
+        // can't lay it out until this fills them), but the full exif dump is a
+        // second exiftool run whose only reader is the Information panel; it
+        // goes to the queue.
+        //
+        // A read that fails costs the photo nothing: it is recorded with what
+        // the phone said about it, and the queued metadata job reads it again.
+        var metadata: MediaProbe.Metadata?
+        do {
+            metadata = try await MediaProbe.probe(
+                url: blob, mediaType: input.mediaType, dumpExif: false
+            )
+        } catch {
+            req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
+        }
+        let probed = metadata
+
+        timing.mark("probe")
+
         // The blob store is where the file lives; the browsable tree is a
         // mirror, and `BrowseTreeWorker` is now the only thing that writes it.
         //
@@ -283,7 +322,23 @@ struct UploadController: RouteCollection {
         // To the millisecond when the phone sent it that finely, so photos
         // taken within one second keep the order they were taken in.
         let capturedAt = input.preciseCapturedAt
+        let geocoder = req.application.geocoder
+        let logger = req.logger
 
+        // Everything the upload writes, in one transaction and so one wait for
+        // the disk.
+        //
+        // It used to be six: the photo, then two statements of metadata, then
+        // three jobs for the background worker, each its own commit — and
+        // Postgres holds every commit until the disk confirms it. On the NAS's
+        // hard drives, busy writing thumbnails at the same time, each of those
+        // waits ran from a few hundredths of a second to over one, and a
+        // phone's log showed commits of one and a half to four seconds, almost
+        // all of it waiting. One commit waits once.
+        //
+        // It is also the right shape. A photo is never on the timeline without
+        // its capture time and place, or without the job that makes its
+        // thumbnails: all of it becomes visible at the same moment, or none.
         let result = try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
             do {
@@ -346,6 +401,59 @@ struct UploadController: RouteCollection {
                     on: sql
                 )
 
+                // What the file itself says, filling what the phone didn't.
+                if let probed {
+                    try await Self.bestEffort("metadata", on: sql, logger: logger) {
+                        try await DerivationWorker.applyMetadata(
+                            probed, assetID: asset.id, on: sql, geocoder: geocoder
+                        )
+                    }
+                }
+
+                // Derivation is keyed on what this row actually has, not on the
+                // dedup flag. `deduplicated` means the *bytes* were seen before —
+                // not that the thumbnails still exist (purge deletes
+                // content-addressed derivatives while leaving the asset row) and
+                // never that this fresh row carries its own derived_at/thumbhash.
+                // Keying the work on dedup left a re-upload of purged content gray
+                // forever, with no derivation job at all. So this runs for every
+                // commit; a genuine duplicate just regenerates identical
+                // thumbnails, which is rare because the .have fast path links
+                // instead.
+                //
+                // The exif dump and the thumbnails. Thumbnails outrank metadata in
+                // the worker's claim, so the tiles a person is watching fill
+                // before the deep metadata does. The thumbnails are not optional:
+                // a photo recorded without the job that makes them would stay
+                // gray, so if queuing them fails, the whole commit does.
+                try await Self.bestEffort("metadata_job", on: sql, logger: logger) {
+                    try await DerivationWorker.enqueue(
+                        assetID: asset.id, kind: "metadata", on: sql
+                    )
+                }
+                try await DerivationWorker.enqueue(
+                    assetID: asset.id, kind: "thumbnails", on: sql
+                )
+                // And, for a video, the cellular rendition. Queued at upload
+                // rather than built on demand: a 4K transcode takes minutes on
+                // this box, so waiting until someone presses play on mobile data
+                // would mean waiting through it. The job no-ops for photos and
+                // for clips already lean enough to stream as they are. It sits
+                // behind thumbnails in the worker's order, which is right —
+                // nobody is watching a transcode, but they are watching the grid
+                // fill.
+                //
+                // Non-fatal, but *logged*. This was once a bare `try?`, and when
+                // the job kind turned out to violate a CHECK constraint the
+                // failure went nowhere at all: uploads succeeded, no rendition
+                // was ever queued, and the only way to find out was to read the
+                // queue by hand.
+                try await Self.bestEffort("playback_job", on: sql, logger: logger) {
+                    try await DerivationWorker.enqueue(
+                        assetID: asset.id, kind: Derivatives.playbackJobKind, on: sql
+                    )
+                }
+
                 try await sql.raw("""
                     UPDATE upload_sessions SET committed_at = now() WHERE id = \(bind: uploadID)
                     """).run()
@@ -378,70 +486,35 @@ struct UploadController: RouteCollection {
         )
         timing.mark("tree")
 
-        // Derivation is keyed on what this row actually has, not on the dedup
-        // flag. `deduplicated` means the *bytes* were seen before — not that the
-        // thumbnails still exist (purge deletes content-addressed derivatives
-        // while leaving the asset row) and never that this fresh row carries its
-        // own derived_at/thumbhash. Keying the work on dedup left a re-upload of
-        // purged content gray forever, with no derivation job at all. So this
-        // runs for every commit; a genuine duplicate just regenerates identical
-        // thumbnails, which is rare because the .have fast path links instead.
-        do {
-            // Lean on purpose — `dumpExif: false`. The timeline needs
-            // captured_at and dimensions at once (a Mac upload sends no
-            // dimensions, so the grid can't lay it out until this fills them),
-            // but the full exif dump is a second exiftool spawn whose only
-            // reader is the Information panel. Blocking every one of a hundred
-            // commits on it is what made a burst crawl; it goes to the queue.
-            let metadata = try await MediaProbe.probe(
-                url: blob, mediaType: input.mediaType, dumpExif: false
-            )
-            try await DerivationWorker.applyMetadata(
-                metadata, assetID: result.assetID, on: req.sql,
-                geocoder: req.application.geocoder
-            )
-        } catch {
-            req.logger.warning("inline metadata probe failed for \(session.filename): \(error)")
-        }
-        timing.mark("probe")
-        // The exif dump in the background, and thumbnails too. Thumbnails outrank
-        // metadata in the worker's claim, so the tiles a person is watching fill
-        // before the deep metadata does.
-        try? await DerivationWorker.enqueue(
-            assetID: result.assetID, kind: "metadata", on: req.sql
-        )
-        try await DerivationWorker.enqueue(
-            assetID: result.assetID, kind: "thumbnails", on: req.sql
-        )
-        // And, for a video, the cellular rendition. Queued at upload rather than
-        // built on demand: a 4K transcode takes minutes on this box, so waiting
-        // until someone presses play on mobile data would mean waiting through
-        // it. The job no-ops for photos and for clips already lean enough to
-        // stream as they are. It sits behind thumbnails in the worker's order,
-        // which is right — nobody is watching a transcode, but they are watching
-        // the grid fill.
-        //
-        // Non-fatal, but *logged*. This was a bare `try?`, and when the job kind
-        // turned out to violate a CHECK constraint the failure went nowhere at
-        // all: uploads succeeded, no rendition was ever queued, and the only way
-        // to find out was to read the queue by hand.
-        do {
-            try await DerivationWorker.enqueue(
-                assetID: result.assetID, kind: Derivatives.playbackJobKind, on: req.sql
-            )
-        } catch {
-            req.logger.warning(
-                "could not queue a playback rendition for \(session.filename): \(error)"
-            )
-        }
-
-        timing.mark("queue")
-
         let summary = timing.summary
         req.logger.info(
             "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated)) in \(summary)"
         )
         return result
+    }
+
+    /// Runs `body` inside a savepoint, so a failure in it undoes only its own
+    /// statements and the transaction around it carries on.
+    ///
+    /// What a write that is allowed to fail needs once it shares a transaction
+    /// with ones that aren't: in Postgres a failed statement otherwise aborts
+    /// the whole transaction, and a job that couldn't be queued would take the
+    /// photo down with it. Logged, because a failure nobody hears about is how
+    /// the playback queue once went empty for weeks.
+    private static func bestEffort(
+        _ name: String,
+        on sql: any SQLDatabase,
+        logger: Logger,
+        _ body: () async throws -> Void
+    ) async throws {
+        try await sql.raw("SAVEPOINT \(unsafeRaw: name)").run()
+        do {
+            try await body()
+            try await sql.raw("RELEASE SAVEPOINT \(unsafeRaw: name)").run()
+        } catch {
+            logger.warning("commit went on without \(name): \(String(reflecting: error))")
+            try await sql.raw("ROLLBACK TO SAVEPOINT \(unsafeRaw: name)").run()
+        }
     }
 
     /// Split times for one commit, logged with it: "1.84s — checks 0.03s,
