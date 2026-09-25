@@ -33,6 +33,10 @@ final class AssetDetailModel {
     /// time a page scrolls into view, and without this every swipe past a photo
     /// refetches its preview and its detail.
     private var hasLoaded = false
+    /// The same, for the full-size preview, which is fetched on its own
+    /// schedule — see `loadPreview`.
+    private var hasLoadedPreview = false
+    private var isLoadingPreview = false
 
     let item: TimelineItem
     private let spaceID: UUID
@@ -60,13 +64,29 @@ final class AssetDetailModel {
         if let cached = await loader.thumbnail(assetID: item.assetID, size: 512), image == nil {
             image = cached
         }
-        if let preview = await loader.preview(assetID: item.assetID) {
-            withAnimation(.easeOut(duration: 0.2)) { image = preview }
-        } else if image == nil {
-            imageError = "Couldn't load this photo."
-        }
 
         await loadDetail(client)
+    }
+
+    /// The full-size picture, over the 512 `load` put up.
+    ///
+    /// Separate from `load` because it is the heavy part — half a megabyte or
+    /// so — and the page decides when it may have it: at once at home, but
+    /// away from it a neighbor waits while a clip on screen is still filling
+    /// its buffer. See `AssetPage.wantsPreview`.
+    func loadPreview(loader: ThumbnailLoader?) async {
+        guard let loader, !hasLoadedPreview, !isLoadingPreview else { return }
+        isLoadingPreview = true
+        defer { isLoadingPreview = false }
+        if let preview = await loader.preview(assetID: item.assetID) {
+            hasLoadedPreview = true
+            withAnimation(.easeOut(duration: 0.2)) { image = preview }
+        } else if !Task.isCancelled {
+            // A real failure rather than being told to wait: settled, so it
+            // isn't asked for again every time the connection frees up.
+            hasLoadedPreview = true
+            if image == nil { imageError = "Couldn't load this photo." }
+        }
     }
 
     /// Never swallow the error here. An earlier version caught and ignored it,
@@ -872,7 +892,10 @@ struct AssetDetailView: View {
             let neighbour = index + offset
             guard macPages.indices.contains(neighbour) else { continue }
             let model = cache.model(for: macPages[neighbour], spaceID: space.id)
-            Task { await model.load(loader: session.loader, client: session.client) }
+            Task {
+                await model.load(loader: session.loader, client: session.client)
+                await model.loadPreview(loader: session.loader)
+            }
         }
     }
     #endif
@@ -1253,6 +1276,47 @@ private struct AssetPage: View {
             }
         }
         .task { await model.load(loader: session.loader, client: session.client) }
+        .task(id: wantsPreview) {
+            guard wantsPreview else { return }
+            // A neighbor away from home gives the page on screen a moment to
+            // claim the connection first — see `waitForTurn`.
+            if !isCurrent, await !waitForTurn() { return }
+            await model.loadPreview(loader: session.loader)
+        }
+    }
+
+    /// Whether this page may fetch its full-size picture now.
+    ///
+    /// At home, always, as on a Mac or a television. Away from home a video's
+    /// page never does — its poster is up for the moment before the first frame
+    /// and the 512 carries that — and a photo either side waits while a clip on
+    /// screen is still filling its buffer. A photo on screen always may.
+    private var wantsPreview: Bool {
+        #if os(iOS)
+        if NetworkLocality.shared.isLocal == true { return true }
+        if model.item.mediaType == .video { return false }
+        return isCurrent || !preloader.isLinkBusy
+        #else
+        return true
+        #endif
+    }
+
+    /// For a neighbor, away from home: whether the connection is still free a
+    /// beat from now.
+    ///
+    /// The pager builds a page and its neighbors together, so without the beat a
+    /// neighbor could look, find the connection free, and start loading in the
+    /// instant before the clip on screen claims it. A claim arriving in the
+    /// meantime flips `isLinkBusy`, which cancels the task waiting here. At home
+    /// there is nothing to wait for.
+    private func waitForTurn() async -> Bool {
+        #if os(iOS)
+        guard NetworkLocality.shared.isLocal != true else { return true }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return !Task.isCancelled && !preloader.isLinkBusy
+        #else
+        return true
+        #endif
     }
 
     @ViewBuilder
@@ -1281,8 +1345,13 @@ private struct AssetPage: View {
             // Built ahead by the pager and not being watched. Show the poster,
             // but get the bytes moving: this is the page you are one swipe —
             // or one finished clip — away from.
+            //
+            // Away from home, only once the clip on screen has what it needs:
+            // keyed on `isLinkBusy`, so this runs again the moment the
+            // connection frees and is cancelled the moment it is claimed.
             Image(platformImage: poster).resizable().scaledToFit()
-                .task {
+                .task(id: preloader.isLinkBusy) {
+                    guard !preloader.isLinkBusy, await waitForTurn() else { return }
                     preloader.warm(
                         assetID: model.item.assetID, client: session.client,
                         // Same representation the page itself will ask for, or

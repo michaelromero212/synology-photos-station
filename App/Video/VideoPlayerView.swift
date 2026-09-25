@@ -82,6 +82,23 @@ final class VideoPlaybackModel {
     /// current before its buffer exists.
     @ObservationIgnored private var wantsPlayback = false
 
+    /// Tell the viewer's preloader that this clip needs the connection, and
+    /// when it no longer does, so the pages either side wait their turn on a
+    /// weak link. See `VideoPreloader.isLinkBusy`. Nil wherever there is no
+    /// preloader to tell.
+    @ObservationIgnored var onNeedsLink: (() -> Void)?
+    @ObservationIgnored var onLinkFree: (() -> Void)?
+    /// Whether this watch has already reported itself far enough ahead.
+    @ObservationIgnored private var isAhead = false
+
+    /// How far past the playhead the buffer has to reach before this clip
+    /// stops needing the connection to itself — or the end of the clip, if
+    /// that comes first. Fifteen seconds of a 1080p rendition is a few seconds'
+    /// download on a good link, so neighbors barely wait there; on a link that
+    /// can't keep ahead of the stream at all it is never reached, which is
+    /// exactly when they shouldn't be competing.
+    private static let comfortablyAhead: Double = 15
+
     /// How far ahead a *preloaded* (not-yet-watched) video buffers. Small on
     /// purpose: enough for an instant start when you reach it, not so much that
     /// the two neighbours the pager warms starve the video actually on screen.
@@ -146,12 +163,23 @@ final class VideoPlaybackModel {
             if wantsPlayback { start() }
         } catch {
             lastError = error
+            // A clip that can't play doesn't need the connection.
+            onLinkFree?()
         }
+    }
+
+    /// Claims the connection for this clip ahead of its first byte — see
+    /// `onNeedsLink`. Called by the page it is on screen in, before the signed
+    /// URL is even fetched, so the pages either side don't start first.
+    func needsLink() {
+        isAhead = false
+        onNeedsLink?()
     }
 
     /// Begins, or resumes, playback of an already-prepared video.
     func start() {
         wantsPlayback = true
+        needsLink()
         guard let player else { return }
         configureAudioSession()
         // On screen now: ask for a real cushion so the playing clip can get
@@ -211,6 +239,8 @@ final class VideoPlaybackModel {
         // is still instant.
         bufferFreely(false)
         isPlaying = false
+        // Capped at a couple of seconds now, so it has stopped reading.
+        onLinkFree?()
     }
 
     /// Playback belongs in the "playback" category, otherwise a video plays
@@ -260,6 +290,9 @@ final class VideoPlaybackModel {
                     self.duration = known
                 }
                 if self.position > 0 { self.hasFinished = false }
+                if !self.isAhead, let item = player.currentItem {
+                    self.noteIfAhead(item, at: time)
+                }
             }
         }
 
@@ -270,6 +303,7 @@ final class VideoPlaybackModel {
             MainActor.assumeIsolated {
                 self?.isPlaying = false
                 self?.hasFinished = true
+                self?.onLinkFree?()
             }
         }
 
@@ -285,6 +319,7 @@ final class VideoPlaybackModel {
             MainActor.assumeIsolated {
                 self?.lastError = item.error ?? URLError(.cannotConnectToHost)
                 self?.isPlaying = false
+                self?.onLinkFree?()
             }
         }
 
@@ -317,6 +352,11 @@ final class VideoPlaybackModel {
                 Diagnostics.shared.log(
                     .playback, "Buffer refilled at \(Self.mmss(self.position))"
                 )
+                // What the connection was managing, on every refill and not
+                // only on a stall. A log from a slow restaurant connection had
+                // two long waits and not one number to say why, because neither
+                // was a stall.
+                self.measure("refilled")
             }
         }
 
@@ -346,8 +386,27 @@ final class VideoPlaybackModel {
             MainActor.assumeIsolated {
                 self?.lastError = failure ?? URLError(.networkConnectionLost)
                 self?.isPlaying = false
+                self?.onLinkFree?()
             }
         }
+    }
+
+    /// Releases the connection once the buffer is well past the playhead, or
+    /// holds everything that is left of the clip.
+    ///
+    /// Measured on the range the playhead is in: after a skip there can be a
+    /// buffered stretch further back that says nothing about what is coming.
+    private func noteIfAhead(_ item: AVPlayerItem, at time: CMTime) {
+        let now = time.seconds
+        guard now.isFinite else { return }
+        let ahead = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .first { $0.containsTime(time) }
+            .map { $0.end.seconds - now } ?? 0
+        let remaining = duration > 0 ? duration - now : .infinity
+        guard ahead >= Self.comfortablyAhead || ahead >= remaining - 0.5 else { return }
+        isAhead = true
+        onLinkFree?()
     }
 
     // MARK: - Diagnostics
@@ -608,6 +667,7 @@ final class VideoPlaybackModel {
         player?.pause()
         player = nil
         isPlaying = false
+        onLinkFree?()
     }
 }
 
@@ -693,6 +753,10 @@ struct VideoPlayerView: View {
             }
         }
         .task {
+            // On screen: claim the connection before the first request, so the
+            // pages either side — built by the pager at the same moment — wait
+            // behind this clip rather than racing it. See `VideoPreloader`.
+            if isActive { model.needsLink() }
             // Resolved here rather than inside the model: the connection
             // monitor is an environment value, and the model has no view to
             // read it from.

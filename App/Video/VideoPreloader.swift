@@ -26,6 +26,26 @@ final class VideoPreloader {
     /// Most recently asked for last.
     private var recency: [UUID] = []
 
+    /// Whether the clip on screen needs the connection to itself right now.
+    ///
+    /// True away from home while the clip being watched is still getting ahead
+    /// of its playhead. The pages either side read it and wait: their video
+    /// isn't warmed and their full-size picture isn't fetched until it is false
+    /// again — once the clip is well ahead, paused, finished or gone.
+    ///
+    /// On a weak connection this was the whole difference. Opening a clip on
+    /// cellular started it downloading alongside two neighbors' first seconds
+    /// of video and three full-size pictures — several megabytes, on a link
+    /// managing a couple of megabits — and the clip you had actually tapped got
+    /// what was left.
+    ///
+    /// Never true at home: the network there carries everything at once, and
+    /// warm neighbors are what make swiping to the next clip instant.
+    private(set) var isLinkBusy = false
+    /// The clip holding the connection, so a neighbor pausing can't release a
+    /// claim that was never its own.
+    private var linkOwner: UUID?
+
     /// Claims a model, creating one if this is the first ask.
     ///
     /// This *mutates* — it reorders the recency list and can evict, which tears
@@ -35,9 +55,27 @@ final class VideoPreloader {
         touch(assetID)
         if let existing = models[assetID] { return existing }
         let created = VideoPlaybackModel()
+        created.onNeedsLink = { [weak self] in self?.claimLink(for: assetID) }
+        created.onLinkFree = { [weak self] in self?.releaseLink(from: assetID) }
         models[assetID] = created
         evictIfNeeded()
         return created
+    }
+
+    private func claimLink(for assetID: UUID) {
+        guard NetworkLocality.shared.isLocal != true else { return }
+        linkOwner = assetID
+        guard !isLinkBusy else { return }
+        isLinkBusy = true
+        Diagnostics.shared.log(.playback, "Neighbors wait: this clip has the connection")
+    }
+
+    private func releaseLink(from assetID: UUID) {
+        guard linkOwner == assetID else { return }
+        linkOwner = nil
+        guard isLinkBusy else { return }
+        isLinkBusy = false
+        Diagnostics.shared.log(.playback, "Connection free: neighbors may load")
     }
 
     /// The model for a clip that has already been claimed, or nil.
@@ -74,7 +112,17 @@ final class VideoPreloader {
     /// lands on a black frame at `-0:00`.
     ///
     /// Pass nil when the current item is a photo.
+    ///
+    /// The new clip claims the connection *before* the others are paused:
+    /// pausing is what releases a claim, and in the other order the clip just
+    /// left would free the link for a moment and the pages around the new one
+    /// would start loading straight into it.
     func playOnly(_ assetID: UUID?) {
+        if let assetID {
+            claimLink(for: assetID)
+        } else if let owner = linkOwner {
+            releaseLink(from: owner)
+        }
         for (id, model) in models where id != assetID {
             model.pause()
         }
