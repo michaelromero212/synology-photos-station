@@ -63,7 +63,8 @@ struct TimelineController: RouteCollection {
                \(localTime) AT TIME ZONE 'UTC' AS "capturedAt",
                -- The same moment to the millisecond, which the whole-second
                -- date on the wire cannot carry. See `TimelineItem.capturedAtMs`.
-               floor(extract(epoch FROM (\(localTime) AT TIME ZONE 'UTC')) * 1000)::bigint
+               -- Rounded, not floored: the driver stores .120 as .119999.
+               round(extract(epoch FROM (\(localTime) AT TIME ZONE 'UTC')) * 1000)::bigint
                              AS "capturedAtMs",
                a.width, a.height, a.orientation,
                a.media_type  AS "mediaType",

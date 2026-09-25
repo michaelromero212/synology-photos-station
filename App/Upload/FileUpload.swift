@@ -63,7 +63,9 @@ struct UploadDescriptor {
             capturedAt: capturedAt,
             // The same instant to the millisecond, which the date itself loses
             // on the wire — see `CommitUploadRequest.capturedAtMs`.
-            capturedAtMs: capturedAt.map { Int64(($0.timeIntervalSince1970 * 1000).rounded(.down)) },
+            // Rounded, not truncated: a photo taken at .120 is stored as a
+            // double just short of it, and cutting that off sent .119.
+            capturedAtMs: capturedAt.map { Int64(($0.timeIntervalSince1970 * 1000).rounded()) },
             capturedTZOffset: capturedTZOffset,
             capturedTZOffsetFallback: capturedTZOffsetFallback,
             capturedAtFallback: capturedAtFallback,
