@@ -76,32 +76,43 @@ final class CollectionsStore {
     }
 }
 
-/// One collection's cover, or several of them cycling.
+/// One collection's cover.
 ///
 /// Falls back to a flat fill rather than a spinner: a card that is briefly
 /// plain reads as a photograph still arriving, where a spinner in a grid of
 /// photographs reads as something being wrong.
 ///
-/// Cycling is opt-in and only the hero asks for it. One card carrying motion
-/// reads as alive; a shelf of them crossfading at different offsets reads as a
-/// screensaver, and each rotating card costs five thumbnails where a still one
-/// costs a single.
+/// Still, and there the moment it is. The hero used to crossfade through five
+/// covers and fade each one in as it landed; on the one card at the top of the
+/// page that read as the page still settling, and he asked for the picture to
+/// simply show up. The ids after the first are stand-ins, tried in order when
+/// the first can't be drawn.
+///
+/// Letterboxed frames are trimmed — see `Letterbox`. A video exported from
+/// iMovie, saved from a feed or transferred off a camcorder often carries its
+/// black bars inside the picture, and filling a card with it fills the card
+/// with bars.
 struct CollectionCover: View {
     let assetIDs: [UUID]
     let loader: ThumbnailLoader?
-    var size: Int = 512
-    /// Seconds each photograph holds before the next fades in. Nil holds on the
-    /// first and never moves.
-    var cycle: Double?
+    let size: Int
 
-    @State private var images: [PlatformImage] = []
-    @State private var index = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var image: PlatformImage?
 
-    private var isCycling: Bool { cycle != nil && !reduceMotion && images.count > 1 }
+    init(assetIDs: [UUID], loader: ThumbnailLoader?, size: Int = 512) {
+        self.assetIDs = assetIDs
+        self.loader = loader
+        self.size = size
+        // Already decoded in memory: drawn on the first frame rather than one
+        // after it, so coming back to the page doesn't blink the hero gray.
+        _image = State(initialValue: assetIDs.first.flatMap { first in
+            loader?.cachedThumbnail(assetID: first, size: size)
+                .map { Letterbox.trimmed($0, key: "\(first)-\(size)") }
+        })
+    }
 
     var body: some View {
-        // The photographs go in an `overlay` on a plain fill rather than beside
+        // The photograph goes in an `overlay` on a plain fill rather than beside
         // it in a `ZStack`, and this is not a stylistic choice.
         //
         // `scaledToFill` makes an image *larger* than the space it was offered,
@@ -115,54 +126,142 @@ struct CollectionCover: View {
         Rectangle()
             .fill(.quaternary)
             .overlay {
-                ForEach(Array(images.enumerated()), id: \.offset) { position, image in
-                    picture(image)
-                        .opacity(position == index ? 1 : 0)
+                if let image {
+                    Image(platformImage: image).resizable().scaledToFill()
                 }
             }
             .clipped()
-        // Long and eased: a crossfade you can see happening is a transition,
-        // where one you only notice afterwards is atmosphere. This wants the
-        // second.
-        .animation(.easeInOut(duration: 1.4), value: index)
-        .animation(.easeOut(duration: 0.3), value: images.count)
-        .task(id: assetIDs) { await load() }
-        .task(id: isCycling) {
-            guard let cycle, isCycling else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(cycle * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                index = (index + 1) % images.count
+            .task(id: assetIDs) { await load() }
+    }
+
+    private func load() async {
+        guard let loader else { return }
+        for assetID in assetIDs.prefix(3) {
+            guard !Task.isCancelled else { return }
+            if let cover = await loader.thumbnail(assetID: assetID, size: size) {
+                let trimmed = Letterbox.trimmed(cover, key: "\(assetID)-\(size)")
+                // No animation, even one inherited from whatever redrew the
+                // page: the picture is either there or it isn't.
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { image = trimmed }
+                return
             }
         }
     }
+}
 
-    @ViewBuilder
-    private func picture(_ platformImage: PlatformImage) -> some View {
+/// Takes black bands off the edges of a picture.
+///
+/// Only a matched pair on opposite edges, uniform and very dark: that is what a
+/// letterbox or pillarbox is, and it is almost never what a photograph is. A
+/// night sky darkens one edge, not two, and it has stars in it.
+enum Letterbox {
+    /// Keyed like the loader's own memory cache, so a card rebuilt by its parent
+    /// doesn't measure the same picture again. `NSCache` is its own lock.
+    nonisolated(unsafe) private static let cache = NSCache<NSString, PlatformImage>()
+
+    static func trimmed(_ image: PlatformImage, key: String) -> PlatformImage {
+        if let hit = cache.object(forKey: key as NSString) { return hit }
+        let result = trim(image) ?? image
+        cache.setObject(result, forKey: key as NSString)
+        return result
+    }
+
+    private static func trim(_ image: PlatformImage) -> PlatformImage? {
         #if canImport(UIKit)
-        Image(uiImage: platformImage).resizable().scaledToFill()
+        guard image.imageOrientation == .up, let cgImage = image.cgImage else { return nil }
         #else
-        Image(nsImage: platformImage).resizable().scaledToFill()
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return nil }
+        #endif
+        guard let inside = content(of: cgImage),
+              let cropped = cgImage.cropping(to: inside) else { return nil }
+        #if canImport(UIKit)
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: .up)
+        #else
+        return NSImage(cgImage: cropped, size: .zero)
         #endif
     }
 
-    /// The first photograph is fetched on its own and drawn as soon as it
-    /// lands; the rest follow behind it. Asking for five at once would make
-    /// every card wait for the slowest of five before showing anything.
-    private func load() async {
-        guard let loader, let first = assetIDs.first else { return }
-        images = []
-        index = 0
-        if let cover = await loader.thumbnail(assetID: first, size: size) {
-            images = [cover]
+    /// The picture inside any bars, in the image's own pixels, or nil if there
+    /// are none worth taking off.
+    static func content(of image: CGImage) -> CGRect? {
+        // Measured on a copy under two hundred pixels wide. A band worth
+        // trimming is dozens of pixels deep on any cover, so this finds it to
+        // within a pixel or two of the original while reading a small fraction
+        // of the pixels.
+        let width = min(image.width, 192)
+        let height = max(1, Int((Double(image.height) * Double(width) / Double(image.width)).rounded()))
+        guard width >= 16, height >= 16,
+              let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+              )
+        else { return nil }
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let data = context.data else { return nil }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: context.bytesPerRow * height)
+        let stride = context.bytesPerRow
+
+        func luma(_ x: Int, _ y: Int) -> Int {
+            let i = y * stride + x * 4
+            return (Int(pixels[i]) * 54 + Int(pixels[i + 1]) * 183 + Int(pixels[i + 2]) * 19) >> 8
         }
-        guard cycle != nil else { return }
-        for assetID in assetIDs.dropFirst() {
-            guard !Task.isCancelled else { return }
-            if let next = await loader.thumbnail(assetID: assetID, size: size) {
-                images.append(next)
+        // Dark on average and nowhere bright. JPEG leaves a little noise in a
+        // black bar, so not zero; one lit pixel is a star, so not the mean alone.
+        func dark(_ values: some Sequence<Int>) -> Bool {
+            var total = 0, count = 0
+            for value in values {
+                if value > 48 { return false }
+                total += value
+                count += 1
             }
+            return count > 0 && total <= 24 * count
         }
+        func band(_ count: Int, _ isDark: (Int) -> Bool) -> Int {
+            var depth = 0
+            while depth < count / 2, isDark(depth) { depth += 1 }
+            return depth
+        }
+
+        let top = band(height) { y in dark((0..<width).lazy.map { luma($0, y) }) }
+        let bottom = band(height) { y in dark((0..<width).lazy.map { luma($0, height - 1 - y) }) }
+        let left = band(width) { x in dark((0..<height).lazy.map { luma(x, $0) }) }
+        let right = band(width) { x in dark((0..<height).lazy.map { luma(width - 1 - x, $0) }) }
+
+        // A pair, of about the same depth, deep enough to be a band, and with a
+        // real picture left between them. A fifth, not a third: a portrait
+        // phone video pillarboxed into a landscape frame is under a third of
+        // its width, and it is the commonest case there is.
+        func pair(_ a: Int, _ b: Int, of length: Int) -> Bool {
+            a >= max(2, length / 25) && b >= max(2, length / 25)
+                && abs(a - b) <= max(2, length / 25)
+                && length - a - b >= length / 5
+        }
+
+        var rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let scaleY = Double(image.height) / Double(height)
+        let scaleX = Double(image.width) / Double(width)
+        // One pixel further in than measured, so no dark seam survives the
+        // rounding at the edge of the picture.
+        if pair(top, bottom, of: height) {
+            let cutTop = Int((Double(top) * scaleY).rounded(.up)) + 1
+            let cutBottom = Int((Double(bottom) * scaleY).rounded(.up)) + 1
+            rect.origin.y = CGFloat(cutTop)
+            rect.size.height -= CGFloat(cutTop + cutBottom)
+        }
+        if pair(left, right, of: width) {
+            let cutLeft = Int((Double(left) * scaleX).rounded(.up)) + 1
+            let cutRight = Int((Double(right) * scaleX).rounded(.up)) + 1
+            rect.origin.x = CGFloat(cutLeft)
+            rect.size.width -= CGFloat(cutLeft + cutRight)
+        }
+        guard rect.size != CGSize(width: image.width, height: image.height),
+              rect.width > 0, rect.height > 0 else { return nil }
+        return rect
     }
 }
 
@@ -180,9 +279,7 @@ struct CollectionHeroCard: View {
             .aspectRatio(5 / 4, contentMode: .fit)
             .overlay {
                 ZStack(alignment: .bottomLeading) {
-                    CollectionCover(
-                        assetIDs: collection.coverAssetIDs, loader: loader, cycle: 5.5
-                    )
+                    CollectionCover(assetIDs: collection.coverAssetIDs, loader: loader)
 
                     // Three stops rather than two. A straight black-to-clear ramp
                     // grays the middle of the photograph to hold text that only
@@ -240,13 +337,18 @@ struct CollectionHeroCard: View {
     }
 
     /// Says what *kind* of thing you are looking at, so a hero that changes
-    /// daily never leaves you guessing why this card is the one.
+    /// daily never leaves you guessing why this card is the one. The server's
+    /// own line wins where it has one — "CHRISTMAS IS COMING UP" says more
+    /// than the kind can.
     private var kicker: String {
+        if let kicker = collection.kicker { return kicker }
         switch collection.kind {
         case .onThisDay: return "ON THIS DAY"
         case .anniversary: return "THIS WEEK, BACK THEN"
         case .trip: return "A TRIP"
-        case .day: return "THAT DAY"
+        // Holidays and the days somebody named, now that busy days alone no
+        // longer earn a card.
+        case .day: return "A DAY TO REMEMBER"
         case .revisit: return "YOU HAVEN'T BEEN IN A WHILE"
         case .mediaType: return "EVERYTHING OF ONE KIND"
         case .season: return "LOOKING BACK"
@@ -254,6 +356,55 @@ struct CollectionHeroCard: View {
         case .recentlyAdded: return "JUST ARRIVED"
         case .favorites: return "YOUR FAVORITES"
         }
+    }
+}
+
+/// Everything one section of the Albums page chose its few rows from — every
+/// trip, or every holiday and occasion.
+///
+/// Read live from the page's store rather than handed a copy, so naming a day
+/// from here renames it here as well as on the page underneath.
+struct CollectionListView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let title: String
+    let store: CollectionsStore
+    let list: KeyPath<CollectionsResponse, [CollectionSummary]?>
+
+    @State private var naming: CollectionSummary?
+
+    private var rows: [CollectionSummary] { store.page?[keyPath: list] ?? [] }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(rows) { row in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: row)
+                    } label: {
+                        CollectionRowCard(collection: row, loader: session.loader)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .nameable(row) { naming = $0 }
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .navigationTitle(title)
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
+        #if !os(tvOS)
+        .sheet(item: $naming) { collection in
+            NameOccasionSheet(
+                session: session, spaceID: space.id, collection: collection
+            ) { changed in
+                naming = nil
+                if changed { Task { await store.refresh() } }
+            }
+        }
+        #endif
     }
 }
 

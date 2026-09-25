@@ -40,6 +40,22 @@ struct CollectionsController: RouteCollection {
     /// a coincidence, not an occasion.
     static let minimumItems = 4
 
+    /// How many trips, and how many holidays and occasions, the page itself
+    /// shows. The rest wait behind See All.
+    ///
+    /// Three of each, where it used to be up to eight trips, six busy days and
+    /// four places you hadn't been — eighteen rows of the library's opinions
+    /// before your own albums, and he found it overwhelming. The page's job is
+    /// to offer a handful of things worth opening, not to list what it can
+    /// compute; See All is there for anyone who wants the list.
+    static let pageTrips = 3
+    static let pageOccasions = 3
+    /// What See All holds. Far more than the page and still bounded — a
+    /// response that grows with the library forever is a page that gets slower
+    /// every year.
+    static let allTripsLimit = 40
+    static let allOccasionsLimit = 60
+
     // MARK: - The page
 
     @Sendable
@@ -59,20 +75,27 @@ struct CollectionsController: RouteCollection {
         // stays recognisable for as long as anyone is looking at it.
         let seed = Self.dayStamp(today)
 
+        // The holiday table is built for the years the library actually holds
+        // and no others. Trips need it too now: a short trip over a holiday is
+        // named after the holiday.
+        let years = try await libraryYears(spaceID: spaceID, on: req.sql)
+        let holidays = Holidays.table(forYears: years)
+
         let onThisDay = try await onThisDayCollections(
             spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
-        let found = try await trips(spaceID: spaceID, seed: seed, on: req.sql)
+        let trips = try await trips(
+            spaceID: spaceID, seed: seed, holidays: holidays, on: req.sql
+        )
 
-        // Days already inside a trip are not also "days worth keeping". The
-        // fortnight in the Outer Banks is one card, not one card plus fourteen —
-        // and every day of a holiday is busy by definition, so without this the
-        // busy-day rule would flood the page with the trip it just summarized.
-        let claimed = Set(found.flatMap { Self.days(inKey: $0.key) })
+        // Days already inside a trip are not also occasions of their own. The
+        // fortnight in the Outer Banks is one card, not one card plus fourteen,
+        // and a Christmas spent away is already in the trip's name.
+        let claimed = Set(trips.flatMap { Self.days(inKey: $0.key) })
 
-        let days = try await busyDays(
-            spaceID: spaceID, seed: seed, userID: device.userID,
-            excluding: claimed, on: req.sql
+        let occasions = try await occasions(
+            spaceID: spaceID, seed: seed, userID: device.userID, years: years,
+            holidays: holidays, excluding: claimed, on: req.sql
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
@@ -83,24 +106,27 @@ struct CollectionsController: RouteCollection {
         let season = try await lastSeason(
             spaceID: spaceID, today: today, seed: seed, on: req.sql
         )
-        let anniversaries = Self.anniversaries(of: found, today: today)
+        let anniversaries = Self.anniversaries(of: trips, today: today)
         let types = try await mediaTypes(spaceID: spaceID, seed: seed, on: req.sql)
+        let comingUp = Self.comingUp(occasions, today: today)
 
         // Anything anchored to *today* outranks everything else: this day in an
-        // earlier year, or the week you were away in one. Those are answers to
-        // "why open this now", and the rest are answers to "what else is here".
-        let anchored = ([onThisDay.first] + anniversaries).compactMap { $0 }
+        // earlier year, the week you were away in one, or last year's Christmas
+        // in the weeks before this one. Those are answers to "why open this
+        // now", and the rest are answers to "what else is here".
+        let anchored = ([onThisDay.first, comingUp] + anniversaries).compactMap { $0 }
 
         // The rest is a pool, and the pool is the point. A page that always
         // opens on the same card stops being looked at — so on a day with
         // nothing anchored to it, the hero moves: the latest trip, somewhere
-        // you haven't been in years, last season, the best day recently. Turned
+        // you haven't been in years, last season, the latest occasion. Turned
         // by the date, so it holds still while you are looking and has changed
         // by tomorrow.
-        let pool = ([found.first, away.first, season, days.first]).compactMap { $0 }
+        let latestOccasion = occasions.first { $0.occasion != nil }?.summary
+        let pool = ([trips.first, away.first, season, latestOccasion]).compactMap { $0 }
 
         let turn = Self.utc.ordinality(of: .day, in: .year, for: today) ?? 0
-        let hero: CollectionSummary?
+        var hero: CollectionSummary?
         if !anchored.isEmpty {
             hero = anchored[turn % anchored.count]
         } else if !pool.isEmpty {
@@ -109,34 +135,192 @@ struct CollectionsController: RouteCollection {
             hero = nil
         }
 
+        // Last Christmas on top of the page in December needs saying why, or
+        // it reads as the page being a year behind.
+        if let chosen = hero, chosen.key == comingUp?.key,
+           let name = occasions.first(where: { $0.summary.key == chosen.key })?.occasion {
+            hero = chosen.withKicker("\(name.uppercased()) IS COMING UP")
+        }
+
         // Whatever became the hero is not also listed below it. Matched on the
         // *key* rather than the id: an anniversary is a trip wearing a
         // different sentence, so comparing ids let "Two years ago you were in
         // Nags Head" sit directly above "Six days in Nags Head" — the same
-        // photographs, twice, on one screen.
+        // photographs, twice, on one screen. Nor is the same place or the same
+        // occasion from another year: last Christmas as the hero and the one
+        // before it as a row is one idea said twice.
         let heroKey = hero?.key
-        let heroPlace = hero?.kind == .revisit ? hero?.key : nil
-
-        // A place you haven't visited in years that was also a trip is likewise
-        // one thing said two ways. The trip is the better card of the two — it
-        // has the dates — so the revisit gives way.
-        let tripPlaces = Set(found.flatMap { trip in
-            trip.title.range(of: " in ").map { [String(trip.title[$0.upperBound...])] } ?? []
-        })
+        let heroOccasion = occasions.first { $0.summary.key == heroKey }?.occasion
 
         return CollectionsResponse(
             hero: hero,
-            trips: found.filter { $0.key != heroKey },
-            days: days.filter { $0.key != heroKey },
-            revisits: away.filter { place in
-                guard place.key != heroPlace else { return false }
-                return !tripPlaces.contains(place.title)
-            },
+            trips: Self.featuredTrips(
+                trips.filter { $0.key != heroKey },
+                today: today, heroPlace: hero.flatMap(Self.place(of:))
+            ),
+            days: Self.featuredOccasions(
+                occasions.filter { $0.summary.key != heroKey },
+                today: today, comingUp: comingUp, heroOccasion: heroOccasion
+            ),
+            // Somewhere you haven't been in years is a lovely thing to open on
+            // and a list of four of them is a lot to scroll past, so they are
+            // the hero some days and a row on none.
+            revisits: [],
             mediaTypes: types,
             recentlyDeleted: deleted,
             recentlyAdded: arrived,
-            favorites: marked
+            favorites: marked,
+            allTrips: trips,
+            allOccasions: occasions.map(\.summary)
         )
+    }
+
+    /// The years the library holds, for tables that are built per year.
+    private func libraryYears(spaceID: UUID, on sql: any SQLDatabase) async throws -> [Int] {
+        struct YearRow: Decodable { let year: Int }
+        return try await sql.raw("""
+            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+            """).all(decoding: YearRow.self).map(\.year)
+    }
+
+    // MARK: - Choosing the few
+
+    /// The trips the page itself shows.
+    ///
+    /// The ones that meant most — see `weight` — and one per place. A family
+    /// with a lake house goes there every other weekend, and three rows of "A
+    /// weekend in Bay Lake" are one fact said three times. Listed newest first
+    /// once chosen.
+    static func featuredTrips(
+        _ trips: [CollectionSummary], today: Date, heroPlace: String?
+    ) -> [CollectionSummary] {
+        let ranked = trips.sorted { a, b in
+            let (wa, wb) = (weight(a, today: today), weight(b, today: today))
+            return wa != wb ? wa > wb : a.key > b.key
+        }
+        var places = Set(heroPlace.map { [$0] } ?? [])
+        var chosen: [CollectionSummary] = []
+        for trip in ranked where chosen.count < pageTrips {
+            guard places.insert(place(of: trip) ?? trip.key).inserted else { continue }
+            chosen.append(trip)
+        }
+        return chosen.sorted { $0.key > $1.key }
+    }
+
+    /// The holidays and occasions the page itself shows.
+    ///
+    /// Only days that *are* something — a holiday, or a name somebody gave
+    /// them. A busy Tuesday afternoon is a real thing, but on this page it was
+    /// noise: the timeline already has it, and a row that can only say "A busy
+    /// Saturday" is not an offer anyone takes up.
+    ///
+    /// Each occasion once — one Christmas rather than every Christmas in a row,
+    /// which See All has. The one coming up first, then the ones that meant
+    /// most. Listed newest first once chosen.
+    static func featuredOccasions(
+        _ occasions: [Occasion], today: Date,
+        comingUp: CollectionSummary?, heroOccasion: String?
+    ) -> [CollectionSummary] {
+        // What somebody named counts double: they said it mattered.
+        func score(_ candidate: Occasion) -> Double {
+            let base = weight(candidate.summary, today: today)
+            return candidate.summary.isNamed ? base * 2 : base
+        }
+        let ranked = occasions.filter { $0.occasion != nil }.sorted { a, b in
+            let aSoon = a.summary.key == comingUp?.key
+            let bSoon = b.summary.key == comingUp?.key
+            if aSoon != bSoon { return aSoon }
+            let (sa, sb) = (score(a), score(b))
+            return sa != sb ? sa > sb : a.summary.key > b.summary.key
+        }
+        var seen = Set(heroOccasion.map { [$0] } ?? [])
+        var chosen: [CollectionSummary] = []
+        for candidate in ranked where chosen.count < pageOccasions {
+            guard let name = candidate.occasion, seen.insert(name).inserted else { continue }
+            chosen.append(candidate.summary)
+        }
+        return chosen.sorted { $0.key > $1.key }
+    }
+
+    /// How much a trip or an occasion is likely to mean: how many photographs
+    /// it holds, fading gently with age.
+    ///
+    /// Photographs because they are the family's own vote — forty on Labor Day
+    /// means Labor Day mattered, four means it didn't, whatever the calendar
+    /// thinks of it. Fading so that last summer can beat a bigger summer from
+    /// ten years ago, but gently: the fortnight in Maine is still worth offering
+    /// three years on, where a hard cutoff at a year would drop it for a
+    /// four-photo afternoon.
+    static func weight(_ collection: CollectionSummary, today: Date) -> Double {
+        let age = start(of: collection).map { today.timeIntervalSince($0) / (365.25 * 86_400) } ?? 10
+        return Double(collection.count) / (1 + max(age, 0))
+    }
+
+    /// Where a card is — "Nags Head" from "Six days in Nags Head" — for keeping
+    /// one card per place. Nil for cards that aren't anywhere in particular.
+    static func place(of collection: CollectionSummary) -> String? {
+        switch collection.kind {
+        case .trip, .anniversary:
+            return collection.title.range(of: " in ").map {
+                String(collection.title[$0.upperBound...])
+            }
+        case .revisit:
+            return collection.title
+        default:
+            return nil
+        }
+    }
+
+    /// Last year's version of an occasion that is about to come round again —
+    /// Christmas in the weeks before Christmas, a birthday the week before it.
+    ///
+    /// Only an earlier year's, never this year's own: a day that has only just
+    /// happened is still in the timeline, and "remember this" about last
+    /// Tuesday is not a memory. The soonest to come round wins, so the end of
+    /// November brings back Thanksgiving before Christmas.
+    ///
+    /// Strictly ahead of today. On the day itself On This Day already has it.
+    static func comingUp(_ occasions: [Occasion], today: Date) -> CollectionSummary? {
+        guard let from = utc.date(byAdding: .day, value: 1, to: today),
+              let to = utc.date(byAdding: .day, value: 30, to: today),
+              let recent = utc.date(byAdding: .day, value: -60, to: today)
+        else { return nil }
+        let year = utc.component(.year, from: today)
+
+        /// When this occasion next comes round inside the window, if it does.
+        func anniversary(_ started: Date) -> Date? {
+            let parts = utc.dateComponents([.month, .day], from: started)
+            return [year, year + 1].lazy.compactMap { anniversaryYear -> Date? in
+                var probe = DateComponents()
+                probe.year = anniversaryYear
+                probe.month = parts.month
+                probe.day = parts.day
+                // A 29 February probed in a year without one comes back as the
+                // first of March; that is not its anniversary.
+                guard let date = utc.date(from: probe),
+                      utc.component(.day, from: date) == parts.day,
+                      date >= from, date <= to else { return nil }
+                return date
+            }.first
+        }
+
+        // Newest first already, so among equally soon ones the first found is
+        // the latest year's.
+        var best: (date: Date, summary: CollectionSummary)?
+        for candidate in occasions where candidate.occasion != nil {
+            guard let started = start(of: candidate.summary), started < recent,
+                  let next = anniversary(started) else { continue }
+            if best == nil || next < best!.date { best = (next, candidate.summary) }
+        }
+        return best?.summary
+    }
+
+    /// The first day a trip or occasion covers, from its key.
+    static func start(of collection: CollectionSummary) -> Date? {
+        parseDate(String(collection.key.prefix(10)))
     }
 
     // MARK: - On this day
@@ -224,7 +408,7 @@ struct CollectionsController: RouteCollection {
     /// A single day that far away is a day out, not a trip, so a run has to
     /// span at least two.
     private func trips(
-        spaceID: UUID, seed: String, on sql: any SQLDatabase
+        spaceID: UUID, seed: String, holidays: [String: String], on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
         let rows = try await sql.raw("""
@@ -293,13 +477,17 @@ struct CollectionsController: RouteCollection {
                   * cos(radians(p.lon - h.lon))
                   ))) > \(bind: Self.awayKilometers)
             ORDER BY p.day DESC
-            LIMIT 400
+            LIMIT 1000
             """).all(decoding: TripDay.self)
 
+        // A thousand days away rather than four hundred, now that See All
+        // reaches further back than the page does. Day trips count against it
+        // too, and a family that drives to the coast most weekends used those
+        // up within a couple of years.
         return Self.tripRuns(from: rows)
             .filter { $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems }
-            .prefix(8)
-            .map { Self.describeTrip($0) }
+            .prefix(Self.allTripsLimit)
+            .map { Self.describeTrip($0, holidays: holidays) }
     }
 
     /// How far from home stops being an errand.
@@ -332,7 +520,15 @@ struct CollectionsController: RouteCollection {
     /// Duck, and naming it after whichever had the most photographs would be
     /// arbitrary — the trip was to the coast. So several towns inside one region
     /// are named by the region, and a trip that crosses regions says neither.
-    static func describeTrip(_ run: [TripDay]) -> CollectionSummary {
+    ///
+    /// A week or less away over a holiday is named for the holiday — "Christmas
+    /// 2024 in Asheville" is what the family calls it, and the days it covers
+    /// are claimed by the trip, so it is the only card that can say so. A
+    /// fortnight that happens to include Labor Day was not a Labor Day trip, and
+    /// keeps its length.
+    static func describeTrip(
+        _ run: [TripDay], holidays: [String: String] = [:]
+    ) -> CollectionSummary {
         let ordered = run.reversed().map { $0 }        // oldest first
         let count = run.reduce(0) { $0 + $1.count }
         let places = run.flatMap(\.places)
@@ -362,7 +558,18 @@ struct CollectionsController: RouteCollection {
             phrase = "\(spelled(run.count).capitalized) days"
         }
 
-        let title = where_.map { "\(phrase) in \($0)" } ?? "\(phrase) away"
+        let holiday = run.count <= 7
+            ? run.filter { holidays[$0.day] != nil }
+                .max { $0.count < $1.count }
+                .flatMap { day in holidays[day.day].map { "\($0) \(day.day.prefix(4))" } }
+            : nil
+
+        let title: String
+        if let holiday {
+            title = where_.map { "\(holiday) in \($0)" } ?? "\(holiday) away from home"
+        } else {
+            title = where_.map { "\(phrase) in \($0)" } ?? "\(phrase) away"
+        }
 
         var parts: [String] = []
         if let from = ordered.first.flatMap({ parseDate($0.day) }),
@@ -386,7 +593,17 @@ struct CollectionsController: RouteCollection {
         )
     }
 
-    // MARK: - Days worth keeping
+    // MARK: - Holidays and occasions
+
+    /// A day that means something, and what it means.
+    struct Occasion {
+        let summary: CollectionSummary
+        /// What the day *is* — "Christmas", "Mom's birthday" — without its year,
+        /// so the page can offer each occasion once rather than every Christmas
+        /// in a row. Nil for a date that only comes round busy every year,
+        /// which See All offers to be named but the page doesn't lead with.
+        let occasion: String?
+    }
 
     /// Everything a day can say about itself, gathered in one pass.
     ///
@@ -405,53 +622,43 @@ struct CollectionsController: RouteCollection {
         let coverAssetIDs: [UUID]
     }
 
-    /// Days that stand out against *this* library's own baseline.
+    /// Holidays, the days somebody named, and the dates that come round busy
+    /// every year — newest first.
     ///
-    /// A threshold in absolute photos would be wrong for everyone: forty
-    /// pictures is a quiet afternoon to one person and a wedding to another. So
-    /// the bar is a multiple of the library's own median day, which makes a
-    /// birthday legible without knowing it is a birthday.
+    /// Only those, where this used to be every day busier than usual. Busy is
+    /// a fact about a day, not a reason to open it: most of them could only be
+    /// called "A busy Saturday" or "An evening in Culpeper", and a page of those
+    /// read as the library listing what it could compute. A day that is
+    /// *something* — Christmas, "Sarah's engagement", the date you photograph
+    /// every year — is worth a card however busy it was.
     ///
-    /// The median is taken over days that *have* photos rather than over the
-    /// calendar — empty days would drag it to zero and make every day
-    /// exceptional.
+    /// A holiday or a named day clears a low bar: Christmas is not unusual, it
+    /// is expected, and a quiet Christmas with six photographs is still
+    /// Christmas. A date that only recurs has to be busy as well — against this
+    /// library's own median day, because forty pictures is a quiet afternoon to
+    /// one person and a wedding to another — or every date anyone photographs
+    /// most years would qualify.
     ///
-    /// Deliberately fetches far more days than it returns. Consecutive busy days
-    /// are one occasion rather than several, and a Saturday and Sunday that
-    /// arrive as separate cards are a weekend the app failed to notice — so the
-    /// grouping happens after the query and the limit applies to the *runs*.
-    private func busyDays(
-        spaceID: UUID, seed: String, userID: UUID,
-        excluding claimed: Set<String>, on sql: any SQLDatabase
-    ) async throws -> [CollectionSummary] {
+    /// Deliberately fetches far more days than it returns. Consecutive days are
+    /// one occasion rather than several — Christmas Eve into Christmas morning
+    /// is one Christmas — so the grouping happens after the query and the limit
+    /// applies to the *runs*.
+    private func occasions(
+        spaceID: UUID, seed: String, userID: UUID, years: [Int],
+        holidays: [String: String], excluding claimed: Set<String>,
+        on sql: any SQLDatabase
+    ) async throws -> [Occasion] {
         let local = TimelineController.localTime
-
-        // The years the library actually holds, so the holiday table is built
-        // for those and no others.
-        struct YearRow: Decodable { let year: Int }
-        let years = try await sql.raw("""
-            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: local))::int AS year
-            FROM space_assets sa
-            JOIN assets a ON a.id = sa.asset_id
-            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-            """).all(decoding: YearRow.self).map(\.year)
-        let holidays = Holidays.table(forYears: years)
-        let named = try await occasionNames(spaceID: spaceID, userID: userID, on: sql)
+        let named = try await occasionNames(
+            spaceID: spaceID, userID: userID, years: years, on: sql
+        )
         let recurring = try await recurringDates(spaceID: spaceID, on: sql)
 
-        // A named day clears a much lower bar than an ordinary one.
-        //
-        // The busy-day test asks "is this day unusual for this library?", which
-        // is the right question when nothing else is known about it. Christmas
-        // is not unusual — it is *expected* — and a quiet Christmas with six
-        // photographs is still Christmas and still worth a card. Holding it to
-        // three times the median would drop exactly the days people most want
-        // back.
-        //
         // Joined and split rather than interpolated: these strings are
         // machine-generated dates, but a query that builds its own IN list is a
         // habit worth not having.
-        let holidayKeys = holidays.keys.sorted().joined(separator: ",")
+        let special = Set(holidays.keys).union(named.keys).sorted().joined(separator: ",")
+        let annual = recurring.sorted().joined(separator: ",")
 
         let rows = try await sql.raw("""
             WITH per_day AS (
@@ -478,21 +685,70 @@ struct CollectionsController: RouteCollection {
             SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
                    p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs"
             FROM per_day p, baseline b
-            WHERE p.count >= CASE
-                    WHEN p.day = ANY(string_to_array(\(bind: holidayKeys), ','))
-                    THEN \(bind: Self.minimumItems)
-                    ELSE GREATEST(b.median * 3, \(bind: Self.minimumItems * 2))
-                 END
+            WHERE (p.day = ANY(string_to_array(\(bind: special), ','))
+                   AND p.count >= \(bind: Self.minimumItems))
+               OR (substr(p.day, 6) = ANY(string_to_array(\(bind: annual), ','))
+                   AND p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2)))
             ORDER BY p.day DESC
-            LIMIT 60
+            LIMIT 600
             """).all(decoding: DayRow.self)
 
+        // A date that only recurs is offered once, in its latest year: what it
+        // is asking for is a name, and one name covers every year of it.
+        var offered = Set<String>()
         return Self.runs(from: rows.filter { !claimed.contains($0.day) })
             .compactMap {
-                Self.describe($0, holidays: holidays, named: named, recurring: recurring)
+                Self.occasion($0, holidays: holidays, named: named, recurring: recurring)
             }
-            .prefix(6)
+            .filter { candidate in
+                guard candidate.occasion == nil else { return true }
+                return offered.insert(Self.monthDay(String(candidate.summary.key.prefix(10))))
+                    .inserted
+            }
+            .prefix(Self.allOccasionsLimit)
             .map { $0 }
+    }
+
+    /// A run as an occasion: its card, and what it is.
+    static func occasion(
+        _ run: Run,
+        holidays: [String: String],
+        named: [String: String],
+        recurring: Set<String>
+    ) -> Occasion? {
+        guard var summary = describe(
+            run, holidays: holidays, named: named, recurring: recurring
+        ) else { return nil }
+        let name = run.days.compactMap { named[$0.day] }.first
+            ?? holiday(in: run, holidays: holidays)?.name
+
+        // A date photographed every year that nobody has named yet is almost
+        // always a birthday or an anniversary, and saying so is the whole
+        // reason to show it. "A busy Tuesday" told you nothing about why it was
+        // here; this tells you, and the card offers to name it every year.
+        if name == nil, summary.recursAnnually, let day = parseDate(run.first.day) {
+            summary = CollectionSummary(
+                kind: summary.kind, key: summary.key,
+                title: "Every year on \(stampFormatter("d MMMM").string(from: day))",
+                // The place back in: the old title carried it, this one doesn't.
+                subtitle: subtitle(run, place: run.place), count: summary.count,
+                coverAssetIDs: summary.coverAssetIDs, isNamed: summary.isNamed,
+                recursAnnually: summary.recursAnnually
+            )
+        }
+        return Occasion(summary: summary, occasion: name)
+    }
+
+    /// The holiday a run is, if it holds one. Where it holds two — Christmas
+    /// Eve into Christmas morning — the busier names it, because that is the
+    /// one people mean.
+    static func holiday(
+        in run: Run, holidays: [String: String]
+    ) -> (name: String, day: String)? {
+        run.days
+            .filter { holidays[$0.day] != nil }
+            .max { $0.count < $1.count }
+            .flatMap { day in holidays[day.day].map { ($0, day.day) } }
     }
 
     /// A stretch of consecutive busy days, treated as one occasion.
@@ -581,27 +837,24 @@ struct CollectionsController: RouteCollection {
         // doesn't contradict a title that just said so.
         var titleNamedPlace = place != nil
 
-        // A named day wins over everything. "Christmas Day" is a better answer
+        // A named day wins over everything. "Christmas 2024" is a better answer
         // than "An afternoon in Culpeper" even though both are true, and it is
         // the answer somebody scanning the page is actually looking for.
         //
-        // Where a run covers two named days — Christmas Eve into Christmas
-        // morning — the busier one names it, because that is the one people
-        // mean.
         // What somebody typed beats everything the library worked out, including
         // the holiday table. If a person renamed the 25th "Christmas at the
         // lake", that is the better answer and it is not the app's place to
-        // argue.
+        // argue — nor to add a year to it, since renaming starts from the title
+        // and a year would end up typed into a name that applies every year.
         let userName = run.days.compactMap { named[$0.day] }.first
 
         if let userName {
             title = userName
             titleNamedPlace = false
-        } else if let holiday = run.days
-            .filter({ holidays[$0.day] != nil })
-            .max(by: { $0.count < $1.count })
-            .flatMap({ holidays[$0.day] }) {
-            title = holiday
+        } else if let holiday = holiday(in: run, holidays: holidays) {
+            // With its year. "Christmas" alone was a card that could have been
+            // any of ten Christmases until you read the line under it.
+            title = "\(holiday.name) \(holiday.day.prefix(4))"
             titleNamedPlace = false
         } else if run.span > 1 {
             // Only when it can say where, or what kind of stretch it was. A
@@ -747,7 +1000,7 @@ struct CollectionsController: RouteCollection {
     /// A name for a specific year beats the annual one, so "Christmas at the
     /// lake" can apply to 2024 while "Christmas" carries on for every other.
     private func occasionNames(
-        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, years: [Int], on sql: any SQLDatabase
     ) async throws -> [String: String] {
         struct NameRow: Decodable {
             let month: Int
@@ -760,14 +1013,6 @@ struct CollectionsController: RouteCollection {
             WHERE user_id = \(bind: userID) AND space_id = \(bind: spaceID)
             """).all(decoding: NameRow.self)
         guard !rows.isEmpty else { return [:] }
-
-        struct YearRow: Decodable { let year: Int }
-        let years = try await sql.raw("""
-            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year
-            FROM space_assets sa
-            JOIN assets a ON a.id = sa.asset_id
-            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-            """).all(decoding: YearRow.self).map(\.year)
 
         var table: [String: String] = [:]
         // Annual first so a year-specific name written afterwards overwrites it.

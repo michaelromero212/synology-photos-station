@@ -16,15 +16,19 @@ import Foundation
 /// US-centric, which matches the household this is for. The two tables below
 /// are the whole of that assumption — a second region is a second pair of
 /// tables, not a rewrite.
+///
+/// Named the way people say them rather than the way a calendar prints them:
+/// "Christmas", not "Christmas Day"; "the Fourth of July", not "Independence
+/// Day". The card adds the year — see `CollectionsController.describe`.
 enum Holidays {
     /// Days that fall on the same date every year.
     private static let fixed: [(monthDay: String, name: String)] = [
         ("01-01", "New Year's Day"),
         ("02-14", "Valentine's Day"),
-        ("07-04", "Independence Day"),
+        ("07-04", "Fourth of July"),
         ("10-31", "Halloween"),
         ("12-24", "Christmas Eve"),
-        ("12-25", "Christmas Day"),
+        ("12-25", "Christmas"),
         ("12-31", "New Year's Eve"),
     ]
 

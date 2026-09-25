@@ -58,10 +58,10 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     public let count: Int
     /// The photographs worth putting on the card, best first.
     ///
-    /// Several rather than one because the hero cycles through them. The rows
-    /// take `coverAssetID` and hold still — eight tiles crossfading at
-    /// different offsets is the noise this page exists to avoid, and a rotating
-    /// tile costs five thumbnails where a still one costs a single.
+    /// Several rather than one so a card whose first choice can't be drawn has
+    /// the next to fall back on. Only one is ever shown, and it holds still —
+    /// the hero used to crossfade through these, and motion on the card at the
+    /// top of the page read as the page not having finished arriving.
     public let coverAssetIDs: [UUID]
 
     /// The one to use where only one is wanted.
@@ -76,13 +76,21 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     /// photographs on it most years — which is exactly when "name this every
     /// year" is the offer worth making rather than a question out of nowhere.
     public let recursAnnually: Bool
+    /// Why this card is the one on top today, in the server's words —
+    /// "CHRISTMAS IS COMING UP" — where the kind alone can't say. Nil for the
+    /// app's own line for the kind.
+    ///
+    /// Optional so a server that predates it, and a client that ignores it,
+    /// both carry on.
+    public let kicker: String?
 
     public var id: String { "\(kind.rawValue):\(key)" }
 
     public init(
         kind: CollectionKind, key: String, title: String,
         subtitle: String?, count: Int, coverAssetIDs: [UUID],
-        isNamed: Bool = false, recursAnnually: Bool = false
+        isNamed: Bool = false, recursAnnually: Bool = false,
+        kicker: String? = nil
     ) {
         self.kind = kind
         self.key = key
@@ -92,6 +100,16 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         self.coverAssetIDs = coverAssetIDs
         self.isNamed = isNamed
         self.recursAnnually = recursAnnually
+        self.kicker = kicker
+    }
+
+    /// The same card with a different line above its title.
+    public func withKicker(_ kicker: String?) -> CollectionSummary {
+        CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker
+        )
     }
 }
 
@@ -127,9 +145,14 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// when there is one, otherwise the most recent trip — the app draws
     /// whatever it is given rather than re-deciding.
     public let hero: CollectionSummary?
+    /// The few trips worth a row on the page — never every trip. See
+    /// `allTrips` for the rest.
     public let trips: [CollectionSummary]
+    /// The few holidays and occasions worth a row on the page. The field keeps
+    /// the name it shipped with, from when it held busy days.
     public let days: [CollectionSummary]
-    /// Places the library knows well and hasn't seen in years.
+    /// Places the library knows well and hasn't seen in years. Empty from
+    /// servers that offer these only as the hero.
     public let revisits: [CollectionSummary]
     /// Videos, panoramas, bursts and the rest — the file-shaped things.
     ///
@@ -152,12 +175,23 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// Its own field for the same reason as `recentlyAdded`: an older client
     /// ignores a key it doesn't know and so never meets the new kind.
     public let favorites: CollectionSummary?
+    /// Every trip the library found, newest first — what "See All" opens.
+    /// `trips` is a few chosen from these.
+    ///
+    /// Optional, and its own field, for the same reason as `recentlyAdded`: an
+    /// older client ignores it, and a newer one talking to an older server
+    /// finds nil and simply offers no "See All".
+    public let allTrips: [CollectionSummary]?
+    /// Every holiday and occasion, newest first — what "See All" opens under
+    /// `days`.
+    public let allOccasions: [CollectionSummary]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
+        case allTrips, allOccasions
     }
 
     public init(
@@ -168,7 +202,9 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         mediaTypes: [CollectionSummary] = [],
         recentlyDeleted: CollectionSummary?,
         recentlyAdded: CollectionSummary? = nil,
-        favorites: CollectionSummary? = nil
+        favorites: CollectionSummary? = nil,
+        allTrips: [CollectionSummary]? = nil,
+        allOccasions: [CollectionSummary]? = nil
     ) {
         self.hero = hero
         self.trips = trips
@@ -178,6 +214,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.recentlyDeleted = recentlyDeleted
         self.recentlyAdded = recentlyAdded
         self.favorites = favorites
+        self.allTrips = allTrips
+        self.allOccasions = allOccasions
     }
 
     /// Whether the page has anything to *show* — as opposed to anything at all.

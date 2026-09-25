@@ -387,61 +387,73 @@ struct AlbumsView: View {
         }
     }
 
-    /// Everything else the server worked out. Each section is absent rather than
-    /// empty when it found nothing — a heading with nothing under it is worse
-    /// than no heading.
+    /// Everything else the server worked out: a few trips and a few occasions,
+    /// each with the way to the rest. Each section is absent rather than empty
+    /// when it found nothing — a heading with nothing under it is worse than no
+    /// heading.
+    ///
+    /// A few, on purpose. This used to be every trip, every busy day and every
+    /// place you hadn't been in years — up to eighteen rows before your own
+    /// albums — and it was overwhelming. The server now chooses the ones that
+    /// meant most; see `CollectionsController.featuredTrips`.
     @ViewBuilder
     private func automatic(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
-        // Trips before days: a fortnight away is a bigger thing than a busy
-        // Saturday, and the page should be ordered by what mattered rather than
-        // by what happened most recently.
+        // Trips before occasions: a fortnight away is a bigger thing than most
+        // single days, and the page should be ordered by what mattered rather
+        // than by what happened most recently.
         if !found.trips.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Trips")
-                ForEach(found.trips) { trip in
-                    NavigationLink {
-                        CollectionDetailView(session: session, space: space, collection: trip)
-                    } label: {
-                        CollectionRowCard(collection: trip, loader: session.loader)
-                            .padding(.horizontal, spacing)
-                            .padding(.vertical, 9)
-                    }
-                    .buttonStyle(.plain)
-                    .nameable(trip) { naming = $0 }
-                }
-            }
+            curated(
+                "Trips", found.trips, all: found.allTrips, space: space,
+                seeAll: \.allTrips
+            )
         }
-
-        if !found.revisits.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("You haven't been in a while")
-                ForEach(found.revisits) { place in
-                    NavigationLink {
-                        CollectionDetailView(session: session, space: space, collection: place)
-                    } label: {
-                        CollectionRowCard(collection: place, loader: session.loader)
-                            .padding(.horizontal, spacing)
-                            .padding(.vertical, 9)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-
         if !found.days.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Days worth keeping")
-                ForEach(found.days) { day in
+            curated(
+                "Holidays & Occasions", found.days, all: found.allOccasions, space: space,
+                seeAll: \.allOccasions
+            )
+        }
+    }
+
+    /// A handful of rows the server chose, under a heading that leads to the
+    /// rest when there is more.
+    private func curated(
+        _ title: String, _ rows: [CollectionSummary], all: [CollectionSummary]?,
+        space: SpaceDTO, seeAll: KeyPath<CollectionsResponse, [CollectionSummary]?>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                sectionHeader(title)
+                Spacer(minLength: 8)
+                // Only when See All would show something the page doesn't. A
+                // server that predates it sends no list, and then there is no
+                // button rather than one leading to an empty screen.
+                if let all, all.count > rows.count, let collections {
                     NavigationLink {
-                        CollectionDetailView(session: session, space: space, collection: day)
+                        CollectionListView(
+                            session: session, space: space, title: title,
+                            store: collections, list: seeAll
+                        )
                     } label: {
-                        CollectionRowCard(collection: day, loader: session.loader)
-                            .padding(.horizontal, spacing)
-                            .padding(.vertical, 9)
+                        Text("See All")
+                            .font(.body)
+                            .foregroundStyle(.tint)
                     }
                     .buttonStyle(.plain)
-                    .nameable(day) { naming = $0 }
+                    .padding(.horizontal, spacing)
+                    .padding(.bottom, 10)
                 }
+            }
+            ForEach(rows) { row in
+                NavigationLink {
+                    CollectionDetailView(session: session, space: space, collection: row)
+                } label: {
+                    CollectionRowCard(collection: row, loader: session.loader)
+                        .padding(.horizontal, spacing)
+                        .padding(.vertical, 9)
+                }
+                .buttonStyle(.plain)
+                .nameable(row) { naming = $0 }
             }
         }
     }
