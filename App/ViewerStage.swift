@@ -98,7 +98,8 @@ final class ViewerStage {
         backdrop = 0
         flight = Flight(
             image: image, frame: tile,
-            target: fitted(aspect: photo.item.aspectRatio), isClosing: false
+            target: fitted(aspect: Self.shape(of: image, else: photo.item.aspectRatio)),
+            isClosing: false
         )
     }
 
@@ -160,7 +161,7 @@ final class ViewerStage {
     func close(current item: TimelineItem, image: UIImage?) {
         guard opened != nil, !isClosing else { return }
         isClosing = true
-        let start = displayedFrame(aspect: item.aspectRatio)
+        let start = displayedFrame(aspect: Self.shape(of: image, else: item.aspectRatio))
         // Asked for before anything moves: this is what scrolls the grid to
         // the tile, if it has to, while the viewer still covers it.
         let target = tileFrame(item)
@@ -192,6 +193,22 @@ final class ViewerStage {
     }
 
     // MARK: - Geometry
+
+    /// A photo's shape, width over height, as the viewer will draw it: read
+    /// off the picture itself, which the NAS renders upright, rather than the
+    /// library's record of the photo's dimensions.
+    ///
+    /// The record can be a quarter turn out. A portrait iPhone photo is stored
+    /// sideways with an instruction to turn it, and when the phone's own
+    /// upright dimensions were recorded alongside that instruction, the
+    /// record said landscape for a photo that shows portrait. Flying to that
+    /// shape cropped the photo into a wide band on the way open, before the
+    /// viewer showed it the right way up — every portrait photo, every time.
+    /// The record is the fallback for when there is no picture to go by.
+    private static func shape(of image: UIImage?, else recorded: Double) -> Double {
+        guard let size = image?.size, size.width > 0, size.height > 0 else { return recorded }
+        return Double(size.width / size.height)
+    }
 
     /// Where a photo of this shape sits when it fills the screen: fitted, and
     /// centered, the way the viewer draws it.
