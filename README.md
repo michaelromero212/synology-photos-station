@@ -245,6 +245,18 @@ Backfill assets that predate geocoding, or re-run after a dataset update:
 docker compose exec server ./FrameStationServer geocode
 ```
 
+Correct photos whose size was recorded a quarter turn out — portrait iPhone
+photos backed up before uploads reconciled PhotoKit's upright size with the
+file's orientation, which reported them landscape (the Information panel said
+4032 × 3024; the justified grid on the Mac and the television laid them out
+wide). Reads each file, writes only the two numbers, and announces every
+change so apps redraw. Try it dry first; a second run finds nothing to do:
+
+```bash
+docker compose exec server ./FrameStationServer repair-dimensions --dry-run
+docker compose exec server ./FrameStationServer repair-dimensions
+```
+
 ### Smoke test
 
 With the server running against a **freshly migrated, empty** database:

@@ -47,6 +47,34 @@ public enum ExifOrientation {
         return (height, width)
     }
 
+    /// The dimensions to record for a file: a size already known, turned to
+    /// lie the way the file's own pixels do.
+    ///
+    /// Stored dimensions are the pixel grid, and the orientation says how to
+    /// turn it — see `displaySize`. A phone knows the size exactly (PhotoKit's
+    /// numbers, RAW included) but reports it upright, while a portrait iPhone
+    /// photo keeps its pixels sideways with orientation 6. Recording the
+    /// upright numbers beside the file's orientation turned the photo a second
+    /// time, and every portrait shot came out landscape.
+    ///
+    /// So the recorded numbers are kept, and turned when they disagree with
+    /// the file about which side is the long one. A square has no long side to
+    /// disagree about. When the record is incomplete, the file's own
+    /// dimensions stand in.
+    public static func fileOrientedSize(
+        recorded: (width: Int?, height: Int?),
+        file: (width: Int?, height: Int?)
+    ) -> (width: Int?, height: Int?) {
+        guard let width = recorded.width, let height = recorded.height else {
+            return file.width != nil && file.height != nil ? file : recorded
+        }
+        guard let fileWidth = file.width, let fileHeight = file.height,
+              width != height, fileWidth != fileHeight,
+              (width > height) != (fileWidth > fileHeight)
+        else { return (width, height) }
+        return (height, width)
+    }
+
     /// Display aspect ratio, or nil when the dimensions aren't known.
     public static func aspectRatio(
         width: Int?, height: Int?, orientation: Int?

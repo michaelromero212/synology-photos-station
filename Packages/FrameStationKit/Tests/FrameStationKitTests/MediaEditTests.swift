@@ -93,6 +93,66 @@ final class MediaEditTests: XCTestCase {
         XCTAssertNil(ExifOrientation.aspectRatio(width: 0, height: 100, orientation: 1))
     }
 
+    /// The bug `fileOrientedSize` exists for, end to end: PhotoKit reports a
+    /// portrait photo upright, 3024×4032, while the file keeps its pixels
+    /// 4032×3024 with orientation 6. Recorded as the phone said, the photo is
+    /// turned twice and reported landscape; recorded the file's way round, it
+    /// reports portrait.
+    func testPhoneSizeIsTurnedToLieTheWayTheFileDoes() {
+        let phone: (width: Int?, height: Int?) = (3024, 4032)
+        let file: (width: Int?, height: Int?) = (4032, 3024)
+
+        let asPhoneSaid = ExifOrientation.aspectRatio(width: 3024, height: 4032, orientation: 6)
+        XCTAssertGreaterThan(asPhoneSaid ?? 0, 1, "the bug: upright numbers turned again read landscape")
+
+        let recorded = ExifOrientation.fileOrientedSize(recorded: phone, file: file)
+        XCTAssertEqual(recorded.width, 4032)
+        XCTAssertEqual(recorded.height, 3024)
+        let ratio = ExifOrientation.aspectRatio(
+            width: recorded.width, height: recorded.height, orientation: 6
+        )
+        XCTAssertLessThan(ratio ?? 99, 1, "recorded the file's way round, it reports portrait")
+    }
+
+    /// The phone's numbers are kept — they are exact where a file's can be a
+    /// preview's — and only their order follows the file.
+    func testRecordedSizeKeepsItsNumbersWhenItAgreesWithTheFile() {
+        let agreeing = ExifOrientation.fileOrientedSize(
+            recorded: (4032, 3024), file: (1024, 768)
+        )
+        XCTAssertEqual(agreeing.width, 4032)
+        XCTAssertEqual(agreeing.height, 3024)
+
+        let turned = ExifOrientation.fileOrientedSize(recorded: (3024, 4032), file: (1024, 768))
+        XCTAssertEqual(turned.width, 4032)
+        XCTAssertEqual(turned.height, 3024)
+    }
+
+    /// A square has no long side to disagree about, and nothing is invented
+    /// when either side is unknown.
+    func testSquaresAndUnknownsAreNotTurned() {
+        let square = ExifOrientation.fileOrientedSize(recorded: (3000, 3000), file: (4000, 3000))
+        XCTAssertEqual(square.width, 3000)
+        XCTAssertEqual(square.height, 3000)
+
+        let squareFile = ExifOrientation.fileOrientedSize(recorded: (3024, 4032), file: (500, 500))
+        XCTAssertEqual(squareFile.width, 3024)
+        XCTAssertEqual(squareFile.height, 4032)
+
+        let fileUnknown = ExifOrientation.fileOrientedSize(recorded: (3024, 4032), file: (nil, nil))
+        XCTAssertEqual(fileUnknown.width, 3024)
+        XCTAssertEqual(fileUnknown.height, 4032)
+
+        // A Mac upload records no size; the file's stands in.
+        let recordedUnknown = ExifOrientation.fileOrientedSize(recorded: (nil, nil), file: (4032, 3024))
+        XCTAssertEqual(recordedUnknown.width, 4032)
+        XCTAssertEqual(recordedUnknown.height, 3024)
+
+        let bothUnknown = ExifOrientation.fileOrientedSize(recorded: (nil, nil), file: (nil, 300))
+        XCTAssertNil(bothUnknown.width)
+        XCTAssertNil(bothUnknown.height)
+    }
+
     // MARK: - Capture time
 
     func testShiftMovesEverythingAndKeepsTheGaps() {

@@ -50,6 +50,12 @@ actor DerivationWorker {
         let spaceID: UUID
     }
 
+    /// The size on record, before a probe's is reconciled with it.
+    private struct RecordedSize: Decodable {
+        let width: Int?
+        let height: Int?
+    }
+
     func start() {
         guard !running else { return }
         running = true
@@ -311,9 +317,14 @@ actor DerivationWorker {
     // MARK: - Shared helpers
 
     /// Client-supplied values win where the device is authoritative — capture
-    /// time and dimensions come from `PHAsset`, which is reliable where EXIF is
-    /// often absent or timezone-naive. Everything else is server-only, so the
-    /// probe fills it in without clobbering anything on a re-run.
+    /// time comes from `PHAsset`, which is reliable where EXIF is often absent
+    /// or timezone-naive. Everything else is server-only, so the probe fills it
+    /// in without clobbering anything on a re-run.
+    ///
+    /// Dimensions are both. `PHAsset`'s numbers are kept, but turned to lie
+    /// the way the file's pixels do, because the orientation recorded beside
+    /// them is the file's — see `ExifOrientation.fileOrientedSize`. Kept as
+    /// the phone said them, every portrait iPhone photo reported landscape.
     static func applyMetadata(
         _ metadata: MediaProbe.Metadata,
         assetID: UUID,
@@ -344,10 +355,18 @@ actor DerivationWorker {
             exifValue = nil
         }
 
+        let recorded = try await sql.raw("""
+            SELECT width, height FROM assets WHERE id = \(bind: assetID)
+            """).first(decoding: RecordedSize.self)
+        let size = ExifOrientation.fileOrientedSize(
+            recorded: (recorded?.width, recorded?.height),
+            file: (metadata.width, metadata.height)
+        )
+
         try await sql.raw("""
             UPDATE assets SET
-                width           = COALESCE(width, \(bind: metadata.width)),
-                height          = COALESCE(height, \(bind: metadata.height)),
+                width           = \(bind: size.width),
+                height          = \(bind: size.height),
                 duration_ms     = COALESCE(duration_ms, \(bind: metadata.durationMs)),
                 -- Client date first, then EXIF, then the file's own creation
                 -- date the client sent as a fallback (0021): a screenshot has

@@ -53,6 +53,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(ImportCommand(), as: "import")
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")
+    app.asyncCommands.use(RepairDimensionsCommand(), as: "repair-dimensions")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())
