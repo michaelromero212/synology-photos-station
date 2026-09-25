@@ -151,7 +151,7 @@ enum Shell {
         resolve(executable) != nil
     }
 
-    private static func resolve(_ executable: String) -> URL? {
+    static func resolve(_ executable: String) -> URL? {
         if executable.hasPrefix("/") {
             return FileManager.default.isExecutableFile(atPath: executable)
                 ? URL(fileURLWithPath: executable) : nil

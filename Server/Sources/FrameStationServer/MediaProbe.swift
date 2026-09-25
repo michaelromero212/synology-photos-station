@@ -73,11 +73,21 @@ struct MediaProbe {
     ]
 
     private static func probePhoto(_ url: URL, dumpExif: Bool) async throws -> Metadata {
-        let result = try await Shell.runChecked(
-            "exiftool", ["-json", "-q"] + exifTags + [url.path], timeout: 60
-        )
+        let arguments = ["-json", "-q"] + exifTags + [url.path]
+        let printed: Data
+        // On a request path — a commit someone's phone is waiting on — the
+        // exiftool already running answers, without Perl starting first. The
+        // background worker keeps starting its own: at low priority, where it
+        // belongs, and not queued behind the uploads. Anything wrong with the
+        // running one and this is the one-shot run it always was.
+        if !Shell.isBackground,
+           let answer = try? await ExifToolDaemon.shared.run(arguments) {
+            printed = answer
+        } else {
+            printed = try await Shell.runChecked("exiftool", arguments, timeout: 60).stdout
+        }
         guard
-            let array = try JSONSerialization.jsonObject(with: result.stdout) as? [[String: Any]],
+            let array = try JSONSerialization.jsonObject(with: printed) as? [[String: Any]],
             let fields = array.first
         else {
             return Metadata()
