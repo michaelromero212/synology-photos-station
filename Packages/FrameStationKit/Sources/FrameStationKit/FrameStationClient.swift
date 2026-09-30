@@ -132,8 +132,9 @@ public actor FrameStationClient {
         )
     }
 
-    /// Removes a photo from a library. The file moves to `#recycle`; the
-    /// record of the removal is what stops backup putting it back.
+    /// Removes a photo from a library. It waits in Recently Deleted for
+    /// `Retention.days` before it is purged; the record of the removal is what
+    /// stops backup putting it back.
     public func removeAsset(spaceID: UUID, assetID: UUID) async throws {
         try await sendNoContent(
             .delete, "v1/spaces/\(spaceID.uuidString)/assets/\(assetID.uuidString)",

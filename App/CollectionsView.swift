@@ -759,107 +759,117 @@ private struct DaysRemainingBadge: View {
     }
 }
 
+/// Everything removed from a library and still recoverable.
+///
+/// Laid out the way Photos lays out the same room, because it is the one
+/// people already know: a count, every item with the days it has left, and
+/// Select — which is where Recover All and Delete All live, the two things this
+/// page exists for. It used to have no Select at all: tapping a tile quietly
+/// toggled it, every unpicked tile was drawn at half opacity, and the only hint
+/// was a footnote telling you to select with a button that wasn't there.
+///
+/// Tapping an item starts a selection with it, since there is nothing to open —
+/// a removed photo's original and preview stay off limits until it is put
+/// back. On a television this is a place to look, not to act, like the rest of
+/// the app there: the countdowns without the controls.
 struct RecentlyDeletedView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
 
     @State private var items: [TimelineItem] = []
     @State private var isLoading = true
-    @State private var selection: Set<UUID> = []
-    @State private var isRestoring = false
-    @State private var isPurging = false
-    @State private var confirmPurge = false
+    @State private var loadError: String?
     @State private var notice: String?
-
-    private var isWorking: Bool { isRestoring || isPurging }
+    #if !os(tvOS)
+    @State private var isSelecting = false
+    /// `assets.id` — what restore and purge take.
+    @State private var picked: Set<UUID> = []
+    @State private var working: Action?
+    @State private var confirming: Action?
+    #endif
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
 
     var body: some View {
-        Group {
-            if isLoading, items.isEmpty {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if items.isEmpty {
-                ContentUnavailableView {
-                    Label("Nothing Removed", systemImage: "trash")
-                } description: {
-                    Text(
-                        "Photos you remove from \(space.name) wait here for "
-                        + "\(Retention.days) days before they go for good."
-                    )
-                }
-            } else {
-                grid
+        content
+            .navigationTitle("Recently Deleted")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .sensoryFeedback(.selection, trigger: picked)
+            #endif
+            #if os(tvOS)
+            .floatingTabBarClearance()
+            #else
+            // The floating tab bar steps aside while selecting and the bar with
+            // Recover and Delete takes its place — the same exchange the library
+            // grid makes. See `FloatingTabBar`.
+            .floatingTabBarClearance(when: !isSelecting)
+            .floatingTabBarHidden(whileSelecting: isSelecting)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if isSelecting { actionBar }
             }
-        }
-        .navigationTitle("Recently Deleted")
-        // The floating tab bar is drawn over this — see `FloatingTabBar`.
-        .floatingTabBarClearance()
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar {
-            if !selection.isEmpty {
-                // Recover on the right, the primary way out of this room; Delete
-                // to its left, destructive, the same arrangement Photos uses.
-                ToolbarItem(placement: .destructiveAction) {
-                    Button("Delete \(selection.count)", role: .destructive) {
-                        confirmPurge = true
-                    }
-                    .disabled(isWorking)
+            .navigationBarBackButtonHidden(isSelecting)
+            .toolbar { toolbar }
+            // Permanent delete skips the 29-day net, so it always asks first.
+            // Recovering what you picked doesn't — putting a photo back is
+            // undone by deleting it again — but Recover All asks, because
+            // everything is a lot to put back by accident.
+            .confirmationDialog(
+                confirmationTitle,
+                isPresented: Binding(
+                    get: { confirming != nil },
+                    set: { if !$0 { confirming = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: confirming
+            ) { action in
+                switch action {
+                case .delete:
+                    Button("Delete Permanently", role: .destructive) { perform(action) }
+                case .recover:
+                    Button("Recover All") { perform(action) }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(isRestoring ? "Recovering…" : "Recover \(selection.count)") {
-                        restore()
-                    }
-                    .disabled(isWorking)
-                    .fontWeight(.semibold)
-                }
+                Button("Cancel", role: .cancel) {}
+            } message: { action in
+                Text(confirmationMessage(action))
             }
+            #endif
+            .task { await load() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isLoading, items.isEmpty {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let loadError, items.isEmpty {
+            // Not "Nothing Removed": an unreachable NAS used to land here as an
+            // empty bin, which is a false answer to the question on screen.
+            ContentUnavailableView {
+                Label("Couldn't Load Recently Deleted", systemImage: "exclamationmark.icloud")
+            } description: {
+                Text(loadError)
+            } actions: {
+                Button("Try Again") { Task { await load() } }
+            }
+        } else if items.isEmpty {
+            ContentUnavailableView {
+                Label("No Recently Deleted Items", systemImage: "trash")
+            } description: {
+                Text(
+                    "Items you delete from \(space.name) stay here for "
+                    + "\(Retention.days) days before they're deleted for good."
+                )
+            }
+        } else {
+            grid
         }
-        // Permanent delete skips the 29-day net, so it asks first. Recover
-        // doesn't — putting a photo back is safe and undoable by deleting again.
-        .confirmationDialog(
-            selection.count == 1
-                ? "Delete this photo permanently?"
-                : "Delete \(selection.count) photos permanently?",
-            isPresented: $confirmPurge,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Permanently", role: .destructive) { purge() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "This can't be undone. "
-                + (selection.count == 1 ? "It's removed" : "They're removed")
-                + " from your NAS right away, without waiting out the \(Retention.days)-day window."
-            )
-        }
-        .task { await load() }
     }
 
     private var grid: some View {
         GeometryReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if let notice {
-                        Text(notice)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                    }
-                    // A countdown, now that there is one to state.
-                    //
-                    // This deliberately said nothing about time while the bin
-                    // was DSM's and emptied on DSM's schedule — a number the
-                    // app could not enforce would have been a promise it had no
-                    // way to keep. FrameStation owns the window now and the
-                    // sweeper holds it, so the days on these tiles are real.
-                    Text("Photos are kept for \(Retention.days) days. Select to recover, or delete for good.")
-                        .font(.footnote)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 12).padding(.bottom, 6)
-
+                    header
                     PhotoGridSection(
                         entries: items.map { GridEntry.item($0) },
                         width: proxy.size.width,
@@ -868,71 +878,269 @@ struct RecentlyDeletedView: View {
                         columns: TimelineZoom.day.columns
                     ) { entry, size in
                         if case .item(let item) = entry {
-                            PhotoCell(item: item, loader: session.loader, size: size)
-                                .opacity(selection.contains(item.assetID) ? 1 : 0.55)
-                                // Both badges sit outside the dimming, so the
-                                // number stays readable on a tile that is
-                                // deliberately faded for not being selected.
-                                .overlay(alignment: .bottomLeading) {
-                                    if let days = item.daysUntilPurge {
-                                        DaysRemainingBadge(days: days)
-                                            .padding(5)
-                                    }
-                                }
-                                .overlay(alignment: .bottomTrailing) {
-                                    if selection.contains(item.assetID) {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(.white, .tint)
-                                            .padding(5)
-                                    }
-                                }
-                                .onTapGesture {
-                                    if selection.contains(item.assetID) {
-                                        selection.remove(item.assetID)
-                                    } else {
-                                        selection.insert(item.assetID)
-                                    }
-                                }
+                            tile(item, size: size)
                         }
                     }
                     .padding(.horizontal, spacing)
                 }
             }
+            #if os(iOS)
+            .refreshable { await load() }
+            #endif
         }
     }
+
+    /// The count, what the numbers on the tiles mean, and what just happened.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let notice {
+                Label(notice, systemImage: "checkmark.circle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 4)
+            }
+            Text(items.count == 1 ? "1 Item" : "\(items.count) Items")
+                .font(.headline)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+            Text("Each item shows the days left before it's deleted for good.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private func daysBadge(_ item: TimelineItem) -> some View {
+        if let days = item.daysUntilPurge {
+            DaysRemainingBadge(days: days).padding(5)
+        }
+    }
+
+    #if os(tvOS)
+    private func tile(_ item: TimelineItem, size: CGSize) -> some View {
+        PhotoCell(item: item, loader: session.loader, size: size)
+            .overlay(alignment: .bottomLeading) { daysBadge(item) }
+    }
+    #else
+    /// Styled exactly as the library grid styles a selection: the circle at the
+    /// top left, a picked tile dimmed. The countdown sits above the dimming so
+    /// it stays readable on a tile you have chosen.
+    private func tile(_ item: TimelineItem, size: CGSize) -> some View {
+        let isPicked = picked.contains(item.assetID)
+        return PhotoCell(item: item, loader: session.loader, size: size)
+            .overlay {
+                if isPicked { Rectangle().fill(.black.opacity(0.25)) }
+            }
+            .overlay(alignment: .bottomLeading) { daysBadge(item) }
+            .overlay(alignment: .topLeading) {
+                if isSelecting { SelectionMark(isPicked: isPicked).padding(5) }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { tap(item) }
+            .accessibilityAddTraits(isPicked ? .isSelected : [])
+    }
+
+    // MARK: - Selecting
+
+    private enum Action: Equatable {
+        case recover(all: Bool)
+        case delete(all: Bool)
+    }
+
+    private var isWorking: Bool { working != nil }
+    private var allPicked: Bool { !items.isEmpty && picked.count == items.count }
+    /// A viewer can see what was removed but, like everywhere else in a
+    /// library they only view, can't change it.
+    private var canEdit: Bool { space.role != .viewer }
+
+    private func tap(_ item: TimelineItem) {
+        guard canEdit, !isWorking else { return }
+        notice = nil
+        isSelecting = true
+        if picked.contains(item.assetID) {
+            picked.remove(item.assetID)
+        } else {
+            picked.insert(item.assetID)
+        }
+    }
+
+    private func endSelection() {
+        isSelecting = false
+        picked.removeAll()
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        if isSelecting {
+            ToolbarItem(placement: .navigation) {
+                Button(allPicked ? "Deselect All" : "Select All") {
+                    picked = allPicked ? [] : Set(items.map(\.assetID))
+                }
+                .keyboardShortcut("a", modifiers: .command)
+                .disabled(isWorking)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Cancel") { endSelection() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isWorking)
+            }
+        }
+        if !isSelecting, canEdit {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Select") {
+                    notice = nil
+                    isSelecting = true
+                }
+                .disabled(items.isEmpty)
+            }
+        }
+    }
+
+    /// Delete on the left, destructive; Recover on the right, the way out of
+    /// this room — the arrangement Photos uses. With nothing picked they act
+    /// on everything, which is what the page's two jobs actually are.
+    private var actionBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                confirming = .delete(all: picked.isEmpty)
+            } label: {
+                Text(picked.isEmpty ? "Delete All" : "Delete")
+                    .frame(maxWidth: .infinity)
+            }
+            .foregroundStyle(.red)
+
+            Group {
+                if working != nil {
+                    ProgressView()
+                } else {
+                    Text(picked.isEmpty ? "Select Items" : "\(picked.count) Selected")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            Button {
+                if picked.isEmpty {
+                    confirming = .recover(all: true)
+                } else {
+                    perform(.recover(all: false))
+                }
+            } label: {
+                Text(picked.isEmpty ? "Recover All" : "Recover")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+            }
+            .foregroundStyle(.tint)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 14)
+        .glassBackground(
+            in: RoundedRectangle(cornerRadius: 26, style: .continuous),
+            interactive: false,
+            fallback: .regularMaterial
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 4)
+        .disabled(isWorking || items.isEmpty)
+    }
+
+    /// How many a confirmation is about: what is picked, or everything.
+    private var targetCount: Int { picked.isEmpty ? items.count : picked.count }
+
+    private var confirmationTitle: String {
+        let n = targetCount
+        switch confirming {
+        case .delete:
+            return n == 1 ? "Delete this item permanently?" : "Delete \(n) items permanently?"
+        case .recover:
+            return n == 1 ? "Recover this item?" : "Recover all \(n) items?"
+        case nil:
+            return ""
+        }
+    }
+
+    private func confirmationMessage(_ action: Action) -> String {
+        switch action {
+        case .delete:
+            return "This can't be undone. "
+                + (targetCount == 1 ? "It's" : "They're")
+                + " removed from your NAS right away, without waiting out the "
+                + "\(Retention.days)-day window."
+        case .recover:
+            return "They go back to \(space.name), where they were."
+        }
+    }
+
+    private func perform(_ action: Action) {
+        guard let client = session.client, !isWorking else { return }
+        let all = picked.isEmpty
+        let first = all ? items.map(\.assetID) : Array(picked)
+        guard !first.isEmpty else { return }
+        working = action
+        Task {
+            var batch = first
+            var total = 0
+            do {
+                while !batch.isEmpty {
+                    let result: MediaEditResponse
+                    switch action {
+                    case .recover:
+                        result = try await client.restore(spaceID: space.id, assetIDs: batch)
+                    case .delete:
+                        result = try await client.purge(spaceID: space.id, assetIDs: batch)
+                    }
+                    total += result.updated
+                    // "All" means all, not the first page: this list holds at
+                    // most 500, and a fuller bin has more behind them.
+                    guard all, result.updated > 0 else { break }
+                    await load()
+                    batch = items.map(\.assetID)
+                }
+                switch action {
+                case .recover:
+                    notice = total == 1 ? "1 item recovered." : "\(total) items recovered."
+                case .delete:
+                    notice = total == 1
+                        ? "1 item deleted permanently." : "\(total) items deleted permanently."
+                }
+            } catch {
+                notice = "That didn't finish: \(error.localizedDescription)"
+            }
+            working = nil
+            endSelection()
+            await load()
+        }
+    }
+    #endif
 
     private func load() async {
-        guard let client = session.client else { return }
+        guard let client = session.client else {
+            isLoading = false
+            return
+        }
         isLoading = true
         defer { isLoading = false }
-        items = (try? await client.deletedItems(spaceID: space.id).items) ?? []
-    }
-
-    private func restore() {
-        guard let client = session.client, !selection.isEmpty else { return }
-        isRestoring = true
-        let chosen = Array(selection)
-        Task {
-            defer { isRestoring = false }
-            let result = try? await client.restore(spaceID: space.id, assetIDs: chosen)
-            let n = result?.updated ?? 0
-            notice = n == 1 ? "1 photo put back." : "\(n) photos put back."
-            selection.removeAll()
-            await load()
-        }
-    }
-
-    private func purge() {
-        guard let client = session.client, !selection.isEmpty else { return }
-        isPurging = true
-        let chosen = Array(selection)
-        Task {
-            defer { isPurging = false }
-            let result = try? await client.purge(spaceID: space.id, assetIDs: chosen)
-            let n = result?.updated ?? 0
-            notice = n == 1 ? "1 photo deleted permanently." : "\(n) photos deleted permanently."
-            selection.removeAll()
-            await load()
+        do {
+            items = try await client.deletedItems(spaceID: space.id).items
+            loadError = nil
+            #if !os(tvOS)
+            // Anything recovered or purged from another device is no longer
+            // here to pick.
+            let present = Set(items.map(\.assetID))
+            picked = picked.filter { present.contains($0) }
+            if items.isEmpty { isSelecting = false }
+            #endif
+        } catch {
+            // Keeps what is on screen: a blip shouldn't empty a page of things
+            // someone is in the middle of deciding about.
+            loadError = error.localizedDescription
         }
     }
 }

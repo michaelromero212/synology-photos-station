@@ -1326,12 +1326,16 @@ struct CollectionsController: RouteCollection {
         let coverAssetID: UUID?
     }
 
-    /// Removals inside their retention window, for a personal space only.
+    /// Removals inside their retention window, in any library.
     ///
-    /// Shared-space removals are recovered through File Station rather than
-    /// here — see ARCHITECTURE.md. Offering a restore in a shared space would
-    /// mean deciding who is allowed to undo whose deletion, and DSM already has
-    /// an answer for that.
+    /// Shared libraries used to be left out, on the grounds that their removals
+    /// were recovered through File Station. That stopped being true when shared
+    /// photographs moved into each member's home: removing one withdraws every
+    /// member's copy, straight past DSM's recycle bin, so a shared deletion had
+    /// no way back at all for 29 days while the server still held the bytes.
+    /// Who may undo whose deletion has the same answer as who may delete: any
+    /// contributor may remove anyone's photograph from a shared library, so any
+    /// contributor may put one back.
     ///
     /// This used to read `recycled_path` and stat the file, because the bytes
     /// sat in a bin DSM could empty from under us and a row was no proof the
@@ -1341,19 +1345,15 @@ struct CollectionsController: RouteCollection {
     private func recentlyDeleted(
         spaceID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
-        struct KindRow: Decodable { let kind: String }
-        let space = try await sql.raw("""
-            SELECT kind FROM spaces WHERE id = \(bind: spaceID)
-            """).first(decoding: KindRow.self)
-        guard space?.kind == "personal" else { return nil }
-
         struct CountRow: Decodable { let count: Int }
         let row = try await sql.raw("""
             SELECT count(*) AS count
             FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NOT NULL
               AND sa.purged_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
             """).first(decoding: CountRow.self)
 
         guard let count = row?.count, count > 0 else { return nil }
@@ -1566,13 +1566,16 @@ struct CollectionsController: RouteCollection {
 
     // MARK: - Recently deleted, opened
 
-    /// What is still in the bin and still on disk.
+    /// Everything removed from this library and still recoverable, most
+    /// recently removed first, each carrying the date it goes for good.
     ///
-    /// Every row is checked against the filesystem before it is offered. The bin
-    /// carries DSM's own name so File Station treats it as a recycle bin, which
-    /// means DSM's scheduled emptying can reclaim the bytes underneath us — and
-    /// a list that offered a restore which then failed on tap would be the one
-    /// way this feature could actively lie.
+    /// Built from `TimelineController.itemColumns` like every other list of
+    /// items. This one kept a hand-written column list, and it drifted the way
+    /// that comment warns: no `thumbVersion`, so the app asked for version 0 of
+    /// thumbnails it held cached as version 3 and could not reuse a single one.
+    ///
+    /// A Live Photo's video half is left out, as it is everywhere else: it is
+    /// removed, restored and purged along with its still, never on its own.
     @Sendable
     func deletedItems(req: Request) async throws -> SearchResults {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -1582,17 +1585,8 @@ struct CollectionsController: RouteCollection {
         )
 
         let rows = try await req.sql.raw("""
-            SELECT sa.id,
-                   sa.space_id   AS "spaceID",
-                   a.id          AS "assetID",
-                   \(unsafeRaw: TimelineController.localTime) AT TIME ZONE 'UTC' AS "capturedAt",
-                   a.width, a.height, a.orientation,
-                   a.media_type  AS "mediaType",
-                   a.duration_ms AS "durationMs",
-                   a.thumbhash   AS "thumbHash",
-                   false         AS "isFavorite",
-                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "uploadedBy",
-                   (a.derived_at IS NOT NULL) AS "isDerived",
+            SELECT \(unsafeRaw: TimelineController.itemColumns),
+                   false AS "isFavorite",
                    -- The day this becomes unrecoverable, computed here so the
                    -- client never has to know the window to count down to it.
                    (sa.deleted_at + \(unsafeRaw: Retention.interval)) AT TIME ZONE 'UTC'
@@ -1602,38 +1596,13 @@ struct CollectionsController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NOT NULL
               AND sa.purged_at IS NULL
-            ORDER BY sa.deleted_at DESC
+              AND \(unsafeRaw: TimelineController.visible)
+            ORDER BY sa.deleted_at DESC, sa.id
             LIMIT 500
-            """).all(decoding: DeletedItemRow.self)
+            """).all(decoding: TimelineController.ItemRow.self)
 
-        let items = rows.map { $0.item.toItem() }
+        let items = rows.map { $0.toItem() }
         return SearchResults(items: items, total: items.count, nextOffset: nil)
-    }
-
-    struct DeletedItemRow: Decodable {
-        let id: UUID
-        let spaceID: UUID
-        let assetID: UUID
-        let capturedAt: Date
-        let width: Int?
-        let height: Int?
-        let mediaType: String
-        let durationMs: Int?
-        let thumbHash: Data?
-        let isFavorite: Bool
-        let uploadedBy: UUID
-        let isDerived: Bool
-        let orientation: Int?
-        let purgeAt: Date
-
-        var item: TimelineController.ItemRow {
-            TimelineController.ItemRow(
-                id: id, spaceID: spaceID, assetID: assetID, capturedAt: capturedAt,
-                width: width, height: height, mediaType: mediaType, durationMs: durationMs,
-                thumbHash: thumbHash, isFavorite: isFavorite, uploadedBy: uploadedBy,
-                isDerived: isDerived, orientation: orientation, purgeAt: purgeAt
-            )
-        }
     }
 
     /// Puts photographs back.
@@ -1647,6 +1616,11 @@ struct CollectionsController: RouteCollection {
     ///
     /// Rows past their window are excluded. `purged_at` means the bytes are
     /// gone, so restoring one would return a photograph that could never load.
+    ///
+    /// One transaction for the batch and its announcements, like every other
+    /// write that other devices have to hear about: it used to restore row by
+    /// row with each announcement behind a `try?`, and one that failed left a
+    /// photograph back in the library here and missing everywhere else.
     @Sendable
     func restore(req: Request) async throws -> MediaEditResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -1655,32 +1629,52 @@ struct CollectionsController: RouteCollection {
         try await SpaceAccess.requireContributor(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
+        let chosen = Array(input.assetIDs.prefix(500))
+        guard !chosen.isEmpty else { return MediaEditResponse(updated: 0) }
 
-        struct Row: Decodable {
-            let id: UUID
-            let assetID: UUID
-        }
+        let restored = try await req.withPinnedConnection { sql -> Int in
+            try await sql.raw("BEGIN").run()
+            do {
+                struct Row: Decodable { let id: UUID }
+                let rows = try await sql.raw("""
+                    UPDATE space_assets
+                    SET deleted_at = NULL, deleted_by = NULL
+                    WHERE space_id = \(bind: spaceID)
+                      AND asset_id = ANY(\(bind: chosen))
+                      AND deleted_at IS NOT NULL
+                      AND purged_at IS NULL
+                    RETURNING id
+                    """).all(decoding: Row.self)
 
-        var restored = 0
-        for assetID in input.assetIDs.prefix(500) {
-            guard let row = try await req.sql.raw("""
-                SELECT sa.id, sa.asset_id AS "assetID"
-                FROM space_assets sa
-                WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
-                  AND sa.deleted_at IS NOT NULL
-                  AND sa.purged_at IS NULL
-                """).first(decoding: Row.self) else { continue }
+                // A Live Photo's motion comes back with its still — it was
+                // removed with it. See `AssetController.remove`.
+                try await sql.raw("""
+                    UPDATE space_assets pv
+                    SET deleted_at = NULL, deleted_by = NULL
+                    FROM assets still, assets video
+                    WHERE still.id = ANY(\(bind: chosen))
+                      AND still.live_group_id IS NOT NULL
+                      AND video.live_group_id = still.live_group_id
+                      AND video.media_type = 'video'
+                      AND video.id <> still.id
+                      AND pv.asset_id = video.id
+                      AND pv.space_id = \(bind: spaceID)
+                      AND pv.deleted_at IS NOT NULL
+                      AND pv.purged_at IS NULL
+                    """).run()
 
-            try await req.sql.raw("""
-                UPDATE space_assets
-                SET deleted_at = NULL, deleted_by = NULL
-                WHERE id = \(bind: row.id)
-                """).run()
-            _ = try? await ChangeLog.append(
-                spaceID: spaceID, entity: "space_asset", entityID: row.id,
-                op: "insert", on: req.sql
-            )
-            restored += 1
+                for row in rows {
+                    _ = try await ChangeLog.append(
+                        spaceID: spaceID, entity: "space_asset", entityID: row.id,
+                        op: "insert", on: sql
+                    )
+                }
+                try await sql.raw("COMMIT").run()
+                return rows.count
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
         }
         return MediaEditResponse(updated: restored)
     }
@@ -1707,26 +1701,36 @@ struct CollectionsController: RouteCollection {
             let id: UUID
             let sha256: String
             let blobExt: String
+            let requested: Bool
         }
 
-        var purged = 0
-        for assetID in input.assetIDs.prefix(500) {
-            guard let row = try await req.sql.raw("""
-                SELECT sa.id, a.sha256, a.blob_ext AS "blobExt"
-                FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
-                WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
-                  AND sa.deleted_at IS NOT NULL
-                  AND sa.purged_at IS NULL
-                """).first(decoding: Row.self) else { continue }
+        let chosen = Array(input.assetIDs.prefix(500))
+        guard !chosen.isEmpty else { return MediaEditResponse(updated: 0) }
 
+        // The chosen removals, and the video half of any Live Photo among them —
+        // it was removed with its still and goes for good with it too.
+        let rows = try await req.sql.raw("""
+            SELECT sa.id, a.sha256, a.blob_ext AS "blobExt",
+                   (a.id = ANY(\(bind: chosen))) AS requested
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NOT NULL
+              AND sa.purged_at IS NULL
+              AND (a.id = ANY(\(bind: chosen))
+                   OR (a.media_type = 'video' AND a.live_group_id IN (
+                       SELECT still.live_group_id FROM assets still
+                       WHERE still.id = ANY(\(bind: chosen))
+                         AND still.live_group_id IS NOT NULL)))
+            """).all(decoding: Row.self)
+
+        for row in rows {
             await RetentionWorker.purge(
                 placementID: row.id, sha256: row.sha256, blobExt: row.blobExt,
                 on: req.sql, blobStore: req.blobStore, logger: req.logger
             )
-            purged += 1
         }
-        return MediaEditResponse(updated: purged)
+        return MediaEditResponse(updated: rows.filter(\.requested).count)
     }
 
     // MARK: - Contents

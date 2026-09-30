@@ -431,11 +431,19 @@ struct TimelineView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             // Say what removal actually does. It is not a deletion from the
-            // phone, and it is not permanent on the NAS either.
+            // phone, and it is not permanent on the NAS either: it can be
+            // undone from Recently Deleted until the window closes.
             #if os(iOS)
-            Text("They stay on this iPhone. On the NAS they move to #recycle, and backup won't add them again.")
+            Text(
+                selection.count == 1
+                    ? "It stays on this iPhone. On your NAS it goes to Recently Deleted for \(Retention.days) days, and backup won't add it again."
+                    : "They stay on this iPhone. On your NAS they go to Recently Deleted for \(Retention.days) days, and backup won't add them again."
+            )
             #else
-            Text("On the NAS they move to #recycle. Nothing is removed from anyone's phone.")
+            Text(
+                "They go to Recently Deleted on your NAS for \(Retention.days) days. "
+                + "Nothing is removed from anyone's phone."
+            )
             #endif
         }
         #endif

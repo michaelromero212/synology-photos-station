@@ -53,9 +53,10 @@ struct AssetController: RouteCollection {
 
     /// Removes a photo from a library.
     ///
-    /// Soft delete, and the file moves to `#recycle` beside it rather than
-    /// being unlinked — Synology's convention, and one `LibraryScanner` already
-    /// skips, so a later rescan won't quietly re-import what someone deleted.
+    /// Soft delete. The placement is stamped with who removed it and when, and
+    /// the bytes stay in the blob store for `Retention.days` — that is what
+    /// Recently Deleted restores from, and what `RetentionWorker` purges at the
+    /// end of the window.
     ///
     /// The row stays as the record that this was deliberate. Automatic backup
     /// reads it and declines to upload the photo again; without it, deleting
@@ -94,19 +95,62 @@ struct AssetController: RouteCollection {
         //
         // The reconciler already does the right thing from this one column: its
         // stale pass withdraws the copy from every home on its next sweep, and
-        // the retention sweeper takes the bytes at day \(Retention.days). Both
+        // the retention sweeper takes the bytes when the window closes. Both
         // read state rather than being told, so a delete that races either of
         // them still comes out correct.
-        try await req.sql.raw("""
-            UPDATE space_assets
-            SET deleted_at = now(), deleted_by = \(bind: device.userID)
-            WHERE id = \(bind: placement.id)
-            """).run()
+        //
+        // One transaction for the removal and its announcement. They used to be
+        // two separate writes with the second behind a `try?`, and
+        // `ChangeLog.append`'s lock means nothing outside a transaction — so a
+        // failure between them left the photo deleted here and on screen on
+        // every other device, which never refetches a day it has loaded.
+        let userID = device.userID
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                try await sql.raw("""
+                    UPDATE space_assets
+                    SET deleted_at = now(), deleted_by = \(bind: userID)
+                    WHERE id = \(bind: placement.id)
+                    """).run()
 
-        _ = try? await ChangeLog.append(
-            spaceID: spaceID, entity: "space_asset", entityID: placement.id,
-            op: "delete", on: req.sql
-        )
+                // A Live Photo's motion goes with its still. The paired video
+                // is a placement of its own that no grid shows, so nothing else
+                // would ever delete it: it stayed in File Station, in every
+                // member's home, and was never purged. Unless another copy of
+                // the same Live Photo is still here and needs it.
+                try await sql.raw("""
+                    UPDATE space_assets pv
+                    SET deleted_at = now(), deleted_by = \(bind: userID)
+                    FROM assets still, assets video
+                    WHERE still.id = \(bind: assetID)
+                      AND still.live_group_id IS NOT NULL
+                      AND video.live_group_id = still.live_group_id
+                      AND video.media_type = 'video'
+                      AND video.id <> still.id
+                      AND pv.asset_id = video.id
+                      AND pv.space_id = \(bind: spaceID)
+                      AND pv.deleted_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM space_assets other
+                          JOIN assets twin ON twin.id = other.asset_id
+                          WHERE other.space_id = \(bind: spaceID)
+                            AND other.deleted_at IS NULL
+                            AND twin.live_group_id = still.live_group_id
+                            AND twin.media_type = 'photo'
+                      )
+                    """).run()
+
+                _ = try await ChangeLog.append(
+                    spaceID: spaceID, entity: "space_asset", entityID: placement.id,
+                    op: "delete", on: sql
+                )
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
         return .noContent
     }
 
@@ -245,7 +289,9 @@ struct AssetController: RouteCollection {
 
     @Sendable
     func thumbnail(req: Request) async throws -> Response {
-        let asset = try await requireReadableAsset(req)
+        // Recently Deleted draws these, so a removal that can still be undone
+        // keeps its thumbnail. See `requireReadableAsset`.
+        let asset = try await requireReadableAsset(req, includingRecoverable: true)
         let size = req.query[Int.self, at: "size"] ?? 256
         guard Derivatives.eagerSizes.contains(size) else {
             throw Abort(.badRequest,
@@ -336,14 +382,15 @@ struct AssetController: RouteCollection {
         // Never over the server's own work. Once derivation has run, its
         // rendering is the better one and this request is a straggler from a
         // client that didn't know yet.
-        var changedSomething = false
+        var wroteFile = false
         if !FileManager.default.fileExists(atPath: path.path) {
             try FileManager.default.createDirectory(
                 at: path.deletingLastPathComponent(), withIntermediateDirectories: true
             )
             try body.jpeg.write(to: path, options: .atomic)
-            changedSomething = true
+            wroteFile = true
         }
+        let fileChanged = wroteFile
 
         let assetID = asset.id
         let thumbHash = body.thumbHash.map { ByteBuffer(bytes: $0) }
@@ -364,7 +411,7 @@ struct AssetController: RouteCollection {
                       AND (thumbhash IS NULL OR derived_at IS NULL)
                     RETURNING id
                     """).all(decoding: Touched.self)
-                changedSomething = changedSomething || !updated.isEmpty
+                let changedSomething = fileChanged || !updated.isEmpty
 
                 // Announced only when there is something to announce.
                 //
@@ -430,7 +477,19 @@ struct AssetController: RouteCollection {
 
     // MARK: - Helpers
 
-    private func requireReadableAsset(_ req: Request) async throws -> AssetRow {
+    /// The asset named in the path, if the caller may read it.
+    ///
+    /// `includingRecoverable` widens "placed in one of your spaces" to include
+    /// placements removed but not yet purged — the contents of Recently
+    /// Deleted. Only the thumbnail asks for that. Every tile on that page used
+    /// to 404 here, because nothing in it has a live placement by definition,
+    /// so the page showed nothing but blurred placeholders. The same members
+    /// could see these photographs a moment before they were removed and can
+    /// put them back with one tap, so a thumbnail is no new exposure; the
+    /// original, the preview and the stream stay live-only.
+    private func requireReadableAsset(
+        _ req: Request, includingRecoverable: Bool = false
+    ) async throws -> AssetRow {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let assetID = try req.parameters.require("assetID", as: UUID.self)
 
@@ -450,7 +509,8 @@ struct AssetController: RouteCollection {
                   FROM space_assets sa
                   JOIN space_members m ON m.space_id = sa.space_id
                   WHERE sa.asset_id = a.id
-                    AND sa.deleted_at IS NULL
+                    AND (sa.deleted_at IS NULL
+                         OR (\(bind: includingRecoverable) AND sa.purged_at IS NULL))
                     AND m.user_id = \(bind: device.userID)
               )
             """).first(decoding: AssetRow.self) else {

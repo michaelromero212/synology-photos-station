@@ -438,7 +438,7 @@ struct AssetDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It stays on this iPhone. On the NAS it moves to #recycle, and backup won't add it again.")
+            Text("It stays on this iPhone. On your NAS it goes to Recently Deleted for \(Retention.days) days, and backup won't add it again.")
         }
     }
     #else

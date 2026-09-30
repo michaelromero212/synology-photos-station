@@ -123,7 +123,8 @@ struct MoveReviewBar: View {
         } message: {
             Text(
                 "The \(review.count == 1 ? "copy" : "copies") in \(review.destinationName) "
-                + "will stay. On the NAS the originals move to #recycle."
+                + "will stay. The \(review.count == 1 ? "original goes" : "originals go") to "
+                + "Recently Deleted on your NAS for \(Retention.days) days."
             )
         }
     }
