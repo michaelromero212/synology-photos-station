@@ -108,6 +108,13 @@ RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app
 WORKDIR /app
 COPY --from=build --chown=vapor:vapor /staging /app
 
+# The commit this image was built from, reported by /health as `revision`. CI
+# passes it; a local `docker compose build` leaves it unknown. Declared this
+# late so a new commit only changes this one tiny layer and never the cache of
+# the build above it.
+ARG FRAMESTATION_REVISION=unknown
+ENV FRAMESTATION_REVISION=${FRAMESTATION_REVISION}
+
 USER vapor:vapor
 EXPOSE 8080
 

@@ -55,6 +55,16 @@ services:
       # not in here — every shared-space placement would fail on a path that
       # looks right in the logs.
       FRAMESTATION_SHARED_ROOT: /shared
+      # Push: activity banners, and the silent push that wakes a phone whose
+      # backup iOS has paused overnight. Off until Apple's key is here — drop
+      # the downloaded AuthKey_<KEY ID>.p8 into the secrets/ folder beside
+      # pgdata and restart. The key ID comes from the file's name and the team
+      # and topic default to this app's, so these stay blank unless overriding.
+      # Blank reaches the server as unset.
+      FRAMESTATION_APNS_KEY_ID: ${FRAMESTATION_APNS_KEY_ID:-}
+      FRAMESTATION_APNS_TEAM_ID: ${FRAMESTATION_APNS_TEAM_ID:-}
+      FRAMESTATION_APNS_TOPIC: ${FRAMESTATION_APNS_TOPIC:-}
+      FRAMESTATION_APNS_KEY_PATH: ${FRAMESTATION_APNS_KEY_PATH:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Root, because the layout above writes into each person's DSM home and
     # hands the file to them with chown — both of which a non-root container

@@ -133,12 +133,20 @@ public struct HealthResponse: Codable, Sendable, Hashable {
     public let version: String
     public let database: String
     public let migrationsApplied: Int
+    /// The git commit the running server was built from, when the image was
+    /// built by CI. `version` is a hand-bumped label and can't tell one build
+    /// from another; this can. Optional so either side can be older.
+    public let revision: String?
 
-    public init(status: String, version: String, database: String, migrationsApplied: Int) {
+    public init(
+        status: String, version: String, database: String, migrationsApplied: Int,
+        revision: String? = nil
+    ) {
         self.status = status
         self.version = version
         self.database = database
         self.migrationsApplied = migrationsApplied
+        self.revision = revision
     }
 }
 

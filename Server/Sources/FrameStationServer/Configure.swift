@@ -3,9 +3,22 @@ import FrameStationAPI
 import Vapor
 
 enum Build {
-    /// Bumped by hand per milestone. Surfaced by /health so you can tell at a
-    /// glance which image the NAS is actually running.
+    /// Bumped by hand per milestone. Surfaced by /health, but a label rather
+    /// than an identity — see `revision` for which build is actually running.
     static let version = "1.1.0-M9"
+
+    /// The git commit this image was built from, stamped into the image by CI
+    /// (`FRAMESTATION_REVISION`, see Server/Dockerfile). Nil for a local build.
+    ///
+    /// The answer to "is the NAS running what I pushed?" in one request, where
+    /// it used to take `docker inspect` over SSH with sudo.
+    static let revision: String? = {
+        guard let value = ProcessInfo.processInfo.environment["FRAMESTATION_REVISION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty, value != "unknown"
+        else { return nil }
+        return value
+    }()
 }
 
 func configure(_ app: Application) async throws {
@@ -94,10 +107,26 @@ func configure(_ app: Application) async throws {
         // connection is refused before any push is attempted.
         app.http.client.configuration.httpVersion = .automatic
 
-        let apnsConfiguration = try APNsClient.Configuration.fromEnvironment()
-        if apnsConfiguration == nil {
+        // A key that can't be read turns push off rather than the server:
+        // notifications are the one thing here that can go missing without
+        // anybody's photographs being at risk.
+        let secrets = (blobRoot as NSString).appendingPathComponent("secrets")
+        let apnsConfiguration: APNsClient.Configuration?
+        do {
+            apnsConfiguration = try APNsClient.Configuration.fromEnvironment(
+                secretsDirectory: secrets
+            )
+        } catch {
+            app.logger.error("push disabled — the APNs key could not be read: \(error)")
+            apnsConfiguration = nil
+        }
+        if let apnsConfiguration {
+            app.logger.info(
+                "push enabled — key \(apnsConfiguration.keyID), topic \(apnsConfiguration.topic)"
+            )
+        } else {
             app.logger.notice(
-                "push disabled — set FRAMESTATION_APNS_KEY_PATH, _KEY_ID, _TEAM_ID, _TOPIC"
+                "push disabled — put AuthKey_<KEY ID>.p8 in \(secrets) to turn it on"
             )
         }
         let apns = APNsClient(

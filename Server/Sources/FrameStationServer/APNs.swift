@@ -22,23 +22,79 @@ actor APNsClient {
         var teamID: String
         /// The app's bundle identifier.
         var topic: String
+        /// The bundle identifier of the build that registers *sandbox* tokens.
+        ///
+        /// A Debug build is a separate app — `com.michaelromero.FrameStation.dev`
+        /// in project.yml — and it is also the only kind that talks to the APNs
+        /// sandbox (`PushRegistrar.environment`). A push to its token under the
+        /// release topic is refused, so sandbox tokens get the Debug topic.
+        var sandboxTopic: String
 
-        /// Reads `FRAMESTATION_APNS_*`. Returns nil when push isn't configured.
-        static func fromEnvironment() throws -> Configuration? {
-            guard let keyID = Environment.get("FRAMESTATION_APNS_KEY_ID"),
-                  let teamID = Environment.get("FRAMESTATION_APNS_TEAM_ID"),
-                  let topic = Environment.get("FRAMESTATION_APNS_TOPIC")
-            else { return nil }
+        /// The release app's bundle identifier and team, from project.yml.
+        static let defaultTopic = "com.michaelromero.FrameStation"
+        static let defaultTeamID = "47453G7Q89"
 
-            let pem: String
-            if let path = Environment.get("FRAMESTATION_APNS_KEY_PATH") {
-                pem = try String(contentsOfFile: path, encoding: .utf8)
-            } else if let inline = Environment.get("FRAMESTATION_APNS_KEY") {
-                pem = inline
-            } else {
-                return nil
+        /// Push configuration from `FRAMESTATION_APNS_*`, or nil when push is
+        /// off.
+        ///
+        /// Made to need as little as possible. Apple's download is named
+        /// `AuthKey_<KEY ID>.p8`, so dropping that file into `secretsDirectory`
+        /// unchanged is the whole of the setup: the key ID comes from its name,
+        /// and the team and topic are this app's. Any of them can still be set
+        /// explicitly.
+        ///
+        /// An empty variable counts as unset. docker-compose passes one through
+        /// as `""` when `.env` leaves it blank, and treating that as a value
+        /// used to mean a server that could not start — reading a key from the
+        /// path `""` throws, and that took the whole boot down with it.
+        static func fromEnvironment(secretsDirectory: String?) throws -> Configuration? {
+            func value(_ key: String) -> String? {
+                guard let raw = Environment.get(key)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty
+                else { return nil }
+                return raw
             }
-            return Configuration(keyPEM: pem, keyID: keyID, teamID: teamID, topic: topic)
+
+            var keyID = value("FRAMESTATION_APNS_KEY_ID")
+            var pem: String?
+            if let path = value("FRAMESTATION_APNS_KEY_PATH") {
+                pem = try String(contentsOfFile: path, encoding: .utf8)
+            } else if let inline = value("FRAMESTATION_APNS_KEY") {
+                pem = inline
+            } else if let directory = secretsDirectory,
+                      let found = discoverKey(in: directory, keyID: keyID) {
+                pem = try String(contentsOfFile: found.path, encoding: .utf8)
+                keyID = keyID ?? found.keyID
+            }
+
+            guard let pem, let keyID else { return nil }
+            let topic = value("FRAMESTATION_APNS_TOPIC") ?? defaultTopic
+            return Configuration(
+                keyPEM: pem,
+                keyID: keyID,
+                teamID: value("FRAMESTATION_APNS_TEAM_ID") ?? defaultTeamID,
+                topic: topic,
+                sandboxTopic: value("FRAMESTATION_APNS_SANDBOX_TOPIC") ?? topic + ".dev"
+            )
+        }
+
+        /// An `AuthKey_<KEY ID>.p8` in `directory` — the one for `keyID` if
+        /// that is known, otherwise the only one there. Two keys and no ID to
+        /// choose between them is ambiguous, and guessing would sign with the
+        /// wrong one.
+        static func discoverKey(
+            in directory: String, keyID: String?
+        ) -> (path: String, keyID: String)? {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory)
+            else { return nil }
+            let keys: [(path: String, keyID: String)] = names.compactMap { name in
+                guard name.hasPrefix("AuthKey_"), name.hasSuffix(".p8") else { return nil }
+                let id = String(name.dropFirst("AuthKey_".count).dropLast(".p8".count))
+                guard !id.isEmpty else { return nil }
+                return ((directory as NSString).appendingPathComponent(name), id)
+            }
+            if let keyID { return keys.first { $0.keyID == keyID } }
+            return keys.count == 1 ? keys[0] : nil
         }
     }
 
@@ -162,7 +218,11 @@ actor APNsClient {
 
             let response = try await client.post(url) { request in
                 request.headers.replaceOrAdd(name: "authorization", value: "bearer \(jwt)")
-                request.headers.replaceOrAdd(name: "apns-topic", value: configuration.topic)
+                request.headers.replaceOrAdd(
+                    name: "apns-topic",
+                    value: environment == .production
+                        ? configuration.topic : configuration.sandboxTopic
+                )
                 request.headers.replaceOrAdd(name: "apns-push-type", value: pushType)
                 request.headers.replaceOrAdd(name: "apns-priority", value: priority)
                 request.headers.contentType = .json

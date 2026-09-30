@@ -39,7 +39,8 @@ struct HealthController: RouteCollection {
             status: database == "up" ? "ok" : "degraded",
             version: Build.version,
             database: database,
-            migrationsApplied: migrations
+            migrationsApplied: migrations,
+            revision: Build.revision
         )
     }
 }
