@@ -5,8 +5,9 @@ import Observation
 
 /// Connection + identity for the running app.
 ///
-/// M3 scaffold: the token lives in memory. Keychain persistence, Bonjour
-/// discovery, and the split-horizon LAN/remote race all land with onboarding.
+/// The device token lives in the Keychain (`CredentialStore`); the last `/v1/me`
+/// is remembered on disk (`SessionSnapshotStore`) so a signed-in person opens
+/// straight into their library even when the NAS can't be reached.
 @Observable
 @MainActor
 final class AppSession {
@@ -416,16 +417,20 @@ final class AppSession {
             dsmPassword = ""
             dsmOTPCode = ""
             needsTwoFactor = false
-            rememberSignInFields()
             persist(.init(serverURL: url, token: response.token))
 
-            timelineStores.removeAll()  // As in `adopt` — they belong to the old client.
-            self.client = client
-            self.loader = ThumbnailLoader(client: client)
-            self.user = response.user
-            self.spaces = response.spaces
-            self.selectedSpace = response.spaces.first { $0.kind == .personal } ?? response.spaces.first
-            self.phase = .connected
+            // Through the same door as every other way in. This used to repeat
+            // `adopt` by hand and had drifted from it: it never remembered the
+            // session, so the first launch after signing in with DSM that
+            // couldn't reach the NAS showed the sign-in form instead of the
+            // library already on the phone — and its thumbnail cache ignored
+            // the size chosen in Settings until the next launch.
+            adopt(
+                client: client,
+                me: MeResponse(
+                    user: response.user, deviceID: response.deviceID, spaces: response.spaces
+                )
+            )
         } catch {
             // DSM asking for a code isn't a failed sign-in, it's an unfinished
             // one — so the password survives and only the code is still needed.
