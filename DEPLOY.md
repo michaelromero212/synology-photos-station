@@ -180,11 +180,17 @@ and nothing removed those links, so purged photos kept their bytes on disk. The
 server now takes that tree apart by itself on its first start, logging a
 `legacy browse tree:` summary: extra names removed, space freed, any missing
 blob restored from it, and anything it doesn't recognise left in place. To see
-what it will do first:
+what it will do first, ask the new image before it serves: pull, a one-off
+run, then step 3 as usual.
 
 ```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec server ./FrameStationServer retire-legacy-browse --dry-run'
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose run --rm server retire-legacy-browse --dry-run'
 ```
+
+Not `exec`: the old container doesn't have the command, and the new one has
+already done the work by the time you can exec into it. The one-off run applies
+the image's migrations, as every start does, so take the `pgdata` snapshot
+before it rather than after.
 
 Two failures arrive without changing anything yourself, because they are about
 the NAS rather than the commit: the **address moving** (DHCP — see Gotchas) and
