@@ -94,9 +94,9 @@ struct UploadController: RouteCollection {
         // "does this exact file exist on this NAS?" oracle: anyone holding a
         // copy of a photo could confirm a family member also has it, and the
         // returned asset id was enough to link it into their own library.
-        // Storage dedup is unaffected — commit's ON CONFLICT (sha256) still
-        // collapses identical bytes onto one asset row and one blob. Only the
-        // transfer saving is lost, and only across users.
+        // Identical bytes still share one blob — the store is content-addressed
+        // and `assemble` keeps the file already there — so only the transfer
+        // saving is lost, and only across users.
         if let existing = try await req.sql.raw("""
             SELECT a.id FROM assets a
             WHERE a.sha256 = \(bind: sha)
@@ -473,18 +473,6 @@ struct UploadController: RouteCollection {
         }
 
         timing.mark("record")
-
-        // Best-effort and deliberately outside the transaction: the browse tree
-        // is a convenience mirror, rebuildable from the database, and must never
-        // fail an upload.
-        req.blobStore.linkIntoBrowseTree(
-            blob: blob,
-            userSlug: BlobStore.slug(device.displayName),
-            capturedAt: input.capturedAt,
-            filename: session.filename,
-            logger: req.logger
-        )
-        timing.mark("tree")
 
         let summary = timing.summary
         req.logger.info(

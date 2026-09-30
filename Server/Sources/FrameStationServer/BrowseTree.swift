@@ -6,11 +6,11 @@ import Vapor
 /// Builds the human-readable tree people actually browse in File Station.
 ///
 /// The blob store is named by hash — correct for storage, meaningless to
-/// someone opening a folder. This mirrors every placement to a path built from
-/// who it belongs to and when it was taken:
+/// someone opening a folder. This mirrors every placement into the home of
+/// each person entitled to see it, at a path built from when it was taken:
 ///
-///   /volume1/homes/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
-///   /volume1/FrameStation/Shared/<Space>/YYYY/MM/IMG_4821.heic
+///   /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic                 personal
+///   /volume1/homes/<dsm user>/Photos/Shared/<Space>/YYYY/MM/IMG_4821.heic  shared
 ///
 /// Entries are **reflinks**, not copies or hardlinks. Hardlinks cannot cross
 /// Synology's per-shared-folder Btrfs subvolumes at all (`/volume1/FrameStation`

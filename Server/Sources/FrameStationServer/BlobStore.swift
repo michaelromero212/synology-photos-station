@@ -6,10 +6,14 @@ import Vapor
 ///
 /// Layout (ARCHITECTURE.md §4):
 /// ```
-/// /data/blobs/ab/cd/abcd….heic          canonical, SHA-256 named
+/// /data/blobs/ab/cd/abcd….heic          SHA-256 named
+/// /data/derivatives/ab/cd/abcd…/        thumbnails, preview, poster
 /// /data/incoming/<uploadID>/<n>.part     chunk staging
-/// /data/browse/<user>/2026/07/IMG_1.heic hardlinks, zero extra space
 /// ```
+///
+/// The copies people browse in File Station live in their DSM homes and are
+/// kept there by `BrowseTreeWorker`. The `browse/` tree that used to sit here
+/// is retired by `LegacyBrowseTree`.
 ///
 /// Originals are stored byte-for-byte. Nothing here ever rewrites an original —
 /// re-encoding destroys HDR gain maps, ProRAW, depth data, and Live Photo
@@ -145,87 +149,6 @@ struct BlobStore: Sendable {
 
     func blobExists(sha256: String, fileExtension: String) -> Bool {
         fm.fileExists(atPath: blobPath(sha256: sha256, fileExtension: fileExtension).path)
-    }
-
-    // MARK: - Browsable tree
-
-    /// Mirrors a blob into `browse/<user>/<yyyy>/<MM>/<filename>` as a hardlink.
-    ///
-    /// Same inode, so this costs zero additional space, and it keeps the library
-    /// inspectable from File Station and Finder — which matters a lot to NAS
-    /// owners. Entirely rebuildable from the database; safe to delete.
-    /// Best-effort: a failure here must never fail an upload.
-    func linkIntoBrowseTree(
-        blob: URL,
-        userSlug: String,
-        capturedAt: Date?,
-        filename: String,
-        logger: Logger
-    ) {
-        let date = capturedAt ?? Date()
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
-        let parts = calendar.dateComponents([.year, .month], from: date)
-        guard let year = parts.year, let month = parts.month else { return }
-
-        let directory = root
-            .appendingPathComponent("browse", isDirectory: true)
-            .appendingPathComponent(userSlug, isDirectory: true)
-            .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
-            .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
-
-        do {
-            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            var target = directory.appendingPathComponent(filename)
-
-            // Same content already linked here — nothing to do.
-            if fm.fileExists(atPath: target.path) {
-                let existing = Self.inode(of: target, using: fm)
-                let incoming = Self.inode(of: blob, using: fm)
-                if let existing, existing == incoming { return }
-
-                let base = target.deletingPathExtension().lastPathComponent
-                let ext = target.pathExtension
-                var suffix = 2
-                repeat {
-                    let candidate = ext.isEmpty ? "\(base)-\(suffix)" : "\(base)-\(suffix).\(ext)"
-                    target = directory.appendingPathComponent(candidate)
-                    suffix += 1
-                } while fm.fileExists(atPath: target.path) && suffix < 100
-            }
-
-            try fm.linkItem(at: blob, to: target)
-        } catch {
-            logger.warning("browse tree link failed for \(filename): \(error)")
-        }
-    }
-
-    /// Inode number, read defensively.
-    ///
-    /// `attributesOfItem` returns `[FileAttributeKey: Any]`, and the numeric
-    /// values arrive as `NSNumber` on Darwin but not always with the same
-    /// bridging behavior under swift-corelibs-foundation. Casting straight to
-    /// `Int` works on macOS and can silently return nil on Linux — which here
-    /// would mean every hardlink comparison failing and the browse tree
-    /// accumulating `-2`, `-3` duplicates of files it already had.
-    private static func inode(of url: URL, using fm: FileManager) -> UInt64? {
-        guard let attributes = try? fm.attributesOfItem(atPath: url.path),
-              let raw = attributes[.systemFileNumber] else { return nil }
-        if let number = raw as? NSNumber { return number.uint64Value }
-        if let value = raw as? UInt64 { return value }
-        if let value = raw as? Int { return UInt64(value) }
-        return nil
-    }
-
-    /// Filesystem-safe directory name for a display name.
-    static func slug(_ displayName: String) -> String {
-        let allowed = displayName.map { character -> Character in
-            character.isLetter || character.isNumber ? character : "-"
-        }
-        let collapsed = String(allowed)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        return collapsed.isEmpty ? "user" : collapsed.lowercased()
     }
 
     static func fileExtension(for filename: String) -> String {

@@ -123,12 +123,12 @@ check "stored hash matches"   "$SHA"  "$(shasum -a 256 "$SHARD" 2>/dev/null | aw
 check "staging cleaned up"    "0"     "$(ls "$SCRATCH/blobroot/incoming" 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
-echo "=== 8. browse tree hardlink shares the inode (zero extra space) ==="
-BROWSE=$(find "$SCRATCH/blobroot/browse" -name '*.mov' 2>/dev/null | head -1)
-[ -n "$BROWSE" ] && ok "browse link created: ${BROWSE#$SCRATCH/blobroot/}" || bad "browse link" "exists" "missing"
-INO_BLOB=$(stat -f%i "$SHARD" 2>/dev/null)
-INO_LINK=$(stat -f%i "$BROWSE" 2>/dev/null)
-check "same inode as blob"    "$INO_BLOB" "$INO_LINK"
+echo "=== 8. no legacy browse/ tree under the blob root ==="
+# Uploads used to hardlink every blob into blobroot/browse/<user>/YYYY/MM, and
+# nothing ever removed those links — so purging a photo unlinked its blob while
+# the bytes stayed on disk under the old tree's name. The home tree replaced it
+# (BrowseTreeWorker); an upload must not write here at all.
+[ ! -e "$SCRATCH/blobroot/browse" ] && ok "no browse/ tree written" || bad "browse/ tree" "absent" "present"
 
 echo
 echo "=== 9. database state ==="

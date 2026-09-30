@@ -54,6 +54,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")
     app.asyncCommands.use(RepairDimensionsCommand(), as: "repair-dimensions")
+    app.asyncCommands.use(RetireLegacyBrowseCommand(), as: "retire-legacy-browse")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())
@@ -143,6 +144,10 @@ func configure(_ app: Application) async throws {
         // And rebuild any whose file has since vanished — including one the
         // generator itself discarded for being unplayable.
         Task { await MetadataBackfill.requeueVanishedPlaybackRenditions(on: app) }
+        // Take apart the old hardlink tree under the blob root, which kept the
+        // bytes of permanently deleted photos on disk. Once it is gone this is
+        // a single failed `stat` per boot.
+        Task { await LegacyBrowseTree.retireInBackground(app: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")
