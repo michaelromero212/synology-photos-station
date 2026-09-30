@@ -47,10 +47,10 @@ changed, and **under a minute** when nothing did — buildx hits its GHA cache a
 only republishes the manifest. Measured across six runs: 15.8, 15.1, 0.5, 0.5,
 0.4, 0.4. Pulling before it finishes gives `manifest unknown`.
 
-The cache key is coarser than it looks. `Server/Dockerfile` does
-`COPY ./Packages ./Packages`, so editing FrameStationKit — which the server never
-compiles — still busts the layer and forces the full release rebuild. Narrowing
-that COPY to `./Packages/FrameStationAPI` would make app-only commits free.
+`Server/Dockerfile` copies only `./Packages/FrameStationAPI` into the build, so
+an app-only commit (FrameStationKit, `App/`) never busts the compile layer. The
+revision stamp sits in the last layer, so it changes on every commit without
+costing a rebuild.
 
 ```bash
 gh run list --limit 1
@@ -70,11 +70,18 @@ ssh nas 'curl -s http://127.0.0.1:8080/health'
 
 Expect `{"status":"ok","database":"up","migrationsApplied":N,...}`.
 
-**5. Verify it's the *new* build.** Step 4 cannot tell you this — see below — and
-this is the step that catches a deploy which quietly didn't take.
+**5. Verify it's the *new* build.** This is the step that catches a deploy which
+quietly didn't take. `/health` names the commit the running image was built
+from — no SSH, no sudo:
 
-Ask the image which commit it was built from. CI stamps OCI labels through
-`docker/metadata-action`, so the running image names its own source:
+```bash
+curl -s https://<nas-host>:8443/health      # "revision": "<full sha>"
+git rev-parse HEAD
+```
+
+They match or they don't. Images built before `revision` existed don't report
+one; for those, ask the image itself. CI stamps OCI labels through
+`docker/metadata-action`, so it names its own source:
 
 ```bash
 ssh -t nas "sudo /usr/local/bin/docker inspect ghcr.io/michaelromero212/framestation-server:latest --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
@@ -140,6 +147,44 @@ Work out which row applies **before** step 3.
 | `docker-compose.yml` or `.env.example` | copy the file up **before** pulling — see below |
 | A new bind mount in compose | create the directory on the NAS first; Synology's Docker fails rather than creating it |
 | App or `Packages/` only | nothing. That ships through Xcode, not the NAS |
+
+`0025_placement_lookup` is a data migration as well as an index: it marks the
+video half of every Live Photo that was deleted before deletions took both
+halves as deleted with its still, so retention cleans them up. Snapshot
+`pgdata` before the first deploy that carries it, as for any migration.
+
+### Turning on push
+
+Push — activity banners, and the silent push that wakes a phone whose backup
+iOS has paused overnight — is off until the NAS has Apple's key. Create an
+**APNs key** in the Apple Developer portal (Keys → +, Apple Push Notifications
+service), download it, and copy it up **with its name unchanged**:
+
+```bash
+ssh nas 'mkdir -p /volume1/docker/framestation/secrets && chmod 700 /volume1/docker/framestation/secrets'
+cat AuthKey_ABC123DEFG.p8 | ssh nas 'cat > /volume1/docker/framestation/secrets/AuthKey_ABC123DEFG.p8'
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose up -d --force-recreate server'
+```
+
+The key ID is read from the file name, and the team and topic default to this
+app's. The log confirms it: `push enabled — key ABC123DEFG, topic
+com.michaelromero.FrameStation`. Debug builds are a separate app
+(`….FrameStation.dev`) and register sandbox tokens; those are sent under the
+`.dev` topic automatically. A key that can't be read turns push off — it is
+logged — and never stops the server starting.
+
+### The old `browse/` tree
+
+Every upload used to hardlink its blob into `/volume1/docker/framestation/browse/`,
+and nothing removed those links, so purged photos kept their bytes on disk. The
+server now takes that tree apart by itself on its first start, logging a
+`legacy browse tree:` summary: extra names removed, space freed, any missing
+blob restored from it, and anything it doesn't recognise left in place. To see
+what it will do first:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec server ./FrameStationServer retire-legacy-browse --dry-run'
+```
 
 Two failures arrive without changing anything yourself, because they are about
 the NAS rather than the commit: the **address moving** (DHCP — see Gotchas) and
@@ -332,9 +377,9 @@ arrives with a literal backslash and Docker rejects it with
 **Three ways of checking the NAS is current that don't work.** Each looks
 convincing, which is the problem. Step 5 above is the one that does.
 
-*`/health`.* `version` is `Build.version` in `Configure.swift`, bumped by hand —
-a six-week-old image and a current one both say `1.1.0-M9`. It tells you the
-server is *up*, never which server.
+*`/health`'s `version`.* `Build.version` in `Configure.swift` is bumped by hand —
+a six-week-old image and a current one both say `1.1.0-M9`. Read `revision`
+beside it instead, which CI stamps into every image.
 
 *The image tag in `compose images`.* It reads `latest`, always, because that is
 what `docker-compose.yml` asks for. CI does publish a `sha-<short>` tag, but

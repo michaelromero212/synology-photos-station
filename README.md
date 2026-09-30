@@ -6,20 +6,21 @@ with native clients for iOS, iPadOS, macOS, and tvOS. Replaces Synology Photos.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. This file covers
 running and deploying what exists today.
 
-**Status: M12.** The library works end to end — upload, media pipeline,
+**Status: M13.** The library works end to end — upload, media pipeline,
 timeline with delta sync, shared spaces with attribution, albums, tags and
 ratings, video playback that continues into the next clip, the iOS backup
-engine, and search by place. Push is
-built and verified in the simulator but has never made a real APNs round trip —
-that needs an Apple Developer account and a physical device.
+engine, search by place, and Recently Deleted with a 29-day window in every
+library. Push is built and verified in the simulator but has never made a real
+APNs round trip — that needs an Apple Developer account and a physical device;
+turning it on is now one file on the NAS (see DEPLOY.md, "Turning on push").
 
 It also behaves when the NAS doesn't: an unreachable server is named as such
 rather than blamed on the phone, losing the network no longer burns the backup
 queue's retry budget, and launching out of range shows the cached library
 instead of a sign-in form.
 
-Remaining: a `UICollectionView` grid for 100k scale, Recently Deleted, and the
-view-only macOS/tvOS clients.
+Remaining: the view-only macOS/tvOS clients. The iPhone and iPad grid is a
+`UICollectionView` laid out from the manifest (`TimelineCollection.swift`).
 
 ---
 
@@ -94,10 +95,13 @@ tests:
 FRAMESTATION_LIVE_URL=http://127.0.0.1:8099 swift test --package-path Packages/FrameStationKit
 ```
 
-21 tests. The two worth knowing about: `TransferFailureTests` pins which
-failures may cost an item a retry, and `CacheLimitTests` writes past the disk
-cap and asserts the newest entry survives while the oldest is evicted —
-the eviction that ARCHITECTURE claimed for a while without it existing.
+137 tests, across XCTest and Swift Testing. The ones worth knowing about:
+`TransferFailureTests` pins which failures may cost an item a retry;
+`CacheLimitTests` writes past the disk cap and asserts the newest entry
+survives while the oldest is evicted; and `TimelineStoreTests` drives delta
+sync against a stubbed server — a re-dated photo moves rather than
+duplicating, a restored snapshot replays what changed while the app was
+closed, and every page of changes is applied, not just the first.
 
 **Place search has no smoke script yet.** It was verified by hand against a
 geocoded library in the simulator; the other milestones each have a
@@ -155,10 +159,11 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | — | Status, version, DB reachability, migration count |
+| GET | `/health` | — | Status, version, DB reachability, migration count, and the git `revision` the image was built from |
 | POST | `/v1/auth/redeem` | — | Single-use invite → user + personal space + device token |
 | GET | `/v1/me` | Bearer | Current user, device, and space memberships |
-| POST | `/v1/devices/push-token` | Bearer | Register APNs token (consumed in M6) |
+| PUT/DELETE | `/v1/devices/push-token` | Bearer | Register or drop the APNs token (`POST` still accepted) |
+| PUT | `/v1/devices/backup-state` | Bearer | Items still to back up, so the NAS can wake a stalled phone |
 | POST | `/v1/uploads/probe` | Bearer | Hash-first: `have` (skip transfer) / `need` / `partial` (resume) |
 | PUT | `/v1/uploads/:id/chunk/:n` | Bearer | Upload one 16 MB chunk |
 | POST | `/v1/uploads/:id/commit` | Bearer | Verify hash, store blob, create asset + placement |
@@ -170,7 +175,17 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
 | GET | `/v1/spaces/:id/changes?since=` | Bearer | Delta sync, hydrated with full items |
 | GET | `/v1/spaces/:id/assets/:id/detail` | Bearer | Information panel: camera card, map, attribution |
-| DELETE | `/v1/spaces/:id/assets/:id` | Bearer | Soft delete; kept 29 days, then purged |
+| DELETE | `/v1/spaces/:id/assets/:id` | Bearer | Soft delete; kept 29 days, then purged. A Live Photo's video goes with it |
+| POST | `/v1/assets/:id/thumb` | Bearer | The uploading device hands over its own thumbnail |
+| PUT | `/v1/spaces/:id/assets/:id/location` | Bearer | Set or clear where a photo was taken |
+| POST | `/v1/spaces/:id/assets/credit` | Bearer | Credit a selection to someone other than its uploader |
+| POST | `/v1/spaces/:id/assets/share` | Bearer | Copy a selection into another library |
+| GET | `/v1/spaces/:id/collections` | Bearer | The Albums page: hero, trips, occasions, media types, utilities |
+| GET | `/v1/spaces/:id/collections/items` | Bearer | One collection's contents |
+| PUT | `/v1/spaces/:id/collections/name` | Bearer | Name a day, once or every year |
+| GET | `/v1/spaces/:id/collections/deleted` | Bearer | Recently Deleted, with each item's purge date |
+| POST | `/v1/spaces/:id/collections/deleted/restore` | Bearer | Put a selection back |
+| POST | `/v1/spaces/:id/collections/deleted/purge` | Bearer | Delete a selection permanently, now |
 | PUT/DELETE | `/v1/spaces/:id/assets/:id/favorite` | Bearer | Per-user favorite, not a shared boolean |
 | PUT | `/v1/spaces/:id/assets/:id/rating` | Bearer | Stars 0–5. Shared, unlike favorites |
 | POST | `/v1/spaces/:id/assets/:id/tags` | Bearer | Add and remove in one call; returns the result |
@@ -273,8 +288,8 @@ Both need a **freshly migrated, empty** database and a server started with
 `FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot"` — they assert against
 files on disk. Run one, reset the database, run the other.
 
-`smoke-m1a.sh` — 33 assertions: resume-after-interruption, truncated-chunk
-rejection, hash-mismatch rejection, dedup, hardlink inode sharing, cross-user
+`smoke-m1a.sh` — 32 assertions: resume-after-interruption, truncated-chunk
+rejection, hash-mismatch rejection, dedup, no legacy `browse/` tree, cross-user
 access control.
 
 `smoke-m1b.sh` — 33 assertions: EXIF fields, GPS hemisphere signs, capture time
@@ -509,6 +524,15 @@ It reports the files, people and shared libraries it found, and writes nothing.
 ---
 
 ## Design notes worth knowing before editing
+
+- **Delta sync never skips ahead.** `TimelineStore.cursor` means "the days in
+  memory reflect every change up to here", and only applying changes moves it:
+  a manifest load keeps it when days are loaded (so a restored snapshot
+  replays what it missed), `refresh()` follows `hasMore` to the end, and a
+  loaded day whose count disagrees with the manifest is refetched in place.
+  Anything that changes a photo's day or membership must append to
+  `change_log` in the same transaction — a missed change used to stay wrong
+  for good, because nothing refetches a loaded day.
 
 - **SQLKit, not Fluent.** The schema is hand-written DDL and the queries that
   matter later — timeline bucket aggregation, `change_log` deltas, advisory

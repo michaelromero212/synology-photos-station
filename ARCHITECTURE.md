@@ -410,10 +410,10 @@ it, 200. Reproduced before fixing.
 
 Both now scope to the caller. `probe` only reports `.have` for an asset already
 placed in one of their spaces; `link` requires the same. Storage dedup is
-untouched, because commit's `ON CONFLICT (sha256)` still collapses identical
-bytes onto one asset row and one blob — only the *transfer* saving is lost, and
-only when two people upload the same file. Correct isolation is worth more than
-one skipped upload on a home network.
+untouched — the blob store is content-addressed, so identical bytes still land
+on one blob — and only the *transfer* saving is lost, and only when two people
+upload the same file. Correct isolation is worth more than one skipped upload
+on a home network.
 
 The general rule this establishes: **holding an identifier must never be
 sufficient to read the thing it names.** Every read path re-derives access from
@@ -519,7 +519,7 @@ CREATE TABLE space_members (
 -- The file. Immutable, deduplicated, space-agnostic.
 CREATE TABLE assets (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  sha256          text NOT NULL UNIQUE,
+  sha256          text NOT NULL,          -- indexed, not unique since 0014: a shared copy is its own row
   byte_size       bigint NOT NULL,
   media_type      text NOT NULL,          -- photo | video
   mime            text NOT NULL,
@@ -684,6 +684,25 @@ id (16B) | capturedAt (8B) | aspectRatio (f32) | mediaType (1B) | thumbhash (25B
 
 ≈ 55 bytes/item, so a 400-photo month is ~22 KB. ThumbHash renders an instant
 colored placeholder with zero additional network.
+
+### Delta sync keeps its promise
+
+A day, once loaded, is never refetched for the life of the session, and the
+snapshot carries it into the next launch — so a change that doesn't arrive
+stays wrong. Three rules close that:
+
+- **The cursor only moves by applying changes.** A manifest load keeps it while
+  days are held, so a snapshot restored at launch replays what changed while
+  the app was closed. A cursor ahead of the server's means the database was
+  rebuilt; the days go and sync starts over.
+- **Every page.** `/changes` pages at 500 with `hasMore`; the client follows it
+  to the end (a fresh start past ten pages).
+- **Counts heal the rest.** After each manifest, a loaded day whose item count
+  disagrees with the server's is refetched in place. Whatever caused the drift —
+  a lost write, a re-dated photo, a truncated snapshot — it corrects itself.
+
+Writers keep their half: anything that changes a photo's day or membership
+appends to `change_log` in the same transaction as the change.
 
 ### Upload protocol
 
@@ -1064,9 +1083,14 @@ container is mounted at `/volume1/docker/framestation`, one level *below* the
 share root, so `/volume1/docker/#recycle` is not reachable from inside it. The
 29 days is the safety net; DSM snapshots are the backstop behind it.
 
-**Shared spaces still recover through File Station,** which is why "who may
-restore whose deletion in a shared space" is not a question this app answers.
-Recently Deleted is personal-space only.
+**Every library has Recently Deleted,** shared ones included. They were once
+left to File Station, but removing a shared photograph withdraws every member's
+copy straight past DSM's recycle bin, so that left shared deletions with no way
+back. Who may undo whose deletion has the answer who may delete does: any
+contributor.
+
+A Live Photo is removed, restored and purged as one thing — the video half goes
+with its still (migration 0025 caught up the ones deleted before it did).
 
 ---
 
@@ -1151,7 +1175,7 @@ of watching progress bars before anything is evaluable.
 | **M10** ✅ | Offline | Timeline manifest and loaded buckets persist to Application Support, and the last `/v1/me` is remembered so a valid token no longer needs a round trip to render — launching out of range used to show a **sign-in form**. Image cache is finally bounded: a real LRU with a 250 MB/500 MB/1 GB/2 GB cap, plus the Cache Management screen. A 401 clears all three. |
 | **M11** ✅ | Search: place | `/places` and `/search`, the search screen, and the magnifier left of `+`. Verified against real geocoded coordinates — typing "California" matched two different place names. |
 | **M12** ✅ | Video continuation | "Play All Videos" removed in favour of an Auto Play setting. **Auto-advance works**: a finished clip rolls into the next one from the same day and plays. The cause of the old failure was `TabView(.page)` — it builds pages lazily and silently ignores a programmatic selection to a page it has not built, so the destination never existed. Replaced with a `UIPageViewController` representable, which also gives the preload hook. Next videos are prepared while the current one plays (`VideoPreloader`), so arriving costs no round trip. Skip-to-next is a button in the viewer chrome; macOS and tvOS get Previous/Next. Horizontal paging works both ways, video to photo to video, verified on device. |
-| **M13** ✅ | Recently Deleted | Personal-space backups only — see §9a. 29-day window owned by `RetentionWorker`, per-tile countdown, restore via the reconciler. Shared removals still go to File Station |
+| **M13** ✅ | Recently Deleted | Every library — see §9a. 29-day window owned by `RetentionWorker`, per-tile countdown, Select with Recover All / Delete All, restore via the reconciler |
 | **M14** | macOS / iPadOS / tvOS | Shared package, view-only clients |
 | — | ~~Free Up Space~~ | **Dropped** 2026-08-10, was M7. See §8 |
 
