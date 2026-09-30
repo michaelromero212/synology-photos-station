@@ -6,40 +6,95 @@ import Vapor
 /// from their filenames — so nothing has to be re-uploaded to gain the
 /// metadata the app learned to read after it was stored.
 ///
-/// Runs once at startup, over only the assets that are still missing a capture
-/// date. Anything whose name yields no date is left alone and re-examined on
-/// the next boot, which is a cheap read and no write. New uploads get their
-/// date from the file's own creation date at commit and never reach here.
+/// Runs once at startup and makes one complete pass over the assets that could
+/// still gain something: undated, or dated by an earlier version that kept a
+/// stale offset, and with a name that could carry a date or says screenshot.
+/// New uploads get their date from the file's own creation date at commit and
+/// never need it.
 enum MetadataBackfill {
     private struct Row: Decodable {
         let id: UUID
         let filename: String?
         let mediaSubtypes: [String]
+        /// No trustworthy date on record: none at all, or one with an offset
+        /// on a file that has no camera data to have taken it from.
+        let needsDate: Bool
     }
 
-    static func run(on app: Application) async {
-        let sql = app.sql
-        do {
-            // Only the dateless, and only enough per pass to keep startup brisk
-            // on a large library — the rest come on the next boot.
-            let rows = try await sql.raw("""
-                SELECT a.id,
-                       (SELECT sa.filename FROM space_assets sa
-                        WHERE sa.asset_id = a.id AND sa.filename IS NOT NULL
-                        LIMIT 1) AS filename,
-                       a.media_subtypes AS "mediaSubtypes"
-                FROM assets a
-                -- Missing a date, or carrying a non-zero offset a filename date
-                -- must not keep. The second half re-corrects rows an earlier
-                -- version mis-dated: it stored the filename wall clock but kept
-                -- a stale offset from the upload, so a 3:45 AM screenshot showed
-                -- 11:45 PM the day before and sorted into the wrong day.
-                WHERE (a.captured_at IS NULL OR a.captured_tz_off IS DISTINCT FROM 0)
-                LIMIT 2000
-                """).all(decoding: Row.self)
+    /// Candidates per page. The pass pages through all of them, in id order.
+    private static let pageSize = 500
 
-            var dated = 0
-            var flagged = 0
+    static func run(on app: Application) async {
+        var dated = 0
+        var flagged = 0
+        // Keyset paging, so one boot reaches every candidate.
+        //
+        // This used to take the first 2,000 rows matching a clause that also
+        // matched every iPhone photo — `IMG_4821.HEIC` has a timezone offset
+        // and no date in its name — and it never marked progress. Rows it
+        // could do nothing with never left the result, so on a real library
+        // every boot examined the same 2,000 undatable photos and never reached
+        // the screenshots it exists for. Filtering on names that could carry a
+        // date keeps those out, and paging past each row keeps the pass moving
+        // even over the few whose names still don't parse.
+        var after = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+        do {
+            while true {
+                // Driven from the placements, where the names are: one pass
+                // over their filenames per page rather than a lookup per asset.
+                let rows = try await app.sql.raw("""
+                    SELECT DISTINCT ON (a.id)
+                           a.id, sa.filename, a.media_subtypes AS "mediaSubtypes",
+                           (a.captured_at IS NULL
+                            OR (a.captured_tz_off IS DISTINCT FROM 0 AND a.camera_make IS NULL))
+                               AS "needsDate"
+                    FROM space_assets sa
+                    JOIN assets a ON a.id = sa.asset_id
+                    WHERE a.id > \(bind: after)
+                      AND sa.filename IS NOT NULL
+                      AND (
+                          -- A date the name could supply: eight digits, dashed
+                          -- or not, which every shape FilenameMetadata reads
+                          -- contains and `IMG_4821` does not.
+                          ((a.captured_at IS NULL
+                            OR (a.captured_tz_off IS DISTINCT FROM 0 AND a.camera_make IS NULL))
+                           AND sa.filename ~ '[0-9]{4}-?[0-9]{2}-?[0-9]{2}')
+                          -- Or a screenshot not yet marked as one.
+                          OR (lower(sa.filename) ~ '^(simulator )?screenshot'
+                              AND NOT ('screenshot' = ANY(a.media_subtypes)))
+                      )
+                    ORDER BY a.id, sa.id
+                    LIMIT \(bind: pageSize)
+                    """).all(decoding: Row.self)
+                guard let last = rows.last else { break }
+                after = last.id
+
+                let page = try await app.withPinnedConnection { sql in
+                    try await apply(rows, on: sql)
+                }
+                dated += page.dated
+                flagged += page.flagged
+                if rows.count < pageSize { break }
+            }
+        } catch {
+            app.logger.error("metadata backfill failed: \(String(reflecting: error))")
+        }
+
+        if dated > 0 || flagged > 0 {
+            app.logger.info(
+                "metadata backfill: dated \(dated), flagged \(flagged) screenshot(s) from filenames"
+            )
+        }
+    }
+
+    /// One page, in one transaction with its announcements.
+    private static func apply(
+        _ rows: [Row], on sql: any SQLDatabase
+    ) async throws -> (dated: Int, flagged: Int) {
+        var dated = 0
+        var flagged = 0
+        try await sql.raw("BEGIN").run()
+        do {
             for row in rows {
                 guard let filename = row.filename else { continue }
 
@@ -48,19 +103,40 @@ enum MetadataBackfill {
                 // stale one — and `local_captured_at` is the same wall clock.
                 // Display and sort then both read the time written in the name.
                 //
-                // Overwrites unconditionally: a file whose name carries a date
-                // has no better source (a screenshot has no EXIF), and a camera
-                // file, whose name carries none, never reaches this branch — so
-                // this never overrides a real EXIF or device date.
-                if let date = FilenameMetadata.captureDate(from: filename) {
-                    try await sql.raw("""
+                // Only where there is no better source. A screenshot has no
+                // EXIF; a camera file does, and one whose name happens to carry
+                // a date too — `PXL_20260902_193249.jpg` — keeps the offset its
+                // camera recorded rather than trading it for zero.
+                if row.needsDate, let date = FilenameMetadata.captureDate(from: filename) {
+                    struct Changed: Decodable { let id: UUID }
+                    let changed = try await sql.raw("""
                         UPDATE assets
                         SET captured_at = \(bind: date),
                             captured_tz_off = 0,
                             local_captured_at = \(bind: date) AT TIME ZONE 'UTC'
                         WHERE id = \(bind: row.id)
-                        """).run()
-                    dated += 1
+                          AND (captured_at IS DISTINCT FROM \(bind: date)
+                               OR captured_tz_off IS DISTINCT FROM 0)
+                        RETURNING id
+                        """).all(decoding: Changed.self)
+
+                    // A new date can mean a new day, and every device showing
+                    // the old one has to be told — the same announcement a
+                    // date edited in the app makes. Without it the photo stayed
+                    // on its old day everywhere until that day was refetched.
+                    if !changed.isEmpty {
+                        dated += 1
+                        let placements = try await sql.raw("""
+                            SELECT id, space_id AS "spaceID" FROM space_assets
+                            WHERE asset_id = \(bind: row.id) AND deleted_at IS NULL
+                            """).all(decoding: DerivationWorker.SpacePlacement.self)
+                        for placement in placements {
+                            _ = try await ChangeLog.append(
+                                spaceID: placement.spaceID, entity: "space_asset",
+                                entityID: placement.id, op: "update", on: sql
+                            )
+                        }
+                    }
                 }
 
                 // The kind, from the same name: a screenshot with no recorded
@@ -77,15 +153,12 @@ enum MetadataBackfill {
                     flagged += 1
                 }
             }
-
-            if dated > 0 || flagged > 0 {
-                app.logger.info(
-                    "metadata backfill: dated \(dated), flagged \(flagged) screenshot(s) from filenames"
-                )
-            }
+            try await sql.raw("COMMIT").run()
         } catch {
-            app.logger.error("metadata backfill failed: \(String(reflecting: error))")
+            try? await sql.raw("ROLLBACK").run()
+            throw error
         }
+        return (dated, flagged)
     }
 
     /// Re-probes already-stored assets for the full metadata dump.
