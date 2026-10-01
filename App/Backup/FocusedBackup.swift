@@ -213,9 +213,7 @@ struct FocusedBackupView: View {
             guard pending == 0, session?.isRunning == true else { return }
             session?.stop()
         }
-        #if compiler(>=6.2)
         .persistentSystemOverlays(.hidden)
-        #endif
         .preferredColorScheme(.dark)
     }
 

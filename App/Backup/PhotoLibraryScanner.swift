@@ -138,18 +138,11 @@ enum PhotoLibraryScanner {
     /// time anything about the photo changed — a favorite as much as a crop —
     /// which only ever errs toward looking again: an edit found twice is sent
     /// twice, and the NAS recognizes the bytes the second time.
-    ///
-    /// Behind a compiler check as well as an availability one. The header marks
-    /// `adjustmentTimestamp` iOS 18, but that does not say which SDK first
-    /// declared it — see `subtypes(of:)` for a pair of constants that were
-    /// marked older than their SDK — and CI builds on Xcode 16.4.
     static func editedAt(of asset: PHAsset) -> Date? {
         guard asset.hasAdjustments else { return nil }
-        #if compiler(>=6.2)
         if #available(iOS 18, *), let stamp = asset.adjustmentTimestamp {
             return stamp
         }
-        #endif
         return asset.modificationDate ?? asset.creationDate
     }
 
@@ -178,31 +171,13 @@ enum PhotoLibraryScanner {
         var result: [MediaSubtype] = []
         if subtypes.contains(.photoScreenshot) { result.append(.screenshot) }
         if subtypes.contains(.photoPanorama) { result.append(.panorama) }
-        // These two by raw value, because the *names* are newer than the SDK
-        // this is built against even though the bits are not.
-        //
-        // `PHAssetMediaSubtypeVideoScreenRecording` is `1UL << 19` and annotated
-        // `API_AVAILABLE(ios(13))`; `PHAssetMediaSubtypeVideoCinematic` is
-        // `1UL << 21` and `ios(15)`. Both bits have been set by the OS for
-        // years, but Apple only exposed the constants in a recent SDK header —
-        // they are the last two entries in it. CI builds on Xcode 16.4 (iOS SDK
-        // 18.5), where the symbols do not exist and the build fails; Xcode 26
-        // compiles them without complaint, which is how this reached CI green
-        // locally and red on the runner.
-        //
-        // The bits are public, documented and ABI-stable, so reading them
-        // directly is correct against any SDK. Only the spelling is unportable.
-        if subtypes.contains(PHAssetMediaSubtype(rawValue: 1 << 19)) {
-            result.append(.screenRecording)
-        }
+        if subtypes.contains(.videoScreenRecording) { result.append(.screenRecording) }
         // Apple's own name for slow motion is "high frame rate" — the slowing
         // happens on playback, not in the file.
         if subtypes.contains(.videoHighFrameRate) { result.append(.slomo) }
         if subtypes.contains(.videoTimelapse) { result.append(.timelapse) }
         if subtypes.contains(.photoDepthEffect) { result.append(.portrait) }
-        if subtypes.contains(PHAssetMediaSubtype(rawValue: 1 << 21)) {
-            result.append(.cinematic)
-        }
+        if subtypes.contains(.videoCinematic) { result.append(.cinematic) }
         return result
     }
 
