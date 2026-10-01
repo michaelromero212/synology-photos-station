@@ -277,14 +277,13 @@ actor BrowseTreeWorker {
     /// mention. A missed *removal* is a photograph somebody can still see after
     /// leaving the space, which nobody will mention at all. Recomputing catches
     /// both; an event queue only ever catches the first.
+    ///
+    /// Neither half throws: each logs its own failures and leaves what it
+    /// couldn't do for the next sweep.
     private func sweep() async {
-        do {
-            let sql = app.sql
-            await placeMissing(on: sql)
-            await removeStale(on: sql)
-        } catch {
-            app.logger.error("browse tree sweep failed: \(String(reflecting: error))")
-        }
+        let sql = app.sql
+        await placeMissing(on: sql)
+        await removeStale(on: sql)
     }
 
     /// Placements that somebody entitled to see them has no copy of.

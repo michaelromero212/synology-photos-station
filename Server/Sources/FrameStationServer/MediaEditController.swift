@@ -133,7 +133,7 @@ struct MediaEditController: RouteCollection {
             if existing != nil { continue }
 
             let targetAssetID = try await UploadController.copyIntoSpace(
-                assetID: assetID, spaceID: destination.id, device: device, req: req
+                assetID: assetID, req: req
             ) ?? assetID
 
             try await req.withPinnedConnection { sql in
@@ -211,8 +211,11 @@ struct MediaEditController: RouteCollection {
             )
         }
 
-        var updated = 0
-        try await req.withPinnedConnection { sql in
+        // Counted inside the transaction and handed back, rather than added to a
+        // `var` out here: the body is `@Sendable`, and writing to a captured
+        // `var` from one is a data race as far as the compiler can tell.
+        let updated = try await req.withPinnedConnection { sql -> Int in
+            var updated = 0
             try await sql.raw("BEGIN").run()
             do {
                 for assetID in input.assetIDs {
@@ -239,6 +242,7 @@ struct MediaEditController: RouteCollection {
                 try? await sql.raw("ROLLBACK").run()
                 throw error
             }
+            return updated
         }
 
         return MediaEditResponse(updated: updated)
@@ -268,11 +272,12 @@ struct MediaEditController: RouteCollection {
         }
 
         let spaceID = try await requireContributorSpace(req)
-        var updated = 0
-        var relocated = 0
-        var moves: [(from: String, to: String)] = []
 
-        try await req.withPinnedConnection { sql in
+        // Handed back by the transaction for the same reason as in `setCredit`.
+        let (updated, moves) = try await req.withPinnedConnection {
+            sql -> (Int, [(from: String, to: String)]) in
+            var updated = 0
+            var moves: [(from: String, to: String)] = []
             try await sql.raw("BEGIN").run()
             do {
                 for item in input.items {
@@ -309,11 +314,13 @@ struct MediaEditController: RouteCollection {
                 try? await sql.raw("ROLLBACK").run()
                 throw error
             }
+            return (updated, moves)
         }
 
         // Deliberately after the commit. A half-applied batch of file moves is
         // recoverable — `rebuild` reads the folders — but a database that
         // rolled back while the files had already moved is not.
+        var relocated = 0
         for move in moves {
             guard let landed = Self.move(
                 from: move.from, to: move.to, logger: req.logger
@@ -341,10 +348,12 @@ struct MediaEditController: RouteCollection {
         }
 
         let spaceID = try await requireContributorSpace(req)
-        var updated = 0
-        var stalePreviews: [String] = []
 
-        try await req.withPinnedConnection { sql in
+        // Handed back by the transaction for the same reason as in `setCredit`.
+        let (updated, stalePreviews) = try await req.withPinnedConnection {
+            sql -> (Int, [String]) in
+            var updated = 0
+            var stalePreviews: [String] = []
             try await sql.raw("BEGIN").run()
             do {
                 for assetID in input.assetIDs {
@@ -380,6 +389,7 @@ struct MediaEditController: RouteCollection {
                 try? await sql.raw("ROLLBACK").run()
                 throw error
             }
+            return (updated, stalePreviews)
         }
 
         // The 2048 preview is rendered lazily on first full-screen view, so

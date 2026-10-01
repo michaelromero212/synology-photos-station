@@ -548,46 +548,23 @@ struct UploadController: RouteCollection {
     /// Internal rather than private: the batch share endpoint in
     /// `MediaEditController` is the same operation done fifty times, and two
     /// implementations of "copy a photo into a space" would drift.
-    static func copyIntoSpace(
-        assetID: UUID, spaceID: UUID, device: AuthenticatedDevice, req: Request
-    ) async throws -> UUID? {
+    ///
+    /// Where the copy lands is not decided here. The new row starts with no
+    /// `storage_path`, and `BrowseTreeWorker` files it into every folder the
+    /// caller's placement entitles it to — so the only question for this
+    /// function is whether there is a file to copy at all.
+    static func copyIntoSpace(assetID: UUID, req: Request) async throws -> UUID? {
         let configuration = BrowseTree.Configuration.fromEnvironment()
         guard configuration.enabled else { return nil }
 
-        struct SourceRow: Decodable {
-            let sha256: String
-            let blobExt: String
-            let storagePath: String?
-            let capturedAt: Date?
-            let filename: String?
-        }
-        struct TargetRow: Decodable {
-            let spaceKind: String
-            let spaceName: String
-            let dsmUsername: String?
-            let dsmUID: Int?
-        }
-
-        guard let source = try await req.sql.raw("""
-            SELECT a.sha256, a.blob_ext AS "blobExt", a.storage_path AS "storagePath",
-                   a.captured_at AS "capturedAt",
-                   (SELECT sa.filename FROM space_assets sa
-                    WHERE sa.asset_id = a.id AND sa.filename IS NOT NULL LIMIT 1) AS filename
-            FROM assets a WHERE a.id = \(bind: assetID)
-            """).first(decoding: SourceRow.self),
-            let target = try await req.sql.raw("""
-            SELECT s.kind AS "spaceKind", s.name AS "spaceName",
-                   u.dsm_username AS "dsmUsername", u.dsm_uid AS "dsmUID"
-            FROM spaces s JOIN users u ON u.id = \(bind: device.userID)
-            WHERE s.id = \(bind: spaceID)
-            """).first(decoding: TargetRow.self)
-        else { return nil }
-
         // Nothing to copy from: this row still lives in the blob store.
-        guard let sourcePath = source.storagePath,
+        struct SourceRow: Decodable { let storagePath: String? }
+        guard let source = try await req.sql.raw("""
+            SELECT storage_path AS "storagePath" FROM assets WHERE id = \(bind: assetID)
+            """).first(decoding: SourceRow.self),
+              let sourcePath = source.storagePath,
               FileManager.default.fileExists(atPath: sourcePath)
         else { return nil }
-        _ = sourcePath
 
         // A copy of the row to go with the copy of the file. derived_at comes
         // along so the worker doesn't redo work whose output is already on disk
@@ -662,7 +639,7 @@ struct UploadController: RouteCollection {
             targetAssetID = assetID
         } else {
             targetAssetID = try await Self.copyIntoSpace(
-                assetID: assetID, spaceID: spaceID, device: device, req: req
+                assetID: assetID, req: req
             ) ?? assetID
         }
 

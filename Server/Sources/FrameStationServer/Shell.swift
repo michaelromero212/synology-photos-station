@@ -72,13 +72,22 @@ enum Shell {
         let token = UUID().uuidString
         let outURL = scratch.appendingPathComponent("framestation-\(token).out")
         let errURL = scratch.appendingPathComponent("framestation-\(token).err")
-        FileManager.default.createFile(atPath: outURL.path, contents: nil)
-        FileManager.default.createFile(atPath: errURL.path, contents: nil)
+        let outHandle: FileHandle
+        let errHandle: FileHandle
+        do {
+            guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
+                  FileManager.default.createFile(atPath: errURL.path, contents: nil)
+            else { throw ShellError.scratchUnavailable(scratch.path) }
+            outHandle = try FileHandle(forWritingTo: outURL)
+            errHandle = try FileHandle(forWritingTo: errURL)
+        } catch {
+            try? FileManager.default.removeItem(at: outURL)
+            try? FileManager.default.removeItem(at: errURL)
+            throw error
+        }
 
-        let outHandle = try FileHandle(forWritingTo: outURL)
-        let errHandle = try FileHandle(forWritingTo: errURL)
-
-        func cleanUp() {
+        // `@Sendable` because the timeout below calls it from a Dispatch queue.
+        @Sendable func cleanUp() {
             try? outHandle.close()
             try? errHandle.close()
             try? FileManager.default.removeItem(at: outURL)
@@ -190,11 +199,14 @@ enum ShellError: Error, CustomStringConvertible {
     case notFound(String)
     case failed(String, Int32, String)
     case timedOut(String, TimeInterval)
+    case scratchUnavailable(String)
 
     var description: String {
         switch self {
         case .notFound(let executable):
             return "\(executable) is not installed or not on PATH."
+        case .scratchUnavailable(let directory):
+            return "Could not create a command's output files in \(directory)."
         case .failed(let executable, let status, let stderr):
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(executable) exited \(status)\(detail.isEmpty ? "" : ": \(detail)")"

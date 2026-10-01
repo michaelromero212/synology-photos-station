@@ -60,7 +60,7 @@ struct AlbumController: RouteCollection {
     private func list(_ req: Request) async throws -> AlbumListResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
         let rows = try await req.sql.raw("""
-            \(raw: Self.albumSelect)
+            \(unsafeRaw: Self.albumSelect)
             WHERE a.owner_user_id = \(bind: device.userID)
             ORDER BY a.updated_at DESC
             """).all(decoding: AlbumRow.self)
@@ -267,7 +267,7 @@ struct AlbumController: RouteCollection {
         _ albumID: UUID, device: AuthenticatedDevice, on sql: any SQLDatabase
     ) async throws -> AlbumRow {
         guard let row = try await sql.raw("""
-            \(raw: Self.albumSelect)
+            \(unsafeRaw: Self.albumSelect)
             WHERE a.id = \(bind: albumID) AND a.owner_user_id = \(bind: device.userID)
             """).first(decoding: AlbumRow.self) else {
             throw Abort(.notFound, reason: "No such album.")
