@@ -60,6 +60,19 @@ final class TimelineGridLayout: UICollectionViewLayout {
     private var starts: [CGFloat] = []
     private var height: CGFloat = 0
     private var scale: CGFloat = 3
+    /// Empty room above a library too short to fill the screen.
+    ///
+    /// The grid runs oldest to newest and opens on the newest, so a long
+    /// library shows its newest photos resting on the bar at the bottom. One
+    /// that fits on screen with room to spare used to start at the top
+    /// instead. A shared album of nine photos showed them up under the clock
+    /// with half a screen of nothing below, newest in the middle. The room
+    /// goes above, so a short library looks the way the end of a long one
+    /// does.
+    private var lead: CGFloat = 0
+    /// The height the grid was last laid out for. A short library rests on the
+    /// bottom, so it moves when the bottom does.
+    private var boundsHeight: CGFloat = 0
 
     init(shape: Shape) {
         self.shape = shape
@@ -81,14 +94,34 @@ final class TimelineGridLayout: UICollectionViewLayout {
         // The same arithmetic `PhotoGridSection` used, so the tiles come out the
         // size they always were.
         side = max((width - shape.spacing * CGFloat(columns - 1)) / CGFloat(columns), 1)
+        boundsHeight = collectionView.bounds.height
+        let natural = shape.counts.reduce(shape.libraryHeaderHeight) { $0 + sectionHeight($1) }
+        // On a whole device pixel, so every edge below it rounds the way it
+        // would without it and the gaps stay crisp.
+        let room = shape.counts.isEmpty
+            ? 0 : max(visibleHeight(collectionView, height: boundsHeight) - natural, 0)
+        lead = (room * scale).rounded(.down) / scale
         starts.removeAll(keepingCapacity: true)
         starts.reserveCapacity(shape.counts.count)
-        var y = shape.libraryHeaderHeight
+        var y = lead + shape.libraryHeaderHeight
         for count in shape.counts {
             starts.append(y)
             y += sectionHeight(count)
         }
         height = y
+    }
+
+    /// How much of the grid's height is not under a bar: the content insets
+    /// are the bars, set by hand. See `Coordinator.applyInsets`.
+    private func visibleHeight(_ collectionView: UICollectionView, height: CGFloat) -> CGFloat {
+        max(height - collectionView.contentInset.top - collectionView.contentInset.bottom, 0)
+    }
+
+    /// Whether the library is short enough to rest on the bottom at this much
+    /// visible height, or was the last time it was laid out. Either way, a
+    /// change to the bars or the screen moves it.
+    func restsOnBottom(within visible: CGFloat) -> Bool {
+        lead > 0 || height - lead < visible
     }
 
     private func rows(_ count: Int) -> Int {
@@ -112,7 +145,8 @@ final class TimelineGridLayout: UICollectionViewLayout {
     /// describes the screen as it is. See `shouldInvalidateLayout`.
     var widthWillChange: (() -> Void)?
 
-    /// Only a change of width changes anything; scrolling changes nothing.
+    /// Only a change of width changes anything, or of height for a library
+    /// resting on the bottom. Scrolling changes nothing.
     ///
     /// Also the one moment to take the screen's place before a new width
     /// moves it. By the time the collection view lays itself out, this layout
@@ -121,9 +155,12 @@ final class TimelineGridLayout: UICollectionViewLayout {
     /// the old offset: measured, it named whatever had moved under the old
     /// offset, and putting that back moved nothing.
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
-        guard newBounds.width != width else { return false }
-        widthWillChange?()
-        return true
+        if newBounds.width != width {
+            widthWillChange?()
+            return true
+        }
+        guard newBounds.height != boundsHeight, let collectionView else { return false }
+        return restsOnBottom(within: visibleHeight(collectionView, height: newBounds.height))
     }
 
     /// The day holding a point in the content. A binary search, because this is
@@ -182,7 +219,8 @@ final class TimelineGridLayout: UICollectionViewLayout {
 
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
         var result: [UICollectionViewLayoutAttributes] = []
-        if shape.libraryHeaderHeight > 0, rect.minY < shape.libraryHeaderHeight,
+        if shape.libraryHeaderHeight > 0,
+           rect.minY < lead + shape.libraryHeaderHeight, rect.maxY > lead,
            let library = layoutAttributesForSupplementaryView(
                ofKind: Self.libraryHeaderKind, at: IndexPath(item: 0, section: 0)
            ) {
@@ -246,7 +284,9 @@ final class TimelineGridLayout: UICollectionViewLayout {
         )
         if kind == Self.libraryHeaderKind {
             guard shape.libraryHeaderHeight > 0 else { return nil }
-            attributes.frame = CGRect(x: 0, y: 0, width: width, height: shape.libraryHeaderHeight)
+            attributes.frame = CGRect(
+                x: 0, y: lead, width: width, height: shape.libraryHeaderHeight
+            )
             return attributes
         }
         guard starts.indices.contains(indexPath.section) else { return nil }
@@ -549,6 +589,15 @@ struct TimelineCollection: UIViewRepresentable {
             guard insets != lastInsets else { return false }
             lastInsets = insets
             view.contentInset = insets
+            // A library resting on the bottom moves with it: a bar arriving
+            // there lifts the newest row clear of it, the way scrolling to the
+            // end does for a long one. Laid out now, so that anything measuring
+            // the content next measures the new height.
+            if let layout,
+               layout.restsOnBottom(within: max(view.bounds.height - insets.top - insets.bottom, 0)) {
+                layout.invalidateLayout()
+                view.layoutIfNeeded()
+            }
             return true
         }
 
