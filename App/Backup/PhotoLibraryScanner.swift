@@ -70,16 +70,26 @@ enum PhotoLibraryScanner {
     }
 
     /// Every photo and video in the library, newest first.
+    ///
+    /// Each photo in an autorelease pool of its own. This is one pass over the
+    /// whole library with nothing in it that pauses, so anything Photos hands
+    /// back autoreleased for a photo's files would stay in memory until the
+    /// last photo had been read, on a phone with tens of thousands of them.
+    /// A precaution, not a measured leak. `FileUpload.hashFile` is where the
+    /// same mechanism was measured, holding whole videos in memory until iOS
+    /// killed the app.
     static func scan(includeVideos: Bool) -> [Candidate] {
         let fetched = PHAsset.fetchAssets(with: fetchOptions())
         var candidates: [Candidate] = []
         candidates.reserveCapacity(fetched.count)
 
         fetched.enumerateObjects { asset, _, _ in
-            guard asset.mediaType == .image || (asset.mediaType == .video && includeVideos) else {
-                return
+            autoreleasepool {
+                guard asset.mediaType == .image
+                    || (asset.mediaType == .video && includeVideos)
+                else { return }
+                if let candidate = describe(asset) { candidates.append(candidate) }
             }
-            if let candidate = describe(asset) { candidates.append(candidate) }
         }
         return candidates
     }

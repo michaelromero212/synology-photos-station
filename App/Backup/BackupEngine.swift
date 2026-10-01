@@ -296,7 +296,16 @@ final class BackupEngine {
         // saved once the scan is done: everything up to here the scan has seen,
         // so the next catch-up need only read what comes after. See `catchUp`.
         let mark = LibraryChangeHistory.currentMark()
-        var candidates = PhotoLibraryScanner.scan(includeVideos: settings.includeVideos)
+        // Off the main actor, as `catchUp` already reads the change history.
+        // This reads every photo on the phone, and run here it held the main
+        // thread for as long as that took. The screen froze for it, and iOS
+        // ends an app whose main thread stops answering, for one while it's
+        // being switched away from. Photos' objects are immutable, so handing
+        // them back across is safe.
+        let includeVideos = settings.includeVideos
+        var candidates = await Task.detached(priority: .userInitiated) {
+            PhotoLibraryScanner.scan(includeVideos: includeVideos)
+        }.value
         // Edits follow their photo whichever rule is in force: a rule decides
         // which photos backup takes on, and a photo with an edit to send is one
         // it took on already. See `queueEdits`.
@@ -501,16 +510,22 @@ final class BackupEngine {
         let cutoff = settings.futureCutoff
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: fresh, options: nil)
         var candidates: [PhotoLibraryScanner.Candidate] = []
+        // A pool per photo, as in `PhotoLibraryScanner.scan`: a catch-up can
+        // hand this thousands of photos in one pass with nothing that pauses.
         fetched.enumerateObjects { asset, _, _ in
-            guard asset.mediaType == .image || (asset.mediaType == .video && includeVideos) else {
-                return
+            autoreleasepool {
+                guard asset.mediaType == .image
+                    || (asset.mediaType == .video && includeVideos)
+                else { return }
+                // The line the full scan draws, drawn here too. New to the
+                // library is not the same as newly taken: a photo saved from a
+                // message, or arriving from iCloud, can be years old, and "only
+                // new photos" means new photographs.
+                guard rule.queues(takenAt: asset.creationDate, cutoff: cutoff) else { return }
+                if let candidate = PhotoLibraryScanner.describe(asset) {
+                    candidates.append(candidate)
+                }
             }
-            // The line the full scan draws, drawn here too. New to the library
-            // is not the same as newly taken: a photo saved from a message, or
-            // arriving from iCloud, can be years old, and "only new photos"
-            // means new photographs.
-            guard rule.queues(takenAt: asset.creationDate, cutoff: cutoff) else { return }
-            if let candidate = PhotoLibraryScanner.describe(asset) { candidates.append(candidate) }
         }
         guard !candidates.isEmpty else { return }
 
@@ -628,13 +643,17 @@ final class BackupEngine {
         let includeVideos = settings.includeVideos
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
         var candidates: [PhotoLibraryScanner.Candidate] = []
+        // A pool per photo, as in `PhotoLibraryScanner.scan`.
         fetched.enumerateObjects { asset, _, _ in
-            guard asset.hasAdjustments,
-                  asset.mediaType == .image || (asset.mediaType == .video && includeVideos),
-                  let candidate = PhotoLibraryScanner.describe(asset),
-                  candidate.editedAt != nil
-            else { return }
-            candidates.append(candidate)
+            autoreleasepool {
+                guard asset.hasAdjustments,
+                      asset.mediaType == .image
+                        || (asset.mediaType == .video && includeVideos),
+                      let candidate = PhotoLibraryScanner.describe(asset),
+                      candidate.editedAt != nil
+                else { return }
+                candidates.append(candidate)
+            }
         }
         guard !candidates.isEmpty else { return }
 
