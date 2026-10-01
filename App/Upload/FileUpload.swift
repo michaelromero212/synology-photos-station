@@ -210,8 +210,28 @@ enum FileUpload {
         }
     }
 
+    /// How many of one file's chunks are on the wire at once.
+    ///
+    /// Two. One at a time, each 16 MB chunk waited for the NAS to write it to
+    /// its hard drives and answer before the next one set off, so the link sat
+    /// idle for every one of those writes. In a phone's log of an eight-file
+    /// burst, a 287 MB video was still sending 27 seconds in, long after the
+    /// photos beside it had finished. With a second chunk already travelling
+    /// while the NAS writes the first, the wait overlaps the transfer instead
+    /// of following it.
+    ///
+    /// Not more. Every chunk in flight is 16 MB of memory on the NAS while it is
+    /// received, and the three upload lanes already share one Wi-Fi link. Two
+    /// keeps the link busy, and more would mostly queue at the NAS.
+    static let chunksInFlight = 2
+
     /// Sends only the chunks the server says are missing, so a resumed upload
     /// continues instead of restarting a large video from zero.
+    ///
+    /// Up to `chunksInFlight` at a time. The server takes chunks in any order:
+    /// each is its own file until the commit puts them together, and the commit
+    /// checks the whole file against its SHA-256. So nothing about the bytes
+    /// changes, only how many travel at once.
     private static func sendChunks(
         probe: UploadProbeResponse,
         uploadID: UUID,
@@ -224,64 +244,136 @@ enum FileUpload {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
 
-        for index in probe.missingChunks {
-            // Between chunks and not merely between files. A 3 GB video is one
-            // item to the queue but hundreds of chunks on the wire, so a gate
-            // checked only at the top of a file lets the whole of that video go
-            // out over cellular after the network has already changed underneath
-            // it. This is the point where stopping is free.
-            if let shouldContinue, await !shouldContinue() {
-                throw UploadError.pausedByCaller
-            }
-            try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
-            let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
-            guard !data.isEmpty else { continue }
+        let chunkSize = Int64(probe.chunkSize)
+        func length(of index: Int) -> Int64 {
+            max(min(chunkSize, total - Int64(index) * chunkSize), 0)
+        }
+        // Chunks already on the server count as sent, or a resumed upload
+        // would appear to start from zero.
+        let progress = ChunkProgress(
+            alreadySent: total - probe.missingChunks.reduce(0) { $0 + length(of: $1) },
+            total: total
+        )
 
-            // Chunks already on the server count as sent, or a resumed upload
-            // would appear to start from zero.
-            let baseline = Int64(index) * Int64(probe.chunkSize)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for index in probe.missingChunks {
+                if inFlight == chunksInFlight {
+                    _ = try await group.next()
+                    inFlight -= 1
+                }
+                // Between chunks and not merely between files. A 3 GB video is
+                // one item to the queue but hundreds of chunks on the wire, so a
+                // gate checked only at the top of a file lets the whole of that
+                // video go out over cellular after the network has already
+                // changed underneath it. This is the point where stopping is
+                // free. At most the chunks already travelling finish, and the
+                // server keeps them for the next run to resume from.
+                if let shouldContinue, await !shouldContinue() {
+                    throw UploadError.pausedByCaller
+                }
+                // Read here and not in the task that sends it: the handle is
+                // shared, and a seek and a read from two tasks at once could
+                // interleave into the wrong bytes.
+                try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
+                let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
+                guard !data.isEmpty else { continue }
 
-            // Both transports send from a file rather than memory, so the part
-            // is written once here and the platforms differ only in who carries
-            // it. It has to outlive the call, which it does — the defer runs
-            // after the await.
-            //
-            // Into the temporary directory, *not* beside the source. This used
-            // to write `IMG_4021.jpg.0` next to the original, which was merely
-            // untidy on iOS — the source there is always a scratch export this
-            // code made itself — and broken on a Mac, where the source is the
-            // user's own file wherever they picked it. The sandbox grants
-            // access to the *file* the user chose, not to the folder holding
-            // it, so creating a sibling threw; the throw was caught upstream,
-            // the queue drained, and the upload appeared to do nothing at all.
-            let part = FileManager.default.temporaryDirectory
-                .appendingPathComponent("fs-chunk-\(uploadID)-\(index)")
-            try data.write(to: part, options: .atomic)
-            defer { try? FileManager.default.removeItem(at: part) }
+                // Both transports send from a file rather than memory, so the
+                // part is written once here and the platforms differ only in who
+                // carries it.
+                //
+                // Into the temporary directory, *not* beside the source. This
+                // used to write `IMG_4021.jpg.0` next to the original, which was
+                // merely untidy on iOS — the source there is always a scratch
+                // export this code made itself — and broken on a Mac, where the
+                // source is the user's own file wherever they picked it. The
+                // sandbox grants access to the *file* the user chose, not to the
+                // folder holding it, so creating a sibling threw; the throw was
+                // caught upstream, the queue drained, and the upload appeared to
+                // do nothing at all.
+                let part = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("fs-chunk-\(uploadID)-\(index)")
+                try data.write(to: part, options: .atomic)
+                let sent = Int64(data.count)
 
-            #if os(iOS)
-            // Through the background session, so a chunk in flight when iOS
-            // suspends us still lands.
-            let request = try await client.chunkUploadRequest(uploadID: uploadID, index: index)
-            let (_, response) = try await BackgroundTransfers.shared.upload(
-                request, fromFile: part
-            ) { sentInChunk in
-                onPhase?(.sending(sent: min(baseline + sentInChunk, total), total: total))
+                group.addTask {
+                    defer { try? FileManager.default.removeItem(at: part) }
+                    #if os(iOS)
+                    // Through the background session, so a chunk in flight when
+                    // iOS suspends us still lands.
+                    let request = try await client.chunkUploadRequest(
+                        uploadID: uploadID, index: index
+                    )
+                    let (_, response) = try await BackgroundTransfers.shared.upload(
+                        request, fromFile: part
+                    ) { sentInChunk in
+                        onPhase?(.sending(
+                            sent: progress.sending(index, sent: sentInChunk), total: total
+                        ))
+                    }
+                    guard let http = response as? HTTPURLResponse,
+                          (200..<300).contains(http.statusCode)
+                    else {
+                        throw UploadError.chunkRejected(
+                            (response as? HTTPURLResponse)?.statusCode ?? -1, index
+                        )
+                    }
+                    onPhase?(.sending(sent: progress.finished(index, bytes: sent), total: total))
+                    #else
+                    // No background session to need: a Mac is not suspended out
+                    // from under an upload, so the chunk goes out on the
+                    // ordinary client and progress ticks once per chunk rather
+                    // than continuously.
+                    _ = try await client.uploadChunk(
+                        uploadID: uploadID, index: index, fileURL: part
+                    )
+                    onPhase?(.sending(sent: progress.finished(index, bytes: sent), total: total))
+                    #endif
+                }
+                inFlight += 1
             }
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode)
-            else {
-                throw UploadError.chunkRejected(
-                    (response as? HTTPURLResponse)?.statusCode ?? -1, index
-                )
-            }
-            #else
-            // No background session to need: a Mac is not suspended out from
-            // under an upload, so the chunk goes out on the ordinary client and
-            // progress ticks once per chunk rather than continuously.
-            _ = try await client.uploadChunk(uploadID: uploadID, index: index, fileURL: part)
-            onPhase?(.sending(sent: min(baseline + Int64(data.count), total), total: total))
-            #endif
+            try await group.waitForAll()
+        }
+    }
+
+    /// How much of one file has been sent, with chunks finishing out of order.
+    ///
+    /// Each chunk on the wire reports its own progress, from URLSession's
+    /// delegate queue, so the total is kept behind a lock rather than worked
+    /// out from whichever chunk reported last.
+    private final class ChunkProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private let alreadySent: Int64
+        private let total: Int64
+        private var finishedBytes: Int64 = 0
+        private var travelling: [Int: Int64] = [:]
+
+        init(alreadySent: Int64, total: Int64) {
+            self.alreadySent = alreadySent
+            self.total = total
+        }
+
+        /// Notes how far one chunk on the wire has got, and returns the total.
+        func sending(_ index: Int, sent: Int64) -> Int64 {
+            lock.lock()
+            defer { lock.unlock() }
+            travelling[index] = sent
+            return current
+        }
+
+        /// Notes that a chunk has landed, and returns the total.
+        func finished(_ index: Int, bytes: Int64) -> Int64 {
+            lock.lock()
+            defer { lock.unlock() }
+            travelling[index] = nil
+            finishedBytes += bytes
+            return current
+        }
+
+        /// Called with the lock held.
+        private var current: Int64 {
+            min(alreadySent + finishedBytes + travelling.values.reduce(0, +), total)
         }
     }
 
