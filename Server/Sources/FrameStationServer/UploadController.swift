@@ -125,20 +125,39 @@ struct UploadController: RouteCollection {
         // ByteBuffer — [UInt8] binds as a Postgres array, not bytea.
         let emptyMask = ByteBuffer(bytes: [UInt8](repeating: 0, count: (chunkCount + 7) / 8))
 
-        guard let session = try await req.sql.raw("""
-            INSERT INTO upload_sessions
-                (user_id, space_id, device_id, sha256, byte_size, filename,
-                 chunk_size, chunk_count, received_mask)
-            VALUES
-                (\(bind: device.userID), \(bind: input.spaceID), \(bind: device.deviceID),
-                 \(bind: sha), \(bind: input.byteSize), \(bind: input.filename),
-                 \(bind: Self.chunkSize), \(bind: chunkCount),
-                 \(bind: emptyMask))
-            ON CONFLICT (user_id, sha256) WHERE committed_at IS NULL
-            DO UPDATE SET updated_at = now(), space_id = EXCLUDED.space_id
-            RETURNING id
-            """).first(decoding: IDRow.self) else {
-            throw Abort(.internalServerError, reason: "Could not open upload session.")
+        // Without waiting for the disk to confirm it, the way `uploadChunk`
+        // notes a chunk. Waiting made every file's first request wait on hard
+        // drives busy taking in videos and writing thumbnails: 0.7 to 1.8 s per
+        // file in a phone's log of an eight-file burst, for a row that is only
+        // a promise of chunks to come. Losing it to a power cut costs nothing.
+        // The phone's next request finds no session, and it starts the file
+        // again. The commit that records the photo still waits, and its wait
+        // makes this row durable too, since the log is written in order.
+        let session = try await req.withPinnedConnection { sql -> IDRow in
+            try await sql.raw("BEGIN").run()
+            do {
+                try await sql.raw("SET LOCAL synchronous_commit TO OFF").run()
+                guard let row = try await sql.raw("""
+                    INSERT INTO upload_sessions
+                        (user_id, space_id, device_id, sha256, byte_size, filename,
+                         chunk_size, chunk_count, received_mask)
+                    VALUES
+                        (\(bind: device.userID), \(bind: input.spaceID), \(bind: device.deviceID),
+                         \(bind: sha), \(bind: input.byteSize), \(bind: input.filename),
+                         \(bind: Self.chunkSize), \(bind: chunkCount),
+                         \(bind: emptyMask))
+                    ON CONFLICT (user_id, sha256) WHERE committed_at IS NULL
+                    DO UPDATE SET updated_at = now(), space_id = EXCLUDED.space_id
+                    RETURNING id
+                    """).first(decoding: IDRow.self) else {
+                    throw Abort(.internalServerError, reason: "Could not open upload session.")
+                }
+                try await sql.raw("COMMIT").run()
+                return row
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
         }
 
         let missing = try await missingChunks(uploadID: session.id, chunkCount: chunkCount, on: req.sql)

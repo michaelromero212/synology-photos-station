@@ -110,6 +110,18 @@ actor ExifToolDaemon {
         }
     }
 
+    /// Starts exiftool before the first photo needs it.
+    ///
+    /// Started on first use, the first upload after a restart was the one that
+    /// started it, and waited for Perl and exiftool to load. On the NAS that
+    /// photo's metadata read took 2.2 s of a 3.2 s commit, and the photos after
+    /// it read in 0.03 s. Called at boot, the start happens while nobody is
+    /// uploading. A failure here is left for `run` to meet again, and `run`
+    /// already falls back to a one-shot exiftool.
+    func warm() async {
+        _ = try? await run(["-ver"])
+    }
+
     // MARK: - The process
 
     /// The running exiftool, starting one if there is none or the last has

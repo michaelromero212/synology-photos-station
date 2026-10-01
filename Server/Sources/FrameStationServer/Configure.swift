@@ -152,6 +152,10 @@ func configure(_ app: Application) async throws {
         app.storage[RetentionWorkerKey.self] = retention
         await retention.start()
 
+        // Ready before the first upload rather than started by it. See
+        // `ExifToolDaemon.warm`.
+        Task { await ExifToolDaemon.shared.warm() }
+
         // Fill dates and the screenshot kind into already-stored assets from
         // their filenames, so the library that predates this reading gains the
         // metadata without a re-upload. One pass, in the background, off the
