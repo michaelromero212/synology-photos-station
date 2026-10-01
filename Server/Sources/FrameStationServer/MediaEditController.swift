@@ -98,8 +98,13 @@ struct MediaEditController: RouteCollection {
             let mediaType: String
         }
 
+        struct PlacedRow: Decodable {
+            let assetID: UUID
+        }
+
         var landed: [UUID] = []
         var sources: [UUID] = []
+        var already: [UUID] = []
 
         // Deliberately not one big transaction. Copying makes a file on disk per
         // item, and a rollback cannot unmake those — so a failure halfway would
@@ -124,13 +129,22 @@ struct MediaEditController: RouteCollection {
 
             // Already there: nothing to copy and nothing to announce. Sharing
             // the same photo twice should be quiet, not a second notification.
+            //
+            // Quiet to the family, not to the person sharing. Which copy it is
+            // goes back with the response, so the app can say these were there
+            // already and point at them, rather than report "0 shared" and
+            // leave them thinking the share failed.
             let existing = try await req.sql.raw("""
-                SELECT sa.id FROM space_assets sa
+                SELECT sa.asset_id AS "assetID" FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.space_id = \(bind: destination.id) AND sa.deleted_at IS NULL
                   AND a.sha256 = (SELECT sha256 FROM assets WHERE id = \(bind: assetID))
-                """).first(decoding: IDRow.self)
-            if existing != nil { continue }
+                LIMIT 1
+                """).first(decoding: PlacedRow.self)
+            if let existing {
+                already.append(existing.assetID)
+                continue
+            }
 
             let targetAssetID = try await UploadController.copyIntoSpace(
                 assetID: assetID, req: req
@@ -177,7 +191,8 @@ struct MediaEditController: RouteCollection {
             shared: landed.count,
             assetIDs: landed,
             sourceAssetIDs: sources,
-            destinationSpaceID: destination.id
+            destinationSpaceID: destination.id,
+            alreadySharedAssetIDs: already
         )
     }
 

@@ -143,6 +143,36 @@ final class CodingContractTests: XCTestCase {
         XCTAssertEqual(response.missingChunks, [1])
     }
 
+    /// A share answered by a server from before `alreadySharedAssetIDs` still
+    /// decodes, with nil there rather than an empty list. The app counts the
+    /// photos that didn't arrive when it can't name them, and an empty list
+    /// would mean "the server checked, and none were there already".
+    func testShareResponseFromAnOlderServerHasNoAlreadyShared() throws {
+        let json = """
+        {"shared":0,"assetIDs":[],"sourceAssetIDs":[],\
+        "destinationSpaceID":"9A4C4021-1DE7-428C-BE59-5D8EA41C711A"}
+        """.data(using: .utf8)!
+
+        let response = try FrameStationCoding.decoder.decode(ShareAssetsResponse.self, from: json)
+
+        XCTAssertEqual(response.shared, 0)
+        XCTAssertNil(response.alreadySharedAssetIDs)
+    }
+
+    func testShareResponseNamesWhatWasAlreadyThere() throws {
+        let already = UUID()
+        let original = ShareAssetsResponse(
+            shared: 1, assetIDs: [UUID()], sourceAssetIDs: [UUID()],
+            destinationSpaceID: UUID(), alreadySharedAssetIDs: [already]
+        )
+
+        let data = try FrameStationCoding.encoder.encode(original)
+        let decoded = try FrameStationCoding.decoder.decode(ShareAssetsResponse.self, from: data)
+
+        XCTAssertEqual(decoded.alreadySharedAssetIDs, [already])
+        XCTAssertEqual(decoded, original)
+    }
+
     func testPlatformCoversEveryClientTarget() {
         // The server CHECK constraint on devices.platform must stay in step.
         XCTAssertEqual(

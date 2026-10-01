@@ -87,24 +87,30 @@ struct TimelineView: View {
     /// Told where a selection went, so the host can follow it there.
     ///
     /// The grid can share photos but cannot navigate to the result — it only
-    /// knows the space it is showing. The Shared tab owns which space is on
-    /// screen, so it is the thing that can land you in the destination.
+    /// knows the space it is showing. The host owns which space is on screen,
+    /// so it is the thing that can land you in the destination.
     ///
-    /// Carries the source alongside the destination ids: the originals stay put
-    /// now, and offering to remove them later means knowing which they were.
+    /// Handed the whole review, which knows the destination, what arrived and
+    /// where it came from: the originals stay put now, and offering to remove
+    /// them later means knowing which they were.
     #if os(iOS)
-    var onShared: ((SpaceDTO, ShareAssetsResponse, SpaceDTO) -> Void)?
-    /// Items that have just landed in this space, offered for checking.
+    var onShared: ((MoveReview) -> Void)?
+    /// Where a share hands its review to the album it landed in.
     ///
     /// Passed in rather than owned here because the sharing happens in the space
     /// being left, and this is the space being arrived at — two different
-    /// instances of this view.
-    var review: MoveReview?
-    /// Dismisses the review bar. Held by the host for the same reason.
-    var onReviewDone: (() -> Void)?
+    /// instances of this view. An object rather than the review itself, for the
+    /// reason `ShareReviews` gives.
+    var reviews: ShareReviews?
     /// Clears the originals out of the space they were shared from. Held by the
     /// host because the source is a different space from this one.
     var onRemoveOriginals: (() -> Void)?
+    #endif
+
+    #if os(iOS)
+    /// Items that have just landed in this space, offered for checking. Nil in
+    /// every grid but the one they landed in.
+    private var review: MoveReview? { reviews?.review(for: space.id) }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -336,7 +342,17 @@ struct TimelineView: View {
         // that matters — see `floatingTabBarHidden`. Inside the iOS guard
         // because `selection` does not exist on a television: there is no
         // selecting there, and no floating bar to get out of its way.
-        .floatingTabBarHidden(whileSelecting: selection.isActive)
+        //
+        // The same for a share's review, which takes the same slot. It used to
+        // sit under the tab bar with only its two ends showing, "0 i" on one
+        // side and "ne" on the other.
+        .floatingTabBarHidden(while: selection.isActive || review != nil)
+        // Leaving the album is finishing with the review. Kept, the same
+        // count came back every time the album was opened again, long after
+        // anyone was checking.
+        .onDisappear {
+            if review != nil { reviews?.end() }
+        }
         #endif
         .toolbar { toolbar }
         #if os(macOS)
@@ -1556,7 +1572,27 @@ struct TimelineView: View {
                 )
                 selection.clear()
                 await store?.refresh()
-                onShared?(destination, result, space)
+                // A server that predates `alreadySharedAssetIDs` says only how
+                // many arrived. Anything sent that didn't arrive was skipped for
+                // being there already. The one other reason, a photo removed
+                // from this library between selecting and sharing, is rare
+                // enough to be read the same way.
+                let already = result.alreadySharedAssetIDs
+                let alreadyCount = already?.count ?? max(assetIDs.count - result.shared, 0)
+                guard result.shared + alreadyCount > 0 else {
+                    moveError = assetIDs.count == 1
+                        ? "That item is no longer in \(space.name)."
+                        : "Those items are no longer in \(space.name)."
+                    return
+                }
+                onShared?(MoveReview(
+                    assetIDs: result.assetIDs + (already ?? []),
+                    destinationID: destination.id,
+                    destinationName: destination.name,
+                    newCount: result.shared,
+                    alreadyCount: alreadyCount,
+                    source: MoveReview.Source(space: space, assetIDs: result.sourceAssetIDs)
+                ))
             } catch {
                 // Said out loud. An action that silently does nothing leaves
                 // people wondering whether it half-happened, and half-happened
@@ -1941,9 +1977,9 @@ struct TimelineView: View {
             // newest row (or the backup banner) meets the tab bar
             // directly, which is what the library opening on the newest
             // wants underneath it.
-            if let review, let onReviewDone {
+            if let review, let reviews {
                 MoveReviewBar(
-                    review: review, onDone: onReviewDone,
+                    review: review, onDone: { reviews.end() },
                     onRemoveOriginals: onRemoveOriginals
                 )
             }

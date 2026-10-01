@@ -52,13 +52,16 @@ enum FloatingTabBarMetrics {
 
 /// What is on screen that the bar has to get out of the way of.
 ///
-/// Two things put a bar of their own along the bottom of the screen. Selecting
-/// in a grid does — Share, Add to Album, Delete — and so does the photo viewer,
-/// with Share, Favorite, Info and Delete. Drawn in the same strip as this one,
-/// either pair was illegible, and the viewer's buttons couldn't be pressed at
-/// all. Two bars competing for one strip is not a stacking problem to be spaced
-/// out of; only one of them is the answer to "what do I do now", and while you
-/// are choosing photographs or looking at one it is not this one.
+/// Three things put a bar of their own along the bottom of the screen.
+/// Selecting in a grid does (Share, Add to Album, Delete), and so does the
+/// photo viewer, with Share, Favorite, Info and Delete. So does the review a
+/// share lands you in ("2 items shared here", the arrows, Done). Drawn in the
+/// same strip as this one, any of them was illegible. The viewer's buttons
+/// couldn't be pressed at all, and the review sat behind this bar with only its
+/// two ends showing. Two bars competing for one strip is not a stacking problem
+/// to be spaced out of. Only one of them is the answer to "what do I do now",
+/// and while you are choosing photographs, looking at one or checking what just
+/// arrived, it is not this one.
 ///
 /// A singleton because the ends are far apart and cannot be wired together
 /// directly: the selection lives in a `TimelineView`'s `@State`, the viewer is
@@ -69,7 +72,27 @@ enum FloatingTabBarMetrics {
 @MainActor
 final class GridChrome {
     static let shared = GridChrome()
-    var isSelecting = false
+
+    /// The screens whose own bar has the bottom of the screen, each by a token
+    /// of its own.
+    ///
+    /// A set for the same reason `openViewers` is one. This was a single flag,
+    /// which every screen wrote on appearing and cleared on leaving, so the
+    /// last screen to report won. Following a share is exactly when two screens
+    /// report at once, the grid you leave and the album you arrive in, and the
+    /// album's claim for its review would have depended on the order they ran.
+    private(set) var bottomBars: Set<UUID> = []
+
+    func set(_ token: UUID, claimsBottom: Bool) {
+        // Only on a change. Every write to an observed property redraws the bar,
+        // and screens report on every appearance.
+        guard bottomBars.contains(token) != claimsBottom else { return }
+        if claimsBottom {
+            bottomBars.insert(token)
+        } else {
+            bottomBars.remove(token)
+        }
+    }
 
     /// The photo viewers on screen, each by a token of its own.
     ///
@@ -82,7 +105,7 @@ final class GridChrome {
     func viewerClosed(_ token: UUID) { openViewers.remove(token) }
 
     /// Whether the bar should be out of the way.
-    var hidesTabBar: Bool { isSelecting || !openViewers.isEmpty }
+    var hidesTabBar: Bool { !bottomBars.isEmpty || !openViewers.isEmpty }
 }
 
 /// The bar along the bottom: three places in a pill, and search on its own.
@@ -217,6 +240,27 @@ struct FloatingTabBar<Tab: Hashable>: View {
 #endif
 
 extension View {
+    /// Tells the floating bar to step aside while this screen has a bar of its
+    /// own at the bottom: a selection's actions, or a share's review.
+    ///
+    /// Three moments rather than one, because a selection can leave the screen
+    /// without ending: `onAppear` covers arriving at a grid that is *still*
+    /// selecting after a tab switch, `onChange` the selection starting and
+    /// ending under your finger, and `onDisappear` backing out of a shared album
+    /// mid-selection — which would otherwise leave the bar hidden on a screen
+    /// with nothing to replace it.
+    ///
+    /// Each screen reports under its own token, so one screen leaving can only
+    /// withdraw its own claim. See `GridChrome.bottomBars`.
+    @ViewBuilder
+    func floatingTabBarHidden(while ownsBottom: Bool) -> some View {
+        #if os(iOS)
+        modifier(FloatingTabBarHidden(ownsBottom: ownsBottom))
+        #else
+        self
+        #endif
+    }
+
     /// Keeps a screen's content clear of the floating bar.
     ///
     /// A hidden system bar takes its inset with it, so without this every screen
@@ -247,27 +291,6 @@ extension View {
     ///
     /// Nothing outside iOS: a Mac has a sidebar and a television keeps the
     /// system's own bar.
-    /// Tells the floating bar to step aside while this screen is selecting.
-    ///
-    /// Three moments rather than one, because a selection can leave the screen
-    /// without ending: `onAppear` covers arriving at a grid that is *still*
-    /// selecting after a tab switch, `onChange` the selection starting and
-    /// ending under your finger, and `onDisappear` backing out of a shared album
-    /// mid-selection — which would otherwise leave the bar hidden on a screen
-    /// with nothing to replace it.
-    @ViewBuilder
-    func floatingTabBarHidden(whileSelecting selecting: Bool) -> some View {
-        #if os(iOS)
-        onAppear { GridChrome.shared.isSelecting = selecting }
-            .onChange(of: selecting) { _, active in
-                GridChrome.shared.isSelecting = active
-            }
-            .onDisappear { GridChrome.shared.isSelecting = false }
-        #else
-        self
-        #endif
-    }
-
     @ViewBuilder
     func floatingTabBarClearance(when apply: Bool = true) -> some View {
         #if os(iOS)
@@ -284,3 +307,20 @@ extension View {
         #endif
     }
 }
+
+#if os(iOS)
+/// One screen's claim on the bottom of the screen. See `floatingTabBarHidden`.
+private struct FloatingTabBarHidden: ViewModifier {
+    let ownsBottom: Bool
+    @State private var token = UUID()
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { GridChrome.shared.set(token, claimsBottom: ownsBottom) }
+            .onChange(of: ownsBottom) { _, owns in
+                GridChrome.shared.set(token, claimsBottom: owns)
+            }
+            .onDisappear { GridChrome.shared.set(token, claimsBottom: false) }
+    }
+}
+#endif

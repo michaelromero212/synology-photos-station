@@ -216,19 +216,29 @@ public struct ShareAssetsRequest: Codable, Sendable, Hashable {
 ///
 /// `sourceAssetIDs` come back alongside so the app can offer to remove exactly
 /// the originals it just shared, and nothing else.
+///
+/// `alreadySharedAssetIDs` are the photos that were sent but were in the
+/// destination already, again under their ids **there**. The server skips them
+/// so that sharing twice adds nothing and tells nobody. The app needs them
+/// anyway: without them, "share these" answered "0 shared" when they were all
+/// sitting in the album, which reads as the share having failed. Nil from a
+/// server that predates the field, which is why it is optional.
 public struct ShareAssetsResponse: Codable, Sendable, Hashable {
     public let shared: Int
     public let assetIDs: [UUID]
     public let sourceAssetIDs: [UUID]
     public let destinationSpaceID: UUID
+    public let alreadySharedAssetIDs: [UUID]?
 
     public init(
-        shared: Int, assetIDs: [UUID], sourceAssetIDs: [UUID], destinationSpaceID: UUID
+        shared: Int, assetIDs: [UUID], sourceAssetIDs: [UUID], destinationSpaceID: UUID,
+        alreadySharedAssetIDs: [UUID]? = nil
     ) {
         self.shared = shared
         self.assetIDs = assetIDs
         self.sourceAssetIDs = sourceAssetIDs
         self.destinationSpaceID = destinationSpaceID
+        self.alreadySharedAssetIDs = alreadySharedAssetIDs
     }
 }
 

@@ -24,9 +24,21 @@ import SwiftUI
 @Observable
 @MainActor
 final class MoveReview {
-    /// The assets as they exist **here**, in the order they were shared.
+    /// The assets as they exist **here**, in the order they were shared: what
+    /// arrived, then what turned out to be here already.
     let assetIDs: [UUID]
+    /// The album they landed in. Only its grid shows this review.
+    let destinationID: UUID
     let destinationName: String
+    /// How many arrived with this share.
+    let newCount: Int
+    /// How many were in the album before it.
+    ///
+    /// Counted even when the server can't say which they were — one that
+    /// predates `alreadySharedAssetIDs` — so the bar can still say "already
+    /// here" instead of "0 shared", which is what made a repeated share look
+    /// like a broken one.
+    let alreadyCount: Int
     /// The originals, still sitting in the space they were shared from. Nil when
     /// there is nothing sensible to offer removing — sharing from one shared
     /// space to another, say, where "the original" isn't a personal copy.
@@ -44,12 +56,19 @@ final class MoveReview {
         let assetIDs: [UUID]
     }
 
-    init(assetIDs: [UUID], destinationName: String, source: Source? = nil) {
+    init(
+        assetIDs: [UUID], destinationID: UUID, destinationName: String,
+        newCount: Int, alreadyCount: Int = 0, source: Source? = nil
+    ) {
         self.assetIDs = assetIDs
+        self.destinationID = destinationID
         self.destinationName = destinationName
+        self.newCount = newCount
+        self.alreadyCount = alreadyCount
         self.source = source
     }
 
+    /// How many the bar can walk: those whose ids came back.
     var count: Int { assetIDs.count }
 
     /// The asset currently under review, if any.
@@ -70,6 +89,32 @@ final class MoveReview {
         // Wraps, because the last thing anyone wants at item eight of eight is a
         // dead arrow and no way back to the start.
         index = (next % assetIDs.count + assetIDs.count) % assetIDs.count
+    }
+}
+
+/// The review a share hands to the album it landed in.
+///
+/// An object the album's grid reads, rather than an optional passed down to
+/// it. The album is a navigation destination, and SwiftUI can build one from
+/// a closure left over from an earlier pass of the tab view's body. Measured:
+/// the album built while following a share read the path and the tab as they
+/// were before the share began. A review handed down as a value could be just
+/// as stale. The grid observes this object directly, so what it draws is
+/// current.
+@Observable
+@MainActor
+final class ShareReviews {
+    private(set) var current: MoveReview?
+
+    func begin(_ review: MoveReview) { current = review }
+
+    func end() { current = nil }
+
+    /// The review to show in a space's grid. Only the album the photos landed
+    /// in shows it. It used to be handed to every shared album, so opening a
+    /// different one put "shared here" over photos that were never shared to it.
+    func review(for spaceID: UUID) -> MoveReview? {
+        current?.destinationID == spaceID ? current : nil
     }
 }
 
@@ -122,11 +167,18 @@ struct MoveReviewBar: View {
             Button("Keep", role: .cancel) {}
         } message: {
             Text(
-                "The \(review.count == 1 ? "copy" : "copies") in \(review.destinationName) "
-                + "will stay. The \(review.count == 1 ? "original goes" : "originals go") to "
+                "The \(originals == 1 ? "copy" : "copies") in \(review.destinationName) "
+                + "will stay. The \(originals == 1 ? "original goes" : "originals go") to "
                 + "Recently Deleted on your NAS for \(Retention.days) days."
             )
         }
+    }
+
+    /// The originals the removal would take: only those of what this share
+    /// added. Photos that were already in the album came from some earlier
+    /// share, and this one has no business deciding about their originals.
+    private var originals: Int {
+        review.source?.assetIDs.count ?? 0
     }
 
     private var row: some View {
@@ -140,8 +192,13 @@ struct MoveReviewBar: View {
 
             Spacer(minLength: 8)
 
-            step(-1, symbol: "chevron.left", label: "Previous shared item")
-            step(1, symbol: "chevron.right", label: "Next shared item")
+            // Only when there is something to point at. A server too old to say
+            // which photos were already here leaves nothing to walk, and arrows
+            // that do nothing are worse than none.
+            if review.count > 0 {
+                step(-1, symbol: "chevron.left", label: "Previous shared item")
+                step(1, symbol: "chevron.right", label: "Next shared item")
+            }
 
             if review.canRemoveOriginals, onRemoveOriginals != nil {
                 overflow
@@ -188,7 +245,7 @@ struct MoveReviewBar: View {
     }
 
     private var counted: String {
-        review.count == 1 ? "1 original" : "\(review.count) originals"
+        originals == 1 ? "1 original" : "\(originals) originals"
     }
 
     /// Says the count until you start stepping, then says where you are.
@@ -196,14 +253,32 @@ struct MoveReviewBar: View {
     /// Both facts in one line rather than one above the other: "1 of 3 shared
     /// here" is the whole status, and counting from one is what a person is
     /// checking against.
+    ///
+    /// What was already here is said as such. Sharing photos that were in the
+    /// album already used to read "0 items shared here", and with nothing new
+    /// in the grid either, the only conclusion left was that sharing had
+    /// stopped working.
     private var label: String {
         if review.removedOriginals {
             return "Originals removed"
         }
         if let index = review.index {
-            return "\(index + 1) of \(review.count) shared here"
+            return review.alreadyCount == 0
+                ? "\(index + 1) of \(review.count) shared here"
+                : "\(index + 1) of \(review.count) here"
         }
-        return review.count == 1 ? "1 item shared here" : "\(review.count) items shared here"
+        switch (review.newCount, review.alreadyCount) {
+        case (let new, 0):
+            return new == 1 ? "1 item shared here" : "\(new) items shared here"
+        case (0, 1):
+            return "Already here"
+        case (0, 2):
+            return "Both already here"
+        case (0, let already):
+            return "All \(already) already here"
+        case (let new, let already):
+            return "\(new) new, \(already) already here"
+        }
     }
 
     private func step(_ offset: Int, symbol: String, label: String) -> some View {

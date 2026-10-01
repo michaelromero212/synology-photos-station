@@ -36,7 +36,11 @@ struct RootTabView: View {
     /// Held here because sharing happens in the grid you are *leaving* — usually
     /// the Photos tab — and the review belongs to the grid you arrive at. A tab
     /// cannot hand state to a screen inside another tab; their parent can.
-    @State private var review: MoveReview?
+    ///
+    /// An object, not an optional, so that it is the same object whichever
+    /// copy of this view a navigation destination was built from — see
+    /// `ShareReviews`.
+    @State private var reviews = ShareReviews()
     @Environment(\.scenePhase) private var scenePhase
     #endif
 
@@ -378,8 +382,7 @@ struct RootTabView: View {
                 engine: engine, backupSettings: $backupSettings,
                 isPushed: true,
                 onShared: followShare,
-                review: review,
-                onReviewDone: { review = nil },
+                reviews: reviews,
                 onRemoveOriginals: removeOriginals
             )
             #else
@@ -413,26 +416,34 @@ struct RootTabView: View {
     /// Goes where the photos went.
     ///
     /// The same three steps wherever the share started: remember what landed and
-    /// where it came from, open the shared album it landed in, then show the tab
-    /// that album lives on. Ordered so the grid is already looking at the right
-    /// album by the time it appears — switching tabs first would flash the
-    /// previous one.
+    /// where it came from, show the Albums tab, then open the shared album the
+    /// photos landed in.
+    ///
+    /// In that order, and in two separate updates. Switching the tab and
+    /// pushing the album in one update used to be the order here, so that the
+    /// album was already showing when the tab came up. On iOS 27 SwiftUI builds
+    /// the album and then throws its grid away in the same pass. What stays on
+    /// screen is the empty shell of its navigation bar: a large title, an empty
+    /// capsule where the + was, and no photographs. That blank page is what
+    /// sharing "did nothing" meant. Waiting for the switch to land costs a
+    /// glimpse of the Albums page before the album slides over it, and shows
+    /// which page the album lives on.
     ///
     /// The destination used to be a tab; it is a screen inside Albums now, so
     /// "point at it" means setting the path rather than an id. Assigning the
     /// whole path rather than appending matters: following two shares in a row
     /// should land you in the second album, not stack one on the other with a
     /// back chevron into a review you have already finished.
-    private func followShare(
-        destination: SpaceDTO, result: ShareAssetsResponse, from: SpaceDTO
-    ) {
-        review = MoveReview(
-            assetIDs: result.assetIDs,
-            destinationName: destination.name,
-            source: MoveReview.Source(space: from, assetIDs: result.sourceAssetIDs)
-        )
-        albumsPath = [SharedAlbumRoute(spaceID: destination.id)]
+    private func followShare(_ review: MoveReview) {
+        reviews.begin(review)
+        // Both steps every time, without asking which tab is showing. A
+        // closure built in an earlier pass can read this view's state as it
+        // was then (see `ShareReviews`), and a branch taken on a stale tab
+        // could push the album into a tab nobody is looking at. Writing both
+        // is right from any tab.
+        let route = SharedAlbumRoute(spaceID: review.destinationID)
         tab = .albums
+        DispatchQueue.main.async { albumsPath = [route] }
     }
 
     /// Clears the originals from the album they were shared out of.
@@ -446,7 +457,8 @@ struct RootTabView: View {
     /// a better outcome than nothing removed, and the one that didn't is still
     /// in the library where it started.
     private func removeOriginals() {
-        guard let review, let source = review.source, let client = session.client else { return }
+        guard let review = reviews.current, let source = review.source,
+              let client = session.client else { return }
         review.isRemoving = true
         review.removeError = nil
         Task {

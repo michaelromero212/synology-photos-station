@@ -804,7 +804,7 @@ struct RecentlyDeletedView: View {
             // Recover and Delete takes its place — the same exchange the library
             // grid makes. See `FloatingTabBar`.
             .floatingTabBarClearance(when: !isSelecting)
-            .floatingTabBarHidden(whileSelecting: isSelecting)
+            .floatingTabBarHidden(while: isSelecting)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if isSelecting { actionBar }
             }
