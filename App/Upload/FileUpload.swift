@@ -272,13 +272,6 @@ enum FileUpload {
                 if let shouldContinue, await !shouldContinue() {
                     throw UploadError.pausedByCaller
                 }
-                // Read here and not in the task that sends it: the handle is
-                // shared, and a seek and a read from two tasks at once could
-                // interleave into the wrong bytes.
-                try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
-                let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
-                guard !data.isEmpty else { continue }
-
                 // Both transports send from a file rather than memory, so the
                 // part is written once here and the platforms differ only in who
                 // carries it.
@@ -294,8 +287,21 @@ enum FileUpload {
                 // do nothing at all.
                 let part = FileManager.default.temporaryDirectory
                     .appendingPathComponent("fs-chunk-\(uploadID)-\(index)")
-                try data.write(to: part, options: .atomic)
-                let sent = Int64(data.count)
+                // Read here and not in the task that sends it: the handle is
+                // shared, and a seek and a read from two tasks at once could
+                // interleave into the wrong bytes.
+                //
+                // In a pool of its own, for the reason `hashFile` gives: the
+                // read is handed back autoreleased, and it should be gone the
+                // moment it's on disk, not when this loop next yields.
+                let sent: Int64? = try autoreleasepool {
+                    try handle.seek(toOffset: UInt64(index) * UInt64(probe.chunkSize))
+                    let data = try handle.read(upToCount: probe.chunkSize) ?? Data()
+                    guard !data.isEmpty else { return nil }
+                    try data.write(to: part, options: .atomic)
+                    return Int64(data.count)
+                }
+                guard let sent else { continue }
 
                 group.addTask {
                     defer { try? FileManager.default.removeItem(at: part) }
@@ -378,15 +384,23 @@ enum FileUpload {
     }
 
     /// Streamed — a 4 GB video must not be read into memory to be hashed.
+    ///
+    /// Each read in an autorelease pool of its own, and without that it wasn't
+    /// streamed at all. `FileHandle` hands every read back autoreleased, so the
+    /// loop kept each 4 MB piece alive until the whole file had been read.
+    /// Measured on a 1 GB file: 705 MB of memory at the peak without the pool,
+    /// 11 MB with it. Three upload lanes reading large videos at once took the
+    /// app to 3.4 GB on an iPhone 16 Pro Max, and iOS killed it mid-upload.
     static func hashFile(at url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while true {
+        while try autoreleasepool(invoking: { () throws -> Bool in
             let chunk = try handle.read(upToCount: 4 * 1024 * 1024) ?? Data()
-            if chunk.isEmpty { break }
+            guard !chunk.isEmpty else { return false }
             hasher.update(data: chunk)
-        }
+            return true
+        }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
