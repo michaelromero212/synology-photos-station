@@ -320,28 +320,40 @@ on Btrfs.
 
 ## Gotchas, each one earned
 
-### A green local build is not a green CI build
+### One toolchain everywhere
 
-CI runs **Xcode 16.4 (iOS SDK 18.5)** on `macos-15`. This Mac runs **Xcode
-26.6 (SDK 26.5)**. That gap is wide enough to matter, and it fails in the
-direction that wastes the most time: the local build passes, the push looks
-safe, and the runner rejects it fifteen minutes later.
+CI builds with the same tools as this Mac: **Xcode 27** for the apps and the
+Kit tests, on GitHub's `xcode-27` runner image, and the Swift it ships,
+**6.4.0**, for the server on Linux. Nothing moves on its own, and where a pin
+can drift CI checks it:
 
-The way it bites is not obvious. Apple sometimes annotates a constant
-`API_AVAILABLE(ios(13))` — meaning the OS has set that bit since iOS 13 — while
-only *exposing* the name in a much newer SDK header.
-`PHAssetMediaSubtypeVideoScreenRecording` is exactly that: available since iOS
-13, absent from SDK 18.5, present in SDK 26. Xcode 26 compiles
-`.videoScreenRecording` happily; Xcode 16.4 says the type has no such member.
+| What | Pinned in |
+|---|---|
+| Xcode for the apps and Kit tests | `DEVELOPER_DIR` in both macOS jobs of `.github/workflows/ci.yml` — by path, so GitHub changing its runner's default Xcode changes nothing here |
+| Swift for the server | `.swift-version`, `ARG SWIFT_VERSION` in `Server/Dockerfile`, and the `server-linux` container in `ci.yml` — that job's first step fails if the three disagree |
+| Swift in cloud sessions | `SWIFT_VERSION` in `Scripts/cloud-setup.sh`, the environment's setup script — paste it into the environment settings again after changing it |
+| Server dependencies | `Server/Package.resolved` — CI and the Dockerfile build with `--force-resolved-versions` and fail rather than deviate |
 
-When it happens, the fix is usually the raw bit value rather than the name —
-the bits are public and ABI-stable, only the spelling is unportable. See
-`PhotoLibraryScanner.subtypes(of:)`.
+Why the server's Swift follows the Mac's: `Package.resolved` is written by
+whatever Swift resolved it, and that's Xcode's. A Linux toolchain older than
+the lockfile doesn't fail — SwiftPM quietly re-resolves to older versions it
+*can* build. While the image was on Swift 6.0 it shipped older `swift-nio-ssl`,
+`swift-asn1`, `swift-nio-http2` and `postgres-kit` than the lockfile named, and
+every build was green.
 
-The cheap habit that avoids the round trip: when reaching for a PhotoKit or
-SwiftUI symbol that looks recent, check its line in the SDK header. Constants
-clustered at the *end* of an enum are the late additions, and the late
-additions are the ones CI will not have.
+**Moving to a new Xcode:** install it on the Mac, point `DEVELOPER_DIR` at it,
+move the three Swift pins and `cloud-setup.sh` to the Linux release of the Swift
+it ships (`swift --version` in its toolchain), re-resolve in `Server/` if
+dependencies should move too, and push it as one commit. CI says whether it all
+fits before anything is published.
+
+Until October 2026 CI ran Xcode 16.4 while this Mac moved through 26 to 27, and
+the gap showed up two ways. Code was bent to fit the older SDK — raw PhotoKit
+bit values where the names were missing from SDK 18.5, and `#if compiler(>=6.2)`
+around everything Liquid Glass — and, worse, everything behind those guards went
+uncompiled by CI. `PHAsset.adjustmentTimestamp` is in the iOS 27 SDK and not in
+26.5, so the app needs Xcode 27 to build; CI couldn't have said so. It can now,
+and none of the bending is needed any more.
 
 **The NAS is on DHCP, so its address moves.** It has changed once already;
 `DEPLOY.local.md` carries the current one. The symptom is not an error you can

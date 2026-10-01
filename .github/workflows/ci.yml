@@ -30,42 +30,83 @@ jobs:
   server-linux:
     name: Server (Linux)
     runs-on: ubuntu-latest
-    container: swift:6.0-jammy
+    # The same toolchain as .swift-version and the Dockerfile's SWIFT_VERSION.
+    # The first step fails the job when the three disagree.
+    container: swift:6.4.0-jammy
+    # Inside a container GitHub runs steps with plain `sh`, which has no
+    # `pipefail`; the Swift image has bash.
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Toolchains agree
+        run: |
+          set -euo pipefail
+          # A .0 release calls itself "6.4" while its tags and swiftly say
+          # "6.4.0"; compare them as the same version.
+          norm() { sed -E 's/^([0-9]+[.][0-9]+)[.]0$/\1/' <<<"$1"; }
+          pinned="$(cat .swift-version)"
+          container="$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9.]*\).*/\1/p' | head -n 1)"
+          image="$(sed -n 's/^ARG SWIFT_VERSION=//p' Server/Dockerfile)"
+          echo ".swift-version: $pinned · this job: $container · Server/Dockerfile: $image"
+          if [ "$(norm "$container")" != "$(norm "$pinned")" ] || [ "$(norm "$image")" != "$(norm "$pinned")" ]; then
+            echo "::error::Swift versions disagree. .swift-version says $pinned, this job runs $container, and Server/Dockerfile builds with $image. Change all three together."
+            exit 1
+          fi
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: Server/.build
-          key: spm-linux-${{ hashFiles('Server/Package.resolved') }}
-          restore-keys: spm-linux-
+          # The toolchain is part of the key: one Swift's build products are no
+          # use to another, and restoring them only slows the build down.
+          key: spm-linux-${{ hashFiles('.swift-version') }}-${{ hashFiles('Server/Package.resolved') }}
+          restore-keys: spm-linux-${{ hashFiles('.swift-version') }}-
 
       # Debug only. The `image` job's Dockerfile already does a release build,
       # so doing one here too roughly doubled the job for no extra signal —
       # a debug build catches Linux compile errors just as well, and failing
       # here short-circuits before the far more expensive image build starts.
       #
-      # Tradeoff: pull requests skip the image job, so they get no release-mode
-      # compile. Accepted — main always gets one.
+      # Exactly the pinned versions, or fail. Without the flag SwiftPM quietly
+      # re-resolves any pin the toolchain can't use, and the build goes green
+      # on dependencies nobody chose.
       - name: Build
-        run: swift build --package-path Server
+        run: swift build --package-path Server --force-resolved-versions
 
   # FrameStationKit is Apple-only (Keychain, ImageIO), so its tests need macOS.
   # This also covers FrameStationAPI, including the ThumbHash round trips.
   kit-tests:
     name: FrameStationKit tests
-    runs-on: macos-15
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: Toolchain
+        run: ls -d /Applications/Xcode*.app && xcodebuild -version && swift --version
       - name: Run tests
         run: swift test --package-path Packages/FrameStationKit
 
+  # Built with the Xcode the apps are developed with, chosen by path rather
+  # than left to the runner's default: a CI on an older SDK than the Mac never
+  # compiles the newest code paths, and one that follows the runner's default
+  # changes Xcode on GitHub's schedule instead of ours. Move this, the
+  # kit-tests job and the Mac together. `xcode-27` is GitHub's Xcode 27 image,
+  # in public preview; move to its macos-27 label when that is generally
+  # available.
   apps:
     name: App targets
-    runs-on: macos-15
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: ls -d /Applications/Xcode*.app && xcodebuild -version && swift --version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -92,23 +133,27 @@ jobs:
             echo "::endgroup::"
           done
 
+  # Every run builds the image and starts it; only main and release tags
+  # publish it. The NAS pulls :latest, so nothing reaches it that hasn't
+  # migrated a real database, answered /health and taken an upload first.
   image:
     name: Container image
     needs: [server-linux, kit-tests]
-    # Only publish from main and tags; PRs just prove the build.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -116,7 +161,7 @@ jobs:
 
       - name: Metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -125,8 +170,8 @@ jobs:
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build
+        uses: docker/build-push-action@v7
         with:
           # Repository root: the server depends on ../Packages/FrameStationAPI
           # by path, so that sibling has to be inside the build context.
@@ -134,18 +179,37 @@ jobs:
           file: Server/Dockerfile
           # The DS920+ is an Intel Celeron J4125.
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: framestation-server:ci
           labels: ${{ steps.meta.outputs.labels }}
           # Reported by /health, so the NAS can say which commit it runs.
           build-args: FRAMESTATION_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Smoke test
+        run: Scripts/smoke-image.sh framestation-server:ci "${{ github.sha }}"
+
+      # The same build again, answered entirely from the cache the step above
+      # just filled, so what is pushed is what was tested.
+      - name: Push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Server/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: FRAMESTATION_REVISION=${{ github.sha }}
+          cache-from: type=gha
+
       # Report what we just shipped. An image size that nobody measures only
       # ever goes one direction, and reading it off the registry manifest needs
       # no daemon, no pull, and no shell on the NAS.
       - name: Image size
+        if: env.PUBLISH == 'true'
         run: |
           set -euo pipefail
           ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"

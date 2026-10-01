@@ -12,12 +12,15 @@
 #
 #   ./Scripts/smoke-m1a.sh
 #
-# Expects a freshly migrated, empty database.
+# Expects a freshly migrated, empty database. Scripts/smoke-image.sh runs this
+# same script against a built container image, which is how CI checks an image
+# before publishing it.
 set -uo pipefail
 
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
 API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
-PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc"
+# Overridable so a containerised run can use the database container's own psql.
+PSQL="${FRAMESTATION_PSQL:-psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc}"
 mkdir -p "$SCRATCH/chunks"
 PASS=0; FAIL=0
 
@@ -26,6 +29,26 @@ PASS=0; FAIL=0
 export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
 export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
 
+# Invites come from the server's own CLI: `swift run` against a source
+# checkout, or whatever FRAMESTATION_CLI names — a container's binary, say —
+#   FRAMESTATION_CLI="docker exec framestation-smoke ./FrameStationServer"
+invite() {
+  if [ -n "${FRAMESTATION_CLI:-}" ]; then
+    $FRAMESTATION_CLI invite 2>/dev/null
+  else
+    (cd "${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}" && \
+      swift run FrameStationServer invite 2>/dev/null)
+  fi | grep "Invite code:" | awk '{print $3}'
+}
+
+# Size and hash the same way on macOS and Linux: `stat -f%z` and `shasum` are
+# BSD and Perl respectively, and CI runs this on Ubuntu.
+size_of()   { wc -c < "$1" | tr -d ' '; }
+sha256_of() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
+    | awk '{print $1}'
+}
+
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -33,10 +56,7 @@ check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 jq_get() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
 
 echo "=== setup: invite + redeem ==="
-CODE=$(cd "${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}" && \
-  FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable" \
-  FRAMESTATION_BLOB_ROOT="$SCRATCH/blobroot" \
-  swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+CODE=$(invite)
 echo "  invite: $CODE"
 
 REDEEM=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
@@ -56,8 +76,8 @@ echo
 echo "=== build a 40 MB test file (3 chunks: 16+16+8) ==="
 SRC="$SCRATCH/testvideo.mov"
 dd if=/dev/urandom of="$SRC" bs=1048576 count=40 2>/dev/null
-SHA=$(shasum -a 256 "$SRC" | awk '{print $1}')
-SIZE=$(stat -f%z "$SRC")
+SHA=$(sha256_of "$SRC")
+SIZE=$(size_of "$SRC")
 rm -rf "$SCRATCH/chunks"; mkdir -p "$SCRATCH/chunks"
 dd if="$SRC" of="$SCRATCH/chunks/0" bs=1048576 skip=0  count=16 2>/dev/null
 dd if="$SRC" of="$SCRATCH/chunks/1" bs=1048576 skip=16 count=16 2>/dev/null
@@ -118,8 +138,8 @@ echo
 echo "=== 7. bytes landed correctly on disk ==="
 SHARD="$SCRATCH/blobroot/blobs/${SHA:0:2}/${SHA:2:2}/$SHA.mov"
 [ -f "$SHARD" ] && ok "blob at sharded path blobs/${SHA:0:2}/${SHA:2:2}/" || bad "blob at sharded path" "exists" "missing"
-check "stored size matches"   "$SIZE" "$(stat -f%z "$SHARD" 2>/dev/null)"
-check "stored hash matches"   "$SHA"  "$(shasum -a 256 "$SHARD" 2>/dev/null | awk '{print $1}')"
+check "stored size matches"   "$SIZE" "$(size_of "$SHARD" 2>/dev/null)"
+check "stored hash matches"   "$SHA"  "$(sha256_of "$SHARD" 2>/dev/null)"
 check "staging cleaned up"    "0"     "$(ls "$SCRATCH/blobroot/incoming" 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
@@ -171,10 +191,7 @@ check "staging discarded"         "0"   "$(ls "$SCRATCH/blobroot/incoming" 2>/de
 
 echo
 echo "=== 13. another user cannot touch this session ==="
-CODE2=$(cd "${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}" && \
-  FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable" \
-  FRAMESTATION_BLOB_ROOT="$SCRATCH/blobroot" \
-  swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+CODE2=$(invite)
 T2=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE2\",\"displayName\":\"Morgan\",\"deviceName\":\"iPad\",\"platform\":\"ipados\"}" | jq_get '["token"]')
 C5=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$API/v1/uploads/$UPLOAD/chunk/0" \

@@ -10,10 +10,20 @@
 # DS920+ is an Intel Celeron J4125. See README.md "Building the image" for why
 # you probably do not want to run this build on the NAS itself.
 
+# The Swift toolchain, pinned to the patch release. Three other places name it,
+# and CI fails the build when any of them disagree: .swift-version (what swiftly
+# and cloud sessions install), the server-linux job's container in ci.yml, and
+# the Swift in the Xcode the apps build with — the one that resolves
+# Server/Package.resolved. A toolchain older than the lockfile doesn't
+# fail on its own: it quietly resolves older dependencies instead, which is how
+# this image shipped older TLS and certificate code than the lockfile named
+# for as long as this line said 6.0.
+ARG SWIFT_VERSION=6.4.0
+
 # ==============================================================================
 # Build
 # ==============================================================================
-FROM swift:6.0-jammy AS build
+FROM swift:${SWIFT_VERSION}-jammy AS build
 
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
@@ -24,10 +34,14 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
 WORKDIR /build
 
 # Manifests first so dependency resolution caches independently of source edits.
+# The lockfile is required, not optional: without it every build would resolve
+# whatever happened to be newest that day.
 COPY ./Packages/FrameStationAPI/Package.swift ./Packages/FrameStationAPI/
-COPY ./Server/Package.swift ./Server/Package.resolved* ./Server/
+COPY ./Server/Package.swift ./Server/Package.resolved ./Server/
 WORKDIR /build/Server
-RUN swift package resolve
+# Exactly the pinned versions, or stop. Left to itself SwiftPM re-resolves when
+# a pin doesn't fit the toolchain and carries on with whatever does.
+RUN swift package resolve --force-resolved-versions
 
 WORKDIR /build
 # FrameStationAPI only — deliberately not all of ./Packages. FrameStationKit is
@@ -41,20 +55,26 @@ COPY ./Packages/FrameStationAPI ./Packages/FrameStationAPI
 COPY ./Server ./Server
 
 WORKDIR /build/Server
-RUN swift build -c release --product FrameStationServer -Xlinker -ljemalloc
+RUN swift build -c release --product FrameStationServer --force-resolved-versions \
+        -Xlinker -ljemalloc
 
 WORKDIR /staging
 
 RUN BIN_PATH="$(swift build --package-path /build/Server -c release --show-bin-path)" \
     && cp "$BIN_PATH/FrameStationServer" ./ \
     # The SQL migrations ship in a resource bundle that must sit beside the
-    # binary. Losing this line is the classic "Migrations/SQL missing" failure.
-    && find -L "$BIN_PATH/" -regex '.*\.resources$' -exec cp -Ra {} ./ \;
+    # binary. SwiftPM named it `<target>.resources` until Swift 6.4, which calls
+    # it `<target>.bundle`; take either. A pattern that matches nothing copies
+    # nothing without complaint, and the server then dies at launch looking for
+    # its migrations, so the last line refuses to build an image without them.
+    && find -L "$BIN_PATH/" -maxdepth 1 \( -name '*.resources' -o -name '*.bundle' \) \
+         -exec cp -Ra {} ./ \; \
+    && ls -d FrameStationServer_FrameStationServer.* >/dev/null
 
 # ==============================================================================
 # Run
 # ==============================================================================
-FROM swift:6.0-jammy-slim
+FROM swift:${SWIFT_VERSION}-jammy-slim
 
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \

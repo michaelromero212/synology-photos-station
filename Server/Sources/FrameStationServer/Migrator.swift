@@ -190,7 +190,8 @@ enum MigrationError: Error, CustomStringConvertible {
         switch self {
         case .bundleMissing:
             return "Migrations/SQL resource directory missing from the bundle. "
-                + "In Docker, ensure the *.resources bundle is copied next to the binary."
+                + "In Docker, ensure FrameStationServer_FrameStationServer.bundle "
+                + "(.resources before Swift 6.4) is copied next to the binary."
         }
     }
 }

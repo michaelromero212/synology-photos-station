@@ -290,7 +290,8 @@ files on disk. Run one, reset the database, run the other.
 
 `smoke-m1a.sh` — 32 assertions: resume-after-interruption, truncated-chunk
 rejection, hash-mismatch rejection, dedup, no legacy `browse/` tree, cross-user
-access control.
+access control. Runs on Linux as well as macOS, and against a container image
+through `Scripts/smoke-image.sh`, which is how CI checks every image it builds.
 
 `smoke-m1b.sh` — 33 assertions: EXIF fields, GPS hemisphere signs, capture time
 against `OffsetTimeOriginal`, video duration and rotation-corrected dimensions,
@@ -356,8 +357,20 @@ docker compose build
 Cross-building on an Apple-silicon Mac under qemu is the slowest option and
 isn't recommended.
 
-The `swift:6.0-jammy` base tags in [Server/Dockerfile](Server/Dockerfile) are
-pinned conservatively; bump them if you want a newer toolchain.
+**CI starts the image before it publishes it.** After the build, the image job
+runs [`Scripts/smoke-image.sh`](Scripts/smoke-image.sh): the image has to carry
+its media tools, migrate an empty Postgres, answer `/health` naming the commit it
+was built from, and pass the `smoke-m1a.sh` upload flow. Only then is it pushed,
+and only from `main` or a release tag — every other run stops after the test.
+The same check, locally:
+
+```bash
+docker build -f Server/Dockerfile -t framestation-server:local .
+Scripts/smoke-image.sh framestation-server:local
+```
+
+The image is built with exactly the Swift and the dependency versions the rest
+of the project uses — see *One toolchain everywhere* in [DEPLOY.md](DEPLOY.md).
 
 ---
 
