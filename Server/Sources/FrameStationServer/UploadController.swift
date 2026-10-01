@@ -210,7 +210,9 @@ struct UploadController: RouteCollection {
         let store = req.blobStore
         let bytes = Data(buffer.readableBytesView)
         try await req.application.threadPool.runIfActive {
-            try store.writeChunk(uploadID: uploadID, index: index, bytes: bytes)
+            try store.writeChunk(
+                uploadID: uploadID, index: index, chunkSize: Self.chunkSize, bytes: bytes
+            )
         }
 
         // Without waiting for the disk to confirm it. This is only a note of
@@ -280,10 +282,10 @@ struct UploadController: RouteCollection {
         let fileExtension = BlobStore.fileExtension(for: session.filename)
         let blob: URL
         do {
-            // On the thread pool — see `uploadChunk`. This reads every chunk
-            // back, hashes the whole file and writes it out again: for a large
-            // video, seconds of disk that used to hold one of the four threads
-            // every other request was waiting on.
+            // On the thread pool — see `uploadChunk`. This reads the whole
+            // upload back to hash it: for a large video, seconds of disk that
+            // used to hold one of the four threads every other request was
+            // waiting on.
             let store = req.blobStore
             let chunkCount = session.chunkCount
             let sha256 = session.sha256

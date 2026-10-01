@@ -224,7 +224,7 @@ One DSM shared folder, one service account. No per-user folders.
       preview-2048.heic               ← lazy
       poster.jpg                      ← video first frame
       hls/                            ← lazy, LRU-evictable
-  incoming/<uploadSessionId>/         ← chunk staging
+  incoming/<uploadSessionId>/         ← upload.data, each chunk written in place
   browse/<user>/2026/07/IMG_4821.heic ← hardlinks, zero extra space
   pgdata/
 ```
@@ -717,8 +717,9 @@ appends to `change_log` in the same transaction as the change.
 **Large files must be client-chunked.** iOS background `URLSession` upload
 tasks cannot resume mid-file — a failed transfer restarts from zero, which
 means a 350 MB video on a flaky connection may never complete. Files are split
-into uniform **16 MB chunks**, each its own background task, reassembled
-server-side. This is not optional at 3,000 videos. Chunking is uniform rather
+into uniform **16 MB chunks**, each its own background task, and each written
+straight into its place in one staged file as it arrives, so commit verifies
+and renames rather than copying. This is not optional at 3,000 videos. Chunking is uniform rather
 than threshold-gated: a small photo is simply a one-chunk upload, so there is no
 second code path to get wrong.
 
