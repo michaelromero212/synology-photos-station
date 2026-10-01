@@ -71,8 +71,54 @@ ssh nas 'curl -s http://127.0.0.1:8080/health'
 Expect `{"status":"ok","database":"up","migrationsApplied":N,...}`.
 
 **5. Verify it's the *new* build.** This is the step that catches a deploy which
-quietly didn't take. `/health` names the commit the running image was built
-from — no SSH, no sudo:
+quietly didn't take, and the same check answers "is the NAS up to date?" any
+day. Paste it from anywhere: it reads nothing from this checkout, so it also
+works in a terminal that isn't allowed into `~/Documents` — macOS refuses that
+to some, and then `git` and `gh` fail with `Unable to read current working
+directory: Operation not permitted`.
+
+```bash
+cd ~ && R=michaelromero212/synology-photos-station
+want=$(gh run list --repo $R --branch main --status success --limit 1 --json headSha --jq '.[0].headSha')
+want_migrations=$(gh api "repos/$R/contents/Server/Sources/FrameStationServer/Migrations/SQL?ref=$want" --jq '[.[] | select(.name | endswith(".sql"))] | length')
+health=$(ssh -o ConnectTimeout=8 -o LogLevel=ERROR nas 'curl -s http://127.0.0.1:8080/health')
+have=$(printf '%s' "$health" | sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')
+have_migrations=$(printf '%s' "$health" | sed -n 's/.*"migrationsApplied"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+if [ -z "$want" ]; then echo "❌ Couldn't ask GitHub for the newest build. Is gh signed in?"
+elif [ -z "$health" ]; then echo "❌ Couldn't reach the NAS. Are you on the home network, and does 'ssh nas' work?"
+elif [ -z "$have" ]; then echo "❌ The NAS runs an image from before it reported its commit. Pull and restart."
+else
+  echo "Newest build: ${want:0:7} · NAS runs: ${have:0:7} · migrations ${have_migrations:-?} of $want_migrations"
+  changed=""
+  if [ "$have" != "$want" ] && ! changed=$(gh api "repos/$R/compare/$have...$want" --jq '.files[].filename | select(startswith("Server/") or startswith("Packages/FrameStationAPI/") or . == "docker-compose.yml")'); then
+    changed="(couldn't ask GitHub what changed)"
+  fi
+  if [ -n "$changed" ]; then
+    echo "❌ The NAS is behind. Changed since its build ($(printf '%s\n' "$changed" | grep -c .) files):"
+    printf '%s\n' "$changed" | head -15 | sed 's/^/     /'
+    echo "   Pull and restart, then run this again. If docker-compose.yml is listed, see \"When the compose file changed\"."
+  elif [ "$have_migrations" != "$want_migrations" ]; then
+    echo "❌ The NAS runs the newest server but reports $have_migrations of $want_migrations migrations. Check its log."
+  else
+    echo "✅ The NAS is up to date."
+    if [ "$have" != "$want" ]; then echo "   Newer commits on main don't change the server."; fi
+  fi
+fi
+```
+
+It asks GitHub for the newest commit on `main` that passed CI — the image a pull
+fetches — and asks the NAS which commit it is running: `/health` reports it as
+`revision`. The two needn't match for the NAS to be current. Every commit on
+`main` publishes an image, a docs-only one included, so what counts is whether
+anything changed under `Server/`, `Packages/FrameStationAPI/` or
+`docker-compose.yml` in between — the same definition as "Checking what's
+deployed without touching the NAS" below. It also compares the migrations the
+NAS has applied with the ones in that commit. Tested against the NAS: current,
+a build a week stale (it lists the 19 server files since), and one docs-only
+commit behind (current).
+
+By hand, right after a push, the running commit against the one pushed —
+`/health` answers without SSH or sudo:
 
 ```bash
 curl -s https://<nas-host>:8443/health      # "revision": "<full sha>"
