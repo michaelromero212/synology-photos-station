@@ -48,6 +48,29 @@ enum PhotoLibraryScanner {
         /// When the photo was edited, if the file described is an edit. See
         /// `editedAt(of:)`.
         var editedAt: Date? = nil
+        /// A Live Photo's motion half. Nil for anything that isn't one.
+        var pairedVideo: PairedVideo? = nil
+    }
+
+    /// The file facts for a Live Photo's motion half.
+    ///
+    /// Read from the same list of files as the photo itself, in `describe`. It
+    /// used to be a second read of that list for every Live Photo, made on the
+    /// main thread as the photo was queued, and Photos loads a file's details
+    /// on demand. That's the "Missing prefetched properties … on the main
+    /// queue" warning Photos logs.
+    ///
+    /// Dimensions and duration are deliberately absent rather than borrowed
+    /// from the still: the video is a different size to the photo it belongs to
+    /// — commonly 1440×1080 beside a 4032×3024 still — and sending the still's
+    /// numbers would write a wrong answer the server's own probe then refuses
+    /// to correct, because it only fills what is missing. Subtypes are absent
+    /// too: they describe the photograph, and a portrait Live Photo's motion is
+    /// not a second portrait.
+    struct PairedVideo {
+        let filename: String
+        let byteSize: Int64
+        let mime: String
     }
 
     /// The fetch the full scan and the change observer both use, so "inserted"
@@ -96,6 +119,10 @@ enum PhotoLibraryScanner {
 
     /// One asset's file facts. Shared with the share picker so a photo carries
     /// the same filename, MIME and RAW flag whichever way it reaches the NAS.
+    ///
+    /// Never on the main thread. Reading an asset's files makes Photos load
+    /// their details on demand, and every caller runs this in a background
+    /// task for that reason.
     static func describe(_ asset: PHAsset) -> Candidate? {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let primary = primaryResource(in: resources, for: asset) else { return nil }
@@ -109,7 +136,25 @@ enum PhotoLibraryScanner {
             mime: mimeType(for: ext, uti: primary.uniformTypeIdentifier),
             isRaw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"].contains(ext),
             subtypes: subtypes(of: asset),
-            editedAt: isRender(primary) ? editedAt(of: asset) : nil
+            editedAt: isRender(primary) ? editedAt(of: asset) : nil,
+            pairedVideo: pairedVideo(in: resources, for: asset)
+        )
+    }
+
+    /// A Live Photo's motion half, from the list of files `describe` already
+    /// has. See `PairedVideo`.
+    private static func pairedVideo(
+        in resources: [PHAssetResource], for asset: PHAsset
+    ) -> PairedVideo? {
+        guard let resource = livePhotoResource(in: resources, for: asset) else { return nil }
+        let filename = Self.filename(of: resource, in: resources)
+        return PairedVideo(
+            filename: filename,
+            byteSize: byteSize(of: resource),
+            mime: mimeType(
+                for: (filename as NSString).pathExtension.lowercased(),
+                uti: resource.uniformTypeIdentifier
+            )
         )
     }
 
@@ -298,36 +343,6 @@ enum PhotoLibraryScanner {
     static func asset(forKey key: String) -> PHAsset? {
         guard BackupKey.kind(key) != .pairedVideo else { return nil }
         return asset(for: BackupKey.photo(key))
-    }
-
-    /// The file facts for a Live Photo's motion half.
-    ///
-    /// Dimensions and duration are deliberately absent rather than borrowed
-    /// from the still: the video is a different size to the photo it belongs to
-    /// — commonly 1440×1080 beside a 4032×3024 still — and sending the still's
-    /// numbers would write a wrong answer the server's own probe then refuses
-    /// to correct, because it only fills what is missing.
-    static func pairedVideoCandidate(for asset: PHAsset) -> Candidate? {
-        let resources = PHAssetResource.assetResources(for: asset)
-        guard let resource = livePhotoResource(in: resources, for: asset) else { return nil }
-        let filename = Self.filename(of: resource, in: resources)
-        return Candidate(
-            asset: asset,
-            filename: filename,
-            byteSize: byteSize(of: resource),
-            mediaType: .video,
-            mime: mimeType(
-                for: (filename as NSString).pathExtension.lowercased(),
-                uti: resource.uniformTypeIdentifier
-            ),
-            isRaw: false,
-            // None, deliberately. The subtypes on a Live Photo describe the
-            // photograph — a portrait Live Photo is a portrait — and they
-            // belong to the still, which is the half the timeline shows. Copying
-            // them here would file the same moment under Portrait twice, once
-            // for a video nobody can see.
-            subtypes: []
-        )
     }
 
     /// `PHAssetResource` exposes size only through a private-ish key. Missing

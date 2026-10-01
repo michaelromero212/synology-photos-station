@@ -211,18 +211,30 @@ final class PendingUploads {
                 remove(claimed.id)
                 completedItems += 1
             }
-            guard let asset = PhotoLibraryScanner.asset(for: claimed.localIdentifier),
-                  let candidate = PhotoLibraryScanner.describe(asset) else {
+            // Off the main actor. Describing reads the file's details from
+            // Photos, which loads them on demand: on the main thread that was
+            // the "Missing prefetched properties … on the main queue" warning,
+            // and a stall, once per file.
+            let identifier = claimed.localIdentifier
+            let prepared = await Task.detached(priority: .userInitiated) {
+                () -> (PHAsset, UploadDescriptor)? in
+                guard let asset = PhotoLibraryScanner.asset(for: identifier),
+                      let candidate = PhotoLibraryScanner.describe(asset)
+                else { return nil }
+                return (asset, UploadDescriptor(asset: asset, candidate: candidate))
+            }.value
+            guard let prepared else {
                 // Gone from the camera roll between queueing and sending.
                 // Nothing to retry and nothing to report as broken.
                 forget(localIdentifier: claimed.localIdentifier, spaceID: spaceID)
                 failed += 1
                 continue
             }
+            let (asset, descriptor) = prepared
             do {
                 let result = try await AssetUploader.send(
                     asset,
-                    descriptor: UploadDescriptor(asset: asset, candidate: candidate),
+                    descriptor: descriptor,
                     to: spaceID,
                     client: client
                 )

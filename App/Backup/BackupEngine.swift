@@ -262,7 +262,7 @@ final class BackupEngine {
         observationTask = Task { @MainActor [weak self] in
             for await change in changes {
                 if !change.changed.isEmpty {
-                    self?.enqueueEdits(withIdentifiers: change.changed)
+                    await self?.enqueueEdits(withIdentifiers: change.changed)
                 }
                 if !change.inserted.isEmpty {
                     await self?.enqueueNewAssets(withIdentifiers: change.inserted)
@@ -391,7 +391,7 @@ final class BackupEngine {
                 await enqueueNewAssets(withIdentifiers: changes.inserted)
             }
             if !changes.updated.isEmpty {
-                enqueueEdits(withIdentifiers: changes.updated)
+                await enqueueEdits(withIdentifiers: changes.updated)
             }
         }
         if let now { LibraryChangeHistory.save(now) }
@@ -416,9 +416,9 @@ final class BackupEngine {
         // Not under "Photos Only": that toggle is a deliberate choice to leave
         // video on the phone, and three seconds of motion per photo is still
         // video. The still goes up regardless, just without its pair.
-        let pairedVideo = settings.includeVideos
-            ? PhotoLibraryScanner.pairedVideoCandidate(for: asset)
-            : nil
+        //
+        // Read with the photo, off the main thread. See `PairedVideo`.
+        let pairedVideo = settings.includeVideos ? candidate.pairedVideo : nil
         let liveGroupID = pairedVideo.map { _ in UUID() }
 
         let item = BackupItem(
@@ -508,25 +508,33 @@ final class BackupEngine {
         let includeVideos = settings.includeVideos
         let rule = settings.rule
         let cutoff = settings.futureCutoff
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: fresh, options: nil)
-        var candidates: [PhotoLibraryScanner.Candidate] = []
-        // A pool per photo, as in `PhotoLibraryScanner.scan`: a catch-up can
-        // hand this thousands of photos in one pass with nothing that pauses.
-        fetched.enumerateObjects { asset, _, _ in
-            autoreleasepool {
-                guard asset.mediaType == .image
-                    || (asset.mediaType == .video && includeVideos)
-                else { return }
-                // The line the full scan draws, drawn here too. New to the
-                // library is not the same as newly taken: a photo saved from a
-                // message, or arriving from iCloud, can be years old, and "only
-                // new photos" means new photographs.
-                guard rule.queues(takenAt: asset.creationDate, cutoff: cutoff) else { return }
-                if let candidate = PhotoLibraryScanner.describe(asset) {
-                    candidates.append(candidate)
+        // Off the main actor, as `scanLibrary` reads the library. Describing
+        // reads each photo's files, and Photos loads their details on demand:
+        // on the main thread that was the "Missing prefetched properties …
+        // on the main queue" warning once per photo, and a catch-up can hand
+        // this thousands.
+        let candidates = await Task.detached(priority: .userInitiated) {
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: fresh, options: nil)
+            var candidates: [PhotoLibraryScanner.Candidate] = []
+            // A pool per photo, as in `PhotoLibraryScanner.scan`: one pass with
+            // nothing in it that pauses.
+            fetched.enumerateObjects { asset, _, _ in
+                autoreleasepool {
+                    guard asset.mediaType == .image
+                        || (asset.mediaType == .video && includeVideos)
+                    else { return }
+                    // The line the full scan draws, drawn here too. New to the
+                    // library is not the same as newly taken: a photo saved
+                    // from a message, or arriving from iCloud, can be years
+                    // old, and "only new photos" means new photographs.
+                    guard rule.queues(takenAt: asset.creationDate, cutoff: cutoff) else { return }
+                    if let candidate = PhotoLibraryScanner.describe(asset) {
+                        candidates.append(candidate)
+                    }
                 }
             }
-        }
+            return candidates
+        }.value
         guard !candidates.isEmpty else { return }
 
         var added = 0
@@ -638,23 +646,27 @@ final class BackupEngine {
     /// a favorite, an album, iCloud catching up — so a photo PhotoKit says has
     /// no edits is passed over before anything else is read, and only the rows
     /// of the few that do are fetched.
-    func enqueueEdits(withIdentifiers ids: [String]) {
+    func enqueueEdits(withIdentifiers ids: [String]) async {
         guard PhotoLibraryScanner.access == .authorized, !ids.isEmpty else { return }
         let includeVideos = settings.includeVideos
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-        var candidates: [PhotoLibraryScanner.Candidate] = []
-        // A pool per photo, as in `PhotoLibraryScanner.scan`.
-        fetched.enumerateObjects { asset, _, _ in
-            autoreleasepool {
-                guard asset.hasAdjustments,
-                      asset.mediaType == .image
-                        || (asset.mediaType == .video && includeVideos),
-                      let candidate = PhotoLibraryScanner.describe(asset),
-                      candidate.editedAt != nil
-                else { return }
-                candidates.append(candidate)
+        // Off the main actor, for the reason `enqueueNewAssets` gives.
+        let candidates = await Task.detached(priority: .userInitiated) {
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+            var candidates: [PhotoLibraryScanner.Candidate] = []
+            // A pool per photo, as in `PhotoLibraryScanner.scan`.
+            fetched.enumerateObjects { asset, _, _ in
+                autoreleasepool {
+                    guard asset.hasAdjustments,
+                          asset.mediaType == .image
+                            || (asset.mediaType == .video && includeVideos),
+                          let candidate = PhotoLibraryScanner.describe(asset),
+                          candidate.editedAt != nil
+                    else { return }
+                    candidates.append(candidate)
+                }
             }
-        }
+            return candidates
+        }.value
         guard !candidates.isEmpty else { return }
 
         // Each photo's own row, and the row its edit would have if queued.
@@ -706,7 +718,7 @@ final class BackupEngine {
                   still.state != .done,
                   still.liveGroupID == nil,
                   rows[videoID] == nil,
-                  let pairedVideo = PhotoLibraryScanner.pairedVideoCandidate(for: asset)
+                  let pairedVideo = candidate.pairedVideo
             else { continue }
 
             let liveGroupID = UUID()
@@ -1047,6 +1059,54 @@ final class BackupEngine {
         return try? context.fetch(descriptor).first
     }
 
+    /// What one queue row will send, as found in Photos.
+    private enum Resolution {
+        /// The photo, the file of it to send, and which version of the photo
+        /// that file shows (see `queueEdits`) where that matters.
+        case send(PHAsset, PHAssetResource?, shows: String?)
+        /// Nothing to send, and there never will be. The reason is recorded on
+        /// the row.
+        case skip(String)
+    }
+
+    /// Finds the photo behind a queue row and the file of it to send.
+    ///
+    /// Static and nonisolated so it runs off the main actor. See `upload`.
+    nonisolated private static func resolve(
+        kind: BackupKey.Kind, photo: String
+    ) -> Resolution {
+        guard let asset = PhotoLibraryScanner.asset(for: photo) else {
+            // Deleted from the library since the scan. Not an error, and not
+            // retryable.
+            return .skip("No longer in the photo library")
+        }
+        switch kind {
+        case .main:
+            // Read before the export rather than after it: an edit landing in
+            // between then looks newer than what went, and is sent again —
+            // where the NAS recognizes the bytes — instead of being missed.
+            let resource = PhotoLibraryScanner.primaryResource(for: asset)
+            return .send(
+                asset, resource,
+                shows: resource.map { PhotoLibraryScanner.versionKey(of: asset, sending: $0) }
+            )
+        case .pairedVideo:
+            guard let paired = PhotoLibraryScanner.livePhotoResource(for: asset) else {
+                // The Live Photo lost its motion since the scan — usually
+                // "Convert to Still" in Photos.
+                return .skip("No longer a Live Photo")
+            }
+            return .send(asset, paired, shows: nil)
+        case .edit:
+            guard let render = PhotoLibraryScanner.editedResource(for: asset) else {
+                // Reverted in Photos before it went. The photo is on the NAS as
+                // it was; there is nothing else to send.
+                return .skip("The edit was undone before it was backed up")
+            }
+            return .send(asset, render, shows: nil)
+        }
+    }
+
     /// Returns why the item failed, or nil if it went up or was skipped.
     /// `start` uses that to decide whether the rest of the queue is worth
     /// attempting.
@@ -1072,56 +1132,32 @@ final class BackupEngine {
         let kind = BackupKey.kind(item.localIdentifier)
         let assetIdentifier = BackupKey.photo(item.localIdentifier)
 
-        guard let asset = PHAsset.fetchAssets(
-            withLocalIdentifiers: [assetIdentifier], options: nil
-        ).firstObject else {
-            // Deleted from the library since the scan. Not an error, and not
-            // retryable.
+        // Off the main actor, for the reason `enqueueNewAssets` gives: finding
+        // which file to send makes Photos load its details on demand.
+        let asset: PHAsset
+        // Resolved now rather than at scan time: a `PHAssetResource` is a
+        // handle into the library, not something a queue row can hold across a
+        // relaunch.
+        let resource: PHAssetResource?
+        // Which version the photo's own upload shows, kept once it has gone so
+        // that a later edit can be told from it. See `queueEdits`.
+        let shows: String?
+        switch await Task.detached(priority: .userInitiated, operation: {
+            Self.resolve(kind: kind, photo: assetIdentifier)
+        }).value {
+        case .send(let found, let file, let version):
+            asset = found
+            resource = file
+            shows = version
+        case .skip(let reason):
             item.state = .skipped
-            item.lastError = "No longer in the photo library"
+            item.lastError = reason
             try? context.save()
             return nil
         }
 
         do {
             let localIdentifier = item.localIdentifier
-            // Resolved now rather than at scan time: a `PHAssetResource` is a
-            // handle into the library, not something a queue row can hold
-            // across a relaunch.
-            let resource: PHAssetResource?
-            // Which version the photo's own upload shows, kept once it has gone
-            // so that a later edit can be told from it. See `queueEdits`.
-            var shows: String?
-            switch kind {
-            case .main:
-                // Read before the export rather than after it: an edit landing
-                // in between then looks newer than what went, and is sent again
-                // — where the NAS recognizes the bytes — instead of being missed.
-                resource = PhotoLibraryScanner.primaryResource(for: asset)
-                shows = resource.map { PhotoLibraryScanner.versionKey(of: asset, sending: $0) }
-            case .pairedVideo:
-                guard let paired = PhotoLibraryScanner.livePhotoResource(for: asset) else {
-                    // The Live Photo lost its motion since the scan — usually
-                    // "Convert to Still" in Photos. Nothing to send, and never
-                    // will be.
-                    item.state = .skipped
-                    item.lastError = "No longer a Live Photo"
-                    try? context.save()
-                    return nil
-                }
-                resource = paired
-            case .edit:
-                guard let render = PhotoLibraryScanner.editedResource(for: asset) else {
-                    // Reverted in Photos before it went. The photo is on the NAS
-                    // as it was; there is nothing else to send.
-                    item.state = .skipped
-                    item.lastError = "The edit was undone before it was backed up"
-                    try? context.save()
-                    return nil
-                }
-                resource = render
-            }
-
             let result = try await AssetUploader.send(
                 asset, descriptor: item.descriptor, to: spaceID, client: client,
                 resource: resource, isAutomaticBackup: true,
