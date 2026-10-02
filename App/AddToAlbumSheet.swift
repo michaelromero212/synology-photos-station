@@ -106,6 +106,7 @@ struct AddToAlbumSheet: View {
             _ = try await client.addToAlbum(
                 album.id, AlbumAssetsRequest(spaceAssetIDs: spaceAssetIDs)
             )
+            albumsChanged()
             onFinished("Added to \(album.name)")
         } catch {
             failure = error.localizedDescription
@@ -124,10 +125,19 @@ struct AddToAlbumSheet: View {
             let album = try await client.createAlbum(
                 CreateAlbumRequest(name: name, spaceAssetIDs: spaceAssetIDs)
             )
+            albumsChanged()
             onFinished("Added to \(album.name)")
         } catch {
             failure = error.localizedDescription
         }
+    }
+
+    /// The Albums page keeps its list between visits, and an album isn't part
+    /// of any library's change log, so nothing else would tell it. Not awaited:
+    /// the sheet has nothing to wait for.
+    private func albumsChanged() {
+        let store = session.albumStore()
+        Task { await store.refresh() }
     }
 }
 

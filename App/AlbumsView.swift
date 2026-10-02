@@ -13,8 +13,13 @@ final class AlbumStore {
     private(set) var hasLoaded = false
 
     private weak var session: AppSession?
-    /// When the list was last answered, for `isStale`.
+    /// When the list was last answered, and how far into the personal
+    /// library's changes it had got, for `isStale`.
     private var fetchedAt: Date?
+    private var fetchedCursor: Int64?
+    /// Set while a request is out, so a second caller doesn't send another.
+    /// See `CollectionsStore.isRefreshing`.
+    private var isRefreshing = false
 
     init(session: AppSession) { self.session = session }
 
@@ -29,31 +34,46 @@ final class AlbumStore {
     /// the screen was.
     ///
     /// A minute, matching the collections beside it, so flipping between tabs
-    /// doesn't put a run of identical queries on a J4125.
+    /// doesn't put a run of identical queries on a J4125 — but not when the
+    /// library has changed under the list. A trashed photo can be an album's
+    /// cover, and a count that still includes it is wrong.
     var isStale: Bool {
         guard let fetchedAt else { return true }
+        if libraryCursor != fetchedCursor { return true }
         return Date().timeIntervalSince(fetchedAt) > 60
     }
 
+    /// See `AppSession.changeCursor`. The personal library's, because that is
+    /// where an album's photos come from.
+    private var libraryCursor: Int64? {
+        guard let session, let personal = session.personalSpace else { return nil }
+        return session.changeCursor(for: personal.id)
+    }
+
     func refreshIfStale() async {
-        guard isStale else { return }
+        guard isStale, !isRefreshing else { return }
         await refresh()
     }
 
     func refresh() async {
         guard let client = session?.client else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         // Only the first time. A refresh behind a list that is already on
         // screen must not announce itself — this drives the empty state, and
         // flipping it on every poll would make the page flicker between having
         // albums and deciding whether it has any.
         if !hasLoaded { isLoading = true }
         defer { isLoading = false }
+        // Before asking, as `CollectionsStore.refresh` does.
+        let cursor = libraryCursor
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
             albums = try await client.albums().albums
             hasLoaded = true
             fetchedAt = Date()
+            fetchedCursor = cursor
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -129,12 +149,26 @@ struct AlbumsView: View {
     /// cheaper thing to own than another field on a response that four clients
     /// decode.
     @State private var placeTotal = 0
+    /// Which library `placeTotal` was counted for, when, and how far into its
+    /// changes.
+    @State private var placesFetched: (space: UUID, at: Date, cursor: Int64?)?
     /// The place the Places list handed back, pushed as its own screen.
     @State private var pickedPlace: String?
     @Environment(\.scenePhase) private var scenePhase
 
     private let columns = 2
     private let spacing: CGFloat = 14
+
+    /// Starts from the session's stores, which are usually filled already —
+    /// see `AppSession.albumStore`. Starting from nil and assigning them in a
+    /// task drew a spinner for a frame first, even with everything ready.
+    init(session: AppSession) {
+        self.session = session
+        _store = State(initialValue: session.albumStore())
+        _collections = State(initialValue: session.personalSpace.map {
+            session.collectionsStore(for: $0.id)
+        })
+    }
 
     /// Whether there is genuinely nothing to draw.
     ///
@@ -239,24 +273,45 @@ struct AlbumsView: View {
                 )
             }
         }
-        .task {
-            let created = store ?? AlbumStore(session: session)
-            store = created
-            await created.refresh()
-        }
+        // The albums list needs no task of its own. The store comes from the
+        // session, already built (see `init`), and the `.onAppear` below asks
+        // again when it's stale (`AlbumStore.isStale`). This used to fetch it on
+        // every visit: a tab's `.task` runs each time the tab is shown.
         .task(id: session.personalSpace?.id) {
             guard let space = session.personalSpace, let client = session.client else { return }
+            // By the stores' rule either side of it: once a minute, or sooner
+            // if the library has changed since (`AppSession.changeCursor`).
+            let cursor = session.changeCursor(for: space.id)
+            if let fetched = placesFetched, fetched.space == space.id,
+               fetched.cursor == cursor,
+               Date().timeIntervalSince(fetched.at) < 60 {
+                return
+            }
             // One row's worth: the count, not the list. The list is fetched by
             // the screen behind the row, and only if somebody opens it.
-            placeTotal = (try? await client.places(spaceID: space.id, limit: 1))?.total ?? 0
+            //
+            // Kept on failure, as the stores keep theirs: a blip shouldn't
+            // take the row away.
+            if let total = (try? await client.places(spaceID: space.id, limit: 1))?.total {
+                placeTotal = total
+                placesFetched = (space.id, Date(), cursor)
+            }
         }
-        // Keyed on the space so switching personal libraries rebuilds it, and
-        // separate from the albums load because either can fail alone.
+        // Keyed on the space so switching personal libraries finds that
+        // library's store, and separate from the albums load because either
+        // can fail alone.
+        //
+        // The session's store, never a new one. This made a new store every
+        // time the tab was shown, so the page came up without the hero, the
+        // shelves, the trips and the occasions, and they arrived a moment later
+        // on top, pushing everything below them down the screen. That was the
+        // flicker switching to Albums: about 0.15 s against the dev server,
+        // recorded in the simulator, and longer against the NAS.
         .task(id: session.personalSpace?.id) {
             guard let space = session.personalSpace else { return }
-            let created = CollectionsStore(session: session, spaceID: space.id)
-            collections = created
-            await created.refresh()
+            let current = session.collectionsStore(for: space.id)
+            if collections !== current { collections = current }
+            await current.refreshIfStale()
         }
         // Coming back to the tab, or to the app, should not mean coming back to
         // a page somebody else changed an hour ago on a different device. The

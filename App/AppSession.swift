@@ -352,6 +352,9 @@ final class AppSession {
         // Each one holds a family's photographs and a client that is about to
         // be invalid.
         timelineStores.removeAll()
+        // And another account's albums and collections.
+        albumStoreCache = nil
+        collectionsStores.removeAll()
         #if os(iOS)
         // Which of this phone's photos are which of that account's assets. Of
         // no use to whoever signs in next, and not theirs to hold.
@@ -370,6 +373,8 @@ final class AppSession {
         // happen to exist, and the invariant belongs next to the assignment
         // that would break it.
         timelineStores.removeAll()
+        albumStoreCache = nil
+        collectionsStores.removeAll()
         self.client = client
         self.loader = ThumbnailLoader(
             client: client, diskLimitBytes: CacheSettings.limit.bytes
@@ -525,6 +530,50 @@ final class AppSession {
         if let existing = timelineStores[space.id] { return existing }
         let store = TimelineStore(client: client, spaceID: space.id)
         timelineStores[space.id] = store
+        return store
+    }
+
+    /// How far into a library's changes the grid has followed it. Nil until
+    /// the library has a timeline.
+    ///
+    /// For the pages that draw from the same library and keep what they
+    /// fetched: once this has moved past what they were answered at, they are
+    /// behind the grid. A photo trashed, a favorite, a backup landing — each
+    /// moves it.
+    func changeCursor(for spaceID: UUID) -> Int64? {
+        timelineStores[spaceID]?.cursor
+    }
+
+    /// The Albums page's two stores, kept here for the reason `timelineStores`
+    /// is.
+    ///
+    /// The page owned them itself and built new ones every time its tab was
+    /// shown. So switching to Albums drew the page without the hero, the
+    /// shelves, the trips and the occasions, and they arrived a moment later on
+    /// top, pushing the rest down: the flicker. Kept here, they outlive the
+    /// page, and they can be filled before it is first opened. See
+    /// `RootTabView`'s prefetch.
+    ///
+    /// Kept also means kept between visits, so neither asks again on every
+    /// one. They ask when the library has moved on since they were answered
+    /// (`changeCursor`), when an album is edited, or after a minute.
+    ///
+    /// Not observed: nothing draws from the cache itself, and the page creates
+    /// entries while it is being built, which must not count as a change.
+    @ObservationIgnored private var albumStoreCache: AlbumStore?
+    @ObservationIgnored private var collectionsStores: [UUID: CollectionsStore] = [:]
+
+    func albumStore() -> AlbumStore {
+        if let existing = albumStoreCache { return existing }
+        let store = AlbumStore(session: self)
+        albumStoreCache = store
+        return store
+    }
+
+    func collectionsStore(for spaceID: UUID) -> CollectionsStore {
+        if let existing = collectionsStores[spaceID] { return existing }
+        let store = CollectionsStore(session: self, spaceID: spaceID)
+        collectionsStores[spaceID] = store
         return store
     }
 

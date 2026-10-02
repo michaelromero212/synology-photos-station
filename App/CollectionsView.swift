@@ -20,10 +20,18 @@ final class CollectionsStore {
     private(set) var hasLoaded = false
 
     private weak var session: AppSession?
-    private let spaceID: UUID
+    /// The library these collections are drawn from, so the Albums page can
+    /// tell whether the store it already has is still the right one.
+    let spaceID: UUID
     /// When the page was last answered, and for which calendar day.
     private var fetchedAt: Date?
     private var fetchedFor: String?
+    /// How far into the library's changes it had got. See `isStale`.
+    private var fetchedCursor: Int64?
+    /// Set while a request is out, so a second caller doesn't send another.
+    /// The Albums page asks from two places as it appears, and both used to go
+    /// to the NAS: two identical requests per visit.
+    private var isRefreshing = false
 
     init(session: AppSession, spaceID: UUID) {
         self.session = session
@@ -39,8 +47,13 @@ final class CollectionsStore {
     /// built from what today is, so a device left on overnight would go on
     /// offering yesterday's "on this day" until somebody touched it. An Apple
     /// TV is exactly that device, and it has no pull-to-refresh to fall back on.
+    ///
+    /// A change the grid has already seen doesn't wait out the minute. Favorite
+    /// a photo, or trash one, and the Favorites count or the trip it belonged to
+    /// should say so the moment you arrive here.
     var isStale: Bool {
         guard let fetchedAt, fetchedFor == Self.dayStamp() else { return true }
+        if session?.changeCursor(for: spaceID) != fetchedCursor { return true }
         return Date().timeIntervalSince(fetchedAt) > 60
     }
 
@@ -54,14 +67,19 @@ final class CollectionsStore {
     /// Asks again only when it is worth it, so switching tabs back and forth
     /// doesn't put a run of identical queries on a J4125.
     func refreshIfStale() async {
-        guard isStale else { return }
+        guard isStale, !isRefreshing else { return }
         await refresh()
     }
 
     func refresh() async {
         guard let client = session?.client else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         if page == nil { isLoading = true }
         defer { isLoading = false }
+        // Read before asking, not after: a change that lands while the request
+        // is out may not be in the answer, and must still count as unseen.
+        let cursor = session?.changeCursor(for: spaceID)
         // Failure is quiet, but it must not be destructive. Assigning the
         // result straight through meant one failed pull-to-refresh replaced a
         // good page with nil — and the page above, seeing nothing, replaced
@@ -72,6 +90,7 @@ final class CollectionsStore {
             hasLoaded = true
             fetchedAt = Date()
             fetchedFor = Self.dayStamp()
+            fetchedCursor = cursor
         }
     }
 }

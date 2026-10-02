@@ -84,6 +84,18 @@ struct RootTabView: View {
     #if !os(macOS)
     private var tabs: some View {
         tabContainer
+        // The Albums page's data, fetched while the library is what's on
+        // screen, so the first visit to Albums finds it ready rather than
+        // assembling itself in front of you. Two seconds in, so it doesn't
+        // compete with the grid's own first load on the NAS. See
+        // `AppSession.albumStore`.
+        .task {
+            try? await Task.sleep(for: .seconds(2))
+            if let personal = session.personalSpace {
+                await session.collectionsStore(for: personal.id).refreshIfStale()
+            }
+            await session.albumStore().refreshIfStale()
+        }
         #if os(iOS)
         // Ours takes the system bar's place — the system's own is hidden per
         // tab, in `tabContainer`. See `FloatingTabBar` for why it is drawn by
