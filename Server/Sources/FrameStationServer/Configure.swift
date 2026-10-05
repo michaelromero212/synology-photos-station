@@ -85,6 +85,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: ActivityController())
     try app.grouped("v1").register(collection: AlbumController())
     try app.grouped("v1").register(collection: CollectionsController())
+    try app.grouped("v1").register(collection: CurationController())
 
     // Only the long-running server drains the queue.
     //
@@ -155,6 +156,10 @@ func configure(_ app: Application) async throws {
         // Ready before the first upload rather than started by it. See
         // `ExifToolDaemon.warm`.
         Task { await ExifToolDaemon.shared.warm() }
+
+        // Photos analyzed under older curation rules get the current ones,
+        // with no device involved. See `CurationVocabulary.retag`.
+        Task { await CurationVocabulary.retag(on: app) }
 
         // Fill dates and the screenshot kind into already-stored assets from
         // their filenames, so the library that predates this reading gains the

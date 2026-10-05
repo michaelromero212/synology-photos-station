@@ -16,6 +16,12 @@ extension PurgeAssetsRequest: @retroactive Content {}
 /// and be correct the day a library is imported rather than after an overnight
 /// job that may not finish.
 ///
+/// In a person's own library the arithmetic also counts what their own devices
+/// saw in the photographs, so a day can turn out to have been a birthday party
+/// and a holiday has to look like one. The looking happened on the device; here
+/// it is only counted. See "What the photographs showed" and
+/// `CurationVocabulary`.
+///
 /// The page is deliberately *not* a list of everything that could be computed.
 /// Apple's Albums tab reaches twenty-five rows before your own albums, most of
 /// them media types, and the result reads as a filing cabinet. So sections that
@@ -75,17 +81,33 @@ struct CollectionsController: RouteCollection {
         // stays recognisable for as long as anyone is looking at it.
         let seed = Self.dayStamp(today)
 
+        // What the person's own devices saw, for their own library. Empty
+        // anywhere else, or with curation turned off, and then the page is
+        // exactly what it was before curation existed. See `CurationVocabulary`.
+        let curation = try await CurationController.context(
+            userID: device.userID, spaceID: spaceID, on: req.sql
+        )
+        let evidence = curation.enabled && curation.isPersonal
+            ? try await dayEvidence(spaceID: spaceID, userID: device.userID, on: req.sql)
+            : [:]
+
         // The holiday table is built for the years the library actually holds
         // and no others. Trips need it too now: a short trip over a holiday is
         // named after the holiday.
+        //
+        // Turned off, there are no holidays at all, here or in trip names. On,
+        // a holiday the devices have looked at has to look like itself.
         let years = try await libraryYears(spaceID: spaceID, on: req.sql)
-        let holidays = Holidays.table(forYears: years)
+        let holidays = curation.holidays
+            ? Self.evidenced(Holidays.table(forYears: years), by: evidence)
+            : [:]
+        let events = Self.events(in: evidence, excluding: holidays)
 
         let onThisDay = try await onThisDayCollections(
             spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
         let trips = try await trips(
-            spaceID: spaceID, seed: seed, holidays: holidays, on: req.sql
+            spaceID: spaceID, seed: seed, holidays: holidays, evidence: evidence, on: req.sql
         )
 
         // Days already inside a trip are not also occasions of their own. The
@@ -95,7 +117,7 @@ struct CollectionsController: RouteCollection {
 
         let occasions = try await occasions(
             spaceID: spaceID, seed: seed, userID: device.userID, years: years,
-            holidays: holidays, excluding: claimed, on: req.sql
+            holidays: holidays, events: events, excluding: claimed, on: req.sql
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
@@ -259,12 +281,13 @@ struct CollectionsController: RouteCollection {
         return Double(collection.count) / (1 + max(age, 0))
     }
 
-    /// Where a card is — "Nags Head" from "Six days in Nags Head" — for keeping
-    /// one card per place. Nil for cards that aren't anywhere in particular.
+    /// Where a card is — "Nags Head" from "Six days in Nags Head", or from
+    /// "Beach trip to Nags Head" — for keeping one card per place. Nil for
+    /// cards that aren't anywhere in particular.
     static func place(of collection: CollectionSummary) -> String? {
         switch collection.kind {
         case .trip, .anniversary:
-            return collection.title.range(of: " in ").map {
+            return (collection.title.range(of: " in ") ?? collection.title.range(of: " to ")).map {
                 String(collection.title[$0.upperBound...])
             }
         case .revisit:
@@ -309,8 +332,11 @@ struct CollectionsController: RouteCollection {
 
         // Newest first already, so among equally soon ones the first found is
         // the latest year's.
+        //
+        // Holidays and named days only. Last year's soccer game was an event,
+        // not something that comes round again.
         var best: (date: Date, summary: CollectionSummary)?
-        for candidate in occasions where candidate.occasion != nil {
+        for candidate in occasions where candidate.occasion != nil && !candidate.isEvent {
             guard let started = start(of: candidate.summary), started < recent,
                   let next = anniversary(started) else { continue }
             if best == nil || next < best!.date { best = (next, candidate.summary) }
@@ -408,7 +434,8 @@ struct CollectionsController: RouteCollection {
     /// A single day that far away is a day out, not a trip, so a run has to
     /// span at least two.
     private func trips(
-        spaceID: UUID, seed: String, holidays: [String: String], on sql: any SQLDatabase
+        spaceID: UUID, seed: String, holidays: [String: String],
+        evidence: [String: DayEvidence] = [:], on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
         let rows = try await sql.raw("""
@@ -487,7 +514,12 @@ struct CollectionsController: RouteCollection {
         return Self.tripRuns(from: rows)
             .filter { $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems }
             .prefix(Self.allTripsLimit)
-            .map { Self.describeTrip($0, holidays: holidays) }
+            .map {
+                Self.describeTrip(
+                    $0, holidays: holidays,
+                    event: Self.tripEvent(days: $0.map(\.day), evidence: evidence)
+                )
+            }
     }
 
     /// How far from home stops being an errand.
@@ -526,8 +558,13 @@ struct CollectionsController: RouteCollection {
     /// are claimed by the trip, so it is the only card that can say so. A
     /// fortnight that happens to include Labor Day was not a Labor Day trip, and
     /// keeps its length.
+    ///
+    /// Otherwise, where the person's devices have seen what the trip was, it
+    /// is named for that: "Beach trip to Duck", "Wedding in Charleston". The
+    /// dates under the title already say how long. See `tripEvent`.
     static func describeTrip(
-        _ run: [TripDay], holidays: [String: String] = [:]
+        _ run: [TripDay], holidays: [String: String] = [:],
+        event: CurationVocabulary.Event? = nil
     ) -> CollectionSummary {
         let ordered = run.reversed().map { $0 }        // oldest first
         let count = run.reduce(0) { $0 + $1.count }
@@ -567,6 +604,8 @@ struct CollectionsController: RouteCollection {
         let title: String
         if let holiday {
             title = where_.map { "\(holiday) in \($0)" } ?? "\(holiday) away from home"
+        } else if let event, let kind = event.tripTitle {
+            title = where_.map { "\(kind) \(event.tripPreposition) \($0)" } ?? kind
         } else {
             title = where_.map { "\(phrase) in \($0)" } ?? "\(phrase) away"
         }
@@ -603,6 +642,9 @@ struct CollectionsController: RouteCollection {
         /// in a row. Nil for a date that only comes round busy every year,
         /// which See All offers to be named but the page doesn't lead with.
         let occasion: String?
+        /// Found by what the photographs showed rather than by the calendar
+        /// or a name. See `CurationVocabulary.events`.
+        var isEvent = false
     }
 
     /// Everything a day can say about itself, gathered in one pass.
@@ -645,7 +687,8 @@ struct CollectionsController: RouteCollection {
     /// applies to the *runs*.
     private func occasions(
         spaceID: UUID, seed: String, userID: UUID, years: [Int],
-        holidays: [String: String], excluding claimed: Set<String>,
+        holidays: [String: String], events: [String: CurationVocabulary.Event] = [:],
+        excluding claimed: Set<String>,
         on sql: any SQLDatabase
     ) async throws -> [Occasion] {
         let local = TimelineController.localTime
@@ -657,7 +700,11 @@ struct CollectionsController: RouteCollection {
         // Joined and split rather than interpolated: these strings are
         // machine-generated dates, but a query that builds its own IN list is a
         // habit worth not having.
-        let special = Set(holidays.keys).union(named.keys).sorted().joined(separator: ",")
+        //
+        // A day the person's devices saw an occasion in clears the same bar as
+        // a holiday: it is something, however busy it was.
+        let special = Set(holidays.keys).union(named.keys).union(events.keys)
+            .sorted().joined(separator: ",")
         let annual = recurring.sorted().joined(separator: ",")
 
         let rows = try await sql.raw("""
@@ -696,9 +743,11 @@ struct CollectionsController: RouteCollection {
         // A date that only recurs is offered once, in its latest year: what it
         // is asking for is a name, and one name covers every year of it.
         var offered = Set<String>()
-        return Self.runs(from: rows.filter { !claimed.contains($0.day) })
+        return Self.split(Self.runs(from: rows.filter { !claimed.contains($0.day) }), by: events)
             .compactMap {
-                Self.occasion($0, holidays: holidays, named: named, recurring: recurring)
+                Self.occasion(
+                    $0, holidays: holidays, named: named, recurring: recurring, events: events
+                )
             }
             .filter { candidate in
                 guard candidate.occasion == nil else { return true }
@@ -714,13 +763,18 @@ struct CollectionsController: RouteCollection {
         _ run: Run,
         holidays: [String: String],
         named: [String: String],
-        recurring: Set<String>
+        recurring: Set<String>,
+        events: [String: CurationVocabulary.Event] = [:]
     ) -> Occasion? {
         guard var summary = describe(
-            run, holidays: holidays, named: named, recurring: recurring
+            run, holidays: holidays, named: named, recurring: recurring, events: events
         ) else { return nil }
-        let name = run.days.compactMap { named[$0.day] }.first
+        let given = run.days.compactMap { named[$0.day] }.first
             ?? holiday(in: run, holidays: holidays)?.name
+        // An event only where nothing better names the day, matching the
+        // order `describe` titles it in.
+        let found = given == nil ? event(in: run, events: events) : nil
+        let name = given ?? found?.title
 
         // A date photographed every year that nobody has named yet is almost
         // always a birthday or an anniversary, and saying so is the whole
@@ -736,7 +790,7 @@ struct CollectionsController: RouteCollection {
                 recursAnnually: summary.recursAnnually
             )
         }
-        return Occasion(summary: summary, occasion: name)
+        return Occasion(summary: summary, occasion: name, isEvent: found != nil)
     }
 
     /// The holiday a run is, if it holds one. Where it holds two — Christmas
@@ -798,6 +852,173 @@ struct CollectionsController: RouteCollection {
         return runs
     }
 
+    // MARK: - What the photographs showed
+
+    /// One day of a person's own library, as their devices saw it.
+    struct DayEvidence {
+        /// Everything the day holds.
+        var total = 0
+        /// How much of it has been analyzed.
+        var analyzed = 0
+        /// Analyzed, and a picture rather than a screenshot or a document:
+        /// what shares are taken of.
+        var usable = 0
+        /// How many usable photos carry each tag.
+        var tags: [String: Int] = [:]
+
+        /// Whether enough of the day has been looked at to trust what wasn't
+        /// found in it. Until then a day keeps the rules it had before
+        /// curation, so the page doesn't thin out while a library is still
+        /// being analyzed.
+        var isAnalyzed: Bool { analyzed > 0 && analyzed * 2 >= total }
+
+        func count(_ tag: String) -> Int { tags[tag, default: 0] }
+
+        func share(_ tag: String) -> Double {
+            usable > 0 ? Double(count(tag)) / Double(usable) : 0
+        }
+    }
+
+    /// Every day of the library that the person's devices have seen any of.
+    ///
+    /// Two passes over the person's own library, both cheap next to the page's
+    /// other queries: what each day holds, and how often each tag appears in
+    /// it. Utility photos (screenshots, receipts, documents) count toward how
+    /// much of a day was analyzed but are never evidence of an occasion.
+    private func dayEvidence(
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> [String: DayEvidence] {
+        struct TotalRow: Decodable { let day: String; let total: Int; let analyzed: Int; let usable: Int }
+        struct TagRow: Decodable { let day: String; let tag: String; let n: Int }
+        let local = TimelineController.localTime
+
+        let totals = try await sql.raw("""
+            SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
+                   count(*)::int AS total,
+                   count(o.sha256)::int AS analyzed,
+                   count(o.sha256) FILTER (
+                       WHERE NOT o.is_utility AND NOT ('utility' = ANY(o.tags))
+                   )::int AS usable
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            LEFT JOIN media_observations o
+                   ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
+            GROUP BY 1
+            HAVING count(o.sha256) > 0
+            """).all(decoding: TotalRow.self)
+        guard !totals.isEmpty else { return [:] }
+
+        let tagged = try await sql.raw("""
+            SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day, t.tag, count(*)::int AS n
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN media_observations o ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
+            CROSS JOIN LATERAL unnest(o.tags) AS t(tag)
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND NOT o.is_utility AND NOT ('utility' = ANY(o.tags))
+            GROUP BY 1, 2
+            """).all(decoding: TagRow.self)
+
+        var evidence: [String: DayEvidence] = [:]
+        for row in totals {
+            evidence[row.day] = DayEvidence(
+                total: row.total, analyzed: row.analyzed, usable: row.usable
+            )
+        }
+        for row in tagged {
+            evidence[row.day]?.tags[row.tag] = row.n
+        }
+        return evidence
+    }
+
+    /// The holidays that looked like themselves.
+    ///
+    /// A holiday on a day the devices have looked at stays only if the day
+    /// shows the evidence `CurationVocabulary.holidayEvidence` asks of it. One
+    /// not looked at yet, or with no rule, keeps the date-only rule it always
+    /// had.
+    static func evidenced(
+        _ holidays: [String: String], by evidence: [String: DayEvidence]
+    ) -> [String: String] {
+        holidays.filter { day, name in
+            guard let rules = CurationVocabulary.holidayEvidence[name],
+                  let seen = evidence[day], seen.isAnalyzed
+            else { return true }
+            return rules.contains { rule in
+                seen.count(rule.tag) >= rule.minPhotos && seen.share(rule.tag) >= rule.minShare
+            }
+        }
+    }
+
+    /// The days whose photographs show an occasion, and which: the first in
+    /// `CurationVocabulary.events` that the day clears both bars for.
+    ///
+    /// Holidays are left to be holidays. A Fourth of July baseball game is
+    /// the Fourth of July.
+    static func events(
+        in evidence: [String: DayEvidence], excluding holidays: [String: String]
+    ) -> [String: CurationVocabulary.Event] {
+        var found: [String: CurationVocabulary.Event] = [:]
+        for (day, seen) in evidence where seen.isAnalyzed && holidays[day] == nil {
+            found[day] = CurationVocabulary.events.first { event in
+                seen.count(event.tag) >= event.minPhotos && seen.share(event.tag) >= event.minShare
+            }
+        }
+        return found
+    }
+
+    /// What a trip turned out to be, over all of its days together: the first
+    /// event that can name a trip and that enough of it shows.
+    static func tripEvent(
+        days: [String], evidence: [String: DayEvidence]
+    ) -> CurationVocabulary.Event? {
+        var whole = DayEvidence()
+        for day in days {
+            guard let seen = evidence[day] else { continue }
+            whole.total += seen.total
+            whole.analyzed += seen.analyzed
+            whole.usable += seen.usable
+            whole.tags.merge(seen.tags, uniquingKeysWith: +)
+        }
+        guard whole.isAnalyzed else { return nil }
+        return CurationVocabulary.events.first { event in
+            event.tripTitle != nil
+                && whole.count(event.tag) >= event.minPhotos
+                && whole.share(event.tag) >= CurationVocabulary.tripShare
+        }
+    }
+
+    /// The event a run of days was, if any of its days was one. After `split`
+    /// a run holds at most one kind.
+    static func event(
+        in run: Run, events: [String: CurationVocabulary.Event]
+    ) -> CurationVocabulary.Event? {
+        run.days.lazy.compactMap { events[$0.day] }.first
+    }
+
+    /// Splits runs where what the photographs showed changes, so a birthday on
+    /// Saturday and a soccer game on Sunday are two occasions rather than one
+    /// named for whichever came first. Christmas Eve into Christmas Day, with
+    /// no event on either, stays one.
+    static func split(_ runs: [Run], by events: [String: CurationVocabulary.Event]) -> [Run] {
+        guard !events.isEmpty else { return runs }
+        return runs.flatMap { run -> [Run] in
+            var pieces: [Run] = []
+            for day in run.days {
+                if let previous = pieces.last?.days.last,
+                   events[previous.day]?.tag == events[day.day]?.tag {
+                    pieces[pieces.count - 1].days.append(day)
+                } else {
+                    pieces.append(Run(days: [day]))
+                }
+            }
+            return pieces
+        }
+    }
+
     // MARK: - Naming an occasion
 
     /// Writes a title from what the media actually is.
@@ -828,7 +1049,8 @@ struct CollectionsController: RouteCollection {
         _ run: Run,
         holidays: [String: String] = [:],
         named: [String: String] = [:],
-        recurring: Set<String> = []
+        recurring: Set<String> = [],
+        events: [String: CurationVocabulary.Event] = [:]
     ) -> CollectionSummary? {
         let place = run.place
         let title: String
@@ -856,6 +1078,11 @@ struct CollectionsController: RouteCollection {
             // any of ten Christmases until you read the line under it.
             title = "\(holiday.name) \(holiday.day.prefix(4))"
             titleNamedPlace = false
+        } else if let event = event(in: run, events: events) {
+            // What the photographs showed, where the person's own devices
+            // looked: "Birthday party in Culpeper". Earned the same way as
+            // every rule below, so it outranks them.
+            title = inPlace(event.title, place)
         } else if run.span > 1 {
             // Only when it can say where, or what kind of stretch it was. A
             // weekend is a thing; "four days" is a measurement.

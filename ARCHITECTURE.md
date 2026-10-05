@@ -915,6 +915,49 @@ or `-Subject`, so IPTC keywords in the originals are discarded. Tags exist only
 where somebody typed one in the app, so a tag search today would open on an
 empty vocabulary. Keyword extraction plus a backfill is the prerequisite.
 
+### Curated albums — devices observe, the NAS decides
+
+The Albums page's trips and occasions were worked out from dates and
+coordinates alone. In a person's own library they now also use what that
+person's devices saw in the photographs: a birthday party, a beach day,
+whether Christmas looked like Christmas.
+
+**Inference happens on the device, never on the NAS and never in a cloud.** The
+phone runs Apple's Vision framework on each photo's 512-pixel thumbnail and
+sends back what Vision named, with confidences: `birthday_cake 0.92`. It sends
+nothing else. The NAS has no ML runtime and still doesn't. Apple's Private Cloud
+Compute model, new in the iOS 27 SDK, is remote inference and is never used.
+
+**Meaning is decided on the NAS, in one table.** `CurationVocabulary` maps
+labels to tags (cake and candles → `birthday`) and tags to occasions, with a
+version number. Tuning it after feedback is a server update rather than an app
+update, and the server re-derives stored tags at boot, so no photo is analyzed
+twice because a rule changed. Only one thing ever writes an album (the
+server), so two devices analyzing the same photos can't produce two albums.
+
+**What's stored is per person and keyed by the file.** `media_observations` holds
+one row per (person, SHA-256): the labels, an aesthetic score, a utility flag
+for screenshots and documents, people and animal counts, and the derived tags.
+The hash survives `rebuild`, which assigns new asset ids. The server reads it
+from the asset row and never accepts one from a client, so a hash is never a
+way to ask whether a photo exists.
+
+Two settings on `users`, both on by default, apply to every one of the person's
+devices at once. One switches curation off entirely; the page is then exactly
+what it was before. The other switches holiday albums off, including in trip
+names. Deleting a person's AI data removes their rows and nothing else.
+
+**Holidays have to look like themselves.** Once enough of a day has been
+analyzed, a holiday stays only if its photos show the evidence the vocabulary
+asks for: a tree or decorations for Christmas, a costume or jack-o'-lantern for
+Halloween, a gathering for Thanksgiving. Not every family celebrates every
+holiday, and the date alone said otherwise. A day not analyzed yet keeps the
+date-only rule, so the page doesn't thin out while a library is being worked
+through.
+
+**Personal libraries only, for now.** Every analysis endpoint is scoped to the
+caller's own library. Shared libraries keep their date-and-place collections.
+
 ---
 
 ## 9a. UI reference
