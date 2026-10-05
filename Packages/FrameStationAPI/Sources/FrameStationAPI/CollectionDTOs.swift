@@ -194,6 +194,39 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         case allTrips, allOccasions
     }
 
+    /// Read card by card, so a card this build can't read is left out instead
+    /// of failing the whole page.
+    ///
+    /// `CollectionSummary.kind` is a closed set, and the synthesized decoder
+    /// threw on a single unknown value — the hero and every shelf gone, on any
+    /// device still running an older build. Curated albums will bring new
+    /// kinds, and the family's devices update when they update, so this has to
+    /// reach all of them first. A newer server then costs an older app the
+    /// cards it doesn't understand, never the page.
+    ///
+    /// A missing array reads as empty for the same reason. Encoding is still
+    /// synthesized, so what the server sends doesn't change.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func card(_ key: CodingKeys) -> CollectionSummary? {
+            try? container.decodeIfPresent(CollectionSummary.self, forKey: key)
+        }
+        func cards(_ key: CodingKeys) -> [CollectionSummary]? {
+            (try? container.decodeIfPresent([Skippable<CollectionSummary>].self, forKey: key))?
+                .map { $0.compactMap(\.value) }
+        }
+        hero = card(.hero)
+        trips = cards(.trips) ?? []
+        days = cards(.days) ?? []
+        revisits = cards(.revisits) ?? []
+        mediaTypes = cards(.mediaTypes) ?? []
+        recentlyDeleted = card(.recentlyDeleted)
+        recentlyAdded = card(.recentlyAdded)
+        favorites = card(.favorites)
+        allTrips = cards(.allTrips)
+        allOccasions = cards(.allOccasions)
+    }
+
     public init(
         hero: CollectionSummary?,
         trips: [CollectionSummary],
@@ -228,6 +261,19 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// be told so.
     public var isEmpty: Bool {
         hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
+    }
+}
+
+/// One element of an array that may hold things this build can't read: the
+/// value, or nil in its place.
+///
+/// Going through `singleValueContainer` rather than calling `Value(from:)`
+/// keeps the decoder's own strategies, such as how dates are read.
+private struct Skippable<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: any Decoder) throws {
+        value = try? decoder.singleValueContainer().decode(Value.self)
     }
 }
 
