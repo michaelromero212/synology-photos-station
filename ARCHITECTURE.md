@@ -958,6 +958,17 @@ through.
 **Personal libraries only, for now.** Every analysis endpoint is scoped to the
 caller's own library. Shared libraries keep their date-and-place collections.
 
+**On the phone, never in the way.** `CurationRunner` (iOS 18 and later)
+analyzes only while the app is open, starting a few seconds after launch. It
+holds back on cellular, in Low Power Mode, while the device runs warm and
+while backup is uploading, and fetches thumbnails outside the image cache so
+browsing never loses its cached tiles to analysis. The analyzer itself,
+`FrameStationAnalysis`, is a package target with no dependency on the
+networking client. `AnalysisBoundaryTests` fails the build if that changes, or
+if the Private Cloud Compute model appears anywhere. The Information panel
+shows what was detected in each photo, so the reading can be judged photo by
+photo.
+
 ---
 
 ## 9a. UI reference
