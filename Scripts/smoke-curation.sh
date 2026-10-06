@@ -162,6 +162,28 @@ check "curation off: a word means only a place" "0" "$(found birthday)"
 check "curation off: a year still works" "4" "$(found 2023)"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
 
+echo "Highlights"
+# Fourteen photos an hour apart, quality rising through the day, and one more
+# thirty seconds after the first, better than it: a near-duplicate.
+H=(); for i in $(seq 10 23); do H+=("$(upload "$SP" "$A" "hl$i" $((500 + i)) "2021-08-07T${i}:00:00Z")"); done
+H+=("$(upload "$SP" "$A" "hldup" 560 "2021-08-07T10:00:30Z")")
+for i in "${!H[@]}"; do
+  util=false; [ "$i" = "1" ] && util=true
+  aes=$(python3 -c "print(round(0.05 * $i - 0.2, 2))")
+  curl -s -X POST "$API/v1/spaces/$SP/curation/observations" -H "$A" -H 'Content-Type: application/json' \
+    -d "{\"analysisVersion\":1,\"modelVersion\":\"smoke\",\"observations\":[{\"assetID\":\"${H[$i]}\",\"labels\":$SKY,\"aesthetic\":$aes,\"isUtility\":$util,\"peopleCount\":0,\"animalCount\":0}]}" >/dev/null
+done
+HL=$(curl -s "$API/v1/spaces/$SP/collections/items?kind=day&key=2021-08-07&highlights=10" -H "$A")
+check "ten highlights" "10" "$(echo "$HL" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['items']))")"
+check "out of everything the day holds" "15" "$(echo "$HL" | jq '["total"]')"
+lacks "never a screenshot" "${H[1]}" "$HL"
+lacks "never the lesser of two near-duplicates" "${H[0]}" "$HL"
+has "but the better one" "${H[14]}" "$HL"
+lacks "and not the weakest photo" "${H[2]}" "$HL"
+check "in the order they were taken" "${H[14]}" \
+  "$(echo "$HL" | python3 -c "import sys,json; print(json.load(sys.stdin)['items'][0]['assetID'])")"
+check "a small collection is shown whole" "4" "$(curl -s "$API/v1/spaces/$SP/collections/items?kind=day&key=2022-12-25&highlights=10" -H "$A" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['items']))")"
+
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"
 check "nothing is left" "404" "$(code "$API/v1/spaces/$SP/assets/${B[0]}/observation" -H "$A")"

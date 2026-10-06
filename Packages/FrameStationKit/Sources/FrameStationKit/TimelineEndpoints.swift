@@ -119,8 +119,14 @@ extension FrameStationClient {
     }
 
     /// The photos inside one collection, opened with the key its card carried.
+    ///
+    /// With `highlights`, the best that many instead, in the order they were
+    /// taken, with `total` still counting them all. The answer holds
+    /// everything when the server can't choose: the collection isn't analyzed
+    /// enough, it's small, or the server predates highlights.
     public func collectionItems(
-        spaceID: UUID, kind: CollectionKind, key: String, on date: Date = Date()
+        spaceID: UUID, kind: CollectionKind, key: String, on date: Date = Date(),
+        highlights: Int? = nil
     ) async throws -> SearchResults {
         let encodedKey = key.addingPercentEncoding(
             withAllowedCharacters: .urlQueryValue
@@ -128,6 +134,7 @@ extension FrameStationClient {
         return try await get(
             "v1/spaces/\(spaceID)/collections/items"
             + "?kind=\(kind.rawValue)&key=\(encodedKey)&date=\(Self.dayStamp(date))"
+            + (highlights.map { "&highlights=\($0)" } ?? "")
         )
     }
 

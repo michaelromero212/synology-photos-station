@@ -1978,7 +1978,76 @@ struct CollectionsController: RouteCollection {
 
     // MARK: - Contents
 
+    /// The best few photos of a collection, in the order they were taken, with
+    /// `total` saying how many it holds in all. Nil when the person's devices
+    /// haven't analyzed enough of it to choose, and then the caller sends
+    /// everything as before.
+    ///
+    /// "Best" means what a person would keep:
+    /// - never a screenshot or a document, and only the chosen frame of a
+    ///   burst;
+    /// - one photo per two minutes at most, so ten near-identical shots of the
+    ///   cake don't crowd out the rest of the party;
+    /// - the highest aesthetic scores among what's left, shown in time order
+    ///   so the highlights still tell the day in sequence.
+    private func highlights(
+        of filter: SQLQueryString, count: Int,
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> SearchResults? {
+        let local = TimelineController.localTime
+
+        struct Coverage: Decodable { let total: Int; let analyzed: Int }
+        guard let coverage = try await sql.raw("""
+            SELECT count(*)::int AS total, count(o.sha256)::int AS analyzed
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            \(Self.observed(by: userID))
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              \(filter)
+            """).first(decoding: Coverage.self),
+              coverage.total > count,
+              coverage.analyzed * 2 >= coverage.total
+        else { return nil }
+
+        let rows = try await sql.raw("""
+            WITH candidates AS (
+                SELECT \(unsafeRaw: TimelineController.itemColumns),
+                       EXISTS (
+                           SELECT 1 FROM space_asset_favorites f
+                           WHERE f.space_asset_id = sa.id AND f.user_id = \(bind: userID)
+                       ) AS "isFavorite",
+                       \(unsafeRaw: local) AS taken,
+                       COALESCE(o.aesthetic, -1) AS quality,
+                       row_number() OVER (
+                           PARTITION BY floor(extract(epoch FROM \(unsafeRaw: local)) / 120)
+                           ORDER BY COALESCE(o.aesthetic, -1) DESC, sa.id
+                       ) AS rank_in_moment
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                \(Self.observed(by: userID))
+                WHERE sa.space_id = \(bind: spaceID)
+                  AND sa.deleted_at IS NULL
+                  AND NOT COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false)
+                  AND (a.burst_id IS NULL OR a.burst_pick)
+                  \(filter)
+            ),
+            best AS (
+                SELECT * FROM candidates
+                WHERE rank_in_moment = 1
+                ORDER BY quality DESC, taken
+                LIMIT \(bind: count)
+            )
+            SELECT * FROM best ORDER BY taken ASC
+            """).all(decoding: TimelineController.ItemRow.self)
+
+        return SearchResults(items: rows.map { $0.toItem() }, total: coverage.total, nextOffset: nil)
+    }
+
     /// The photos in one collection, decoded from the key the summary carried.
+    ///
+    /// With `highlights=N`, the best N instead, where the person's devices have
+    /// analyzed enough of it to tell. See `highlights(of:)`.
     @Sendable
     func items(req: Request) async throws -> SearchResults {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -2054,6 +2123,14 @@ struct CollectionsController: RouteCollection {
                 """
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
+        }
+
+        if let wanted = req.query[Int.self, at: "highlights"],
+           let best = try await highlights(
+               of: filter, count: min(max(wanted, 10), 100),
+               spaceID: spaceID, userID: device.userID, on: req.sql
+           ) {
+            return best
         }
 
         let rows = try await req.sql.raw("""

@@ -491,8 +491,31 @@ struct CollectionDetailView: View {
     @State private var items: [TimelineItem] = []
     @State private var isLoading = true
     @State private var failure: String?
+    /// Everything, rather than the highlights. Off whenever a collection
+    /// opens: a week away is 400 photos, and the best 30 are the way in.
+    @State private var showAll = false
+    /// Whether the server could choose highlights for this collection, which
+    /// it can only once enough of it has been analyzed. Until then, or from a
+    /// server that predates them, there's no toggle and everything shows.
+    @State private var highlightsAvailable = false
+    @State private var total = 0
+    /// The collection `items` belongs to, so switching between highlights and
+    /// everything doesn't blank the grid the way switching collections must.
+    @State private var loadedKey: String?
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
+    private static let highlightCount = 30
+
+    /// Things that happened, as opposed to filters. Favorites are already a
+    /// person's own pick, and a media type is a filter rather than an event.
+    private var offersHighlights: Bool {
+        switch collection.kind {
+        case .onThisDay, .trip, .day, .anniversary, .season, .revisit:
+            return collection.count > Self.highlightCount
+        default:
+            return false
+        }
+    }
 
     var body: some View {
         Group {
@@ -519,8 +542,13 @@ struct CollectionDetailView: View {
         // re-fires on an input change, only on appear. So the grid kept the
         // previous type's photos until you left for Library and came back, which
         // rebuilt the view. Keying the load to the collection restarts it the
-        // moment the row changes.
-        .task(id: collection.key) { await load() }
+        // moment the row changes. The highlights switch is part of the key, so
+        // flipping it loads the other set.
+        .task(id: "\(collection.key)#\(showAll)") { await load() }
+        .onChange(of: collection.key) {
+            showAll = false
+            highlightsAvailable = false
+        }
     }
 
     private var grid: some View {
@@ -533,6 +561,17 @@ struct CollectionDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
+                    }
+
+                    if highlightsAvailable {
+                        Picker("Show", selection: $showAll) {
+                            Text("Highlights").tag(false)
+                            Text("All \(total)").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
                     }
 
                     PhotoGridSection(
@@ -566,14 +605,21 @@ struct CollectionDetailView: View {
         // Drop the outgoing collection's photos before fetching, so switching
         // sidebar rows shows *this* collection loading rather than the last
         // one's grid sitting under the new title for a beat. On first appearance
-        // `items` is already empty, so this is a no-op there.
-        items = []
+        // `items` is already empty, so this is a no-op there. Switching between
+        // highlights and everything keeps the grid up until the other arrives.
+        if loadedKey != collection.key { items = [] }
         failure = nil
         defer { isLoading = false }
+        let wantHighlights = offersHighlights && !showAll
         do {
-            items = try await client.collectionItems(
-                spaceID: space.id, kind: collection.kind, key: collection.key
-            ).items
+            let page = try await client.collectionItems(
+                spaceID: space.id, kind: collection.kind, key: collection.key,
+                highlights: wantHighlights ? Self.highlightCount : nil
+            )
+            items = page.items
+            total = page.total
+            loadedKey = collection.key
+            if wantHighlights { highlightsAvailable = page.items.count < page.total }
         } catch {
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
