@@ -150,6 +150,14 @@ check "one new file indexed" "1" "$(echo "$OUT3" | grep -c 'Indexed: 1')"
 check "eight assets now" "8" "$(q "select count(*) from assets;")"
 check "michael has five" "5" "$(mine michael)"
 
+echo
+echo "=== 11. the Personal folder the server writes now ==="
+photo "$LIB/homes/michael/Photos/Personal/2026/10/IMG_7010.jpg"
+OUT4=$(rebuild)
+check "it's indexed" "1" "$(echo "$OUT4" | grep -c 'Indexed: 1')"
+check "as michael's own" "6" "$(mine michael)"
+check "from where it lies" "1" "$(q "select count(*) from assets where storage_path like '%/Photos/Personal/2026/10/IMG_7010.jpg';")"
+
 admin "DROP DATABASE IF EXISTS $DB;" >/dev/null
 
 echo

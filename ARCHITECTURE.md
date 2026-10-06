@@ -117,8 +117,8 @@ and the lane count would have needed capping via
 
 Photos are stored at a real, human path and *that file is the photo*:
 
-    /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic
-    /volume1/FrameStation/<Space>/YYYY/MM/IMG_9001.jpg
+    /volume1/homes/<dsm user>/Photos/Personal/YYYY/MM/IMG_4821.heic
+    /volume1/homes/<dsm user>/Photos/Shared/<Space>/YYYY/MM/IMG_9001.jpg
 
 The database is an index over those files, rebuildable by scanning them. It is
 no longer the only thing that knows what a file is.
@@ -231,11 +231,12 @@ One DSM shared folder, one service account. No per-user folders.
 
 ### Browsable trees
 
-Each person sees their own library in DSM, and shared spaces separately:
+Each person sees their own library in DSM, and the shared spaces they belong
+to beside it, in two folders:
 
 ```
-/volume1/homes/<DSM user>/Photos/2026/07/…              ← private
-/volume1/FrameStation/<Space Name>/2026/07/…            ← shared
+/volume1/homes/<DSM user>/Photos/Personal/2026/07/…              ← private
+/volume1/homes/<DSM user>/Photos/Shared/<Space Name>/2026/07/…   ← shared
 ```
 
 These are **reflinks** (`cp --reflink`), not hardlinks. Measured on the DS920+:
@@ -450,8 +451,15 @@ an arbitrary asset.
 Blobs are named by hash — right for storage, meaningless to someone opening a
 folder. A second, human-readable tree mirrors every placement:
 
-    /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic
-    /volume1/FrameStation/<Space>/YYYY/MM/IMG_9001.jpg
+    /volume1/homes/<dsm user>/Photos/Personal/YYYY/MM/IMG_4821.heic
+    /volume1/homes/<dsm user>/Photos/Shared/<Space>/YYYY/MM/IMG_9001.jpg
+
+Opening `Photos` shows Personal and Shared, and nothing else of FrameStation's.
+Personal copies used to sit loose at the root of `Photos`. Since October 2026
+the browse-tree worker moves those into `Personal` by rename, which keeps
+anything edited in File Station. It then removes the folders they leave once
+those are empty, allowing for Synology's `@eaDir` cache. See
+`BrowseTreeWorker.relocatePersonal` and `Scripts/smoke-browse-personal.sh`.
 
 Entries are **reflinks**. Hardlinks cannot cross Synology's per-shared-folder
 Btrfs subvolumes at all (§4), reflinks cost nothing until written, and they

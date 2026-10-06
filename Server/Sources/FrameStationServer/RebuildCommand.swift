@@ -353,8 +353,9 @@ struct RebuildCommand: AsyncCommand {
     /// The device a legacy `MobileBackup/<device>/…` path names, if any.
     ///
     /// Only meaningful for files Synology filed. Anything under `PhotoLibrary/`
-    /// came from a browser and names no device, and anything written since the
-    /// layout was flattened sits at `Photos/YYYY/MM/` and names none either —
+    /// came from a browser and names no device, and anything FrameStation wrote
+    /// sits at `Photos/Personal/YYYY/MM/` (loose at `Photos/YYYY/MM/` before
+    /// Personal existed) and names none either —
     /// which is correct. The device belongs in `space_assets.source_device_id`,
     /// not in a path.
     static func legacyDevice(of path: String, under photos: String) -> String? {

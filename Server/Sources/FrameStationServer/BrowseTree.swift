@@ -2,6 +2,11 @@ import Foundation
 import FrameStationAPI
 import SQLKit
 import Vapor
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// Builds the human-readable tree people actually browse in File Station.
 ///
@@ -9,8 +14,12 @@ import Vapor
 /// someone opening a folder. This mirrors every placement into the home of
 /// each person entitled to see it, at a path built from when it was taken:
 ///
-///   /volume1/homes/<dsm user>/Photos/YYYY/MM/IMG_4821.heic                 personal
+///   /volume1/homes/<dsm user>/Photos/Personal/YYYY/MM/IMG_4821.heic        personal
 ///   /volume1/homes/<dsm user>/Photos/Shared/<Space>/YYYY/MM/IMG_4821.heic  shared
+///
+/// So opening `Photos` shows two folders, Personal and Shared, and nothing
+/// else of FrameStation's. Synology Photos' own `MobileBackup` and
+/// `PhotoLibrary` sit beside them until that library is migrated.
 ///
 /// Entries are **reflinks**, not copies or hardlinks. Hardlinks cannot cross
 /// Synology's per-shared-folder Btrfs subvolumes at all (`/volume1/FrameStation`
@@ -118,9 +127,11 @@ enum BrowseTree {
     /// without anybody configuring an ACL — a home is already private, and a
     /// person who is not a member simply has no such folder.
     ///
-    /// Personal photographs keep their existing shape at the root of `Photos`;
-    /// shared ones sit under `Photos/Shared/<Space>` beside them, so one person
-    /// opening their home sees everything they are entitled to in one tree.
+    /// Personal photographs go under `Photos/Personal` and shared ones under
+    /// `Photos/Shared/<Space>`, so one person opening their home sees
+    /// everything they are entitled to in one tree, in two clearly named
+    /// halves. Personal used to sit loose at the root of `Photos`;
+    /// `BrowseTreeWorker.relocatePersonal` moves what was placed that way.
     static func destinations(
         for placement: Placement, configuration: Configuration
     ) -> [(path: String, recipient: Recipient)] {
@@ -145,6 +156,8 @@ enum BrowseTree {
             if placement.spaceKind == "shared" {
                 parts.append("Shared")
                 parts.append(sanitise(placement.spaceName))
+            } else {
+                parts.append("Personal")
             }
             parts.append(contentsOf: [year, month, file])
             return (parts.joined(separator: "/"), recipient)
@@ -225,6 +238,11 @@ actor BrowseTreeWorker {
     private let app: Application
     private let configuration: BrowseTree.Configuration
     private var task: Task<Void, Never>?
+    /// Personal copies `relocatePersonal` found it couldn't move, such as one
+    /// filed under a home the person's DSM name no longer matches. Left where
+    /// they are, and not asked about again until the server restarts, so a
+    /// few of them can't hold up the rest.
+    private var unmovable: Set<UUID> = []
 
     init(app: Application, configuration: BrowseTree.Configuration) {
         self.app = app
@@ -282,8 +300,126 @@ actor BrowseTreeWorker {
     /// couldn't do for the next sweep.
     private func sweep() async {
         let sql = app.sql
+        await relocatePersonal(on: sql)
         await placeMissing(on: sql)
         await removeStale(on: sql)
+    }
+
+    /// Moves personal copies placed loose in `Photos/YYYY/MM` into
+    /// `Photos/Personal/YYYY/MM`, where `destinations` now puts them.
+    ///
+    /// A rename, not a delete and re-link. It's instant on the same volume,
+    /// keeps anything somebody edited in File Station (a reflink they wrote to
+    /// is their own copy now), and there is never a moment when the photo
+    /// isn't in the person's home. The canonical file in the blob store isn't
+    /// touched.
+    ///
+    /// Safe to stop at any point. Each move is one rename and then one row,
+    /// and a move whose row didn't get written is finished next sweep: the
+    /// file is already at its new path, so only the row changes. A copy the
+    /// person deleted themselves just has its row pointed at the new path,
+    /// exactly as before, rather than being put back.
+    ///
+    /// Once a month's folder is empty it goes, then its year's, so `Photos`
+    /// ends up holding Personal and Shared and nothing loose. See
+    /// `removeEmptied`: a person's own files are never at risk. Nothing to do
+    /// costs one indexed query a sweep.
+    private func relocatePersonal(on sql: any SQLDatabase) async {
+        struct Row: Decodable {
+            let id: UUID
+            let path: String
+            let sha256: String
+            let dsmUsername: String?
+        }
+        do {
+            let rows = try await sql.raw("""
+                SELECT be.id, be.path, a.sha256, u.dsm_username AS "dsmUsername"
+                FROM browse_entries be
+                JOIN space_assets sa ON sa.id = be.space_asset_id
+                JOIN spaces s ON s.id = sa.space_id
+                JOIN assets a ON a.id = sa.asset_id
+                JOIN users u ON u.id = be.user_id
+                WHERE s.kind = 'personal'
+                  AND be.path NOT LIKE '%/Photos/Personal/%'
+                  AND NOT (be.id = ANY(\(bind: Array(unmovable))::uuid[]))
+                LIMIT 500
+                """).all(decoding: Row.self)
+            guard !rows.isEmpty else { return }
+
+            let manager = FileManager.default
+            var moved = 0
+            // Each folder a copy left, with the `Photos` folder it is under.
+            var emptied: [String: String] = [:]
+            for row in rows {
+                guard let user = row.dsmUsername, !user.isEmpty else {
+                    unmovable.insert(row.id)
+                    continue
+                }
+                let photos = "\(configuration.homesRoot)/\(BrowseTree.sanitise(user))/Photos"
+                // Only a copy this layout put there: loose under the person's
+                // own `Photos`. Anything else is left exactly where it is.
+                guard row.path.hasPrefix(photos + "/") else {
+                    unmovable.insert(row.id)
+                    continue
+                }
+                let rest = String(row.path.dropFirst(photos.count + 1))
+                guard !rest.hasPrefix("Shared/"), !rest.hasPrefix("Personal/") else {
+                    unmovable.insert(row.id)
+                    continue
+                }
+                var target = "\(photos)/Personal/\(rest)"
+
+                if manager.fileExists(atPath: row.path) {
+                    if manager.fileExists(atPath: target) {
+                        target = Self.deduplicated(target, sha256: row.sha256)
+                    }
+                    try manager.createDirectory(
+                        atPath: (target as NSString).deletingLastPathComponent,
+                        withIntermediateDirectories: true
+                    )
+                    try manager.moveItem(atPath: row.path, toPath: target)
+                    moved += 1
+                    emptied[(row.path as NSString).deletingLastPathComponent] = photos
+                }
+                try await sql.raw("""
+                    UPDATE browse_entries SET path = \(bind: target) WHERE id = \(bind: row.id)
+                    """).run()
+            }
+
+            // Deepest first, so a month goes before its year.
+            for (folder, photos) in emptied.sorted(by: { $0.key.count > $1.key.count }) {
+                Self.removeEmptied(folder, under: photos)
+            }
+            if moved > 0 {
+                app.logger.info("browse tree: moved \(moved) personal photos into Photos/Personal")
+            }
+        } catch {
+            app.logger.error("browse tree relocation failed: \(String(reflecting: error))")
+        }
+    }
+
+    /// Removes a folder the move left empty, then its parent, and so on up
+    /// to, but never including, the person's `Photos` folder.
+    ///
+    /// "Empty" allows for what Synology leaves behind: its indexing writes an
+    /// `@eaDir` thumbnail cache into every folder it has seen, describing
+    /// files that are no longer there once they've moved. Anything else in a
+    /// folder (a person's own file, a folder of their own) means it stays,
+    /// and `rmdir` refuses a folder that still holds anything.
+    static func removeEmptied(_ folder: String, under photos: String) {
+        let manager = FileManager.default
+        let leftovers: Set<String> = ["@eaDir", ".DS_Store"]
+        var current = folder
+        while current.hasPrefix(photos + "/") {
+            guard let contents = try? manager.contentsOfDirectory(atPath: current),
+                  contents.allSatisfy(leftovers.contains)
+            else { return }
+            for item in contents {
+                try? manager.removeItem(atPath: "\(current)/\(item)")
+            }
+            guard rmdir(current) == 0 else { return }
+            current = (current as NSString).deletingLastPathComponent
+        }
     }
 
     /// Placements that somebody entitled to see them has no copy of.
