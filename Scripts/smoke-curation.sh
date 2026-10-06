@@ -101,6 +101,19 @@ echo "The Albums page"
 for b in "${B[@]:1}"; do observe "$SP" "$A" "$b" "$CAKE" >/dev/null; done
 has "a day of cake and candles is a birthday party" "Birthday party" "$(titles "$SP" "$A")"
 
+# A screenshot never fronts a card, however good Vision thought it looked.
+curl -s -X POST "$API/v1/spaces/$SP/curation/observations" -H "$A" -H 'Content-Type: application/json' \
+  -d "{\"analysisVersion\":5,\"modelVersion\":\"smoke\",\"observations\":[{\"assetID\":\"${B[0]}\",\"labels\":$CAKE,\"aesthetic\":0.9,\"isUtility\":true,\"peopleCount\":0,\"animalCount\":0}]}" >/dev/null
+COVERS=$(curl -s "$API/v1/spaces/$SP/collections?date=2026-10-12" -H "$A" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for c in (d.get('allOccasions') or []):
+    if c['title'].startswith('Birthday party'):
+        print(' '.join(c['coverAssetIDs'])); break")
+check "a screenshot goes to the back of the covers" "${B[0]}" "$(echo "$COVERS" | awk '{print $NF}')"
+lacks "and never first" "${B[0]} " "$(echo "$COVERS" | awk '{print $1" "}')"
+has "the card still holds the other photos" "${B[1]}" "$COVERS"
+
 C=(); for i in 1 2 3 4; do C+=("$(upload "$SP" "$A" "xmas$i" $((400 + i)) "2022-12-25T1${i}:00:00Z")"); done
 has "an unanalyzed Christmas keeps the date-only rule" "Christmas 2022" "$(titles "$SP" "$A")"
 for c in "${C[@]}"; do observe "$SP" "$A" "$c" "$SKY" >/dev/null; done

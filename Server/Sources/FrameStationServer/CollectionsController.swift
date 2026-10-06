@@ -107,7 +107,8 @@ struct CollectionsController: RouteCollection {
             spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
         let trips = try await trips(
-            spaceID: spaceID, seed: seed, holidays: holidays, evidence: evidence, on: req.sql
+            spaceID: spaceID, seed: seed, userID: device.userID,
+            holidays: holidays, evidence: evidence, on: req.sql
         )
 
         // Days already inside a trip are not also occasions of their own. The
@@ -124,12 +125,16 @@ struct CollectionsController: RouteCollection {
         let marked = try await favorites(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
-        let away = try await revisits(spaceID: spaceID, seed: seed, on: req.sql)
+        let away = try await revisits(
+            spaceID: spaceID, seed: seed, userID: device.userID, on: req.sql
+        )
         let season = try await lastSeason(
-            spaceID: spaceID, today: today, seed: seed, on: req.sql
+            spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
         let anniversaries = Self.anniversaries(of: trips, today: today)
-        let types = try await mediaTypes(spaceID: spaceID, seed: seed, on: req.sql)
+        let types = try await mediaTypes(
+            spaceID: spaceID, seed: seed, userID: device.userID, on: req.sql
+        )
         let comingUp = Self.comingUp(occasions, today: today)
 
         // Anything anchored to *today* outranks everything else: this day in an
@@ -378,6 +383,7 @@ struct CollectionsController: RouteCollection {
                        [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
+            \(Self.observed(by: userID))
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND EXTRACT(MONTH FROM \(unsafeRaw: TimelineController.localTime)) = \(bind: month)
@@ -434,7 +440,7 @@ struct CollectionsController: RouteCollection {
     /// A single day that far away is a day out, not a trip, so a run has to
     /// span at least two.
     private func trips(
-        spaceID: UUID, seed: String, holidays: [String: String],
+        spaceID: UUID, seed: String, userID: UUID, holidays: [String: String],
         evidence: [String: DayEvidence] = [:], on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
@@ -442,9 +448,13 @@ struct CollectionsController: RouteCollection {
             WITH located AS (
                 SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
                        a.lat, a.lon, a.place_name, a.id, a.derived_at, a.camera_make,
-                       a.burst_id, a.burst_pick, a.media_type
+                       a.burst_id, a.burst_pick, a.media_type,
+                       -- For the covers below; see `coverOrder`.
+                       COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false) AS utility,
+                       COALESCE(o.aesthetic, 0) AS aesthetic
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
+                \(Self.observed(by: userID))
                 WHERE sa.space_id = \(bind: spaceID)
                   AND sa.deleted_at IS NULL
                   AND a.lat IS NOT NULL AND a.lon IS NOT NULL
@@ -484,6 +494,8 @@ struct CollectionsController: RouteCollection {
                        avg(lat) AS lat, avg(lon) AS lon,
                        (ARRAY_AGG(id ORDER BY
                             (derived_at IS NOT NULL) DESC,
+                            utility ASC,
+                            (aesthetic > \(unsafeRaw: String(Self.goodLooking))) DESC,
                             (camera_make IS NOT NULL) DESC,
                             (burst_id IS NULL OR burst_pick) DESC,
                             (media_type = 'photo') DESC,
@@ -722,6 +734,7 @@ struct CollectionsController: RouteCollection {
                            [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
+                \(Self.observed(by: userID))
                 WHERE sa.space_id = \(bind: spaceID)
                   AND sa.deleted_at IS NULL
                 GROUP BY day
@@ -1431,7 +1444,7 @@ struct CollectionsController: RouteCollection {
     /// timeline buries, because the only way to reach 2021 by scrolling is to
     /// scroll through everything since.
     private func revisits(
-        spaceID: UUID, seed: String, on sql: any SQLDatabase
+        spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
         let rows = try await sql.raw("""
@@ -1442,6 +1455,7 @@ struct CollectionsController: RouteCollection {
                        [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
+            \(Self.observed(by: userID))
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND a.place_name IS NOT NULL
@@ -1480,7 +1494,7 @@ struct CollectionsController: RouteCollection {
     /// season you are standing in, and a page offering to reminisce about this
     /// morning is a page that has run out of things to say.
     private func lastSeason(
-        spaceID: UUID, today: Date, seed: String, on sql: any SQLDatabase
+        spaceID: UUID, today: Date, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
         guard let season = Self.completedSeason(before: today) else { return nil }
         let local = TimelineController.localTime
@@ -1499,6 +1513,7 @@ struct CollectionsController: RouteCollection {
                    ) AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
+            \(Self.observed(by: userID))
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD')
@@ -1692,7 +1707,7 @@ struct CollectionsController: RouteCollection {
     /// A type with nothing in it is absent rather than shown as zero, which is
     /// the same rule the rest of the page follows.
     private func mediaTypes(
-        spaceID: UUID, seed: String, on sql: any SQLDatabase
+        spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         // (key, title, predicate)
         var kinds: [(String, String, SQLQueryString)] = [
@@ -1727,6 +1742,7 @@ struct CollectionsController: RouteCollection {
                        ) AS "coverAssetIDs"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
+                \(Self.observed(by: userID))
                 WHERE sa.space_id = \(bind: spaceID)
                   AND sa.deleted_at IS NULL
                   AND \(predicate)
@@ -2084,14 +2100,36 @@ struct CollectionsController: RouteCollection {
     /// actually fetches beyond the first.
     static let coverDepth = 5
 
+    ///
+    /// Where the person's own devices have looked at the photos, what they saw
+    /// comes next. A screenshot or a document never fronts a card, and a photo
+    /// Vision rated good-looking goes ahead of one it didn't. That bias is
+    /// still rotated by the seed, among the good ones, rather than crowning
+    /// one photo for good. Expects the caller's observations joined as `o`;
+    /// see `observed(by:)`. Where there are none, the order is what it always
+    /// was.
     static func coverOrder(seed: String) -> String {
         """
         (a.derived_at IS NOT NULL) DESC,
+        COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false) ASC,
+        (COALESCE(o.aesthetic, 0) > \(goodLooking)) DESC,
         (a.camera_make IS NOT NULL) DESC,
         (a.burst_id IS NULL OR a.burst_pick) DESC,
         (a.media_type = 'photo') DESC,
         md5(a.id::text || '\(seed)')
         """
+    }
+
+    /// Vision's aesthetic score, from -1 to 1, above which a photo counts as
+    /// good-looking enough to prefer for a cover. A starting point, to tune
+    /// against real libraries.
+    static let goodLooking = 0.1
+
+    /// The caller's own observations, joined as `o`, for anything that reads
+    /// quality off them. At most one row per photo, since observations are
+    /// keyed by (person, file), so it never changes a count.
+    static func observed(by userID: UUID) -> SQLQueryString {
+        "LEFT JOIN media_observations o ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256"
     }
 
     // MARK: - Formatting
