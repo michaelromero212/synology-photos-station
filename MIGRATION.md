@@ -106,8 +106,12 @@ fingerprint it. The clones themselves are instant and take no space.
 
 **Afterward:**
 
-- **Thumbnails** follow in the background, four at a time. A photo shows up in
-  File Station once its thumbnails exist.
+- **The same background work as an upload:** thumbnails first, four at a
+  time, then the full metadata the Information panel shows, and for each video
+  a smaller copy for streaming on cellular. A photo shows up in File Station
+  once its thumbnails exist. Place names are filled in during the import
+  itself, from each file's GPS, so a day can name and group its places from
+  the start.
 - **One notification.** An import is one bulk session, so a shared library's
   members get a single summary push. Personal libraries never push.
 - **Credit** goes to the destination's owner, since files don't record who added
@@ -159,6 +163,20 @@ fingerprint it. The clones themselves are instant and take no space.
 That's about 70 MB/s, or 250 GB an hour, for files averaging about 100 MB.
 ARCHITECTURE.md's ~175 MB/s estimate was for hashing alone, so plan with the
 measured pace.
+
+**What that import missed, fixed afterward.** It ran before the import named
+places or queued anything but thumbnails. Its new photos had their GPS
+coordinates but no place name, so a day with photos from Ohio and Virginia
+read "Reston, Virginia" and didn't split. The full metadata and the cellular
+video copies came later, from catch-up passes that run each time the server
+starts. The place names were filled in by hand, once:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec server ./FrameStationServer geocode'
+```
+
+It names every photo that has coordinates and no place, and leaves the rest
+alone. Imports since don't need it.
 
 ## Next: everyone's personal library
 

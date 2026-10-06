@@ -263,6 +263,19 @@ struct ImportCommand: AsyncCommand {
 
                     if metadata.capturedAt == nil { metadata.capturedAt = candidate.modifiedAt }
 
+                    // Named now, from the file's own position. An upload is
+                    // named by its metadata job, but an import is queued for
+                    // thumbnails only, and the pass that would name it later
+                    // waits behind every thumbnail in the library. Until then
+                    // its day can't name the place, or split by it — a
+                    // Synology Shared Space photo taken in Ohio sat in a day
+                    // headed "Reston, Virginia".
+                    let placeName = metadata.latitude.flatMap { latitude in
+                        metadata.longitude.flatMap { longitude in
+                            app.geocoder?.label(latitude: latitude, longitude: longitude)
+                        }
+                    }
+
                     // Another library may hold the same bytes, such as a photo
                     // someone also backed up from their phone. Its row is
                     // copied rather than shared, as sharing does, so an edit in
@@ -282,6 +295,7 @@ struct ImportCommand: AsyncCommand {
                         sha: sha,
                         blobExtension: blobExtension,
                         metadata: metadata,
+                        placeName: placeName,
                         liveGroupID: liveGroups[candidate.url.path],
                         spaceID: spaceID,
                         userID: userID,
@@ -407,6 +421,7 @@ struct ImportCommand: AsyncCommand {
         sha: String,
         blobExtension: String,
         metadata: MediaProbe.Metadata,
+        placeName: String?,
         liveGroupID: UUID?,
         spaceID: UUID,
         userID: UUID,
@@ -440,7 +455,8 @@ struct ImportCommand: AsyncCommand {
                              thumb_version, derived_at, storage_path)
                         SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                                captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
-                               lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                               lat, lon, COALESCE(place_name, \(bind: placeName)),
+                               camera_make, camera_model, lens, iso, aperture,
                                shutter, focal_len, exposure_bias, dynamic_range, orientation,
                                is_raw, COALESCE(\(bind: liveGroupID), live_group_id), burst_id, burst_pick,
                                media_subtypes, thumbhash, exif, thumb_version, derived_at, NULL
@@ -455,7 +471,7 @@ struct ImportCommand: AsyncCommand {
                     INSERT INTO assets
                         (sha256, byte_size, media_type, mime, blob_ext, width, height,
                          duration_ms, captured_at, captured_tz_off, local_captured_at,
-                         lat, lon, camera_make, camera_model, lens, iso, aperture, shutter,
+                         lat, lon, place_name, camera_make, camera_model, lens, iso, aperture, shutter,
                          focal_len, exposure_bias, dynamic_range, orientation, is_raw,
                          live_group_id)
                     VALUES
@@ -466,7 +482,7 @@ struct ImportCommand: AsyncCommand {
                          (\(bind: metadata.capturedAt)
                             + COALESCE(\(bind: metadata.capturedTZOffset), 0) * interval '1 second')
                             AT TIME ZONE 'UTC',
-                         \(bind: metadata.latitude), \(bind: metadata.longitude),
+                         \(bind: metadata.latitude), \(bind: metadata.longitude), \(bind: placeName),
                          \(bind: metadata.cameraMake), \(bind: metadata.cameraModel), \(bind: metadata.lens),
                          \(bind: metadata.iso), \(bind: metadata.aperture), \(bind: metadata.shutter),
                          \(bind: metadata.focalLength), \(bind: metadata.exposureBias),
@@ -511,11 +527,22 @@ struct ImportCommand: AsyncCommand {
                         last_at = now(), is_bulk = true
                     """).run()
 
-                // A copied row brought its thumbnails with it.
+                // The jobs an upload queues, so an imported photo ends up with
+                // everything an uploaded one has: the full metadata dump the
+                // Information panel shows (metadata), its tiles (thumbnails),
+                // and for a video the cellular rendition (playback, which
+                // no-ops for a photo). This used to queue thumbnails alone,
+                // which left the rest to catch-up passes that run only when the
+                // server starts, 5,000 photos and 500 videos at a time — fine
+                // for the Shared Space, and many restarts for a 67,000-photo
+                // library. Thumbnails still go first: the worker takes them
+                // ahead of everything else.
+                //
+                // A copied row brought all of it with it, from the row it copies.
                 if original == nil {
-                    try await DerivationWorker.enqueue(
-                        assetID: asset.id, kind: "thumbnails", on: sql
-                    )
+                    for kind in ["thumbnails", "metadata", Derivatives.playbackJobKind] {
+                        try await DerivationWorker.enqueue(assetID: asset.id, kind: kind, on: sql)
+                    }
                 }
 
                 try await sql.raw("COMMIT").run()

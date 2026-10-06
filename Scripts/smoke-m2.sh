@@ -15,6 +15,13 @@ export PATH="/opt/homebrew/bin:$PATH"
 DB=framestation_import; PORT=8096; API="http://127.0.0.1:$PORT"
 export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
 export FRAMESTATION_BLOB_ROOT="$SCRATCH/import-blobroot"
+# Place names need the GeoNames dataset. The dev stack's env file says where
+# it is; only that one line is read from it.
+if [ -z "${FRAMESTATION_GEONAMES_DIR:-}" ]; then
+  FRAMESTATION_GEONAMES_DIR=$(sed -n 's/^export //; s/^FRAMESTATION_GEONAMES_DIR=//p' \
+    "$HOME/.framestation-dev/env" 2>/dev/null | tr -d '"' | head -1)
+fi
+export FRAMESTATION_GEONAMES_DIR
 LIB="$SCRATCH/fakelib"
 PASS=0; FAIL=0
 
@@ -45,6 +52,7 @@ mkimg "$LIB/2024/IMG_001.jpg" 1200 900
 mkimg "$LIB/2024/IMG_002.jpg" 900 1200
 exiftool -q -overwrite_original -Make=Apple -Model="iPhone 15" \
   -DateTimeOriginal="2024:08:12 10:30:00" -OffsetTimeOriginal="-04:00" \
+  -GPSLatitude=38.9586 -GPSLatitudeRef=N -GPSLongitude=77.3570 -GPSLongitudeRef=W \
   "$LIB/2024/IMG_001.jpg" >/dev/null 2>&1
 
 # Live Photo pair: same stem, one still and one movie, same folder.
@@ -122,6 +130,14 @@ check "camera model" "iPhone 15" "$(q "select coalesce(camera_model,'-') from as
 check "capture time honors -04:00 offset" "2024-08-12 14:30:00" \
   "$(q "select to_char(captured_at at time zone 'UTC','YYYY-MM-DD HH24:MI:SS') from assets where camera_model='iPhone 15';")"
 check "videos got a duration" "1" "$(q "select count(*) from assets where media_type='video' and duration_ms > 0;")"
+check "GPS came across" "38.96 -77.36" \
+  "$(q "select round(lat::numeric, 2) || ' ' || round(lon::numeric, 2) from assets where camera_model='iPhone 15';")"
+if [ -d "${FRAMESTATION_GEONAMES_DIR:-/nonexistent}" ]; then
+  check "and was named, so its day can name the place" "Reston, Virginia" \
+    "$(q "select coalesce(place_name, '-') from assets where camera_model='iPhone 15';")"
+else
+  echo "  - place name not checked: no GeoNames dataset (FRAMESTATION_GEONAMES_DIR)"
+fi
 
 echo
 echo "=== 7. blobs on disk, one per unique file ==="
@@ -143,12 +159,14 @@ echo "$OUT3" | grep -qE "To import: 1" && ok "detects the modified file" \
 check "5 assets after re-import" "5" "$(q 'select count(*) from assets;')"
 
 echo
-echo "=== 10. thumbnails queued and drained ==="
-for _ in $(seq 1 60); do
-  [ "$(q "select count(*) from derivation_jobs where state='done';")" = "5" ] && break; sleep 1
+echo "=== 10. the jobs an upload gets, queued and drained ==="
+for _ in $(seq 1 90); do
+  [ "$(q "select count(*) from derivation_jobs where state='done';")" = "15" ] && break; sleep 1
 done
-check "5 derivation jobs done" "5" "$(q "select count(*) from derivation_jobs where state='done';")"
+check "thumbnails, metadata and playback for each of the 5" "metadata:5 playback:5 thumbnails:5" \
+  "$(q "select string_agg(kind || ':' || n, ' ' order by kind) from (select kind, count(*) n from derivation_jobs where state='done' group by kind) k;")"
 check "no failed jobs"         "0" "$(q "select count(*) from derivation_jobs where state='failed';")"
+check "every file got the full metadata dump" "5" "$(q 'select count(*) from assets where exif is not null;')"
 check "every asset has a ThumbHash" "5" "$(q 'select count(*) from assets where thumbhash is not null;')"
 
 echo
