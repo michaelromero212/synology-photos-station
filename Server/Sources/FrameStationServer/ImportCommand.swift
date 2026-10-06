@@ -62,7 +62,7 @@ struct ImportCommand: AsyncCommand {
         @Option(name: "user", short: "u", help: "Attribute uploads to this user id (defaults to the space owner)")
         var user: String?
 
-        @Option(name: "mode", short: "m", help: "copy (default) or hardlink")
+        @Option(name: "mode", short: "m", help: "reflink (default), copy or hardlink")
         var mode: String?
 
         @Option(name: "concurrency", short: "c", help: "Parallel hash/probe workers (default 4)")
@@ -76,6 +76,13 @@ struct ImportCommand: AsyncCommand {
     }
 
     enum Mode: String {
+        /// A copy-on-write clone. It's instant, takes no space until one side
+        /// is edited, and leaves the source library exactly as it was. Needs
+        /// the library and the blob store on one Btrfs volume, which on the NAS
+        /// they are; checked before anything is imported. The default, because
+        /// importing a few hundred gigabytes shouldn't need a few hundred
+        /// gigabytes free.
+        case reflink
         /// Duplicates bytes. Needs free space equal to the library.
         case copy
         /// Same inode as the source: instant, zero extra space. Requires the
@@ -103,7 +110,9 @@ struct ImportCommand: AsyncCommand {
         guard let spaceString = signature.space, let spaceID = UUID(uuidString: spaceString) else {
             throw Abort(.badRequest, reason: "--space is required. Run `FrameStationServer spaces`.")
         }
-        let mode = Mode(rawValue: signature.mode ?? "copy") ?? .copy
+        guard let mode = Mode(rawValue: signature.mode ?? Mode.reflink.rawValue) else {
+            throw ImportError.unknownMode(signature.mode ?? "")
+        }
         let concurrency = max(1, signature.concurrency ?? 4)
         let batchSize = max(1, signature.batch ?? 64)
 
@@ -179,9 +188,15 @@ struct ImportCommand: AsyncCommand {
             console.warning("Editing a source file in place would silently change the stored asset.")
         }
 
+        // Proved on one file before an hour of hashing, not discovered as a
+        // failure on every file after it.
+        if mode == .reflink, let first = pending.first {
+            try await Self.checkReflink(from: first.url, store: app.blobStore)
+        }
+
         // --------------------------------------------------------------- import
         let started = Date()
-        var imported = 0, deduped = 0, failed = 0
+        var imported = 0, reused = 0, present = 0, failed = 0
         var bytesDone: Int64 = 0
 
         for chunk in stride(from: 0, to: pending.count, by: batchSize).map({
@@ -221,17 +236,34 @@ struct ImportCommand: AsyncCommand {
                 }
 
                 do {
+                    // Already in this library, put there by an upload, a share
+                    // or an earlier import, or deliberately removed from it. A
+                    // second copy is never what anyone wants, and a removal is
+                    // a decision the import doesn't get to reverse.
+                    if try await alreadyInSpace(sha: sha, spaceID: spaceID, on: app.sql) {
+                        present += 1
+                        bytesDone += candidate.byteSize
+                        try? await record(candidate, sha: sha, assetID: nil,
+                                          outcome: "already in library", error: nil, on: app.sql)
+                        continue
+                    }
+
                     var metadata = candidate.mediaType == .photo
                         ? (photoMetadata[candidate.url.path] ?? MediaProbe.Metadata())
                         : try await MediaProbe.probe(url: candidate.url, mediaType: .video)
 
                     if metadata.capturedAt == nil { metadata.capturedAt = candidate.modifiedAt }
 
-                    let existed = try await assetExists(sha: sha, on: app.sql)
+                    // Another library may hold the same bytes, such as a photo
+                    // someone also backed up from their phone. Its row is
+                    // copied rather than shared, as sharing does, so an edit in
+                    // one library never changes another person's photo.
+                    let original = try await assetWithBytes(sha: sha, on: app.sql)
                     let blobExtension = BlobStore.fileExtension(for: candidate.url.lastPathComponent)
-                    if !existed {
-                        try place(candidate, sha: sha, ext: blobExtension, mode: mode, store: app.blobStore)
-                    }
+                    // Always, because a row doesn't prove the blob store has
+                    // the bytes (a rebuilt library keeps them in homes). A
+                    // no-op when it does.
+                    try await place(candidate, sha: sha, ext: blobExtension, mode: mode, store: app.blobStore)
 
                     let assetID = try await insert(
                         candidate: candidate,
@@ -241,14 +273,14 @@ struct ImportCommand: AsyncCommand {
                         liveGroupID: liveGroups[candidate.url.path],
                         spaceID: spaceID,
                         userID: userID,
-                        alreadyStored: existed,
+                        copying: original,
                         app: app
                     )
 
-                    if existed { deduped += 1 } else { imported += 1 }
+                    if original == nil { imported += 1 } else { reused += 1 }
                     bytesDone += candidate.byteSize
                     try? await record(candidate, sha: sha, assetID: assetID,
-                                      outcome: existed ? "deduplicated" : "imported",
+                                      outcome: original == nil ? "imported" : "deduplicated",
                                       error: nil, on: app.sql)
                 } catch {
                     failed += 1
@@ -258,7 +290,7 @@ struct ImportCommand: AsyncCommand {
                 }
             }
 
-            let done = imported + deduped + failed
+            let done = imported + reused + present + failed
             let elapsed = Date().timeIntervalSince(started)
             let rate = elapsed > 0 ? Double(done) / elapsed : 0
             let remaining = rate > 0 ? Double(pending.count - done) / rate : 0
@@ -272,9 +304,10 @@ struct ImportCommand: AsyncCommand {
 
         let elapsed = Date().timeIntervalSince(started)
         console.info("")
-        console.info("  Imported:     \(imported)")
-        console.info("  Deduplicated: \(deduped)")
-        console.info("  Failed:       \(failed)")
+        console.info("  Imported:            \(imported)")
+        console.info("  Stored once already: \(reused)  (bytes shared, row of its own)")
+        console.info("  Already in library:  \(present)  (skipped)")
+        console.info("  Failed:              \(failed)")
         console.info("  Elapsed:      \(Self.humanDuration(elapsed))")
         console.info("")
         console.info("Thumbnails are queued; the derivation worker drains them in the background.")
@@ -285,9 +318,49 @@ struct ImportCommand: AsyncCommand {
 
     // MARK: - Steps
 
-    private func assetExists(sha: String, on sql: any SQLDatabase) async throws -> Bool {
-        try await sql.raw("SELECT id FROM assets WHERE sha256 = \(bind: sha)")
-            .first(decoding: IDRow.self) != nil
+    /// Whether the library already holds these bytes in any state: live, in
+    /// Recently Deleted, or purged.
+    private func alreadyInSpace(sha: String, spaceID: UUID, on sql: any SQLDatabase) async throws -> Bool {
+        try await sql.raw("""
+            SELECT sa.id FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND a.sha256 = \(bind: sha)
+            LIMIT 1
+            """).first(decoding: IDRow.self) != nil
+    }
+
+    /// The oldest row over these bytes, anywhere, to copy rather than probe
+    /// the file again.
+    private func assetWithBytes(sha: String, on sql: any SQLDatabase) async throws -> UUID? {
+        try await sql.raw("""
+            SELECT id FROM assets WHERE sha256 = \(bind: sha) ORDER BY created_at LIMIT 1
+            """).first(decoding: IDRow.self)?.id
+    }
+
+    /// Makes one reflink from the library into the blob store and removes it
+    /// again, so a filesystem that can't clone between them stops the import
+    /// before it starts.
+    static func checkReflink(from source: URL, store: BlobStore) async throws {
+        let probe = store.root.appendingPathComponent(".reflink-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: probe) }
+        guard await reflink(source, to: probe) else {
+            throw ImportError.cannotReflink(source.path)
+        }
+    }
+
+    /// `cp --reflink=always`, which fails rather than quietly copying. macOS
+    /// spells it `-c` (clonefile), for running this against a dev library.
+    static func reflink(_ source: URL, to destination: URL) async -> Bool {
+        #if os(macOS)
+        let arguments = ["-c", source.path, destination.path]
+        #else
+        let arguments = ["--reflink=always", source.path, destination.path]
+        #endif
+        guard let result = try? await Shell.run("cp", arguments), result.status == 0 else {
+            try? FileManager.default.removeItem(at: destination)
+            return false
+        }
+        return true
     }
 
     private func place(
@@ -296,7 +369,7 @@ struct ImportCommand: AsyncCommand {
         ext: String,
         mode: Mode,
         store: BlobStore
-    ) throws {
+    ) async throws {
         let fm = FileManager.default
         let destination = store.blobPath(sha256: sha, fileExtension: ext)
         guard !fm.fileExists(atPath: destination.path) else { return }
@@ -305,6 +378,10 @@ struct ImportCommand: AsyncCommand {
         )
 
         switch mode {
+        case .reflink:
+            guard await Self.reflink(candidate.url, to: destination) else {
+                throw ImportError.cannotReflink(candidate.url.path)
+            }
         case .hardlink:
             do {
                 try fm.linkItem(at: candidate.url, to: destination)
@@ -325,26 +402,46 @@ struct ImportCommand: AsyncCommand {
         liveGroupID: UUID?,
         spaceID: UUID,
         userID: UUID,
-        alreadyStored: Bool,
+        copying original: UUID?,
         app: Application
     ) async throws -> UUID {
         try await app.withPinnedConnection { sql in
             try await sql.raw("BEGIN").run()
             do {
-                // Dedup by lookup rather than ON CONFLICT: the unique index on
-                // sha256 is gone (§3a), because two placements can now own two
-                // files with identical bytes. Import still copies into the blob
-                // store, where identical bytes really are one file, so reusing
-                // the row is correct here. Safe without a constraint because
-                // import runs single-threaded over one directory walk.
-                struct ExistingRow: Decodable { let id: UUID }
-                let existingAsset = try await sql.raw("""
-                    SELECT id FROM assets WHERE sha256 = \(bind: sha) LIMIT 1
-                    """).first(decoding: ExistingRow.self)
-
+                // A row of its own, always, the way sharing does it (migration
+                // 0014): two libraries holding the same bytes is two
+                // placements over two rows, never one row in both. Otherwise a
+                // date or location fixed in Family Shared would quietly change
+                // someone's personal copy. The bytes are still stored once:
+                // the blob store is content-addressed.
                 let asset: IDRow
-                if let existingAsset {
-                    asset = IDRow(id: existingAsset.id)
+                if let original {
+                    // Copied from the row that already has these bytes, so
+                    // nothing is probed or rendered twice: derivatives are kept
+                    // under the content hash, and derived_at comes along. The
+                    // Live Photo pairing found in this walk wins over the old
+                    // row's, so a still and its motion half imported together
+                    // stay together.
+                    guard let copied = try await sql.raw("""
+                        INSERT INTO assets
+                            (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
+                             captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
+                             lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                             shutter, focal_len, exposure_bias, dynamic_range, orientation,
+                             is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
+                             thumb_version, derived_at, storage_path)
+                        SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
+                               captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
+                               lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                               shutter, focal_len, exposure_bias, dynamic_range, orientation,
+                               is_raw, COALESCE(\(bind: liveGroupID), live_group_id), burst_id, burst_pick,
+                               media_subtypes, thumbhash, exif, thumb_version, derived_at, NULL
+                        FROM assets WHERE id = \(bind: original)
+                        RETURNING id
+                        """).first(decoding: IDRow.self) else {
+                        throw Abort(.internalServerError, reason: "asset copy returned nothing")
+                    }
+                    asset = copied
                 } else {
                 guard let inserted = try await sql.raw("""
                     INSERT INTO assets
@@ -374,10 +471,14 @@ struct ImportCommand: AsyncCommand {
                 asset = inserted
                 }
 
+                // The original name, so the File Station tree shows
+                // `IMG_1234.jpg` rather than a hash, and the filename-based
+                // backfills (dates, screenshots) have something to read.
                 guard let placement = try await sql.raw("""
                     INSERT INTO space_assets
-                        (space_id, asset_id, uploaded_by_user_id, on_device)
-                    VALUES (\(bind: spaceID), \(bind: asset.id), \(bind: userID), false)
+                        (space_id, asset_id, uploaded_by_user_id, on_device, filename)
+                    VALUES (\(bind: spaceID), \(bind: asset.id), \(bind: userID), false,
+                            \(bind: candidate.url.lastPathComponent))
                     ON CONFLICT (space_id, asset_id) DO UPDATE SET deleted_at = NULL
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
@@ -402,7 +503,8 @@ struct ImportCommand: AsyncCommand {
                         last_at = now(), is_bulk = true
                     """).run()
 
-                if !alreadyStored {
+                // A copied row brought its thumbnails with it.
+                if original == nil {
                     try await DerivationWorker.enqueue(
                         assetID: asset.id, kind: "thumbnails", on: sql
                     )

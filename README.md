@@ -215,15 +215,34 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 docker compose exec server ./FrameStationServer spaces
 ```
 
+The compose file doesn't mount the library being imported, and nothing should
+need it after the import. So the import runs in a one-off container that mounts
+it read-only. For example, to bring Synology Photos' Shared Space (the `photo`
+shared folder) into Family Shared:
+
 ```bash
-docker compose exec server ./FrameStationServer import --path /data/photo --space <space-id> --dry-run
+docker compose run --rm -v /volume1/photo:/import/photo:ro server import --path /import/photo --space <space-id> --dry-run
 ```
 
-Drop `--dry-run` to run it. Resumable — re-running skips anything already
-imported and retries failures. `--mode hardlink` places blobs as hardlinks to
-the source instead of copies: instant and zero extra space, but the blob then
-shares an inode with the original, so editing the source in place would
-silently change the stored asset. Requires both on the same volume.
+- **Running it.** Drop `--dry-run` to run it. It's resumable: re-running skips
+  anything already imported and retries failures.
+- **Reflink copies by default.** They're instant, take no extra space, and leave
+  the source exactly as it was. The import proves one file clones before
+  touching anything, and stops if the filesystem can't clone.
+- **Other modes.**
+  - `--mode copy` copies the bytes instead, and needs free space equal to the
+    library.
+  - `--mode hardlink` shares an inode with the source, so editing the source in
+    place would silently change the stored asset.
+- **Nothing added twice.** What the destination already holds, in any state
+  (live, in Recently Deleted, or purged), isn't added again. A removal isn't the
+  import's to undo.
+- **A row per library.** A photo another library already holds gets a row of its
+  own over the same stored bytes, the way sharing does. Its thumbnails come along
+  rather than being rendered again.
+- **Names and credit.** Original filenames are kept. Every photo is credited to
+  the destination's owner unless `--user` says otherwise, because files don't
+  record who added them.
 
 ### Media tools
 

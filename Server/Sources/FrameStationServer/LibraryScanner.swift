@@ -164,9 +164,19 @@ enum ImportError: Error, CustomStringConvertible {
     case noSuchSpace(UUID)
     case noSuchUser(UUID)
     case notAMember
+    case unknownMode(String)
+    /// A copy-on-write clone failed, so the library and the blob store aren't
+    /// on one Btrfs volume, or the filesystem can't clone between them.
+    case cannotReflink(String)
 
     var description: String {
         switch self {
+        case .unknownMode(let mode):
+            return "Unknown --mode \(mode). Use reflink (the default), copy or hardlink."
+        case .cannotReflink(let path):
+            return "Couldn't make a reflink copy of \(path), so the library and the blob "
+                + "store can't share storage here. Nothing was imported. Re-run with --mode "
+                + "copy to copy the bytes instead, which needs free space equal to the library."
         case .unreadableRoot(let path):
             return "Cannot read \(path)."
         case .noSuchSpace(let id):

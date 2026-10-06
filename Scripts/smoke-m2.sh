@@ -1,23 +1,36 @@
 #!/bin/bash
 # M2 smoke test: library import — exclusions, Live Photo pairing, dedup,
-# resumability, and metadata.
+# resumability, metadata, reflink copies, original filenames, and a row of
+# its own in every library.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m2.sh
 #
-# Needs a freshly migrated, empty database and a server started with
-# FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot".
+# Runs its own server against its own database and blob store, because every
+# count here is a count of the whole database.
 set -uo pipefail
 
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
+DB=framestation_import; PORT=8096; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+export FRAMESTATION_BLOB_ROOT="$SCRATCH/import-blobroot"
 LIB="$SCRATCH/fakelib"
 PASS=0; FAIL=0
 
-q() { psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+q() { psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin() { psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
+
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+rm -rf "$FRAMESTATION_BLOB_ROOT"; mkdir -p "$FRAMESTATION_BLOB_ROOT"
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$SCRATCH/import-server.log" 2>&1 &
+SERVER=$!
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+# The commands below go through the same binary the server runs.
+import(){ (cd "$SERVER_DIR" && "$BIN" import "$@" 2>/dev/null); }
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -55,33 +68,38 @@ echo "  real media: 5 (4 photos + 1 video, one of which is a duplicate)"
 echo "  traps:      2 @eaDir, 1 #recycle, 1 .txt, 1 AppleDouble"
 
 # -------------------------------------------------------------------- account ---
-CODE=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+CODE=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE\",\"displayName\":\"Michael\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
 TOKEN=$(echo "$R" | jq_get '["token"]'); SPACE=$(echo "$R" | jq_get '["personalSpace"]["id"]')
 
 echo
 echo "=== 1. spaces command lists the destination ==="
-SP_OUT=$(cd "$SERVER_DIR" && swift run FrameStationServer spaces 2>/dev/null)
+SP_OUT=$(cd "$SERVER_DIR" && "$BIN" spaces 2>/dev/null)
 echo "$SP_OUT" | grep -q "$SPACE" && ok "space id listed" || bad "space id listed" "$SPACE" "not found"
 echo "$SP_OUT" | grep -q "Personal Space" && ok "space name listed" || bad "space name" "Personal Space" "missing"
 
 echo
 echo "=== 2. dry run reports without writing ==="
-DRY=$(cd "$SERVER_DIR" && swift run FrameStationServer import --path "$LIB" --space "$SPACE" --dry-run 2>/dev/null)
+DRY=$(import --path "$LIB" --space "$SPACE" --dry-run)
 echo "$DRY" | grep -qE "To import: 5" && ok "counts 5 importable (traps excluded)" \
   || bad "importable count" "5" "$(echo "$DRY" | grep 'To import' | xargs)"
 check "dry run wrote no assets" "0" "$(q 'select count(*) from assets;')"
+echo "$DRY" | grep -qE "Mode: +reflink" && ok "copies are reflinks by default" \
+  || bad "default mode" "reflink" "$(echo "$DRY" | grep 'Mode' | xargs)"
 
 echo
 echo "=== 3. import ==="
-OUT=$(cd "$SERVER_DIR" && swift run FrameStationServer import --path "$LIB" --space "$SPACE" 2>/dev/null)
-echo "$OUT" | grep -E "Imported:|Deduplicated:|Failed:" | sed 's/^/  /'
+OUT=$(import --path "$LIB" --space "$SPACE")
+echo "$OUT" | grep -E "Imported:|Stored once already:|Already in library:|Failed:" | sed 's/^/  /'
 check "4 unique assets"   "4" "$(q 'select count(*) from assets;')"
 check "4 placements"      "4" "$(q "select count(*) from space_assets where space_id='$SPACE';")"
 check "no failures"       "0" "$(q "select count(*) from import_records where outcome='failed';")"
 check "5 import records"  "5" "$(q 'select count(*) from import_records;')"
-check "1 deduplicated"    "1" "$(q "select count(*) from import_records where outcome='deduplicated';")"
+# The duplicate in another folder is the same photo, so the library gets it once.
+check "1 skipped as already in the library" "1" "$(q "select count(*) from import_records where outcome='already in library';")"
+check "every placement keeps its file name" "4" "$(q "select count(*) from space_assets where filename is not null;")"
+check "named as on disk" "1" "$(q "select count(*) from space_assets where filename='IMG_100.mov';")"
 
 echo
 echo "=== 4. traps were excluded ==="
@@ -107,11 +125,11 @@ check "videos got a duration" "1" "$(q "select count(*) from assets where media_
 
 echo
 echo "=== 7. blobs on disk, one per unique file ==="
-check "4 blobs" "4" "$(find "$SCRATCH/blobroot/blobs" -type f 2>/dev/null | wc -l | tr -d ' ')"
+check "4 blobs" "4" "$(find "$FRAMESTATION_BLOB_ROOT/blobs" -type f 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
 echo "=== 8. re-run is idempotent ==="
-OUT2=$(cd "$SERVER_DIR" && swift run FrameStationServer import --path "$LIB" --space "$SPACE" 2>/dev/null)
+OUT2=$(import --path "$LIB" --space "$SPACE")
 echo "$OUT2" | grep -q "Nothing to do" && ok "second run skips everything" \
   || bad "second run" "Nothing to do" "$(echo "$OUT2" | grep 'To import' | xargs)"
 check "still 4 assets" "4" "$(q 'select count(*) from assets;')"
@@ -119,7 +137,7 @@ check "still 4 assets" "4" "$(q 'select count(*) from assets;')"
 echo
 echo "=== 9. a changed source file is re-imported ==="
 mkimg "$LIB/2024/IMG_002.jpg" 640 480
-OUT3=$(cd "$SERVER_DIR" && swift run FrameStationServer import --path "$LIB" --space "$SPACE" 2>/dev/null)
+OUT3=$(import --path "$LIB" --space "$SPACE")
 echo "$OUT3" | grep -qE "To import: 1" && ok "detects the modified file" \
   || bad "modified file detected" "To import: 1" "$(echo "$OUT3" | grep 'To import' | xargs)"
 check "5 assets after re-import" "5" "$(q 'select count(*) from assets;')"
@@ -136,8 +154,50 @@ check "every asset has a ThumbHash" "5" "$(q 'select count(*) from assets where 
 echo
 echo "=== 11. it shows up in the timeline ==="
 M=$(curl -s "$API/v1/spaces/$SPACE/timeline?zoom=day" -H "Authorization: Bearer $TOKEN")
-check "timeline total is 5" "5" "$(echo "$M" | jq_get '["total"]')"
+# Five assets, one of them the motion half of a Live Photo, which the
+# timeline counts with its still: four things to look at.
+check "timeline total is 4" "4" "$(echo "$M" | jq_get '["total"]')"
 check "activity flagged as bulk" "t" "$(q 'select is_bulk from activity_sessions limit 1;')"
+
+echo
+echo "=== 12. the same photos into a second library get rows of their own ==="
+# A Synology Shared Space holding photos somebody also has in their own
+# library: same bytes, different folder.
+SHARED=$(curl -s -X POST "$API/v1/spaces" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Family Shared","memberIDs":[]}' | jq_get '["id"]')
+LIB2="$SCRATCH/fakelib-shared"; rm -rf "$LIB2"; mkdir -p "$LIB2/PhotoLibrary/2024/08"
+cp "$LIB/2024/IMG_001.jpg" "$LIB2/PhotoLibrary/2024/08/IMG_001.jpg"
+cp "$LIB/Trip/IMG_100.jpg" "$LIB2/PhotoLibrary/2024/08/IMG_100.jpg"
+cp "$LIB/Trip/IMG_100.mov" "$LIB2/PhotoLibrary/2024/08/IMG_100.mov"
+JOBS_BEFORE=$(q "select count(*) from derivation_jobs;")
+OUT4=$(import --path "$LIB2" --space "$SHARED")
+check "three placements in Family Shared" "3" "$(q "select count(*) from space_assets where space_id='$SHARED';")"
+check "each over a row of its own" "0" "$(q "select count(*) from space_assets s join space_assets p on p.asset_id = s.asset_id where s.space_id='$SHARED' and p.space_id='$SPACE';")"
+check "the bytes stored once" "5" "$(find "$FRAMESTATION_BLOB_ROOT/blobs" -type f | wc -l | tr -d ' ')"
+check "no thumbnail rendered twice" "$JOBS_BEFORE" "$(q "select count(*) from derivation_jobs;")"
+check "the copies arrive with their thumbnails" "3" "$(q "select count(*) from space_assets sa join assets a on a.id = sa.asset_id where sa.space_id='$SHARED' and a.derived_at is not null;")"
+check "the Live Photo stays paired" "1" "$(q "select count(distinct a.live_group_id) from space_assets sa join assets a on a.id = sa.asset_id where sa.space_id='$SHARED' and a.live_group_id is not null;")"
+check "and named as on disk" "1" "$(q "select count(*) from space_assets where space_id='$SHARED' and filename='IMG_100.jpg';")"
+echo "$OUT4" | grep -qE "Stored once already: +3" && ok "the summary says so" \
+  || bad "summary" "Stored once already: 3" "$(echo "$OUT4" | grep -E 'Imported|Stored|Already' | xargs)"
+
+echo
+echo "=== 13. what a library already holds isn't added again ==="
+cp "$LIB/2024/IMG_001.jpg" "$LIB2/PhotoLibrary/2024/08/IMG_001 copy.jpg"
+OUT5=$(import --path "$LIB2" --space "$SHARED")
+check "still three in Family Shared" "3" "$(q "select count(*) from space_assets where space_id='$SHARED';")"
+echo "$OUT5" | grep -qE "Already in library: +1" && ok "skipped as already in the library" \
+  || bad "skipped" "Already in library: 1" "$(echo "$OUT5" | grep -E 'Imported|Stored|Already' | xargs)"
+
+echo
+echo "=== 14. a photo somebody removed stays removed ==="
+q "update space_assets set deleted_at = now() where space_id='$SHARED' and filename='IMG_001.jpg';" >/dev/null
+cp "$LIB/2024/IMG_001.jpg" "$LIB2/PhotoLibrary/2024/08/IMG_001 again.jpg"
+OUT6=$(import --path "$LIB2" --space "$SHARED")
+check "not brought back" "1" "$(q "select count(*) from space_assets where space_id='$SHARED' and deleted_at is not null;")"
+check "nor added as a new photo" "3" "$(q "select count(*) from space_assets where space_id='$SHARED';")"
+
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
 
 echo
 echo "════════════════════════════════════"
