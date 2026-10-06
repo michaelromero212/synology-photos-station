@@ -92,10 +92,15 @@ struct TimelineController: RouteCollection {
 
     // MARK: - Manifest
 
-    private struct BucketRow: Decodable {
+    /// One place within one bucket. A bucket's photos with no place come
+    /// through as a row of their own, with a nil `place`.
+    private struct BucketPlaceRow: Decodable {
         let key: String
-        let count: Int
         let place: String?
+        let count: Int
+        let latitude: Double?
+        let longitude: Double?
+        let first: Date?
     }
 
     @Sendable
@@ -111,24 +116,55 @@ struct TimelineController: RouteCollection {
         // Allowlisted, never interpolated from the request.
         let pattern = Self.format(for: zoom)
 
+        // Every place in every bucket, with where and when, so the header can
+        // name each area the bucket's photos came from (`HeaderPlaces`)
+        // rather than only the commonest.
         let rows = try await req.sql.raw("""
             SELECT to_char(\(unsafeRaw: Self.localTime), \(bind: pattern)) AS key,
+                   a.place_name AS place,
                    count(*)::int AS count,
-                   mode() WITHIN GROUP (ORDER BY a.place_name) AS place
+                   avg(a.lat) AS latitude,
+                   avg(a.lon) AS longitude,
+                   min(\(unsafeRaw: Self.localTime)) AS first
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: Self.visible)
-            GROUP BY 1
+            GROUP BY 1, 2
             ORDER BY 1 DESC
-            """).all(decoding: BucketRow.self)
+            """).all(decoding: BucketPlaceRow.self)
+
+        // A day reads in the order it happened; a month or a year leads with
+        // where most of it was spent.
+        let order: HeaderPlaces.Order = zoom == .day ? .time : .count
+        var buckets: [TimelineBucket] = []
+        var index = rows.startIndex
+        while index < rows.endIndex {
+            let key = rows[index].key
+            var count = 0
+            var places: [HeaderPlaces.Place] = []
+            while index < rows.endIndex, rows[index].key == key {
+                let row = rows[index]
+                count += row.count
+                if let name = row.place {
+                    places.append(HeaderPlaces.Place(
+                        name: name, count: row.count,
+                        latitude: row.latitude, longitude: row.longitude, first: row.first
+                    ))
+                }
+                index += 1
+            }
+            buckets.append(TimelineBucket(
+                key: key, count: count, place: HeaderPlaces.label(places, order: order)
+            ))
+        }
 
         return TimelineManifest(
             spaceID: spaceID,
             zoom: zoom,
-            total: rows.reduce(0) { $0 + $1.count },
+            total: buckets.reduce(0) { $0 + $1.count },
             cursor: try await currentCursor(spaceID: spaceID, on: req.sql),
-            buckets: rows.map { TimelineBucket(key: $0.key, count: $0.count, place: $0.place) }
+            buckets: buckets
         )
     }
 

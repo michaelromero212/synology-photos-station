@@ -1030,7 +1030,13 @@ Photos for the library and backup shell. Where they disagree, Apple wins.
   (`Backing up 1,204 of 8,331`), and it is where per-item failures and retries
   surface. Synology's vanishes and offers no error detail; ours must not.
 - **Section headers carry date + place** — `Jul 18 · Culpeper County, Virginia`.
-  Served by the `place` field on day buckets, so no extra request.
+  Served by the `place` field on day buckets, so no extra request. Since
+  October 2026 it names every area the bucket's photos came from, not only the
+  commonest: places within about 15 miles merge under the one with the most
+  photos, and farther ones are listed, as in `Sep 26 · Reston and Richmond` or
+  `Reston, Richmond and 1 more`. A day lists them in the order it visited them,
+  and a month or year leads with where most of it was spent (`HeaderPlaces`,
+  `Scripts/smoke-day-places.sh`).
 - **Year / Month / Day / Folders** segmented control. Backed by
   `timeline?zoom=`; each zoom is a different bucket granularity and grid density.
 - **Grid overlays** — video duration with a play glyph (`12:08 ▶`), stack count
