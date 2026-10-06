@@ -20,6 +20,9 @@ struct InformationPanel: View {
     /// picture, and hides the "add a location" row entirely — there is no point
     /// inviting an edit the panel cannot carry out.
     var onEditLocation: (() -> Void)?
+    /// What the person's own devices recognized in the photo. Nil until it has
+    /// been analyzed, and then there's no section at all.
+    var observation: AssetObservationDetail?
 
     var body: some View {
         ScrollView {
@@ -38,6 +41,7 @@ struct InformationPanel: View {
                 }
                 #endif
                 storageRow
+                detectedSection
                 // Everything the file itself records, below the curated card:
                 // grouped, filtered and formatted by the server so this is a
                 // plain column of sections rather than a wall of tags.
@@ -89,6 +93,76 @@ struct InformationPanel: View {
             }
         }
         .padding(.top, 2)
+    }
+
+    // MARK: - Detected
+
+    /// What Vision recognized on the person's own device, and what the NAS made
+    /// of it: the tags curated albums are built from, then the strongest raw
+    /// labels with their confidences.
+    ///
+    /// There so the reading can be judged photo by photo. "Birthday" on the
+    /// cake shot and nothing on the screenshot is the library working; the
+    /// reverse is what to report.
+    @ViewBuilder
+    private var detectedSection: some View {
+        if let observation,
+           !observation.labels.isEmpty || observation.isUtility || observation.peopleCount > 0 {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("DETECTED ON YOUR DEVICE")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .kerning(0.5)
+
+                let seenAs = Self.seenAs(observation)
+                if !seenAs.isEmpty {
+                    Text(seenAs.joined(separator: " · "))
+                        .font(.subheadline.weight(.medium))
+                }
+
+                if !observation.labels.isEmpty {
+                    // Scrolled rather than wrapped, like the tag row above.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(observation.labels.prefix(10), id: \.id) { label in
+                                Text("\(Self.spoken(label.id)) \(Int((label.confidence * 100).rounded()))%")
+                                    .font(.caption)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tags in words, plus what the counts say. "Screenshot or document"
+    /// stands in for both kinds of utility; nobody needs to know there are two.
+    static func seenAs(_ observation: AssetObservationDetail) -> [String] {
+        var words: [String] = []
+        var utility = observation.isUtility
+        for tag in observation.tags {
+            switch tag {
+            case "utility": utility = true
+            case "gathering": continue   // said by the people count below
+            default: words.append(spoken(tag))
+            }
+        }
+        if utility { words.append("Screenshot or document") }
+        switch observation.peopleCount {
+        case 0: break
+        case 1: words.append("1 person")
+        default: words.append("\(observation.peopleCount) people")
+        }
+        return words
+    }
+
+    /// `birthday_cake` → "Birthday cake".
+    static func spoken(_ identifier: String) -> String {
+        let words = identifier.replacingOccurrences(of: "_", with: " ")
+        return words.prefix(1).uppercased() + words.dropFirst()
     }
 
     // MARK: - Caption

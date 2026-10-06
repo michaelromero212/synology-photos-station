@@ -37,6 +37,10 @@ final class AssetDetailModel {
     /// schedule — see `loadPreview`.
     private var hasLoadedPreview = false
     private var isLoadingPreview = false
+    /// What this person's devices recognized in the photo, for the Information
+    /// panel. See `loadObservation`.
+    var observation: AssetObservationDetail?
+    private var hasLoadedObservation = false
 
     let item: TimelineItem
     private let spaceID: UUID
@@ -87,6 +91,16 @@ final class AssetDetailModel {
             hasLoadedPreview = true
             if image == nil { imageError = "Couldn't load this photo." }
         }
+    }
+
+    /// Fetched when the Information panel opens rather than with the photo, so
+    /// swiping through a day costs nothing extra. Quiet on failure on purpose,
+    /// unlike `loadDetail`: a photo not analyzed yet, or a NAS that predates
+    /// curation, simply has no Detected section.
+    func loadObservation(_ client: FrameStationClient) async {
+        guard !hasLoadedObservation else { return }
+        hasLoadedObservation = true
+        observation = try? await client.observation(spaceID: spaceID, assetID: item.assetID)
     }
 
     /// Never swallow the error here. An earlier version caught and ignored it,
@@ -1626,8 +1640,12 @@ private struct InformationSheet: View {
             InformationPanel(
                 detail: detail,
                 onEditCredit: detail.isSharedSpace ? { showCreditEditor = true } : nil,
-                onEditLocation: { showLocationEditor = true }
+                onEditLocation: { showLocationEditor = true },
+                observation: model.observation
             )
+            .task {
+                if let client = session.client { await model.loadObservation(client) }
+            }
             .sheet(isPresented: $showLocationEditor) {
                 LocationEditorSheet(
                     session: session,

@@ -11,7 +11,7 @@ let package = Package(
         .tvOS(.v17),
     ],
     products: [
-        .library(name: "FrameStationKit", targets: ["FrameStationKit"]),
+        .library(name: "FrameStationKit", targets: ["FrameStationKit", "FrameStationAnalysis"]),
     ],
     dependencies: [
         .package(path: "../FrameStationAPI"),
@@ -23,9 +23,13 @@ let package = Package(
                 .product(name: "FrameStationAPI", package: "FrameStationAPI"),
             ]
         ),
+        // Looking at photographs, with Vision on the device. Deliberately
+        // depends on nothing, least of all the client above, so nothing in it
+        // can send a picture anywhere. `AnalysisBoundaryTests` keeps it so.
+        .target(name: "FrameStationAnalysis"),
         .testTarget(
             name: "FrameStationKitTests",
-            dependencies: ["FrameStationKit"]
+            dependencies: ["FrameStationKit", "FrameStationAnalysis"]
         ),
     ]
 )

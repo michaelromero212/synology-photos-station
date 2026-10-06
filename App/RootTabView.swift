@@ -31,6 +31,10 @@ struct RootTabView: View {
     /// Built alongside the engine and shared with it: the engine is what
     /// discovers an outage, and the grid is what has to say so.
     @State private var connection: ConnectionMonitor?
+    /// Looks at the library's thumbnails while the app is open, for curated
+    /// albums. Built with the engine, on the same connection monitor, so it
+    /// holds back on cellular for the same reasons backup does.
+    @State private var curation: CurationRunner?
     /// What just landed in a shared album, for checking.
     ///
     /// Held here because sharing happens in the grid you are *leaving* — usually
@@ -174,8 +178,11 @@ struct RootTabView: View {
             switch phase {
             case .background:
                 engine?.reportBackupState(force: true)
+                // Curation only ever runs in the open app. See `CurationRunner`.
+                curation?.stop()
             case .active:
                 Task { await engine?.resume() }
+                curation?.start()
             default:
                 break
             }
@@ -196,15 +203,26 @@ struct RootTabView: View {
                 container: container, session: session, settings: backupSettings,
                 connection: monitor
             )
+            let runner = CurationRunner(
+                session: session, connection: monitor,
+                isBackingUp: { [weak created] in created?.isRunning ?? false }
+            )
             // Picking up where the outage stopped it. Waiting for the next
             // background window instead would mean a phone that reconnects on
             // the sofa does nothing until iOS decides to wake us.
-            monitor.onReconnect = { [weak created] in await created?.start() }
+            monitor.onReconnect = { [weak created, weak runner] in
+                await created?.start()
+                runner?.start()
+            }
             connection = monitor
             engine = created
+            curation = runner
             // Signing out has to stop this engine, and the session is what
             // knows about the sign-out. See `BackupEngine.retire`.
-            session.willSignOut = { [weak created] in created?.retire() }
+            session.willSignOut = { [weak created, weak runner] in
+                created?.retire()
+                runner?.stop()
+            }
             // Offered once per sign-in, the way a fresh install offers it —
             // and not to someone who already has backup running.
             //
@@ -226,6 +244,7 @@ struct RootTabView: View {
             // so the first pick-up is asked for here as well. Not waited for:
             // it runs for as long as the queue does.
             Task { await created.resume() }
+            runner.start()
             // Finish anything a share left outstanding when the app was last
             // taken away. Automatic backup has always resumed itself; this is
             // the manual path getting the same treatment — see `ManualUpload`.
@@ -375,7 +394,9 @@ struct RootTabView: View {
     @ViewBuilder
     private var moreTab: some View {
         #if os(iOS)
-        MoreView(session: session, engine: engine, settings: $backupSettings)
+        MoreView(
+            session: session, engine: engine, settings: $backupSettings, curation: curation
+        )
         #else
         MoreView(session: session)
         #endif
@@ -504,6 +525,7 @@ struct MoreView: View {
     #if os(iOS)
     let engine: BackupEngine?
     @Binding var settings: BackupSettings
+    let curation: CurationRunner?
     @State private var showBackup = false
     #endif
 
@@ -571,6 +593,13 @@ struct MoreView: View {
             } label: {
                 Label("Manage Shared Albums", systemImage: "person.2.badge.gearshape")
             }
+            #if os(iOS)
+            NavigationLink {
+                CurationSettingsView(session: session, runner: curation)
+            } label: {
+                Label("Curated Albums", systemImage: "sparkles.rectangle.stack")
+            }
+            #endif
         }
 
         Section {
