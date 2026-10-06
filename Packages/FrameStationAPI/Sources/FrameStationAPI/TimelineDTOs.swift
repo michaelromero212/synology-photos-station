@@ -16,16 +16,37 @@ public struct TimelineBucket: Codable, Sendable, Hashable, Identifiable {
     /// `2026`, `2026-07`, or `2026-07-18` depending on zoom.
     public let key: String
     public let count: Int
-    /// Dominant reverse-geocoded location, for the section header
-    /// (`Jul 18 · Culpeper, Virginia`). Null until geocoding runs.
+    /// Where the bucket's photos were taken, for the section header: one
+    /// place (`Jul 18 · Culpeper, Virginia`), or every area when they came
+    /// from more than one (`Reston and Richmond`). Null until geocoding runs.
     public let place: String?
+    /// A day whose photos came from more than one area, as its groups: in the
+    /// order the day visited them, each with its full name and how many of
+    /// the day's photos it holds. The counts add up to `count`. Nil for a day
+    /// with one place or none, and for months and years.
+    ///
+    /// Optional, so a client that predates it decodes the day as one group.
+    public let areas: [TimelineArea]?
 
     public var id: String { key }
 
-    public init(key: String, count: Int, place: String?) {
+    public init(key: String, count: Int, place: String?, areas: [TimelineArea]? = nil) {
         self.key = key
         self.count = count
         self.place = place
+        self.areas = areas
+    }
+}
+
+/// One area of a day spent in several: its place and how many photos.
+public struct TimelineArea: Codable, Sendable, Hashable {
+    /// `Richmond, Virginia`.
+    public let name: String
+    public let count: Int
+
+    public init(name: String, count: Int) {
+        self.name = name
+        self.count = count
     }
 }
 
@@ -154,6 +175,11 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// one-year immutable cache. Optional and read as 0 so a payload without it
     /// still decodes — see the `Bool?` fields on `AssetDetail` for why.
     public let thumbVersion: Int?
+    /// Which of its day's `TimelineBucket.areas` this photo is grouped under.
+    /// Set by a day's timeline page when the day has more than one area, nil
+    /// everywhere else. A variable so a client can keep it when a change
+    /// arrives without it.
+    public var area: Int?
 
     public var isLive: Bool { liveVideoAssetID != nil }
     /// The thumbnail generation, with a missing value read as the baseline.
@@ -182,7 +208,8 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         mediaType: MediaType, durationMs: Int?, thumbHash: String?,
         isFavorite: Bool, uploadedBy: UUID, isDerived: Bool,
         isBurst: Bool = false, liveVideoAssetID: UUID? = nil, purgeAt: Date? = nil,
-        thumbVersion: Int? = nil, sourceLocalID: String? = nil, capturedAtMs: Int64? = nil
+        thumbVersion: Int? = nil, sourceLocalID: String? = nil, capturedAtMs: Int64? = nil,
+        area: Int? = nil
     ) {
         self.id = id
         self.spaceID = spaceID
@@ -201,6 +228,7 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
         self.purgeAt = purgeAt
         self.thumbVersion = thumbVersion
         self.sourceLocalID = sourceLocalID
+        self.area = area
     }
 
     public var thumbHashBytes: [UInt8]? {

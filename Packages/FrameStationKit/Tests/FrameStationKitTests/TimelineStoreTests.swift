@@ -16,11 +16,13 @@ private func at(_ iso: String) -> Date {
     ISO8601DateFormatter().date(from: iso)!
 }
 
-private func photo(_ id: UUID, _ iso: String, derived: Bool = true, space: UUID = UUID()) -> TimelineItem {
+private func photo(
+    _ id: UUID, _ iso: String, derived: Bool = true, space: UUID = UUID(), area: Int? = nil
+) -> TimelineItem {
     TimelineItem(
         id: id, spaceID: space, assetID: id, capturedAt: at(iso), aspectRatio: 1,
         mediaType: .photo, durationMs: nil, thumbHash: nil, isFavorite: false,
-        uploadedBy: UUID(), isDerived: derived
+        uploadedBy: UUID(), isDerived: derived, area: area
     )
 }
 
@@ -143,6 +145,73 @@ struct TimelineStaleBucketTests {
     func agreementIsQuiet() {
         let held = [day: [photo(UUID(), "2025-06-15T09:00:00Z")]]
         #expect(TimelineStore.staleBuckets(in: manifest([(day, 1), (nextDay, 40)]), items: held).isEmpty)
+    }
+
+    private func spread(_ key: String, _ counts: [Int]) -> TimelineManifest {
+        TimelineManifest(
+            spaceID: UUID(), zoom: .day, total: counts.reduce(0, +), cursor: 1,
+            buckets: [TimelineBucket(
+                key: key, count: counts.reduce(0, +), place: "Reston and Richmond",
+                areas: counts.enumerated().map { TimelineArea(name: "Area \($0.offset)", count: $0.element) }
+            )]
+        )
+    }
+
+    @Test("A day spent in two areas holding a photo with no area is stale")
+    func ungroupedPhotoInGroupedDay() {
+        let held = [day: [photo(UUID(), "2025-06-15T09:00:00Z", area: 0),
+                          photo(UUID(), "2025-06-15T15:00:00Z")]]
+        #expect(TimelineStore.staleBuckets(in: spread(day, [1, 1]), items: held) == [day])
+    }
+
+    @Test("A day back down to one area, still holding grouped photos, is stale")
+    func groupedPhotosInPlainDay() {
+        let held = [day: [photo(UUID(), "2025-06-15T09:00:00Z", area: 0),
+                          photo(UUID(), "2025-06-15T15:00:00Z", area: 1)]]
+        #expect(TimelineStore.staleBuckets(in: manifest([(day, 2)]), items: held) == [day])
+    }
+
+    @Test("A grouped day whose photos all know their area is left alone")
+    func groupedAgreement() {
+        let held = [day: [photo(UUID(), "2025-06-15T09:00:00Z", area: 0),
+                          photo(UUID(), "2025-06-15T15:00:00Z", area: 1)]]
+        #expect(TimelineStore.staleBuckets(in: spread(day, [1, 1]), items: held).isEmpty)
+    }
+}
+
+@Suite("A day spent in several areas is held area by area")
+struct TimelineAreaTests {
+    @Test("Photos are grouped by area, each area oldest first")
+    func groupsByArea() {
+        let a = UUID(), b = UUID(), c = UUID(), d = UUID()
+        // Two people at once: their photos interleave in time.
+        let byTime = [
+            photo(a, "2025-06-15T09:00:00Z", area: 0), photo(b, "2025-06-15T09:30:00Z", area: 1),
+            photo(c, "2025-06-15T10:00:00Z", area: 0), photo(d, "2025-06-15T10:30:00Z", area: 1),
+        ]
+        #expect(TimelineStore.grouped(byTime).map(\.id) == [a, c, b, d])
+    }
+
+    @Test("A day the server didn't group keeps its order")
+    func plainDayUnchanged() {
+        let items = [photo(UUID(), "2025-06-15T09:00:00Z"), photo(UUID(), "2025-06-15T08:00:00Z")]
+        #expect(TimelineStore.grouped(items) == items)
+    }
+
+    @Test("A change without an area keeps the photo in the area it was in")
+    func updateKeepsArea() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let held = [day: [photo(a, "2025-06-15T09:00:00Z", area: 0),
+                          photo(c, "2025-06-15T11:00:00Z", area: 0),
+                          photo(b, "2025-06-15T10:00:00Z", derived: false, area: 1)]]
+        // A thumbnail finishing, as `/changes` sends it: no area.
+        let result = TimelineStore.applying(
+            [change(9, .update, photo(b, "2025-06-15T10:00:00Z", derived: true))], to: held, zoom: .day
+        )
+        #expect(result.items[day]?.map(\.id) == [a, c, b])
+        #expect(result.items[day]?.last?.area == 1)
+        #expect(result.items[day]?.last?.isDerived == true)
+        #expect(!result.membershipMoved)
     }
 }
 

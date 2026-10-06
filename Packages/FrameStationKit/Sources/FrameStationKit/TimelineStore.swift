@@ -202,7 +202,7 @@ public final class TimelineStore {
             let page = try await client.bucket(spaceID: spaceID, key: key, zoom: zoom)
             // A density change while this was in flight replaced every day.
             guard zoom == self.zoom else { return }
-            items[key] = Array(page.items.reversed())
+            items[key] = Self.grouped(Array(page.items.reversed()))
             scheduleSnapshot()
         } catch {
             // Keep what is there; the next manifest asks again.
@@ -274,7 +274,7 @@ public final class TimelineStore {
             // Reversed to oldest-first, to match `buckets` and the way the grid
             // now reads a day forward. The server still sends within-day
             // newest-first; the flip is the client's, in one direction, here.
-            items[key] = Array(page.items.reversed())
+            items[key] = Self.grouped(Array(page.items.reversed()))
             scheduleSnapshot()
         } catch {
             // Leave the day unloaded on failure rather than caching an empty
@@ -439,7 +439,13 @@ public final class TimelineStore {
                     continue
                 }
                 if let index = held.firstIndex(where: { $0.id == item.id }) {
-                    held[index] = item
+                    // A change doesn't say which area of its day a photo is
+                    // grouped under — that takes the whole day — so the one
+                    // already held is kept. Without this a thumbnail finishing
+                    // in a day spent in two places would move the photo.
+                    var updated = item
+                    if updated.area == nil { updated.area = held[index].area }
+                    held[index] = updated
                 } else {
                     // Either genuinely new, or re-dated into this day.
                     membershipMoved = true
@@ -448,7 +454,7 @@ public final class TimelineStore {
                 // Oldest-first, matching `loadBucket` and `buckets` — to the
                 // millisecond, so photos taken within the same second land in
                 // the order they were taken rather than the order they arrived.
-                days[key] = held.sorted { $0.preciseCapturedAt < $1.preciseCapturedAt }
+                days[key] = grouped(held.sorted { $0.preciseCapturedAt < $1.preciseCapturedAt })
 
             case .delete:
                 membershipMoved = true
@@ -461,16 +467,38 @@ public final class TimelineStore {
     }
 
     /// Loaded days whose item count no longer matches the manifest's —
-    /// including days the manifest no longer lists at all.
+    /// including days the manifest no longer lists at all — or whose grouping
+    /// by area doesn't: a day now spent in several areas holding a photo with
+    /// no area (one that arrived as a change), or a day back down to one area
+    /// still holding photos grouped as if it weren't.
     nonisolated static func staleBuckets(
         in manifest: TimelineManifest, items: [String: [TimelineItem]]
     ) -> [String] {
-        var counts: [String: Int] = [:]
-        for bucket in manifest.buckets { counts[bucket.key] = bucket.count }
+        var known: [String: TimelineBucket] = [:]
+        for bucket in manifest.buckets { known[bucket.key] = bucket }
         return items
-            .filter { key, held in held.count != (counts[key] ?? 0) }
+            .filter { key, held in
+                guard let bucket = known[key], held.count == bucket.count else { return true }
+                return bucket.areas == nil
+                    ? held.contains { $0.area != nil }
+                    : held.contains { $0.area == nil }
+            }
             .map(\.key)
             .sorted()
+    }
+
+    /// A day's photos grouped by area, in the order the day visited them,
+    /// each area's in the order it already had (oldest first).
+    ///
+    /// Only for a day the server has grouped: one with no area numbers is
+    /// left exactly as it was. A photo without one in a grouped day, which
+    /// only arrives as a change, sits with the first area until the day is
+    /// fetched again (`staleBuckets`).
+    nonisolated static func grouped(_ items: [TimelineItem]) -> [TimelineItem] {
+        guard items.contains(where: { $0.area != nil }) else { return items }
+        return items.enumerated()
+            .sorted { ($0.element.area ?? 0, $0.offset) < ($1.element.area ?? 0, $1.offset) }
+            .map(\.element)
     }
 
     /// The manifest's key for the day, month or year a capture time falls in.

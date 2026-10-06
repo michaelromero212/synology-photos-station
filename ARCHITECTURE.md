@@ -1037,6 +1037,16 @@ Photos for the library and backup shell. Where they disagree, Apple wins.
   `Reston, Richmond and 1 more`. A day lists them in the order it visited them,
   and a month or year leads with where most of it was spent (`HeaderPlaces`,
   `Scripts/smoke-day-places.sh`).
+- **A day spent in more than one area is drawn area by area.** The manifest
+  sends each area's full name and photo count (`TimelineBucket.areas`), so the
+  grid lays the day out before it loads, and each photo of the day says which
+  area it's in (`TimelineItem.area`). Every area after the first opens with a
+  quieter place line, and each area's photos run in time order. That holds for
+  one person's day trip and for two family members in two cities alike. A
+  photo with no place joins the area of the same person's photo taken closest
+  in time, and only if that person has none that day, the closest photo of
+  anyone's. Swiping and autoplay follow the same order. Both fields are
+  optional, so an older app shows the day in time order as it always did.
 - **Year / Month / Day / Folders** segmented control. Backed by
   `timeline?zoom=`; each zoom is a different bucket granularity and grid density.
 - **Grid overlays** — video duration with a play glyph (`12:08 ▶`), stack count

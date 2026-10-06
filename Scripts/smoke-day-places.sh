@@ -105,6 +105,65 @@ echo "Months"
 check "a month leads with where most of it was spent" "Reston, Richmond and 3 more" \
   "$(manifest month | grep '^2026-05|' | cut -d'|' -f2)"
 
+# A day's groups, as "name:count" in order, and each photo's group by name.
+areas(){ curl -s "$API/v1/spaces/$1/timeline?zoom=day" -H "Authorization: Bearer $2" | python3 -c "
+import sys, json
+for b in json.load(sys.stdin)['buckets']:
+    if b['key'] == '$3':
+        print(' '.join(f\"{a['name'].split(',')[0]}:{a['count']}\" for a in (b.get('areas') or [])) or '-')"; }
+grouped(){ curl -s "$API/v1/spaces/$1/timeline/$3?zoom=day" -H "Authorization: Bearer $2" \
+  | python3 -c "import sys,json; [print(i['id'], i.get('area', '-') if i.get('area') is not None else '-') for i in json.load(sys.stdin)['items']]" \
+  | while read -r id area; do echo "$(q "SELECT replace(filename, '.jpg', '') FROM space_assets WHERE id = '$id'"):$area"; done \
+  | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+echo "Groups within a day"
+check "a two-city day is two groups, in the order visited" "Reston:2 Richmond:3" "$(areas "$SPACE" "$TOKEN" 2026-05-03)"
+check "and each photo knows its group" "c1:0 c2:0 c3:1 c4:1 c5:1" "$(grouped "$SPACE" "$TOKEN" 2026-05-03)"
+check "a one-place day isn't grouped" "-" "$(areas "$SPACE" "$TOKEN" 2026-05-07)"
+check "nor are its photos" "g1:- g2:-" "$(grouped "$SPACE" "$TOKEN" 2026-05-07)"
+check "a nearby town doesn't make a group" "-" "$(areas "$SPACE" "$TOKEN" 2026-05-02)"
+
+echo "Two people sharing a library"
+CODE2=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+R2=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$CODE2\",\"displayName\":\"Second\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
+USER2=$(echo "$R2" | jq '["user"]["id"]'); TOKEN2=$(echo "$R2" | jq '["token"]')
+USER1=$(echo "$R" | jq '["user"]["id"]')
+SHARED=$(curl -s -X POST "$API/v1/spaces" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Family Shared\",\"memberIDs\":[\"$USER2\"]}" | jq '["id"]')
+# Set up so that taking the closest photo of anyone's would put each unplaced
+# photo in the wrong city.
+SHARED_PLAN=(
+  "s1 2026-05-09T10:00 RESTON 1"   "s2 2026-05-09T11:00 RESTON 1"   "s3 2026-05-09T15:00 NOWHERE 1"
+  "s4 2026-05-09T14:55 RICHMOND 2" "s5 2026-05-09T15:30 RICHMOND 2" "s6 2026-05-09T11:05 NOWHERE 2"
+  "x1 2026-05-10T10:00 RESTON 1"   "x2 2026-05-10T16:00 RICHMOND 1" "x3 2026-05-10T15:30 NOWHERE 2"
+)
+mkdir -p "$ROOT/lib1" "$ROOT/lib2"
+for entry in "${SHARED_PLAN[@]}"; do
+  set -- $entry
+  vips gaussnoise "$ROOT/n.v" 64 64 >/dev/null 2>&1 && vips copy "$ROOT/n.v" "$ROOT/lib$4/$1.jpg" >/dev/null 2>&1
+done
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/lib1" --space "$SHARED" --user "$USER1" >/dev/null 2>&1)
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/lib2" --space "$SHARED" --user "$USER2" >/dev/null 2>&1)
+for _ in $(seq 1 120); do
+  [ "$(q "SELECT count(*) FROM derivation_jobs WHERE state IN ('pending', 'running')")" = "0" ] && break; sleep 1
+done
+for entry in "${SHARED_PLAN[@]}"; do
+  set -- $entry
+  name=$1; when=$2; where=$3
+  if [ "$where" = "NOWHERE" ]; then lat=NULL; lon=NULL; place=NULL
+  else set -- ${!where}; lat=$1; lon=$2; shift 2; place="'$*'"; fi
+  q "UPDATE assets SET local_captured_at = '$when', lat = $lat, lon = $lon, place_name = $place
+     WHERE id = (SELECT asset_id FROM space_assets WHERE filename = '$name.jpg')" >/dev/null
+done
+check "two people in two cities are two groups" "Reston:3 Richmond:3" "$(areas "$SHARED" "$TOKEN" 2026-05-09)"
+check "an unplaced photo goes with its own person's place, not the closest stranger's" \
+  "s1:0 s2:0 s3:0 s4:1 s5:1 s6:1" "$(grouped "$SHARED" "$TOKEN" 2026-05-09)"
+check "every member sees the same groups" "s1:0 s2:0 s3:0 s4:1 s5:1 s6:1" "$(grouped "$SHARED" "$TOKEN2" 2026-05-09)"
+check "someone with no places that day borrows the closest photo of anyone's" \
+  "x1:0 x2:1 x3:1" "$(grouped "$SHARED" "$TOKEN" 2026-05-10)"
+check "and the groups count it" "Reston:1 Richmond:2" "$(areas "$SHARED" "$TOKEN" 2026-05-10)"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

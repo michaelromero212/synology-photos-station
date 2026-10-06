@@ -30,18 +30,34 @@ import UIKit
 /// so there is nothing exact to compute there and they keep the SwiftUI grid.
 final class TimelineGridLayout: UICollectionViewLayout {
     static let libraryHeaderKind = "library-header"
+    /// The line naming a place, inside a day spent in more than one.
+    static let areaHeaderKind = "area-header"
 
     struct Shape: Equatable {
         /// Entries per day, in drawing order: loaded photographs, placeholders
         /// standing in for ones that aren't, and tiles still on this phone.
         var counts: [Int]
+        /// For a day spent in more than one area, how many entries each area
+        /// draws, in order. They add up to that day's count. Empty for every
+        /// other day, which draws as one run, as days always did.
+        var areas: [[Int]]
         /// Tiles across a phone at this zoom. A wider grid fits more — see
         /// `columnCount`.
         var columns: Int
         var spacing: CGFloat
         var headerHeight: CGFloat
+        /// A place line's height, top padding to bottom.
+        var areaHeaderHeight: CGFloat
         /// The library's count above the oldest day. Zero for none.
         var libraryHeaderHeight: CGFloat
+    }
+
+    /// One area's tiles within a day: its first entry, how many, and where its
+    /// first row starts below the day's top.
+    struct Run {
+        let first: Int
+        let count: Int
+        let top: CGFloat
     }
 
     var shape: Shape {
@@ -58,6 +74,9 @@ final class TimelineGridLayout: UICollectionViewLayout {
     private var side: CGFloat = 0
     /// Where each day's heading begins, in content coordinates.
     private var starts: [CGFloat] = []
+    /// The areas of each day spent in more than one, by section. Every other
+    /// day is a single run starting under its heading, and isn't stored.
+    private var runs: [Int: [Run]] = [:]
     private var height: CGFloat = 0
     private var scale: CGFloat = 3
     /// Empty room above a library too short to fill the screen.
@@ -95,7 +114,21 @@ final class TimelineGridLayout: UICollectionViewLayout {
         // size they always were.
         side = max((width - shape.spacing * CGFloat(columns - 1)) / CGFloat(columns), 1)
         boundsHeight = collectionView.bounds.height
-        let natural = shape.counts.reduce(shape.libraryHeaderHeight) { $0 + sectionHeight($1) }
+        // Before anything is measured: a day's height includes its areas'.
+        runs.removeAll(keepingCapacity: true)
+        for (section, areas) in shape.areas.enumerated() where areas.count > 1 {
+            var laid: [Run] = []
+            var first = 0
+            var top = shape.headerHeight
+            for (index, count) in areas.enumerated() {
+                if index > 0 { top += shape.areaHeaderHeight }
+                laid.append(Run(first: first, count: count, top: top))
+                first += count
+                top += rowsHeight(count)
+            }
+            runs[section] = laid
+        }
+        let natural = shape.counts.indices.reduce(shape.libraryHeaderHeight) { $0 + sectionHeight($1) }
         // On a whole device pixel, so every edge below it rounds the way it
         // would without it and the gaps stay crisp.
         let room = shape.counts.isEmpty
@@ -104,9 +137,9 @@ final class TimelineGridLayout: UICollectionViewLayout {
         starts.removeAll(keepingCapacity: true)
         starts.reserveCapacity(shape.counts.count)
         var y = lead + shape.libraryHeaderHeight
-        for count in shape.counts {
+        for section in shape.counts.indices {
             starts.append(y)
-            y += sectionHeight(count)
+            y += sectionHeight(section)
         }
         height = y
     }
@@ -129,10 +162,30 @@ final class TimelineGridLayout: UICollectionViewLayout {
         return (max(count, 0) + columns - 1) / columns
     }
 
-    func sectionHeight(_ count: Int) -> CGFloat {
+    /// The rows of `count` tiles, top of the first to bottom of the last.
+    private func rowsHeight(_ count: Int) -> CGFloat {
         let rows = rows(count)
-        return shape.headerHeight + CGFloat(rows) * side
-            + CGFloat(max(rows - 1, 0)) * shape.spacing
+        return CGFloat(rows) * side + CGFloat(max(rows - 1, 0)) * shape.spacing
+    }
+
+    /// A day's heading, its rows, and the place line before each area after
+    /// its first.
+    func sectionHeight(_ section: Int) -> CGFloat {
+        guard shape.counts.indices.contains(section) else { return 0 }
+        if let last = runs[section]?.last { return last.top + rowsHeight(last.count) }
+        return shape.headerHeight + rowsHeight(shape.counts[section])
+    }
+
+    /// A day's runs: its areas, or the whole day as one.
+    private func runs(in section: Int) -> [Run] {
+        runs[section] ?? [Run(first: 0, count: shape.counts[section], top: shape.headerHeight)]
+    }
+
+    /// The run an entry belongs to. A day has a handful of areas at most, so
+    /// a scan is all this needs.
+    private func run(of item: Int, in section: Int) -> Run {
+        let all = runs(in: section)
+        return all.last { item >= $0.first } ?? all[0]
     }
 
     var contentHeight: CGFloat { height }
@@ -183,14 +236,18 @@ final class TimelineGridLayout: UICollectionViewLayout {
     }
 
     /// The first tile of the row at a point inside a day, or nil when the point
-    /// is on the day's heading.
+    /// is on the day's heading. On a place line, the first tile of the area it
+    /// starts.
     func item(at y: CGFloat, inSection section: Int) -> Int? {
         guard starts.indices.contains(section) else { return nil }
-        let gridTop = starts[section] + shape.headerHeight
-        guard y >= gridTop else { return nil }
+        let all = runs(in: section)
+        guard y >= starts[section] + all[0].top else { return nil }
+        let run = all.last { y >= starts[section] + $0.top - shape.areaHeaderHeight } ?? all[0]
+        let gridTop = starts[section] + run.top
+        guard y >= gridTop else { return run.count > 0 ? run.first : nil }
         let row = Int((y - gridTop) / (side + shape.spacing))
-        let item = row * columnCount
-        return item < shape.counts[section] ? item : nil
+        let index = row * columnCount
+        return index < run.count ? run.first + index : nil
     }
 
     /// Frames land on whole device pixels, the way SwiftUI's did. Fractional
@@ -201,9 +258,10 @@ final class TimelineGridLayout: UICollectionViewLayout {
 
     func frame(forItem item: Int, inSection section: Int) -> CGRect {
         let columns = columnCount
-        let row = item / columns
-        let column = item % columns
-        let gridTop = starts[section] + shape.headerHeight
+        let run = run(of: item, in: section)
+        let row = (item - run.first) / columns
+        let column = (item - run.first) % columns
+        let gridTop = starts[section] + run.top
         let x = CGFloat(column) * (side + shape.spacing)
         let y = gridTop + CGFloat(row) * (side + shape.spacing)
         let minX = pixel(x), maxX = pixel(x + side)
@@ -215,6 +273,14 @@ final class TimelineGridLayout: UICollectionViewLayout {
         let top = starts[section]
         let minY = pixel(top)
         return CGRect(x: 0, y: minY, width: width, height: pixel(top + shape.headerHeight) - minY)
+    }
+
+    /// The place line above a day's `area`-th area, from the second on.
+    private func areaHeaderFrame(_ area: Int, inSection section: Int) -> CGRect? {
+        guard let laid = runs[section], laid.indices.contains(area), area > 0 else { return nil }
+        let bottom = starts[section] + laid[area].top
+        let minY = pixel(bottom - shape.areaHeaderHeight)
+        return CGRect(x: 0, y: minY, width: width, height: pixel(bottom) - minY)
     }
 
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
@@ -231,8 +297,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
         let pitch = side + shape.spacing
         while section < starts.count, starts[section] < rect.maxY {
             let top = starts[section]
-            let count = shape.counts[section]
-            if top + sectionHeight(count) > rect.minY {
+            if top + sectionHeight(section) > rect.minY {
                 if top + shape.headerHeight > rect.minY {
                     let header = UICollectionViewLayoutAttributes(
                         forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
@@ -241,22 +306,32 @@ final class TimelineGridLayout: UICollectionViewLayout {
                     header.frame = headerFrame(section)
                     result.append(header)
                 }
-                let gridTop = top + shape.headerHeight
-                let totalRows = rows(count)
-                if totalRows > 0 {
+                for (area, run) in runs(in: section).enumerated() {
+                    let gridTop = top + run.top
+                    if area > 0, let line = areaHeaderFrame(area, inSection: section),
+                       line.maxY > rect.minY, line.minY < rect.maxY {
+                        let header = UICollectionViewLayoutAttributes(
+                            forSupplementaryViewOfKind: Self.areaHeaderKind,
+                            with: IndexPath(item: area, section: section)
+                        )
+                        header.frame = line
+                        result.append(header)
+                    }
+                    let totalRows = rows(run.count)
+                    guard totalRows > 0 else { continue }
                     let first = max(0, Int(floor((rect.minY - gridTop) / pitch)))
                     let last = min(totalRows - 1, Int(floor((rect.maxY - gridTop) / pitch)))
-                    if first <= last {
-                        for row in first...last {
-                            for column in 0..<columns {
-                                let item = row * columns + column
-                                guard item < count else { break }
-                                let attributes = UICollectionViewLayoutAttributes(
-                                    forCellWith: IndexPath(item: item, section: section)
-                                )
-                                attributes.frame = frame(forItem: item, inSection: section)
-                                result.append(attributes)
-                            }
+                    guard first <= last else { continue }
+                    for row in first...last {
+                        for column in 0..<columns {
+                            let index = row * columns + column
+                            guard index < run.count else { break }
+                            let item = run.first + index
+                            let attributes = UICollectionViewLayoutAttributes(
+                                forCellWith: IndexPath(item: item, section: section)
+                            )
+                            attributes.frame = frame(forItem: item, inSection: section)
+                            result.append(attributes)
                         }
                     }
                 }
@@ -289,6 +364,12 @@ final class TimelineGridLayout: UICollectionViewLayout {
             )
             return attributes
         }
+        if kind == Self.areaHeaderKind {
+            guard let line = areaHeaderFrame(indexPath.item, inSection: indexPath.section)
+            else { return nil }
+            attributes.frame = line
+            return attributes
+        }
         guard starts.indices.contains(indexPath.section) else { return nil }
         attributes.frame = headerFrame(indexPath.section)
         return attributes
@@ -303,7 +384,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
         height.reserveCapacity(keys.count)
         for (index, key) in keys.enumerated() where starts.indices.contains(index) {
             start[key] = Double(starts[index])
-            height[key] = Double(sectionHeight(shape.counts[index]))
+            height[key] = Double(sectionHeight(index))
         }
         return LibrarySpan(
             total: Double(self.height), start: start, height: height,
@@ -368,12 +449,23 @@ struct TimelineCollection: UIViewRepresentable {
         let bucket: TimelineBucket
         /// How many tiles the day draws — see `TimelineGridLayout.Shape.counts`.
         let count: Int
+        /// A day spent in more than one area, area by area. Empty for any
+        /// other day.
+        var areas: [Area] = []
+    }
+
+    /// One area of a day: how many of its tiles, and the place line above it,
+    /// which the first area doesn't have because the day's heading names it.
+    struct Area: Equatable {
+        let count: Int
+        let title: String?
     }
 
     let sections: [Section]
     let columns: Int
     let spacing: CGFloat
     let headerHeight: CGFloat
+    let areaHeaderHeight: CGFloat
     let libraryHeaderHeight: CGFloat
     /// Top: under the floating bar. Bottom: over the tab bar, plus whichever
     /// bar is standing in its place. Applied as the collection view's own
@@ -390,6 +482,8 @@ struct TimelineCollection: UIViewRepresentable {
     let dayItems: (TimelineBucket) -> [TimelineItem]
     let cell: (GridEntry, CGSize, [TimelineItem]) -> AnyView
     let header: (TimelineBucket) -> AnyView
+    /// The place line inside a day spent in more than one area.
+    let areaHeader: (String) -> AnyView
     let libraryHeader: () -> AnyView
     /// Fetches a day and warms its thumbnails.
     let load: (String) async -> Void
@@ -445,6 +539,7 @@ struct TimelineCollection: UIViewRepresentable {
 
         private static let cellID = "tile"
         private static let headerID = "day"
+        private static let areaID = "area"
         private static let libraryID = "library"
 
         init(parent: TimelineCollection) {
@@ -454,9 +549,11 @@ struct TimelineCollection: UIViewRepresentable {
         func shape(for parent: TimelineCollection) -> TimelineGridLayout.Shape {
             TimelineGridLayout.Shape(
                 counts: parent.sections.map(\.count),
+                areas: parent.sections.map { $0.areas.count > 1 ? $0.areas.map(\.count) : [] },
                 columns: parent.columns,
                 spacing: parent.spacing,
                 headerHeight: parent.headerHeight,
+                areaHeaderHeight: parent.areaHeaderHeight,
                 libraryHeaderHeight: parent.libraryHeaderHeight
             )
         }
@@ -476,6 +573,11 @@ struct TimelineCollection: UIViewRepresentable {
                 TimelineTileCell.self,
                 forSupplementaryViewOfKind: TimelineGridLayout.libraryHeaderKind,
                 withReuseIdentifier: Self.libraryID
+            )
+            view.register(
+                TimelineTileCell.self,
+                forSupplementaryViewOfKind: TimelineGridLayout.areaHeaderKind,
+                withReuseIdentifier: Self.areaID
             )
             view.dataSource = self
             view.delegate = self
@@ -706,6 +808,20 @@ struct TimelineCollection: UIViewRepresentable {
                 let build = parent.libraryHeader
                 view.contentConfiguration = UIHostingConfiguration { TileHost { build() } }
                     .margins(.all, 0)
+                return view
+            }
+            if kind == TimelineGridLayout.areaHeaderKind {
+                let view = collectionView.dequeueReusableSupplementaryView(
+                    ofKind: kind, withReuseIdentifier: Self.areaID, for: indexPath
+                ) as! TimelineTileCell
+                let areas = parent.sections.indices.contains(indexPath.section)
+                    ? parent.sections[indexPath.section].areas : []
+                let title = areas.indices.contains(indexPath.item) ? areas[indexPath.item].title : nil
+                let build = parent.areaHeader
+                view.contentConfiguration = UIHostingConfiguration {
+                    TileHost { build(title ?? "") }
+                }
+                .margins(.all, 0)
                 return view
             }
             let view = collectionView.dequeueReusableSupplementaryView(

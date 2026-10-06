@@ -138,6 +138,8 @@ struct TimelineController: RouteCollection {
         // where most of it was spent.
         let order: HeaderPlaces.Order = zoom == .day ? .time : .count
         var buckets: [TimelineBucket] = []
+        // Days whose photos came from more than one area, to be grouped below.
+        var spread: [String] = []
         var index = rows.startIndex
         while index < rows.endIndex {
             let key = rows[index].key
@@ -154,9 +156,28 @@ struct TimelineController: RouteCollection {
                 }
                 index += 1
             }
+            if zoom == .day, HeaderPlaces.areas(places, order: order).count > 1 {
+                spread.append(key)
+            }
             buckets.append(TimelineBucket(
                 key: key, count: count, place: HeaderPlaces.label(places, order: order)
             ))
+        }
+
+        // Grouped photo by photo, because where a photo with no place goes
+        // depends on who took it and when. Few days need it, so they're
+        // fetched together rather than each.
+        if !spread.isEmpty {
+            let photos = try await Self.dayPhotos(spaceID: spaceID, days: spread, on: req.sql)
+            for (position, bucket) in buckets.enumerated() {
+                guard let dayPhotos = photos[bucket.key] else { continue }
+                let groups = HeaderPlaces.group(dayPhotos)
+                guard groups.areas.count > 1 else { continue }
+                buckets[position] = TimelineBucket(
+                    key: bucket.key, count: bucket.count, place: groups.label ?? bucket.place,
+                    areas: groups.areas.map { TimelineArea(name: $0.name, count: $0.count) }
+                )
+            }
         }
 
         return TimelineManifest(
@@ -282,7 +303,85 @@ struct TimelineController: RouteCollection {
             ORDER BY \(unsafeRaw: Self.localTime) DESC, sa.id
             """).all(decoding: ItemRow.self)
 
-        return TimelineBucketPage(key: key, zoom: zoom, items: rows.map { $0.toItem() })
+        var items = rows.map { $0.toItem() }
+
+        // A day spent in more than one area says which area each photo is
+        // grouped under. The order stays by time: an app that predates areas
+        // shows the day as it always did, and one that knows them regroups.
+        if zoom == .day {
+            let photos = try await Self.dayPhotos(spaceID: spaceID, span: span, on: req.sql)
+            let groups = HeaderPlaces.group(photos)
+            if groups.areas.count > 1 {
+                for position in items.indices {
+                    items[position].area = groups.areaOf[items[position].id]
+                }
+            }
+        }
+
+        return TimelineBucketPage(key: key, zoom: zoom, items: items)
+    }
+
+    // MARK: - Areas
+
+    private struct DayPhotoRow: Decodable {
+        let key: String
+        let id: UUID
+        let place: String?
+        let latitude: Double?
+        let longitude: Double?
+        let contributor: UUID
+        let at: Date
+    }
+
+    private static let dayPhotoColumns = """
+        to_char(\(localTime), 'YYYY-MM-DD') AS key,
+        sa.id, a.place_name AS place, a.lat AS latitude, a.lon AS longitude,
+        COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS contributor,
+        \(localTime) AS at
+        """
+
+    /// The photos of these days, as `HeaderPlaces.group` takes them, by day.
+    private static func dayPhotos(
+        spaceID: UUID, days: [String], on sql: any SQLDatabase
+    ) async throws -> [String: [HeaderPlaces.DayPhoto]] {
+        let rows = try await sql.raw("""
+            SELECT \(unsafeRaw: dayPhotoColumns)
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: visible)
+              AND to_char(\(unsafeRaw: localTime), 'YYYY-MM-DD') = ANY(\(bind: days)::text[])
+            """).all(decoding: DayPhotoRow.self)
+        return Dictionary(grouping: rows.map(dayPhoto), by: \.key).mapValues { $0.map(\.photo) }
+    }
+
+    /// One day's photos, found the way `bucket` finds them: by capture-time
+    /// range, which the index answers.
+    private static func dayPhotos(
+        spaceID: UUID, span: (start: String, end: String), on sql: any SQLDatabase
+    ) async throws -> [HeaderPlaces.DayPhoto] {
+        try await sql.raw("""
+            SELECT \(unsafeRaw: dayPhotoColumns)
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: visible)
+              AND (
+                  (a.local_captured_at >= \(unsafeRaw: span.start)
+                   AND a.local_captured_at < \(unsafeRaw: span.end))
+                  OR (a.local_captured_at IS NULL
+                      AND (a.created_at AT TIME ZONE 'UTC') >= \(unsafeRaw: span.start)
+                      AND (a.created_at AT TIME ZONE 'UTC') < \(unsafeRaw: span.end))
+              )
+            """).all(decoding: DayPhotoRow.self).map { dayPhoto($0).photo }
+    }
+
+    private static func dayPhoto(_ row: DayPhotoRow) -> (key: String, photo: HeaderPlaces.DayPhoto) {
+        (row.key, HeaderPlaces.DayPhoto(
+            id: row.id, place: row.place, latitude: row.latitude, longitude: row.longitude,
+            contributor: row.contributor, at: row.at
+        ))
     }
 
     /// The local wall-clock range a bucket key covers, as SQL `timestamp`

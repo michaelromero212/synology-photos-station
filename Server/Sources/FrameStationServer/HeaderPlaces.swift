@@ -41,6 +41,8 @@ enum HeaderPlaces {
         var first: Date?
         let latitude: Double?
         let longitude: Double?
+        /// Every place merged into it, its own name included.
+        var places: Set<String> = []
     }
 
     /// The header text for these places, or nil when none of the photos has
@@ -81,10 +83,12 @@ enum HeaderPlaces {
             if let joins {
                 areas[joins].count += place.count
                 areas[joins].first = earliest(areas[joins].first, place.first)
+                areas[joins].places.insert(place.name)
             } else {
                 areas.append(Area(
                     name: place.name, count: place.count, first: place.first,
-                    latitude: place.latitude, longitude: place.longitude
+                    latitude: place.latitude, longitude: place.longitude,
+                    places: [place.name]
                 ))
             }
         }
@@ -99,6 +103,91 @@ enum HeaderPlaces {
                 $0.first != $1.first ? earlier($0.first, $1.first) : $0.count > $1.count
             }
         }
+    }
+
+    // MARK: - A day, photo by photo
+
+    /// One photo of a day, as grouping it by area needs it.
+    struct DayPhoto {
+        /// `space_assets.id`, the same as `TimelineItem.id`.
+        let id: UUID
+        let place: String?
+        let latitude: Double?
+        let longitude: Double?
+        /// Who took it, or who it's credited to.
+        let contributor: UUID
+        let at: Date
+    }
+
+    /// A day's photos grouped by area: the areas in the order the day visited
+    /// them, each with its full name and photo count, and which area each
+    /// photo belongs to.
+    struct DayGroups {
+        let areas: [(name: String, count: Int)]
+        let areaOf: [UUID: Int]
+        /// The header text, from the same areas.
+        let label: String?
+    }
+
+    /// Groups a day's photos by area.
+    ///
+    /// A photo with a place joins that place's area. One without, such as a
+    /// screenshot or a file imported with no location, joins the area of the
+    /// same person's photo taken closest in time. Failing that, the day's
+    /// closest photo of anyone's. It never borrows another family member's
+    /// city when its own person's photos say where they were.
+    static func group(_ photos: [DayPhoto]) -> DayGroups {
+        var byName: [String: (count: Int, latitude: Double, longitude: Double, located: Int, first: Date)] = [:]
+        for photo in photos {
+            guard let name = photo.place else { continue }
+            var entry = byName[name] ?? (0, 0, 0, 0, photo.at)
+            entry.count += 1
+            if let lat = photo.latitude, let lon = photo.longitude {
+                entry.latitude += lat
+                entry.longitude += lon
+                entry.located += 1
+            }
+            entry.first = min(entry.first, photo.at)
+            byName[name] = entry
+        }
+        let places = byName.map { name, entry in
+            Place(
+                name: name, count: entry.count,
+                latitude: entry.located > 0 ? entry.latitude / Double(entry.located) : nil,
+                longitude: entry.located > 0 ? entry.longitude / Double(entry.located) : nil,
+                first: entry.first
+            )
+        }
+        let ordered = areas(places, order: .time)
+        let label = label(places, order: .time)
+
+        var areaOfPlace: [String: Int] = [:]
+        for (index, area) in ordered.enumerated() {
+            for name in area.places { areaOfPlace[name] = index }
+        }
+
+        var areaOf: [UUID: Int] = [:]
+        let placed = photos.filter { $0.place != nil }.sorted { $0.at < $1.at }
+        for photo in placed {
+            if let name = photo.place, let index = areaOfPlace[name] { areaOf[photo.id] = index }
+        }
+        if !placed.isEmpty {
+            for photo in photos where photo.place == nil {
+                let own = placed.filter { $0.contributor == photo.contributor }
+                let nearest = (own.isEmpty ? placed : own).min {
+                    abs($0.at.timeIntervalSince(photo.at)) < abs($1.at.timeIntervalSince(photo.at))
+                }
+                if let nearest, let index = areaOf[nearest.id] { areaOf[photo.id] = index }
+            }
+        }
+
+        var counts = Array(repeating: 0, count: ordered.count)
+        for index in areaOf.values { counts[index] += 1 }
+        return DayGroups(
+            areas: zip(ordered, counts).map { (name: $0.name, count: $1) },
+            areaOf: areaOf,
+            label: label
+        )
     }
 
     /// "Reston" from "Reston, Virginia".

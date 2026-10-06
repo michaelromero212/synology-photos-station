@@ -1242,6 +1242,62 @@ struct TimelineView: View {
     /// than by luck.
     private var headerHeight: CGFloat { headerLine + 16 }
 
+    /// A place line's line box, inside a day spent in more than one area.
+    /// Scaled for the same reason as `headerLine`.
+    @ScaledMetric(relativeTo: .footnote) private var areaLine: CGFloat = 16
+
+    /// What a place line costs, top padding to bottom. Declared for the same
+    /// reason as `headerHeight`: the layout measures the library with it.
+    private var areaHeaderHeight: CGFloat { areaLine + 12 }
+
+    /// One area of a day spent in more than one: where its tiles start among
+    /// the day's, how many, which of the day's areas it is, and its name.
+    struct DayArea: Equatable {
+        let area: Int
+        let name: String?
+        let start: Int
+        var count: Int
+    }
+
+    /// A day's tiles divided into the areas it was spent in, in order. One
+    /// unnamed run for a day with one area or none.
+    ///
+    /// Read off the tiles rather than the manifest's counts, so the runs add up
+    /// to exactly what the day draws. A photograph knows its area. A
+    /// placeholder takes the one the manifest's counts put it in. A photo
+    /// still on this phone takes the area of the tile before it.
+    static func areaRuns(for bucket: TimelineBucket, entries: [GridEntry]) -> [DayArea] {
+        guard let areas = bucket.areas, areas.count > 1 else {
+            return [DayArea(area: 0, name: nil, start: 0, count: entries.count)]
+        }
+        var placeholderArea: [Int] = []
+        for (index, area) in areas.enumerated() {
+            placeholderArea.append(contentsOf: repeatElement(index, count: max(area.count, 0)))
+        }
+        var runs: [DayArea] = []
+        var current = 0
+        for (offset, entry) in entries.enumerated() {
+            switch entry {
+            case .item(let item):
+                current = item.area ?? current
+            case .placeholder(let index):
+                current = placeholderArea.indices.contains(index)
+                    ? placeholderArea[index] : (placeholderArea.last ?? 0)
+            #if os(iOS)
+            case .pending:
+                break
+            #endif
+            }
+            if let last = runs.last, last.area == current {
+                runs[runs.count - 1].count += 1
+            } else {
+                let name = areas.indices.contains(current) ? areas[current].name : nil
+                runs.append(DayArea(area: current, name: name, start: offset, count: 1))
+            }
+        }
+        return runs.isEmpty ? [DayArea(area: 0, name: nil, start: 0, count: 0)] : runs
+    }
+
     /// Asks the loader to warm a day's thumbnails.
     ///
     /// Capped rather than the whole bucket: a day with six hundred photos would
@@ -2008,18 +2064,29 @@ struct TimelineView: View {
         // Read here, in the body, and handed on as values — the tiles and
         // headings are drawn in cells hosted outside it.
         let headingHeight = headerHeight
+        let areaHeight = areaHeaderHeight
         let libraryHeight = headerLine + 60
         // Grouped once per render, not once per day. See `entries(for:items:queued:)`.
         let queued = queuedByDay
         let days = Self.mergedBuckets(store, queued: queued)
         let sections = days.map { bucket in
-            TimelineCollection.Section(
-                bucket: bucket,
-                count: entryCount(
-                    for: bucket,
-                    items: store.items[bucket.key] ?? [],
-                    queued: queued[bucket.key] ?? []
+            let items = store.items[bucket.key] ?? []
+            let dayQueued = queued[bucket.key] ?? []
+            guard (bucket.areas?.count ?? 0) > 1 else {
+                return TimelineCollection.Section(
+                    bucket: bucket,
+                    count: entryCount(for: bucket, items: items, queued: dayQueued)
                 )
+            }
+            // A day spent in several areas is laid out area by area, which
+            // takes its tiles. Few days are, so building theirs here is cheap.
+            let all = entries(for: bucket, items: items, queued: dayQueued)
+            return TimelineCollection.Section(
+                bucket: bucket,
+                count: all.count,
+                areas: Self.areaRuns(for: bucket, entries: all).enumerated().map { index, run in
+                    TimelineCollection.Area(count: run.count, title: index == 0 ? nil : run.name)
+                }
             )
         }
 
@@ -2029,6 +2096,7 @@ struct TimelineView: View {
                 columns: columns,
                 spacing: spacing,
                 headerHeight: headingHeight,
+                areaHeaderHeight: areaHeight,
                 libraryHeaderHeight: store.total > 0 ? libraryHeight : 0,
                 // The same two margins the SwiftUI grid sets as content margins,
                 // for the same reasons: clear of the floating bar at the top,
@@ -2056,6 +2124,7 @@ struct TimelineView: View {
                     AnyView(cell(entry, size: size, dayItems: items, sweeps: false))
                 },
                 header: { AnyView(header($0, height: headingHeight)) },
+                areaHeader: { AnyView(areaHeader($0, height: areaHeight)) },
                 libraryHeader: { AnyView(gridFooter(store.total).frame(height: libraryHeight)) },
                 load: { key in
                     await store.loadBucket(key)
@@ -2186,16 +2255,27 @@ struct TimelineView: View {
                     ForEach(sections(store)) { bucket in
                         Section {
                             let items = store.items[bucket.key] ?? []
-                            PhotoGridSection(
-                                entries: entries(for: bucket, items: items),
-                                width: proxy.size.width,
-                                targetHeight: PhotoGridMetrics.targetRowHeight(
-                                    for: store.zoom
-                                ),
-                                spacing: spacing,
-                                columns: columns
-                            ) { entry, size in
-                                cell(entry, size: size, dayItems: items)
+                            let all = entries(for: bucket, items: items)
+                            // Area by area for a day spent in more than one,
+                            // each its own run of rows under a place line, so
+                            // a row never mixes two places.
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Self.areaRuns(for: bucket, entries: all), id: \.start) { run in
+                                    if run.start > 0, let name = run.name {
+                                        areaHeader(name)
+                                    }
+                                    PhotoGridSection(
+                                        entries: Array(all[run.start..<(run.start + run.count)]),
+                                        width: proxy.size.width,
+                                        targetHeight: PhotoGridMetrics.targetRowHeight(
+                                            for: store.zoom
+                                        ),
+                                        spacing: spacing,
+                                        columns: columns
+                                    ) { entry, size in
+                                        cell(entry, size: size, dayItems: items)
+                                    }
+                                }
                             }
                             // The scrubber's fine target: this day's rows,
                             // separate from its heading so a scrub can land
@@ -2719,6 +2799,31 @@ struct TimelineView: View {
         // headings did not: a section's rows have always known their own height,
         // and its heading was whatever the type happened to measure.
         .frame(height: height ?? headerHeight)
+    }
+
+    /// The line that opens each area of a day after its first: where the
+    /// photographs below it were taken. The day's heading names the first,
+    /// along with the rest.
+    ///
+    /// Quieter than the heading: a smaller size, secondary, no date. It labels
+    /// the photographs under it rather than starting anything new, so it sits
+    /// closer to them than to the ones above.
+    private func areaHeader(_ name: String, height: CGFloat? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: "mappin")
+                .imageScale(.small)
+            Text(name)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: height ?? areaHeaderHeight)
+        .accessibilityElement(children: .combine)
     }
 
     #if os(iOS)
