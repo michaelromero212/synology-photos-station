@@ -112,10 +112,11 @@ fingerprint it. The clones themselves are instant and take no space.
 
 ## When it goes wrong
 
-- **"Fatal error … Program crashed" with a backtrace** is how the server's
-  commands report a refusal today. The reason is the `[ WARNING ]` line above
-  it. Every check runs before the first write, so a run that stops this way
-  imported nothing.
+- **A refusal prints its reason as one `[ WARNING ]` line** and exits with
+  status 1. Every check runs before the first write, so a run that stops this
+  way imported nothing. A server image from before 2026-10-06 printed the
+  reason twice and then "Fatal error … Program crashed" with a backtrace; that
+  meant the same thing.
 - **"Couldn't make a reflink copy of …"** means the clone check failed. On this
   NAS, check the mount before anything else, and don't take the message's
   suggestion of `--mode copy` unless the clone fails outside the container too:
