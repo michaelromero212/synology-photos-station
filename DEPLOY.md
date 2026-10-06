@@ -25,6 +25,7 @@ path: a change is on `main` and needs to reach the NAS.
 | SSH alias | `nas` → `<nas-lan-ip>` (see below — it moves; `DEPLOY.local.md`) |
 | Stack | `/volume1/docker/framestation/` (compose, `.env`, `pgdata`, `blobs`) |
 | Media | `/volume1/FrameStation/` (shared libraries only) |
+| Clones | through a second mount of all of `/volume1` (see "Reflink works…" under Gotchas) |
 | Docker | `/usr/local/bin/docker` — **not on `PATH`** |
 | Health | `http://127.0.0.1:8080/health` on the NAS |
 | Public | `https://<nas-host>:8443` (`DEPLOY.local.md`) |
@@ -515,24 +516,43 @@ ln                  /volume1/docker/... /volume1/homes/...   → FAILED
 Each DSM shared folder is its own Btrfs subvolume, so hardlinks cannot cross
 between them — but reflinks can. `BrowseTree.link` tries reflink first, so tree
 entries share extents with the blob store and cost close to nothing on disk.
-That is the assumption the whole layout rests on: if a future DSM or volume
-change breaks reflink, `link` falls through to `copyItem` and every tree entry
-silently becomes a second full copy. It logs `browse tree: copied … this
-duplicates the file on disk` when that happens — worth grepping for after any
-volume work.
+That is the assumption the whole layout rests on.
 
-**That was measured on the host, and in the container it fails.** The server
-reaches `/data` and `/homes` through two separate mounts, and inside a container
-a clone between two separately mounted folders fails on this NAS, even on one
-volume. That was seen first in the 2026-10-06 import, where mounting `/volume1`
-once fixed it. Checked the same day: every tree entry was an empty file, 2,791
-of them, while `browse_entries.link_kind` said `reflink` for all.
-`cp --reflink=always` leaves an empty destination when the clone fails, and
-`BrowseTree.link` counted a file already at the path as placed. Photos were
-never at risk, because the app serves from the blob store. But the File Station
-tree held nothing, and a `rebuild` from it would recover nothing. The
-empty-file count in [MIGRATION.md](MIGRATION.md) § "Before any import" is the
-check; `link_kind` isn't.
+**On the host, that is. In a container a clone must also stay inside one
+mount.** DSM's kernel refuses a clone between two separately mounted folders,
+even on one volume, and the server reaches `/data` and `/homes` through two. The
+2026-10-06 import hit it first, and mounting `/volume1` once fixed that. The
+same day showed the tree had always hit it: every entry was an empty file, 2,791
+of them, while `browse_entries.link_kind` said `reflink` for all. GNU
+`cp --reflink=always` creates its destination before cloning into it and leaves
+it empty when the clone fails, and `link` then counted the file already at the
+path as placed. Photos were never at risk, because the app serves from the blob
+store. But the File Station tree held nothing, and a `rebuild` from it would
+have recovered nothing.
+
+What changed, so it can't recur:
+
+- **One mount for clones.** Compose also mounts all of `/volume1` at its own
+  path and names the blob store and the homes inside it
+  (`FRAMESTATION_CLONE_BLOB_ROOT`, `FRAMESTATION_CLONE_HOMES_ROOT`). Clones go
+  through those paths (`CloneRoute`). Everything else, and every path stored in
+  the database, still uses `/data` and `/homes`. The price is reach: the root
+  container can now see every shared folder.
+- **Nothing half-made at the real path.** `link` clones under a temporary name
+  and renames into place. If the clone fails it tries a hardlink, and never a
+  full copy. A copy per member of every shared photo would be hundreds of
+  gigabytes, and once a failed clone stopped leaving an empty file, that
+  fallback would have started running.
+- **A check before placing.** Each start, the tree links one small file into the
+  homes root first. Until that works it places nothing, and logs once:
+  `browse tree: … File Station copies are paused rather than made as full
+  copies`. When it works: `File Station copies can be made here`.
+- **Empty copies refill themselves.** Each sweep checks 500 entries, round and
+  round, and clones the photo over any empty file standing in for one. The log
+  says `browse tree: refilled N empty File Station copies`.
+
+The check that tells: the empty-file count in [MIGRATION.md](MIGRATION.md)
+§ "Before any import" should be 0. `link_kind` alone can't show this.
 
 Disk usage is one copy. Whether Synology's *per-user quota* accounting also
 counts shared extents once is not established; watch `homes` usage after the

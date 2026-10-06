@@ -79,7 +79,8 @@ struct ImportCommand: AsyncCommand {
         /// A copy-on-write clone. It's instant, takes no space until one side
         /// is edited, and leaves the source library exactly as it was. Needs
         /// the library and the blob store on one Btrfs volume, which on the NAS
-        /// they are; checked before anything is imported. The default, because
+        /// they are, reached through one mount (`CloneRoute`); checked before
+        /// anything is imported. The default, because
         /// importing a few hundred gigabytes shouldn't need a few hundred
         /// gigabytes free.
         case reflink
@@ -188,10 +189,18 @@ struct ImportCommand: AsyncCommand {
             console.warning("Editing a source file in place would silently change the stored asset.")
         }
 
+        // Through the volume mount compose provides, when it does, so the
+        // library and the blob store are one mount to the kernel. See
+        // `CloneRoute`.
+        let route = CloneRoute.fromEnvironment(
+            blobRoot: app.blobStore.root.path,
+            homesRoot: BrowseTree.Configuration.fromEnvironment().homesRoot
+        )
+
         // Proved on one file before an hour of hashing, not discovered as a
         // failure on every file after it.
         if mode == .reflink, let first = pending.first {
-            try await Self.checkReflink(from: first.url, store: app.blobStore)
+            try await Self.checkReflink(from: first.url, store: app.blobStore, route: route)
         }
 
         // --------------------------------------------------------------- import
@@ -263,7 +272,10 @@ struct ImportCommand: AsyncCommand {
                     // Always, because a row doesn't prove the blob store has
                     // the bytes (a rebuilt library keeps them in homes). A
                     // no-op when it does.
-                    try await place(candidate, sha: sha, ext: blobExtension, mode: mode, store: app.blobStore)
+                    try await place(
+                        candidate, sha: sha, ext: blobExtension, mode: mode,
+                        store: app.blobStore, route: route
+                    )
 
                     let assetID = try await insert(
                         candidate: candidate,
@@ -340,23 +352,18 @@ struct ImportCommand: AsyncCommand {
     /// Makes one reflink from the library into the blob store and removes it
     /// again, so a filesystem that can't clone between them stops the import
     /// before it starts.
-    static func checkReflink(from source: URL, store: BlobStore) async throws {
+    static func checkReflink(from source: URL, store: BlobStore, route: CloneRoute) async throws {
         let probe = store.root.appendingPathComponent(".reflink-check-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: probe) }
-        guard await reflink(source, to: probe) else {
+        guard await reflink(source, to: probe, route: route) else {
             throw ImportError.cannotReflink(source.path)
         }
     }
 
-    /// `cp --reflink=always`, which fails rather than quietly copying. macOS
-    /// spells it `-c` (clonefile), for running this against a dev library.
-    static func reflink(_ source: URL, to destination: URL) async -> Bool {
-        #if os(macOS)
-        let arguments = ["-c", source.path, destination.path]
-        #else
-        let arguments = ["--reflink=always", source.path, destination.path]
-        #endif
-        guard let result = try? await Shell.run("cp", arguments), result.status == 0 else {
+    /// A clone through `route`, with whatever a failed `cp` left behind
+    /// removed again.
+    static func reflink(_ source: URL, to destination: URL, route: CloneRoute) async -> Bool {
+        guard await route.clone(source.path, to: destination.path) else {
             try? FileManager.default.removeItem(at: destination)
             return false
         }
@@ -368,7 +375,8 @@ struct ImportCommand: AsyncCommand {
         sha: String,
         ext: String,
         mode: Mode,
-        store: BlobStore
+        store: BlobStore,
+        route: CloneRoute
     ) async throws {
         let fm = FileManager.default
         let destination = store.blobPath(sha256: sha, fileExtension: ext)
@@ -379,7 +387,7 @@ struct ImportCommand: AsyncCommand {
 
         switch mode {
         case .reflink:
-            guard await Self.reflink(candidate.url, to: destination) else {
+            guard await Self.reflink(candidate.url, to: destination, route: route) else {
                 throw ImportError.cannotReflink(candidate.url.path)
             }
         case .hardlink:

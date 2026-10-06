@@ -47,14 +47,16 @@ well and file every family photo in that person's personal library. Import
    ssh -t nas "sudo sh -c 'find /volume1/homes/*/Photos/Personal /volume1/homes/*/Photos/Shared -path \"*/@eaDir\" -prune -o -type f -size 0 -print 2>/dev/null | wc -l'"
    ```
 
-   **On 2026-10-06 every one was empty, 2,791 of 2,791.** The server reaches the
+   **On 2026-10-06 every one was empty, 2,791 of 2,791.** The server reached the
    blob store and the homes through two separate mounts, the arrangement that
    also failed the import's own clone check ([below](#the-import)). `cp` left an
-   empty file behind each time, and the tree counted it as placed. So the
-   database's `link_kind` said `reflink` for all of them, and it can't serve as
-   this check. No photo was affected, because the app serves from the blob
-   store. Only the File Station copies are hollow. Until that's fixed, whatever
-   is imported gets an empty File Station copy too.
+   empty file behind each time, and the tree counted it as placed, so the
+   database's `link_kind` said `reflink` for all of them. That's why this check
+   counts files instead. No photo was affected, because the app serves from the
+   blob store. The same day, clones began going through one mount of the whole
+   volume, and the server refills empty copies itself. Its log says
+   `browse tree: refilled N empty File Station copies` (DEPLOY.md, "Reflink
+   works…").
 4. **Dry run.** It walks and counts without hashing or writing, and its count is
    the one to trust. `du` overstates, because Synology keeps thumbnails in an
    `@eaDir` folder beside every photo: it said 316 GB for a Shared Space holding
@@ -71,21 +73,23 @@ it holds, a `space:` id and its owner. The `space:` id is what `--space` takes.
 
 ## The import
 
-This is how the Shared Space came in. Dry run first, then the same command
-without `--dry-run`:
+Dry run first, then the same command without `--dry-run`:
 
 ```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm -v /volume1:/volume1 -e FRAMESTATION_BLOB_ROOT=/volume1/docker/framestation server import --path /volume1/photo --space <space-id> --dry-run'
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path /volume1/photo --space <space-id> --dry-run'
 ```
 
-**Why all of `/volume1`, mounted once.** DSM's kernel won't clone a file between
-two separately mounted folders, even two on the same volume. The first attempt
-mounted the library on its own (`-v /volume1/photo:/import/photo:ro`), and the
-import's one-file clone check stopped it before anything was written. On the
-NAS itself the same clone worked, because there `/volume1` is a single mount. So
-the one-off container mounts `/volume1` once, and `FRAMESTATION_BLOB_ROOT`
-points the blob store, through that mount, at the files the server knows as
-`/data`. Near the top of the output: `blob root: /volume1/docker/framestation`.
+**Why it reads `/volume1/...` directly.** DSM's kernel won't clone a file
+between two separately mounted folders, even two on the same volume. The first
+attempt mounted the library on its own (`-v /volume1/photo:/import/photo:ro`),
+and the import's one-file clone check stopped it before anything was written.
+On the NAS itself the same clone worked, because there `/volume1` is a single
+mount. The compose file now mounts all of `/volume1` once, and the import
+clones into the blob store through that mount (`FRAMESTATION_CLONE_BLOB_ROOT`),
+so the library and the blob store are one mount to the kernel. The Shared Space
+went in before compose had that, so its run added the mount by hand:
+`-v /volume1:/volume1 -e FRAMESTATION_BLOB_ROOT=/volume1/docker/framestation`.
+Don't add those any more, since compose already mounts `/volume1`.
 
 **While it runs,** a progress line every 64 files gives the count, bytes, files
 per second and time left. Most of the time goes on reading every byte to
@@ -120,8 +124,9 @@ fingerprint it. The clones themselves are instant and take no space.
   reason twice and then "Fatal error … Program crashed" with a backtrace; that
   meant the same thing.
 - **"Couldn't make a reflink copy of …"** means the clone check failed. On this
-  NAS, check the mount before anything else, and don't take the message's
-  suggestion of `--mode copy` unless the clone fails outside the container too:
+  NAS, first check that the compose file in use mounts `/volume1` and sets
+  `FRAMESTATION_CLONE_BLOB_ROOT`, and that `--path` starts with `/volume1/`.
+  Fall back to `--mode copy` only if the clone fails outside the container too:
 
   ```bash
   ssh -t nas 'sudo cp --reflink=always "<a file under the source>" /volume1/docker/framestation/.reflink-test && echo "HOST REFLINK WORKS"; sudo rm -f /volume1/docker/framestation/.reflink-test'
@@ -187,7 +192,7 @@ For each person:
    at it in the app:
 
    ```bash
-   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm -v /volume1:/volume1 -e FRAMESTATION_BLOB_ROOT=/volume1/docker/framestation server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id>'
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id>'
    ```
 
    If it shows doubles, stop and work out why before the rest. The full run

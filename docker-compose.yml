@@ -44,6 +44,15 @@ services:
       # self-signed for the LAN address.
       FRAMESTATION_DSM_URL: ${FRAMESTATION_DSM_URL:-http://host.docker.internal:5000}
       FRAMESTATION_HOMES_ROOT: /homes
+      # The blob store and the homes again, as they appear inside the one mount
+      # of the whole volume below. A clone between them (every File Station
+      # copy, and every file the import brings in) goes through these paths,
+      # because DSM's kernel refuses a clone between two separately mounted
+      # folders even on one volume, and /data and /homes are two. Before these
+      # existed, every File Station copy on the NAS was an empty file (found
+      # in October 2026). Everything else uses /data and /homes.
+      FRAMESTATION_CLONE_BLOB_ROOT: ${FRAMESTATION_DATA:-/volume1/docker/framestation}
+      FRAMESTATION_CLONE_HOMES_ROOT: ${FRAMESTATION_HOMES:-/volume1/homes}
       # The §3a layout: photos are written to a real path a person can open in
       # File Station, and that file is the photo. Off, this runs the old
       # content-addressed model — storage_path stays NULL, every file is named
@@ -71,8 +80,11 @@ services:
     # cannot do. The image itself runs as vapor:vapor and is happy to; this
     # overrides it only because /volume1/homes demands it.
     #
-    # The exposure is bounded: the port is loopback-only behind DSM's reverse
-    # proxy, and the only paths mounted are the app's own volume and homes.
+    # The port is loopback-only behind DSM's reverse proxy. What's mounted is
+    # wider than it was: the whole volume, so clones work (see below), which
+    # means this root container can reach every shared folder, not only the
+    # app's own folder and the homes. That was the price of File Station copies
+    # that aren't empty or full duplicates.
     # Set FRAMESTATION_USER=vapor:vapor to decline — uploads still work, they
     # just stay in the blob store and never reach anyone's home directory.
     user: ${FRAMESTATION_USER:-0:0}
@@ -93,6 +105,11 @@ services:
       # space — hardlinks can't be used because Synology makes every shared
       # folder its own Btrfs subvolume.
       - ${FRAMESTATION_HOMES:-/volume1/homes}:/homes
+      # The whole volume, once, at its own path. A clone between two of the
+      # mounts above fails, so clones go through this one instead (see
+      # FRAMESTATION_CLONE_*). It also lets the import read a Synology library
+      # where it lies: `import --path /volume1/photo`.
+      - ${FRAMESTATION_VOLUME:-/volume1}:${FRAMESTATION_VOLUME:-/volume1}
     ports:
       # Loopback only. DSM's reverse proxy is the sole entry point, so the
       # container is never directly reachable from the LAN or the internet.

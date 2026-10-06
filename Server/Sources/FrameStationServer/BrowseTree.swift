@@ -62,8 +62,8 @@ enum BrowseTree {
         }
     }
 
-    /// How the copy was actually made. Recorded because a silent fallback to a
-    /// full copy would double disk usage without anyone noticing.
+    /// How the copy was actually made. `copy` is no longer made (see `link`),
+    /// but older rows may carry it.
     enum LinkKind: String {
         case reflink, hardlink, copy
     }
@@ -166,54 +166,95 @@ enum BrowseTree {
 
     // MARK: - Linking
 
-    /// Reflink, falling back only as far as the filesystem forces.
+    /// Why a File Station copy couldn't be made.
+    enum LinkError: Error, CustomStringConvertible {
+        /// Neither a clone nor a hardlink is possible between the two.
+        case unavailable(String)
+        case rename(String, Int32)
+
+        var description: String {
+            switch self {
+            case .unavailable(let path):
+                return "can't clone or hardlink into \(path)"
+            case .rename(let path, let code):
+                return "can't move a new copy into place at \(path): \(String(cString: strerror(code)))"
+            }
+        }
+    }
+
+    /// Reflink, or hardlink where that's all the filesystem allows, and never a
+    /// full copy.
     ///
-    /// Reported rather than silent: a fallback to `copy` means the tree is
-    /// costing real disk space, which is worth knowing before it fills a volume.
+    /// The file is made under a temporary name beside the destination, then
+    /// renamed into place, so a failure leaves nothing at the real path. It
+    /// used to leave an empty file: GNU `cp --reflink=always` creates its
+    /// destination before cloning into it, the clone failed on the NAS (see
+    /// `CloneRoute`), and the empty file was then counted as placed. Every
+    /// File Station copy there was empty while `browse_entries` called it a
+    /// reflink.
+    ///
+    /// There's no full-copy fallback. A copy of every shared photograph per
+    /// member is hundreds of gigabytes nobody chose, and now that a failed
+    /// clone no longer leaves an empty file behind, that fallback would have
+    /// started running. A missing File Station copy is logged, and made once
+    /// cloning works.
     @discardableResult
     static func link(
-        from source: String, to destination: String, logger: Logger
+        from source: String, to destination: String,
+        route: CloneRoute = CloneRoute(), logger: Logger
     ) async throws -> LinkKind {
         let manager = FileManager.default
-        try manager.createDirectory(
-            atPath: (destination as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true
-        )
-        if manager.fileExists(atPath: destination) { return .reflink }
+        let folder = (destination as NSString).deletingLastPathComponent
+        try manager.createDirectory(atPath: folder, withIntermediateDirectories: true)
 
-        // macOS clonefile and Linux --reflink spell this differently.
-        #if os(macOS)
-        let reflinkArguments = ["-c", source, destination]
-        #else
-        let reflinkArguments = ["--reflink=always", source, destination]
-        #endif
-        if let result = try? await Shell.run("cp", reflinkArguments), result.status == 0 {
-            return .reflink
-        }
+        // Something already there was placed earlier or is somebody's edit in
+        // File Station, and stays. The exception is an empty file standing in
+        // for a photo that isn't empty, which only a failed clone ever made.
+        let hollow = isHollow(destination, source: source)
+        if !hollow, manager.fileExists(atPath: destination) { return .reflink }
 
-        // Same subvolume after all, or a filesystem without CoW.
-        if (try? manager.linkItem(atPath: source, toPath: destination)) != nil {
+        let temporary = "\(folder)/.framestation-\(UUID().uuidString).tmp"
+        defer { try? manager.removeItem(atPath: temporary) }
+
+        let kind: LinkKind
+        if await route.clone(source, to: temporary) {
+            kind = .reflink
+        } else {
+            // Whatever `cp` created before the clone failed.
+            try? manager.removeItem(atPath: temporary)
+            // Same subvolume after all, or a filesystem without CoW.
+            guard (try? manager.linkItem(atPath: source, toPath: temporary)) != nil else {
+                throw LinkError.unavailable(destination)
+            }
             logger.notice("browse tree: hardlinked \(destination) — no reflink support")
-            return .hardlink
+            kind = .hardlink
         }
 
-        do {
-            try manager.copyItem(atPath: source, toPath: destination)
-        } catch let error as NSError
-            where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
-            // The file is already there — a previous sweep placed it, `cp`
-            // created it before failing, or two lanes raced. The destination is
-            // content-addressed (`deduplicated` suffixes different bytes by
-            // sha), so a file already at this path *is* the right file. Count it
-            // placed rather than throwing: throwing is what left every colliding
-            // file un-recorded and re-tried each 20-second sweep, the 516 flood
-            // that never converges under a big batch.
-            return .reflink
+        if hollow {
+            // Over the empty file in one step.
+            guard rename(temporary, destination) == 0 else {
+                throw LinkError.rename(destination, errno)
+            }
+        } else {
+            do {
+                try manager.moveItem(atPath: temporary, toPath: destination)
+            } catch let error as NSError
+                where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+                // Something arrived at the path in the meantime, and it stays.
+                return .reflink
+            }
         }
-        logger.warning(
-            "browse tree: copied \(destination) — this duplicates the file on disk"
-        )
-        return .copy
+        return kind
+    }
+
+    /// An empty file at `path` standing in for a photo that isn't empty.
+    static func isHollow(_ path: String, source: String) -> Bool {
+        let manager = FileManager.default
+        guard let size = (try? manager.attributesOfItem(atPath: path))?[.size] as? NSNumber,
+              size.int64Value == 0,
+              let sourceSize = (try? manager.attributesOfItem(atPath: source))?[.size] as? NSNumber
+        else { return false }
+        return sourceSize.int64Value > 0
     }
 
     /// Hands the file to its DSM owner so it is theirs in File Station, not
@@ -243,10 +284,21 @@ actor BrowseTreeWorker {
     /// they are, and not asked about again until the server restarts, so a
     /// few of them can't hold up the rest.
     private var unmovable: Set<UUID> = []
+    private let route: CloneRoute
+    /// Whether a File Station copy can be made here at all. Nil until checked.
+    private var canLink: Bool?
+    /// How far `refillHollow` has got through `browse_entries`, by id.
+    private var refillCursor: UUID?
+    /// Empty copies `refillHollow` couldn't refill, left until the server
+    /// restarts so one failure doesn't repeat every sweep.
+    private var unrefillable: Set<UUID> = []
 
     init(app: Application, configuration: BrowseTree.Configuration) {
         self.app = app
         self.configuration = configuration
+        self.route = CloneRoute.fromEnvironment(
+            blobRoot: app.blobStore.root.path, homesRoot: configuration.homesRoot
+        )
     }
 
     func start() {
@@ -301,9 +353,121 @@ actor BrowseTreeWorker {
     private func sweep() async {
         let sql = app.sql
         await relocatePersonal(on: sql)
-        await placeMissing(on: sql)
+        if await linkingWorks() {
+            await refillHollow(on: sql)
+            await placeMissing(on: sql)
+        }
         await removeStale(on: sql)
     }
+
+    /// Proves one File Station copy can be made before trying hundreds.
+    ///
+    /// A small file in the blob store is linked into the homes root the way a
+    /// photo would be, then both are removed. Until that works, nothing is
+    /// placed or refilled, and one line in the log says why, instead of a
+    /// failure per photo every sweep. It's checked each sweep until it works,
+    /// then trusted, because what decides it (the mounts and the route) only
+    /// changes with a restart. Relocation and withdrawal carry on regardless:
+    /// a rename needs no clone, and removing a copy someone is no longer
+    /// entitled to can't wait.
+    private func linkingWorks() async -> Bool {
+        if canLink == true { return true }
+
+        let manager = FileManager.default
+        let probe = app.blobStore.root
+            .appendingPathComponent(".link-check-\(UUID().uuidString)").path
+        let target = "\(configuration.homesRoot)/.framestation-link-check-\(UUID().uuidString)"
+        defer {
+            try? manager.removeItem(atPath: probe)
+            try? manager.removeItem(atPath: target)
+        }
+        var works = false
+        if manager.createFile(atPath: probe, contents: Data("FrameStation link check\n".utf8)) {
+            works = (try? await BrowseTree.link(
+                from: probe, to: target, route: route, logger: app.logger
+            )) != nil
+        }
+
+        if works {
+            app.logger.notice(canLink == false
+                ? "browse tree: File Station copies can be made again"
+                : "browse tree: File Station copies can be made here")
+        } else if canLink != false {
+            app.logger.error("""
+                browse tree: can't clone or hardlink from the blob store into \
+                \(configuration.homesRoot), so File Station copies are paused rather \
+                than made as full copies. On a Synology, compose mounts the volume once \
+                and sets FRAMESTATION_CLONE_BLOB_ROOT and FRAMESTATION_CLONE_HOMES_ROOT; \
+                see DEPLOY.md.
+                """)
+        }
+        canLink = works
+        return works
+    }
+
+    /// Re-makes File Station copies that are empty files.
+    ///
+    /// Every copy on the NAS was one until clones went through a single mount
+    /// (see `BrowseTree.link`). This walks every entry, 500 a sweep and then
+    /// round again, and clones the photo over any empty file standing in for
+    /// one that isn't. It keeps the same path and the same row. A copy
+    /// somebody deleted stays deleted, and one with content is never touched.
+    private func refillHollow(on sql: any SQLDatabase) async {
+        struct Row: Decodable {
+            let id: UUID
+            let path: String
+            let sha256: String
+            let blobExt: String
+            let dsmUID: Int?
+        }
+        do {
+            let rows = try await sql.raw("""
+                SELECT be.id, be.path, a.sha256, a.blob_ext AS "blobExt",
+                       u.dsm_uid AS "dsmUID"
+                FROM browse_entries be
+                JOIN space_assets sa ON sa.id = be.space_asset_id
+                JOIN assets a ON a.id = sa.asset_id
+                JOIN users u ON u.id = be.user_id
+                WHERE be.id > \(bind: refillCursor ?? Self.beforeEveryID)
+                  AND sa.deleted_at IS NULL
+                ORDER BY be.id
+                LIMIT 500
+                """).all(decoding: Row.self)
+            refillCursor = rows.count < 500 ? nil : rows.last?.id
+
+            var refilled = 0
+            for row in rows where !unrefillable.contains(row.id) {
+                let source = app.blobStore.blobPath(
+                    sha256: row.sha256, fileExtension: row.blobExt
+                ).path
+                guard BrowseTree.isHollow(row.path, source: source) else { continue }
+                do {
+                    let kind = try await BrowseTree.link(
+                        from: source, to: row.path, route: route, logger: app.logger
+                    )
+                    if let uid = row.dsmUID {
+                        await BrowseTree.chown(row.path, uid: uid, logger: app.logger)
+                    }
+                    try await sql.raw("""
+                        UPDATE browse_entries SET link_kind = \(bind: kind.rawValue)
+                        WHERE id = \(bind: row.id)
+                        """).run()
+                    refilled += 1
+                } catch {
+                    unrefillable.insert(row.id)
+                    app.logger.warning("browse tree: could not refill \(row.path): \(error)")
+                }
+            }
+            if refilled > 0 {
+                app.logger.info("browse tree: refilled \(refilled) empty File Station copies")
+            }
+        } catch {
+            app.logger.error("browse tree refill failed: \(String(reflecting: error))")
+        }
+    }
+
+    /// Sorts before every real id, to start a walk of `browse_entries`.
+    private static let beforeEveryID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     /// Moves personal copies placed loose in `Photos/YYYY/MM` into
     /// `Photos/Personal/YYYY/MM`, where `destinations` now puts them.
@@ -546,7 +710,7 @@ actor BrowseTreeWorker {
                 // at IMG_0001. Suffix rather than overwrite.
                 let destination = Self.deduplicated(intended, sha256: row.sha256)
                 let kind = try await BrowseTree.link(
-                    from: source.path, to: destination, logger: app.logger
+                    from: source.path, to: destination, route: route, logger: app.logger
                 )
                 if let uid = recipient.dsmUID {
                     await BrowseTree.chown(destination, uid: uid, logger: app.logger)

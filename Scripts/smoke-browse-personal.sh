@@ -1,9 +1,14 @@
 #!/bin/bash
-# The File Station tree's Personal folder. New personal photos land in
-# Photos/Personal/YYYY/MM. Copies placed loose in Photos/YYYY/MM before that
-# move there by rename, and the folders they leave go once they're empty
-# (Synology's @eaDir cache allowed for). A person's own files are never
-# touched, and shared photos stay in Photos/Shared.
+# The File Station tree's Personal folder, and how its copies are made. New
+# personal photos land in Photos/Personal/YYYY/MM. Copies placed loose in
+# Photos/YYYY/MM before that move there by rename, and the folders they leave
+# go once they're empty (Synology's @eaDir cache allowed for). A person's own
+# files are never touched, and shared photos stay in Photos/Shared.
+#
+# Copies are clones made through FRAMESTATION_CLONE_*, the single-mount route
+# the NAS needs. An empty copy, which is what a failed clone used to leave, is
+# refilled in place. When nothing can be linked at all the tree pauses rather
+# than making full copies, and a clone that fails falls back to a hardlink.
 #
 # Runs its own server against its own database and a fake homes root, because
 # the tree is only written with FRAMESTATION_BROWSE_TREE=1 and this rearranges
@@ -15,7 +20,8 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 PGHOST=127.0.0.1; PGPORT=55432; PGUSER=framestation; DB=framestation_browse
 PORT=8097; API="http://127.0.0.1:$PORT"
-ROOT="$SCRATCH/browse"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/homes" "$ROOT/files"
+ROOT="$SCRATCH/browse"; chmod -R u+w "$ROOT" 2>/dev/null; rm -rf "$ROOT"
+mkdir -p "$ROOT/blobroot" "$ROOT/homes" "$ROOT/files"
 # Resolved, because paths are compared as recorded: on macOS /tmp is a symlink.
 ROOT=$(cd "$ROOT" && pwd -P)
 HOMES="$ROOT/homes"
@@ -45,7 +51,10 @@ serve(){ # $1: browse tree 0 or 1
   echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1
 }
 stop(){ kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null; }
-trap stop EXIT
+trap 'chmod 755 "$HOMES" 2>/dev/null; stop' EXIT
+sha(){ shasum -a 256 < "$1" | awk '{print $1}'; }
+kind_of(){ q "SELECT string_agg(DISTINCT be.link_kind, ',') FROM browse_entries be
+              JOIN space_assets sa ON sa.id = be.space_asset_id WHERE sa.asset_id IN ($1)"; }
 
 # upload <space> <name> <width> <capturedAt> → asset id
 upload(){
@@ -77,14 +86,17 @@ PC=$(upload "$SP" IMG_C.jpg 303 2023-03-02T12:00:00Z)
 PD=$(upload "$SP" IMG_D.jpg 304 2022-01-05T12:00:00Z)
 PE=$(upload "$SP" IMG_E.jpg 305 2021-07-04T12:00:00Z)
 PS=$(upload "$SHARED" IMG_S.jpg 306 2024-06-01T12:00:00Z)
+PF=$(upload "$SP" IMG_F.jpg 307 2020-02-02T12:00:00Z)
+PG=$(upload "$SP" IMG_G.jpg 308 2019-09-09T12:00:00Z)
 for _ in $(seq 1 60); do [ "$(q "SELECT count(*) FROM assets WHERE derived_at IS NULL")" = "0" ] && break; sleep 1; done
 stop
 
 # A DSM account, so the tree has a home to write into.
 q "UPDATE users SET dsm_username = 'tester' WHERE id = '$USER'" >/dev/null
 P="$HOMES/tester/Photos"
-legacy(){ # asset id, path the old layout gave it, write the file there or not
+legacy(){ # asset id, path the old layout gave it, write the file there: file, hollow or nofile
   [ "$3" = "file" ] && { mkdir -p "$(dirname "$2")"; cp "$ROOT/files/$(basename "$2")" "$2"; }
+  [ "$3" = "hollow" ] && { mkdir -p "$(dirname "$2")"; : > "$2"; }
   q "INSERT INTO browse_entries (space_asset_id, user_id, path, link_kind)
      SELECT id, '$USER', '$2', 'reflink' FROM space_assets WHERE asset_id = '$1' AND space_id = '$SP'" >/dev/null
 }
@@ -96,12 +108,21 @@ echo "not a photo the app placed" > "$P/2023/notes.txt"
 # Moved by an earlier sweep that stopped before writing its row.
 mkdir -p "$P/Personal/2022/01" && cp "$ROOT/files/IMG_D.jpg" "$P/Personal/2022/01/IMG_D.jpg"
 legacy "$PD" "$P/2022/01/IMG_D.jpg" nofile
+# What every copy on the NAS was: the empty file a failed clone left behind,
+# recorded as placed.
+legacy "$PF" "$P/Personal/2020/02/IMG_F.jpg" hollow
 
-echo "After: the server with the tree on"
+echo "After: the server with the tree on, cloning through a volume route"
+# The same folders reached by another path, as /volume1/... reaches /data and
+# /homes in the container.
+VOLUME="$SCRATCH/browse-volume"; ln -sfn "$ROOT" "$VOLUME"
+export FRAMESTATION_CLONE_BLOB_ROOT="$VOLUME/blobroot"
+export FRAMESTATION_CLONE_HOMES_ROOT="$VOLUME/homes"
 serve 1
 for _ in $(seq 1 60); do
   [ -e "$P/Personal/2021/07/IMG_E.jpg" ] && [ -e "$P/Shared/Family Shared/2024/06/IMG_S.jpg" ] \
-    && [ -e "$P/Personal/2024/05/IMG_A.jpg" ] && break
+    && [ -e "$P/Personal/2024/05/IMG_A.jpg" ] && [ -s "$P/Personal/2020/02/IMG_F.jpg" ] \
+    && [ -e "$P/Personal/2019/09/IMG_G.jpg" ] && break
   sleep 1
 done
 sleep 1
@@ -126,6 +147,41 @@ check "every personal row points into Personal" "0" \
 check "Photos holds Personal, Shared, and the folder with somebody's file" "2023 Personal Shared" \
   "$(ls "$P" | sort | tr '\n' ' ' | sed 's/ $//')"
 check "the move is said in the log" "1" "$(grep -c 'moved 3 personal photos into Photos/Personal' "$ROOT/server.log")"
+check "the link check passes, and says so" "1" "$(grep -c 'File Station copies can be made here' "$ROOT/server.log")"
+check "an empty copy is refilled with the photo" "$(sha "$ROOT/files/IMG_F.jpg")" "$(sha "$P/Personal/2020/02/IMG_F.jpg")"
+check "in place, on the same row" "1" \
+  "$(q "SELECT count(*) FROM browse_entries be JOIN space_assets sa ON sa.id = be.space_asset_id
+        WHERE sa.asset_id = '$PF' AND be.path = '$P/Personal/2020/02/IMG_F.jpg'")"
+check "and the refill is said in the log" "1" "$(grep -c 'refilled 1 empty File Station copies' "$ROOT/server.log")"
+check "new copies through the route are clones" "reflink" "$(kind_of "'$PE', '$PS', '$PG'")"
+check "holding the photo" "$(sha "$ROOT/files/IMG_G.jpg")" "$(sha "$P/Personal/2019/09/IMG_G.jpg")"
+check "no empty copies anywhere" "0" "$(find "$P" -type f -size 0 | wc -l | tr -d ' ')"
+check "no temporary files left behind" "0" "$(find "$HOMES" -name '.framestation-*' | wc -l | tr -d ' ')"
+stop
+
+echo "Paused: nothing can be linked into the homes"
+# A photo with no copy yet: G's, taken away again.
+rm "$P/Personal/2019/09/IMG_G.jpg"
+q "DELETE FROM browse_entries WHERE space_asset_id IN (SELECT id FROM space_assets WHERE asset_id = '$PG')" >/dev/null
+chmod 555 "$HOMES"
+serve 1
+for _ in $(seq 1 30); do grep -q 'File Station copies are paused' "$ROOT/server.log" && break; sleep 0.5; done
+sleep 1
+check "it says so once, rather than failing for every photo" "1" \
+  "$(grep -c 'File Station copies are paused' "$ROOT/server.log")"
+gone "and makes no copy, not even a full one" "$P/Personal/2019/09/IMG_G.jpg"
+check "nor records one" "" "$(kind_of "'$PG'")"
+stop
+chmod 755 "$HOMES"
+
+echo "Fallback: a route that can't clone"
+export FRAMESTATION_CLONE_HOMES_ROOT="$ROOT/nowhere"
+serve 1
+for _ in $(seq 1 30); do [ -e "$P/Personal/2019/09/IMG_G.jpg" ] && break; sleep 0.5; done
+sleep 1
+check "falls back to a hardlink" "hardlink" "$(kind_of "'$PG'")"
+check "holding the photo" "$(sha "$ROOT/files/IMG_G.jpg")" "$(sha "$P/Personal/2019/09/IMG_G.jpg")"
+check "still nothing temporary left" "0" "$(find "$HOMES" -name '.framestation-*' | wc -l | tr -d ' ')"
 
 echo
 echo "$PASS passed, $FAIL failed"

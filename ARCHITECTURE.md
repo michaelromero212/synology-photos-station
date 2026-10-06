@@ -243,7 +243,11 @@ These are **reflinks** (`cp --reflink`), not hardlinks. Measured on the DS920+:
 `/volume1/FrameStation` and `/volume1/homes` report different device numbers
 (49 vs 40) because Synology makes every shared folder its own Btrfs subvolume,
 and **hardlinks cannot cross subvolumes** — `ln` fails with `Invalid cross-device
-link`. Reflinks can, and were verified working there.
+link`. Reflinks can, and were verified working there — on the host. Inside the
+server's container a clone must also stay within a single mount, which the
+blob store and the homes, mounted separately, are not. So clones go through one
+extra mount of the whole volume (`CloneRoute`, DEPLOY.md). Until that existed,
+in October 2026, every copy in the tree was an empty file.
 
 Reflinks are the better primitive anyway: they share extents so the space cost
 is near zero, but they diverge on write. With a hardlink, editing the copy in
@@ -466,8 +470,11 @@ Btrfs subvolumes at all (§4), reflinks cost nothing until written, and they
 diverge on write — someone editing a photo in File Station gets their own copy
 instead of silently corrupting the canonical blob every other member reads.
 
-The fallback chain is reflink → hardlink → copy, and it *logs* when it degrades:
-a silent fall back to a full copy would quietly double disk usage.
+The fallback chain is reflink → hardlink, and never a full copy, which would
+quietly double disk usage. When neither can be made, the tree pauses and says so
+once. Each copy is made under a temporary name and renamed into place, so a
+failure leaves nothing behind. It once left an empty file, counted as placed,
+for every copy on the NAS. The tree now refills any empty copy it finds.
 
 Built after derivation, not at commit, because the YYYY/MM folder comes from the
 capture date and that only exists once the media probe has read the EXIF.

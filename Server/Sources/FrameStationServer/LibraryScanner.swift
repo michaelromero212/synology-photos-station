@@ -175,8 +175,10 @@ enum ImportError: Error, CustomStringConvertible {
             return "Unknown --mode \(mode). Use reflink (the default), copy or hardlink."
         case .cannotReflink(let path):
             return "Couldn't make a reflink copy of \(path), so the library and the blob "
-                + "store can't share storage here. Nothing was imported. Re-run with --mode "
-                + "copy to copy the bytes instead, which needs free space equal to the library."
+                + "store can't share storage here. Nothing was imported. On a Synology, both "
+                + "must be reached through the one /volume1 mount the compose file provides "
+                + "(see MIGRATION.md). Only if a clone fails on the NAS itself too, re-run with "
+                + "--mode copy, which needs free space equal to the library."
         case .unreadableRoot(let path):
             return "Cannot read \(path)."
         case .noSuchSpace(let id):

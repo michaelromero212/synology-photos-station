@@ -215,16 +215,15 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 docker compose exec server ./FrameStationServer spaces
 ```
 
-The compose file doesn't mount the library being imported, and nothing should
-need it after the import. So the import runs in a one-off container. On a
-Synology that container mounts all of `/volume1` once, because DSM's kernel
-won't reflink between two separately mounted folders, even on one volume.
-`FRAMESTATION_BLOB_ROOT` then reaches the blob store through that same mount.
-For example, to bring Synology Photos' Shared Space (the `photo` shared folder)
-into Family Shared:
+The import runs in a one-off container. The compose file mounts all of
+`/volume1` once, so it reads a library where it lies, and it clones into the blob
+store through that same mount (`FRAMESTATION_CLONE_BLOB_ROOT`). DSM's kernel
+won't reflink between two separately mounted folders, even on one volume. For
+example, to bring Synology Photos' Shared Space (the `photo` shared folder) into
+Family Shared:
 
 ```bash
-docker compose run --rm -v /volume1:/volume1 -e FRAMESTATION_BLOB_ROOT=/volume1/docker/framestation server import --path /volume1/photo --space <space-id> --dry-run
+docker compose run --rm server import --path /volume1/photo --space <space-id> --dry-run
 ```
 
 [MIGRATION.md](MIGRATION.md) is the full runbook for moving Synology Photos'
