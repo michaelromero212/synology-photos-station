@@ -16,8 +16,9 @@ ports, the image, `127.0.0.1`.
 > paste them back into this file, and do not "helpfully" fill them in.
 
 First-time setup of a fresh box is a different job — see
-[README.md](README.md) § "First-time setup". This file is the routine path:
-a change is on `main` and needs to reach the NAS.
+[README.md](README.md) § "First-time setup". Moving media in from Synology
+Photos is another — see [MIGRATION.md](MIGRATION.md). This file is the routine
+path: a change is on `main` and needs to reach the NAS.
 
 | | |
 |---|---|
@@ -519,6 +520,13 @@ change breaks reflink, `link` falls through to `copyItem` and every tree entry
 silently becomes a second full copy. It logs `browse tree: copied … this
 duplicates the file on disk` when that happens — worth grepping for after any
 volume work.
+
+**That was measured on the host, not in the container.** The 2026-10-06 import
+found that inside a container DSM's kernel won't clone between two separately
+mounted folders, even on one volume, and the server container reaches `/data`
+and `/homes` through two such mounts. Until the `link_kind` count in
+[MIGRATION.md](MIGRATION.md) § "Before any import" has been run, whether tree
+entries really are reflinks is an open question.
 
 Disk usage is one copy. Whether Synology's *per-user quota* accounting also
 counts shared extents once is not established; watch `homes` usage after the
