@@ -222,7 +222,7 @@ One DSM shared folder, one service account. No per-user folders.
       thumb-256.heic
       thumb-512.heic
       preview-2048.heic               ← lazy
-      poster.jpg                      ← video first frame
+      poster.jpg                      ← video: sharpest of its opening frames (Derivatives.extractPoster)
       hls/                            ← lazy, LRU-evictable
   incoming/<uploadSessionId>/         ← upload.data, each chunk written in place
   browse/<user>/2026/07/IMG_4821.heic ← hardlinks, zero extra space

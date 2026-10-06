@@ -222,7 +222,12 @@ enum MetadataBackfill {
                     FROM assets a
                     JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
                     WHERE a.derived_at IS NULL
-                       OR a.thumb_version < \(bind: Derivatives.thumbnailVersion)
+                       -- Videos have their own version, so a change to how
+                       -- posters are picked rebuilds only the videos.
+                       OR (a.media_type = 'video'
+                           AND a.thumb_version < \(bind: Derivatives.videoThumbnailVersion))
+                       OR (a.media_type <> 'video'
+                           AND a.thumb_version < \(bind: Derivatives.thumbnailVersion))
                     LIMIT 5000
                 )
                 INSERT INTO derivation_jobs (asset_id, kind)

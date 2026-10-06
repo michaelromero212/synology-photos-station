@@ -130,23 +130,33 @@ actor DerivationWorker {
                 UPDATE derivation_jobs
                 SET state = 'running', started_at = now(), attempts = attempts + 1
                 WHERE id = (
-                    SELECT id FROM derivation_jobs
-                    WHERE state = 'pending'
-                       OR (state = 'failed' AND attempts < 3)
+                    SELECT j.id FROM derivation_jobs j
+                    JOIN assets a ON a.id = j.asset_id
+                    WHERE j.state = 'pending'
+                       OR (j.state = 'failed' AND j.attempts < 3)
                        -- Reclaim jobs abandoned mid-flight. Without this a
                        -- worker that dies while processing leaves the row in
                        -- 'running' forever and nothing ever picks it up again.
                        -- 15 minutes is comfortably longer than the longest
                        -- subprocess timeout.
-                       OR (state = 'running'
-                           AND started_at < now() - interval '15 minutes'
-                           AND attempts < 3)
+                       OR (j.state = 'running'
+                           AND j.started_at < now() - interval '15 minutes'
+                           AND j.attempts < 3)
                     -- Thumbnails first: they are what someone watching the grid
                     -- is waiting on, so a burst of uploads (and the exif-dump
                     -- backfill sharing this queue) fills tiles before it spends
                     -- lanes on the deep metadata behind them.
-                    ORDER BY (kind = 'thumbnails') DESC, created_at
-                    FOR UPDATE SKIP LOCKED
+                    --
+                    -- And among those, a photo with no thumbnail yet before one
+                    -- being rebuilt. A rebuild re-pends a job that keeps its
+                    -- old created_at, so oldest-first alone put a library-wide
+                    -- rebuild (every video's poster, say) ahead of whatever
+                    -- somebody uploads while it runs, leaving their new photos
+                    -- gray until the whole rebuild had finished.
+                    ORDER BY (j.kind = 'thumbnails') DESC,
+                             (a.derived_at IS NULL) DESC,
+                             j.created_at
+                    FOR UPDATE OF j SKIP LOCKED
                     LIMIT 1
                 )
             RETURNING id, asset_id AS "assetID", kind
@@ -227,7 +237,7 @@ actor DerivationWorker {
                                 width         = COALESCE(width, \(bind: width)),
                                 height        = COALESCE(height, \(bind: height)),
                                 derived_at    = now(),
-                                thumb_version = \(bind: Derivatives.thumbnailVersion)
+                                thumb_version = \(bind: Derivatives.thumbnailVersion(for: mediaType))
                             WHERE id = \(bind: assetID)
                             """).run()
 

@@ -25,6 +25,17 @@ enum Derivatives {
     /// See `exportProfile`.
     static let thumbnailVersion = 3
 
+    /// The same, for videos, whose thumbnails come from a poster frame. It has
+    /// its own number so a better poster rebuilds the videos and leaves every
+    /// photo alone.
+    /// v4: the poster is the sharpest of a few early frames, not whatever was
+    /// on screen one second in. See `extractPoster`.
+    static let videoThumbnailVersion = 4
+
+    static func thumbnailVersion(for mediaType: MediaType) -> Int {
+        mediaType == .video ? videoThumbnailVersion : thumbnailVersion
+    }
+
     /// The widest aspect a thumbnail is sized for. Past this a panorama would
     /// turn into an enormous strip for no gain — the square grid only ever shows
     /// its center — so the short edge is allowed to fall a little below target.
@@ -92,8 +103,14 @@ enum Derivatives {
         let imageSource: URL
         if mediaType == .video {
             let poster = directory.appendingPathComponent("poster.jpg")
-            try await extractPoster(from: blob, to: poster)
+            try await extractPoster(from: blob, to: poster, logger: logger)
             imageSource = poster
+            // The full-screen preview was rendered from the old poster, and
+            // `makePreview` keeps whatever it finds. Removed, it's rebuilt
+            // from the new one the next time someone opens the video.
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent("preview-\(previewSize).jpg")
+            )
         } else {
             imageSource = blob
         }
@@ -341,28 +358,169 @@ enum Derivatives {
         return output?.stdoutText.contains("video") == true
     }
 
-    /// Seeks a little way in before grabbing the frame — the first frame of a
-    /// phone video is very often black or mid-autoexposure.
-    private static func extractPoster(from video: URL, to destination: URL) async throws {
-        let seek = "00:00:01"
-        do {
-            try await Shell.runChecked(
-                "ffmpeg",
-                ["-y", "-ss", seek, "-i", video.path, "-frames:v", "1",
-                 "-q:v", "3", destination.path],
-                timeout: 180
-            )
-        } catch {
-            // Clip shorter than the seek point; fall back to the first frame.
-            try await Shell.runChecked(
-                "ffmpeg",
-                ["-y", "-i", video.path, "-frames:v", "1", "-q:v", "3", destination.path],
-                timeout: 180
-            )
+    // MARK: - Poster frame
+
+    /// Where in a video its thumbnail frame is looked for, in seconds.
+    ///
+    /// Only the opening seconds, so the thumbnail still shows how the video
+    /// begins, as Apple's does. One second in is among them. It used to be
+    /// the only frame looked at, and it stays the choice unless another is
+    /// clearly sharper, so a poster that was fine doesn't change for nothing.
+    static let posterCandidates: [Double] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+    static let posterBaseline = 1.0
+
+    /// How much sharper the sharpest frame may measure while another still
+    /// counts as about as sharp. Real motion blur measures several times
+    /// softer; this only keeps measurement noise from swapping one good frame
+    /// for another.
+    static let posterSharperBy = 1.25
+
+    /// The side of the gray square each candidate is measured at. About the
+    /// size a grid tile shows, so sharpness is judged at the scale anyone
+    /// will see it, and finer blur that no tile would show doesn't count.
+    private static let posterSampleSide = 384
+
+    /// Picks and writes a video's poster: the sharpest of a few early frames
+    /// that isn't black, blown out or blank.
+    ///
+    /// The first frame of a phone video is very often black or still
+    /// adjusting its exposure, so the start was never used. A fixed second in
+    /// is often mid-pan or mid-motion, though, and made a smeared grid tile.
+    /// Measuring a handful costs a few seconds of background work per video.
+    static func extractPoster(
+        from video: URL, to destination: URL, logger: Logger? = nil
+    ) async throws {
+        let chosen = await posterTime(for: video)
+        if let chosen, chosen != posterBaseline, let logger {
+            logger.info("""
+                derive \(video.deletingPathExtension().lastPathComponent.prefix(8)): \
+                poster from \(chosen)s
+                """)
         }
-        guard FileManager.default.fileExists(atPath: destination.path) else {
-            throw DerivativeError.posterFailed(video.lastPathComponent)
+
+        // The chosen frame, else one second in as before, else the very first
+        // frame, which every clip has.
+        for time in [chosen ?? posterBaseline, nil] {
+            try? FileManager.default.removeItem(at: destination)
+            let seek = time.map { ["-ss", String(format: "%.3f", $0)] } ?? []
+            let written = (try? await Shell.runChecked(
+                "ffmpeg",
+                ["-y"] + seek + ["-i", video.path, "-frames:v", "1", "-q:v", "3", destination.path],
+                timeout: 180
+            )) != nil
+            // Not just present: a seek past the end can leave an empty file.
+            let size = (try? FileManager.default.attributesOfItem(
+                atPath: destination.path
+            ))?[.size] as? NSNumber
+            if written, let size, size.int64Value > 0 { return }
         }
+        throw DerivativeError.posterFailed(video.lastPathComponent)
+    }
+
+    /// When to take the poster from, or nil if no frame could be measured.
+    static func posterTime(for video: URL) async -> Double? {
+        let length = await duration(of: video)
+        var times = posterCandidates.filter { time in length.map { time < $0 - 0.1 } ?? true }
+        // Too short for any of them: its start is all there is.
+        if times.isEmpty { times = [0] }
+
+        var samples: [FrameSample] = []
+        for time in times {
+            if let sample = await sample(video, at: time) { samples.append(sample) }
+        }
+        return choosePosterTime(samples)
+    }
+
+    /// Among the usable frames (every frame, if none is), those about as sharp
+    /// as the sharpest: the one at `posterBaseline` if it's among them, since
+    /// that's the poster it had before, and otherwise the earliest, to stay
+    /// close to how the video starts.
+    static func choosePosterTime(_ samples: [FrameSample]) -> Double? {
+        let usable = samples.filter(\.isUsable)
+        let pool = usable.isEmpty ? samples : usable
+        guard let sharpest = pool.map(\.sharpness).max() else { return nil }
+        let sharpEnough = pool.filter { $0.sharpness * posterSharperBy >= sharpest }
+        if sharpEnough.contains(where: { $0.time == posterBaseline }) { return posterBaseline }
+        return sharpEnough.min(by: { $0.time < $1.time })?.time
+    }
+
+    /// One candidate frame, measured.
+    struct FrameSample {
+        let time: Double
+        /// Mean brightness, 0 to 255.
+        let brightness: Double
+        /// How far brightness strays from that mean. Near zero for a blank or
+        /// solid frame.
+        let contrast: Double
+        /// Variance of the Laplacian: how much fine edge detail there is. A
+        /// smeared or out-of-focus frame scores low, and so does a dim one.
+        let sharpness: Double
+
+        /// Not black, not blown out, not blank.
+        var isUsable: Bool { brightness >= 24 && brightness <= 245 && contrast >= 6 }
+
+        /// From a `side` × `side` grayscale image, one byte per pixel.
+        init(time: Double, gray: [UInt8], side: Int) {
+            self.time = time
+            let count = Double(gray.count)
+            var sum = 0.0, squares = 0.0
+            for value in gray {
+                let v = Double(value)
+                sum += v
+                squares += v * v
+            }
+            brightness = sum / count
+            contrast = (max(squares / count - brightness * brightness, 0)).squareRoot()
+
+            var lapSum = 0.0, lapSquares = 0.0, interior = 0.0
+            if side > 2 {
+                for y in 1..<(side - 1) {
+                    for x in 1..<(side - 1) {
+                        let i = y * side + x
+                        let laplacian = 4 * Double(gray[i])
+                            - Double(gray[i - 1]) - Double(gray[i + 1])
+                            - Double(gray[i - side]) - Double(gray[i + side])
+                        lapSum += laplacian
+                        lapSquares += laplacian * laplacian
+                        interior += 1
+                    }
+                }
+            }
+            let lapMean = interior > 0 ? lapSum / interior : 0
+            sharpness = interior > 0 ? max(lapSquares / interior - lapMean * lapMean, 0) : 0
+        }
+    }
+
+    /// The frame at `time`, squeezed to a small gray square and measured. Nil
+    /// if there's no frame there.
+    private static func sample(_ video: URL, at time: Double) async -> FrameSample? {
+        let side = posterSampleSide
+        let raw = FileManager.default.temporaryDirectory
+            .appendingPathComponent("poster-sample-\(UUID().uuidString).gray")
+        defer { try? FileManager.default.removeItem(at: raw) }
+        // Squeezed to a square rather than kept in proportion. Every candidate
+        // of a video is squeezed alike, so they still compare fairly, and the
+        // byte count then says exactly how big the image is.
+        guard (try? await Shell.runChecked(
+            "ffmpeg",
+            ["-y", "-v", "error", "-ss", String(format: "%.3f", time), "-i", video.path,
+             "-frames:v", "1", "-vf", "scale=\(side):\(side):flags=area,format=gray",
+             "-f", "rawvideo", raw.path],
+            timeout: 120
+        )) != nil,
+              let data = try? Data(contentsOf: raw), data.count == side * side
+        else { return nil }
+        return FrameSample(time: time, gray: [UInt8](data), side: side)
+    }
+
+    /// A video's length in seconds, or nil if ffprobe can't tell.
+    private static func duration(of video: URL) async -> Double? {
+        guard let result = try? await Shell.run(
+            "ffprobe",
+            ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video.path],
+            timeout: 60
+        ), result.status == 0 else { return nil }
+        return Double(result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     static func missingTools() -> [String] {
