@@ -21,7 +21,9 @@ import Vapor
 /// on the family's own photographs. The label names are Vision's revision 2
 /// taxonomy (1,303 identifiers).
 enum CurationVocabulary {
-    static let version = 1
+    /// 2: search terms (`terms`) are derived and stored beside the tags.
+    /// 3: and the single words inside them (`words`).
+    static let version = 3
 
     // MARK: - Labels to tags
 
@@ -156,6 +158,65 @@ enum CurationVocabulary {
         if peopleCount >= gatheringPeople { tags.append("gathering") }
         if !meets(utility).isEmpty { tags.append("utility") }
         return tags
+    }
+
+    // MARK: - Search
+
+    /// How sure Vision has to have been of a label before a photo can be found
+    /// by it. Lower than that and searching "dog" turns up every brown blur.
+    static let searchConfidence: Float = 0.4
+
+    /// Tags that are the server's bookkeeping rather than something a person
+    /// would look for.
+    static let unsearchable: Set<String> = ["utility", "gathering"]
+
+    /// What a photo can be found by: its tags, and the labels Vision was fairly
+    /// sure of. Stored as `media_observations.terms`, indexed.
+    static func terms(labels: [ObservedLabel], tags: [String]) -> [String] {
+        var terms = Set(tags.filter { !unsearchable.contains($0) })
+        for label in labels where label.confidence >= searchConfidence {
+            terms.insert(label.id)
+        }
+        return terms.sorted()
+    }
+
+    /// The single words a typed search can match: each term whole, and the
+    /// words inside a compound one, so "cake" finds `birthday_cake` and "tree"
+    /// finds `christmas_tree`. Fragments shorter than three letters are left
+    /// out; the "o" in `jack_o_lantern` finds nothing anyone wants. Stored as
+    /// `media_observations.words`, indexed.
+    static func words(of terms: [String]) -> [String] {
+        var words = Set<String>()
+        for term in terms {
+            words.insert(term)
+            for part in term.split(separator: "_") where part.count >= 3 {
+                words.insert(String(part))
+            }
+        }
+        return words.sorted()
+    }
+
+    /// Labels true of nearly every photo, so not worth offering as a
+    /// suggestion. Typing one still searches for it.
+    static let tooGeneral: Set<String> = [
+        "outdoor", "sky", "structure", "material", "textile", "people", "adult",
+        "clothing", "land", "plant", "machine", "liquid", "water", "wood_processed",
+        "interior_room", "building", "cloudy", "blue_sky", "vegetation", "grass",
+        "foliage", "tree",
+    ]
+
+    /// Words people type for a term that Vision or the vocabulary spells
+    /// another way.
+    static let synonyms: [String: String] = [
+        "xmas": "christmas", "bday": "birthday", "puppy": "dog", "puppies": "dog",
+        "kitty": "cat", "seaside": "beach", "sunset": "sunset_sunrise",
+        "sunrise": "sunset_sunrise", "ski": "skiing",
+    ]
+
+    /// `birthday_cake` → "Birthday cake".
+    static func spoken(_ term: String) -> String {
+        let words = term.replacingOccurrences(of: "_", with: " ")
+        return words.prefix(1).uppercased() + words.dropFirst()
     }
 
     // MARK: - Tags to occasions
@@ -298,9 +359,13 @@ enum CurationVocabulary {
                     let labels = (try? JSONDecoder().decode(
                         [ObservedLabel].self, from: Data(row.labels.utf8)
                     )) ?? []
+                    let tags = tags(for: labels, peopleCount: row.peopleCount)
+                    let terms = terms(labels: labels, tags: tags)
                     try await sql.raw("""
                         UPDATE media_observations
-                        SET tags = \(bind: tags(for: labels, peopleCount: row.peopleCount)),
+                        SET tags = \(bind: tags),
+                            terms = \(bind: terms),
+                            words = \(bind: words(of: terms)),
                             vocabulary_version = \(bind: version)
                         WHERE user_id = \(bind: row.userID) AND sha256 = \(bind: row.sha256)
                         """).run()

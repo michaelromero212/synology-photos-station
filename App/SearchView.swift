@@ -21,14 +21,32 @@ import SwiftUI
 /// Filtering locally would have quietly meant search only worked on the twelve
 /// places already on screen.
 ///
-/// One axis for now, deliberately. Place names are filled in at import for
-/// every photo carrying GPS, so this works on day one across a whole library;
-/// tags exist only where somebody typed one.
+/// Two lists. Places, filled in at import for every photo carrying GPS. And
+/// things: what this person's own iPhone recognized in their photos ("beach",
+/// "birthday cake", "dog"). Things are listed first because they're what
+/// people usually mean when they go looking for a moment. Submitting what was
+/// typed searches both, plus years and months, every word of which has to
+/// match: "beach 2024", "dog Culpeper", "july fireworks".
 @MainActor
 struct SearchView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
 
+    /// What the results are for. A place picked from its list is matched as
+    /// a place, exactly as before. Anything typed, or a thing picked, is read
+    /// by the server word by word.
+    private enum Search: Hashable {
+        case place(String)
+        case text(String)
+
+        var title: String {
+            switch self {
+            case .place(let name), .text(let name): name
+            }
+        }
+    }
+
+    @State private var things: [ThingSummary] = []
     @State private var places: [PlaceSummary] = []
     /// How many distinct places exist, which is usually far more than `places`
     /// holds. What the "All Places" row counts.
@@ -42,7 +60,7 @@ struct SearchView: View {
     #else
     @State private var query = ""
     #endif
-    @State private var selected: String?
+    @State private var selected: Search?
     @State private var showAllPlaces = false
     @State private var results: [TimelineItem] = []
     @State private var total = 0
@@ -71,21 +89,21 @@ struct SearchView: View {
             if let selected {
                 resultsGrid(for: selected)
             } else {
-                placesList
+                suggestionsList
             }
         }
         // A shared album's name, because the same button searches whichever
         // library you pressed it over, and "Search" alone would claim all of
         // them.
-        .navigationTitle(selected ?? (space.kind == .shared ? space.name : "Search"))
+        .navigationTitle(selected?.title ?? (space.kind == .shared ? space.name : "Search"))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         // Not on macOS: the window put the field in its toolbar already, and a
         // second `.searchable` inside the detail pane would draw a second one.
         #if !os(macOS)
-        .searchable(text: $query, placement: Self.searchPlacement, prompt: "Places")
-        .onSubmit(of: .search) { choose(query) }
+        .searchable(text: $query, placement: Self.searchPlacement, prompt: "Places, things, years")
+        .onSubmit(of: .search) { choose(.text(query)) }
         #endif
         .onChange(of: query) { _, new in
             // Clearing the field comes back to the list rather than stranding
@@ -101,20 +119,20 @@ struct SearchView: View {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
             }
-            await loadPlaces(matching: query)
+            await loadSuggestions(matching: query)
         }
         .navigationDestination(isPresented: $showAllPlaces) {
             AllPlacesView(session: session, space: space, total: placeTotal) { name in
                 showAllPlaces = false
-                choose(name)
+                choose(.place(name))
             }
         }
     }
 
-    // MARK: - Places
+    // MARK: - Things and places
 
     @ViewBuilder
-    private var placesList: some View {
+    private var suggestionsList: some View {
         if isLoadingPlaces {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -122,31 +140,42 @@ struct SearchView: View {
             ContentUnavailableView(
                 "Can't Search Right Now", systemImage: "wifi.slash", description: Text(failure)
             )
-        } else if places.isEmpty {
+        } else if places.isEmpty, things.isEmpty, !query.isEmpty {
+            ContentUnavailableView.search(text: query)
+        } else if places.isEmpty, things.isEmpty {
             // Not an error. A library of scans and screenshots has no
-            // coordinates in it, and saying so is more use than an empty list.
+            // coordinates in it, and a library not analyzed yet has no things,
+            // and saying so is more use than an empty list.
             ContentUnavailableView(
-                "No Places Yet",
-                systemImage: "mappin.slash",
+                "Nothing to Search Yet",
+                systemImage: "magnifyingglass",
                 description: Text(
-                    "Photos taken with location turned on show the place they "
-                    + "were taken. None of the photos in \(space.name) have one yet."
+                    "Photos taken with location turned on can be found by place. "
+                    + "Once your iPhone has analyzed your photos, they can be found "
+                    + "by what's in them, too."
                 )
             )
-        } else if places.isEmpty {
-            ContentUnavailableView.search(text: query)
         } else {
             List {
-                Section {
-                    ForEach(places) { place in
-                        PlaceRow(place: place) { choose(place.name) }
+                if !things.isEmpty {
+                    Section("Things") {
+                        ForEach(things) { thing in
+                            ThingRow(thing: thing) { choose(.text(thing.name)) }
+                        }
                     }
-                } header: {
-                    // Only worth a heading when it is a selection rather than
-                    // the lot; over twelve places it explains why the list
-                    // stops, and under it the heading would be a lie.
-                    if query.isEmpty, placeTotal > places.count {
-                        Text("Most Photographed")
+                }
+
+                if !places.isEmpty {
+                    Section {
+                        ForEach(places) { place in
+                            PlaceRow(place: place) { choose(.place(place.name)) }
+                        }
+                    } header: {
+                        // "Most Photographed" only when it is a selection rather
+                        // than the lot; over twelve places it explains why the
+                        // list stops, and under it the heading would be a lie.
+                        Text(query.isEmpty && placeTotal > places.count
+                             ? "Most Photographed Places" : "Places")
                     }
                 }
 
@@ -184,7 +213,7 @@ struct SearchView: View {
     // MARK: - Results
 
     @ViewBuilder
-    private func resultsGrid(for place: String) -> some View {
+    private func resultsGrid(for search: Search) -> some View {
         GeometryReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -222,7 +251,7 @@ struct SearchView: View {
                         ProgressView()
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 20)
-                            .task { await loadMore(place: place) }
+                            .task { await loadMore(for: search) }
                     }
                 }
             }
@@ -230,48 +259,58 @@ struct SearchView: View {
         .overlay {
             if isSearching, results.isEmpty { ProgressView() }
             if !isSearching, results.isEmpty, failure == nil {
-                ContentUnavailableView.search(text: place)
+                ContentUnavailableView.search(text: search.title)
             }
         }
     }
 
     // MARK: - Loading
 
-    /// Fetches the landing screen's handful, or the matches for what's typed.
-    private func loadPlaces(matching query: String = "") async {
+    /// Fetches the landing screen's handfuls, or the matches for what's typed.
+    private func loadSuggestions(matching query: String = "") async {
         guard let client = session.client else { return }
         // Only the very first load gets a spinner. Re-running this on every
         // keystroke would otherwise blank the list under the cursor.
-        if places.isEmpty { isLoadingPlaces = true }
+        if places.isEmpty, things.isEmpty { isLoadingPlaces = true }
         defer { isLoadingPlaces = false }
+        // More rows while searching: a match list that stops at twelve looks
+        // like the answer isn't there.
+        async let placesAnswer = client.places(
+            spaceID: space.id, matching: query, limit: query.isEmpty ? 12 : 60
+        )
+        // Quietly empty when it fails. A NAS that predates things, or a
+        // library not analyzed yet, still searches by place.
+        let thingsAnswer = try? await client.things(
+            spaceID: space.id, matching: query, limit: query.isEmpty ? 12 : 30
+        )
         do {
-            // More rows while searching: a match list that stops at twelve
-            // looks like the answer isn't there.
-            let response = try await client.places(
-                spaceID: space.id, matching: query,
-                limit: query.isEmpty ? 12 : 60
-            )
+            let response = try await placesAnswer
             places = response.places
             placeTotal = response.total
+            things = thingsAnswer?.things ?? []
             failure = nil
         } catch {
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
     }
 
-    private func choose(_ place: String) {
-        let trimmed = place.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func choose(_ search: Search) {
+        let trimmed = search.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // Put it in the field even when it came from the list. The search bar
+        // Put it in the field even when it came from a list. The search bar
         // covers the navigation title on this screen, so without this a tapped
-        // place gives you a grid of photos with nothing anywhere saying which
-        // place they are from — and no obvious way back but guessing.
+        // row gives you a grid of photos with nothing anywhere saying what
+        // they were found by, and no obvious way back but guessing.
         query = trimmed
-        selected = trimmed
+        let chosen: Search = switch search {
+        case .place: .place(trimmed)
+        case .text: .text(trimmed)
+        }
+        selected = chosen
         results = []
         total = 0
         nextOffset = 0
-        Task { await loadMore(place: trimmed) }
+        Task { await loadMore(for: chosen) }
     }
 
     private func back() {
@@ -282,16 +321,19 @@ struct SearchView: View {
     }
 
     /// Fetches the next page, or the first when `nextOffset` is zero.
-    private func loadMore(place: String) async {
+    private func loadMore(for search: Search) async {
         guard let client = session.client, let offset = nextOffset, !isSearching else { return }
         isSearching = true
         defer { isSearching = false }
         do {
-            let page = try await client.search(
-                spaceID: space.id, place: place, offset: offset
-            )
+            let page = switch search {
+            case .place(let name):
+                try await client.search(spaceID: space.id, place: name, offset: offset)
+            case .text(let text):
+                try await client.search(spaceID: space.id, text: text, offset: offset)
+            }
             // Guard against a page arriving after the user has moved on.
-            guard selected == place else { return }
+            guard selected == search else { return }
             results.append(contentsOf: page.items)
             total = page.total
             nextOffset = page.nextOffset
@@ -300,6 +342,30 @@ struct SearchView: View {
             nextOffset = nil
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
+    }
+}
+
+/// One thing the photos show, with how many show it.
+private struct ThingRow: View {
+    let thing: ThingSummary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.tint)
+                    .frame(width: 22)
+                Text(thing.name).foregroundStyle(.primary)
+                Spacer()
+                Text("\(thing.count)")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

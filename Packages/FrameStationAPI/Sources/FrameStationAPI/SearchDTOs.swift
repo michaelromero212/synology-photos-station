@@ -24,6 +24,36 @@ public struct PlaceSummary: Codable, Sendable, Hashable, Identifiable {
 /// entry per town anyone ever passed through, so the honest shape here is a
 /// bounded list plus a count of what was left out — the caller decides whether
 /// it wants the handful worth showing on a landing screen or the lot.
+/// Something photos in a library were seen to show, for the search screen:
+/// what a person's own devices recognized, with how many photos show it.
+public struct ThingSummary: Codable, Sendable, Hashable, Identifiable {
+    /// What to search for, as the server stores it: `"birthday_cake"`.
+    public let term: String
+    /// How to say it: "Birthday cake".
+    public let name: String
+    public let count: Int
+
+    public var id: String { term }
+
+    public init(term: String, name: String, count: Int) {
+        self.term = term
+        self.name = name
+        self.count = count
+    }
+}
+
+public struct ThingsResponse: Codable, Sendable, Hashable {
+    /// Commonest first.
+    public let things: [ThingSummary]
+    /// How many distinct things match, whatever `things` holds.
+    public let total: Int
+
+    public init(things: [ThingSummary], total: Int) {
+        self.things = things
+        self.total = total
+    }
+}
+
 public struct PlacesResponse: Codable, Sendable, Hashable {
     public let places: [PlaceSummary]
     /// How many distinct places exist in total, whatever `places` holds. What

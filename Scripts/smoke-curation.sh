@@ -57,7 +57,7 @@ observe(){
   curl -s -X POST "$API/v1/spaces/$1/curation/observations" -H "$2" -H 'Content-Type: application/json' \
     -d "{\"analysisVersion\":${5:-1},\"modelVersion\":\"smoke\",\"observations\":[{\"assetID\":\"$3\",\"labels\":$4,\"aesthetic\":0.4,\"isUtility\":false,\"peopleCount\":${6:-0},\"animalCount\":0}]}" | jq '["accepted"]'
 }
-CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]'
+CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6},{"id":"outdoor","confidence":0.7}]'
 SKY='[{"id":"sky","confidence":0.9},{"id":"outdoor","confidence":0.8}]'
 TREE='[{"id":"christmas_tree","confidence":0.88},{"id":"gift","confidence":0.5}]'
 
@@ -121,11 +121,40 @@ check "curation off: nothing stored" "0" "$(observe "$SP" "$A" "${C[0]}" "$CAKE"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
 has "back on: the birthday party is back" "Birthday party" "$(titles "$SP" "$A")"
 
+echo "Search by what's in a photo"
+# total for a typed search
+found(){ curl -s -G "$API/v1/spaces/$SP/search" -H "$A" --data-urlencode "q=$1" | jq '["total"]'; }
+TH=$(curl -s "$API/v1/spaces/$SP/things" -H "$A")
+has "Things lists what the photos show" "birthday_cake" "$TH"
+has "with a name to show" "Birthday cake" "$TH"
+lacks "Things leaves out what nearly every photo shows" '"outdoor"' "$TH"
+has "but typing it still finds it" "outdoor" "$(curl -s "$API/v1/spaces/$SP/things?q=out" -H "$A")"
+lacks "typing filters the list" "christmas" "$(curl -s "$API/v1/spaces/$SP/things?q=cake" -H "$A")"
+check "a tag finds its photos" "4" "$(found birthday)"
+check "two words that are one label" "4" "$(found 'birthday cake')"
+check "a plural finds the singular" "4" "$(found candles)"
+check "a thing and a year" "4" "$(found 'cake 2023')"
+check "the wrong year finds none" "0" "$(found 'cake 2022')"
+check "a month name means the month" "4" "$(found 'may cake')"
+check "a word nobody's photos show finds nothing" "0" "$(found unicorn)"
+check "Christmas finds the tree photos" "4" "$(found christmas)"
+check "xmas means Christmas" "4" "$(found xmas)"
+check "someone else can't search this library" "404" \
+  "$(code -G "$API/v1/spaces/$SP/search" -H "$A2" --data-urlencode 'q=birthday')"
+check "their own Things is empty" "0" \
+  "$(curl -s "$API/v1/spaces/$SP2/things" -H "$A2" | jq '["total"]')"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
+check "curation off: Things is empty" "0" "$(curl -s "$API/v1/spaces/$SP/things" -H "$A" | jq '["total"]')"
+check "curation off: a word means only a place" "0" "$(found birthday)"
+check "curation off: a year still works" "4" "$(found 2023)"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
+
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"
 check "nothing is left" "404" "$(code "$API/v1/spaces/$SP/assets/${B[0]}/observation" -H "$A")"
 check "status counts none" "0" "$(curl -s "$API/v1/curation" -H "$A" | jq '["analyzed"]')"
 check "the photos themselves are untouched" "200" "$(code "$API/v1/assets/${B[0]}/thumb?size=256" -H "$A")"
+check "and search by content finds nothing" "0" "$(found birthday)"
 
 echo
 echo "$PASS passed, $FAIL failed"

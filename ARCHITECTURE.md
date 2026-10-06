@@ -915,6 +915,35 @@ or `-Subject`, so IPTC keywords in the originals are discarded. Tags exist only
 where somebody typed one in the app, so a tag search today would open on an
 empty vocabulary. Keyword extraction plus a backfill is the prerequisite.
 
+### Search by what's in a photo
+
+What a person's own iPhone recognized (see "Curated albums" below) is
+searchable. That fixes the empty-vocabulary problem a tag search has: the
+vocabulary is what's actually in the photos.
+
+- **Stored for search.** Each analyzed photo stores `terms`: its tags plus the
+  Vision labels seen at confidence 0.4 or more. It also stores `words`: those
+  terms and the words inside them, so "cake" finds `birthday_cake`. Both
+  columns have GIN indexes, so "every photo with a dog" is an index lookup at
+  100,000 photos.
+- **`GET …/things`** lists the terms in a library with counts, commonest first,
+  like `/places`. It leaves out labels true of nearly everything ("outdoor",
+  "sky") unless they're typed.
+- **`GET …/search?q=`** reads what was typed word by word, and every word has
+  to match:
+  - a four-digit year narrows to that year;
+  - any other word may mean what's in the photo or where it was taken, and
+    either counts, so "Duck" finds the bird and the town rather than guessing;
+  - a month name may also mean the month;
+  - two words that are one Vision label ("birthday cake") are taken together.
+
+  `place=` is unchanged for older apps, and newer apps send both parameters, so
+  an older server still answers with a place search.
+
+It's per person, like everything curation stores. A photo counts once that
+person's devices have analyzed it, and with curation off, a word means only a
+place or a month.
+
 ### Curated albums — devices observe, the NAS decides
 
 The Albums page's trips and occasions were worked out from dates and

@@ -73,6 +73,40 @@ extension FrameStationClient {
         )
     }
 
+    /// Whatever was typed: places, things in the photos, years and months,
+    /// every word of which has to match.
+    ///
+    /// Sent as `place` as well as `q`. A server that predates `q` ignores it
+    /// and answers a place search, which is what typing meant before.
+    public func search(
+        spaceID: UUID, text: String, offset: Int = 0, limit: Int = 120
+    ) async throws -> SearchResults {
+        let encoded = text.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryValue
+        ) ?? ""
+        return try await get(
+            "v1/spaces/\(spaceID)/search?q=\(encoded)&place=\(encoded)"
+            + "&offset=\(offset)&limit=\(limit)"
+        )
+    }
+
+    /// What this library's photos were seen to show, commonest first, or the
+    /// ones matching what's typed. Only what this person's own devices
+    /// recognized.
+    public func things(
+        spaceID: UUID, matching query: String = "", limit: Int = 12
+    ) async throws -> ThingsResponse {
+        var path = "v1/spaces/\(spaceID)/things?limit=\(limit)"
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let encoded = trimmed.addingPercentEncoding(
+                withAllowedCharacters: .urlQueryValue
+            ) ?? ""
+            path += "&q=\(encoded)"
+        }
+        return try await get(path)
+    }
+
     // MARK: - Collections
 
     /// The whole Albums page in one request.

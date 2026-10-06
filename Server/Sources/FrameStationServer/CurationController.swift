@@ -76,6 +76,15 @@ struct CurationController: RouteCollection {
         )
     }
 
+    /// Whether this person has curation on. Everything built from what their
+    /// devices recognized, search included, goes quiet when it's off.
+    static func isEnabled(userID: UUID, on sql: any SQLDatabase) async throws -> Bool {
+        struct Row: Decodable { let enabled: Bool }
+        return try await sql.raw("""
+            SELECT curation_enabled AS enabled FROM users WHERE id = \(bind: userID)
+            """).first(decoding: Row.self)?.enabled ?? false
+    }
+
     private func settings(userID: UUID, on sql: any SQLDatabase) async throws -> CurationSettings {
         struct Row: Decodable { let enabled: Bool; let holidays: Bool }
         guard let row = try await sql.raw("""
@@ -247,18 +256,22 @@ struct CurationController: RouteCollection {
             let labels = Self.sanitized(observation.labels)
             let labelsJSON = String(decoding: try JSONEncoder().encode(labels), as: UTF8.self)
             let tags = CurationVocabulary.tags(for: labels, peopleCount: observation.peopleCount)
+            let terms = CurationVocabulary.terms(labels: labels, tags: tags)
             let aesthetic = observation.aesthetic.map { min(max($0, -1), 1) }
 
             let stored = try await req.sql.raw("""
                 INSERT INTO media_observations
                     (user_id, sha256, analysis_version, model_version, labels, aesthetic,
-                     is_utility, people_count, animal_count, tags, vocabulary_version, device_id)
+                     is_utility, people_count, animal_count, tags, terms, words,
+                     vocabulary_version, device_id)
                 VALUES (\(bind: device.userID), \(bind: sha256), \(bind: body.analysisVersion),
                         \(bind: body.modelVersion), \(bind: labelsJSON)::jsonb, \(bind: aesthetic),
                         \(bind: observation.isUtility),
                         \(bind: min(max(observation.peopleCount, 0), 999)),
                         \(bind: min(max(observation.animalCount, 0), 999)),
-                        \(bind: tags), \(bind: CurationVocabulary.version), \(bind: device.deviceID))
+                        \(bind: tags), \(bind: terms),
+                        \(bind: CurationVocabulary.words(of: terms)),
+                        \(bind: CurationVocabulary.version), \(bind: device.deviceID))
                 ON CONFLICT (user_id, sha256) DO UPDATE
                 SET analysis_version = EXCLUDED.analysis_version,
                     model_version = EXCLUDED.model_version,
@@ -268,6 +281,8 @@ struct CurationController: RouteCollection {
                     people_count = EXCLUDED.people_count,
                     animal_count = EXCLUDED.animal_count,
                     tags = EXCLUDED.tags,
+                    terms = EXCLUDED.terms,
+                    words = EXCLUDED.words,
                     vocabulary_version = EXCLUDED.vocabulary_version,
                     device_id = EXCLUDED.device_id,
                     observed_at = now()
