@@ -521,12 +521,18 @@ silently becomes a second full copy. It logs `browse tree: copied … this
 duplicates the file on disk` when that happens — worth grepping for after any
 volume work.
 
-**That was measured on the host, not in the container.** The 2026-10-06 import
-found that inside a container DSM's kernel won't clone between two separately
-mounted folders, even on one volume, and the server container reaches `/data`
-and `/homes` through two such mounts. Until the `link_kind` count in
-[MIGRATION.md](MIGRATION.md) § "Before any import" has been run, whether tree
-entries really are reflinks is an open question.
+**That was measured on the host, and in the container it fails.** The server
+reaches `/data` and `/homes` through two separate mounts, and inside a container
+a clone between two separately mounted folders fails on this NAS, even on one
+volume. That was seen first in the 2026-10-06 import, where mounting `/volume1`
+once fixed it. Checked the same day: every tree entry was an empty file, 2,791
+of them, while `browse_entries.link_kind` said `reflink` for all.
+`cp --reflink=always` leaves an empty destination when the clone fails, and
+`BrowseTree.link` counted a file already at the path as placed. Photos were
+never at risk, because the app serves from the blob store. But the File Station
+tree held nothing, and a `rebuild` from it would recover nothing. The
+empty-file count in [MIGRATION.md](MIGRATION.md) § "Before any import" is the
+check; `link_kind` isn't.
 
 Disk usage is one copy. Whether Synology's *per-user quota* accounting also
 counts shared extents once is not established; watch `homes` usage after the

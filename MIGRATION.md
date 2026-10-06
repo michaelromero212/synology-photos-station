@@ -39,20 +39,22 @@ well and file every family photo in that person's personal library. Import
 2. **Have the server on the newest image** ([DEPLOY.md](DEPLOY.md)). The import's
    one-off container runs whatever image the NAS holds and applies its
    migrations on start, so it should be the build the server is already running.
-3. **Check that the mirrors are clones.** Each imported photo also appears in
-   File Station: in every member's home for a shared library, in the owner's
-   for a personal one. Those entries should be reflinks that cost nothing, and
-   the server records how each one was actually made:
+3. **Check that the mirrors hold the photos.** Each imported photo also appears
+   in File Station: in every member's home for a shared library, in the owner's
+   for a personal one. Count the empty files there. It should be 0:
 
    ```bash
-   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec -T db psql -U framestation -d framestation -c "SELECT link_kind, count(*) FROM browse_entries GROUP BY 1"'
+   ssh -t nas "sudo sh -c 'find /volume1/homes/*/Photos/Personal /volume1/homes/*/Photos/Shared -path \"*/@eaDir\" -prune -o -type f -size 0 -print 2>/dev/null | wc -l'"
    ```
 
-   Only `reflink` is right. `copy` rows are full second copies, so each import
-   costs its size again for every home it's mirrored into. The doubt is real:
-   the server reaches the blob store and the homes through two separate mounts,
-   the arrangement that failed the import's own clone check
-   ([below](#the-import)). Not yet run as of 2026-10-06.
+   **On 2026-10-06 every one was empty, 2,791 of 2,791.** The server reaches the
+   blob store and the homes through two separate mounts, the arrangement that
+   also failed the import's own clone check ([below](#the-import)). `cp` left an
+   empty file behind each time, and the tree counted it as placed. So the
+   database's `link_kind` said `reflink` for all of them, and it can't serve as
+   this check. No photo was affected, because the app serves from the blob
+   store. Only the File Station copies are hollow. Until that's fixed, whatever
+   is imported gets an empty File Station copy too.
 4. **Dry run.** It walks and counts without hashing or writing, and its count is
    the one to trust. `du` overstates, because Synology keeps thumbnails in an
    `@eaDir` folder beside every photo: it said 316 GB for a Shared Space holding
