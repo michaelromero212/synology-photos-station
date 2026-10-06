@@ -65,6 +65,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(SpacesCommand(), as: "spaces")
     app.asyncCommands.use(ImportCommand(), as: "import")
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
+    app.asyncCommands.use(CreditUploadersCommand(), as: "credit-uploaders")
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")
     app.asyncCommands.use(RepairDimensionsCommand(), as: "repair-dimensions")
     app.asyncCommands.use(RetireLegacyBrowseCommand(), as: "retire-legacy-browse")

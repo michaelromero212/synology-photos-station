@@ -178,6 +178,40 @@ ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compos
 It names every photo that has coordinates and no place, and leaves the rest
 alone. Imports since don't need it.
 
+## Who shared each Shared Space photo
+
+The import credits every photo to the destination's owner, because a file
+doesn't record who added it. Synology doesn't either, directly: in its
+database (`synofoto`, the `unit` table) every Shared Space photo belongs to
+`id_user` 0, the shared library itself. But sharing a photo there copies it out
+of the sharer's own library, and `unit.duplicate_hash` is a content
+fingerprint (the same photo in one person's MobileBackup and in the Shared Space had
+the same bytes and the same hash). So whoever's own library holds the same
+photo is who shared it. When more than one person has it, the one whose phone
+backed it up first gets it.
+
+`Scripts/credit-synology-uploaders.sh` exports that match and hands it to
+`FrameStationServer credit-uploaders`, which credits each photo through the
+credit "Added by" already prefers. Someone who has never signed in gets an
+account tied to their Synology login, the same account signing in would make,
+and lands in it, already credited, the first time they do. Nobody is added to
+the shared library: membership would put a copy of every shared photo in their
+home folder, and Synology Photos would then show it to them twice. Credits set
+by hand are kept, and running it again changes nothing. Copy the script to the
+NAS, then:
+
+```bash
+ssh -t nas 'sudo sh /tmp/credit-synology-uploaders.sh <space-id> --dry-run'
+ssh -t nas 'sudo sh /tmp/credit-synology-uploaders.sh <space-id>'
+```
+
+The 2026-10-06 Shared Space, matched: 1,472 photos to the owner, 739 and 8 to
+two other family members, and 514 to nobody. Those 514 were uploaded straight
+into the Shared Space from Synology's web page, and stay credited to the owner.
+Synology's users are in `user_info` (`id`, DSM `uid`, `name` as the DSM login).
+Everyone's folders are in `folder`, with `name` as a path under the owner's
+library root.
+
 ## Next: everyone's personal library
 
 Not started. It waits until the family is ready to switch. Counted in August
