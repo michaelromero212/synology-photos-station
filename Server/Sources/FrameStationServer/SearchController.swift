@@ -105,7 +105,9 @@ struct SearchController: RouteCollection {
         let count: Int
     }
 
-    /// The places this space has photos from, commonest first.
+    /// The places this space has photos from, commonest first, by the names
+    /// they go by: a photo taken at Walt Disney World counts there, not in the
+    /// town beside it. See `Destinations`.
     ///
     /// Commonest rather than alphabetical because the top of this list is the
     /// screen you land on before typing anything: it should open on where the
@@ -146,16 +148,17 @@ struct SearchController: RouteCollection {
             ? "name ASC"
             : "count DESC, name ASC"
 
+        let place = TimelineController.placeName
         let rows = try await req.sql.raw("""
-            SELECT a.place_name AS name, count(*)::int AS count
+            SELECT \(unsafeRaw: place) AS name, count(*)::int AS count
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
-              AND a.place_name IS NOT NULL
+              AND \(unsafeRaw: place) IS NOT NULL
               AND \(unsafeRaw: TimelineController.visible)
-              AND a.place_name ILIKE \(bind: pattern)
-            GROUP BY a.place_name
+              AND \(unsafeRaw: place) ILIKE \(bind: pattern)
+            GROUP BY 1
             ORDER BY \(unsafeRaw: ordering)
             LIMIT \(bind: limit)
             """).all(decoding: PlaceRow.self)
@@ -164,14 +167,14 @@ struct SearchController: RouteCollection {
         // the "See All" row has to be able to say 340 while holding 12.
         struct CountRow: Decodable { let total: Int }
         let total = try await req.sql.raw("""
-            SELECT count(DISTINCT a.place_name)::int AS total
+            SELECT count(DISTINCT \(unsafeRaw: place))::int AS total
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
-              AND a.place_name IS NOT NULL
+              AND \(unsafeRaw: place) IS NOT NULL
               AND \(unsafeRaw: TimelineController.visible)
-              AND a.place_name ILIKE \(bind: pattern)
+              AND \(unsafeRaw: place) ILIKE \(bind: pattern)
             """).first(decoding: CountRow.self)?.total ?? 0
 
         return PlacesResponse(
@@ -223,7 +226,10 @@ struct SearchController: RouteCollection {
             // at this scale — a sequential scan over one text column for a
             // library of this size is milliseconds, and a trigram index is one
             // migration away if that ever stops being true.
-            filters = "AND a.place_name ILIKE \(bind: "%\(escapeForLike(place))%")"
+            filters = """
+                AND \(unsafeRaw: TimelineController.placeName)
+                    ILIKE \(bind: "%\(escapeForLike(place))%")
+                """
         }
 
         // At most one row per photo: observations are keyed by (person, file).
@@ -275,7 +281,10 @@ struct SearchController: RouteCollection {
     /// beach in a photo and photos taken at Virginia Beach, and "dog Culpeper"
     /// finds the dog photographed in Culpeper. Rather than guess which "Duck"
     /// was meant (the bird or the town), it finds both. A month name can also
-    /// mean the month: "july 2024".
+    /// mean the month: "july 2024". A place is its town or the name it goes by,
+    /// so "disney" finds Walt Disney World, and a few words mean a place beyond
+    /// their letters: "obx", or "orlando" for Disney World and Universal too.
+    /// See `Destinations`.
     ///
     /// Nil when nothing usable was typed.
     private func plan(
@@ -318,7 +327,21 @@ struct SearchController: RouteCollection {
             index += 1
 
             let pattern = "%\(escapeForLike(phrase))%"
-            var either: SQLQueryString = "\(shown) OR a.place_name ILIKE \(bind: pattern)"
+            // The town or the name the place goes by, so "disney" finds Walt
+            // Disney World and "celebration" still finds the town it sits
+            // beside.
+            var either: SQLQueryString = """
+                \(shown) OR a.place_name ILIKE \(bind: pattern) OR a.destination ILIKE \(bind: pattern)
+                """
+            // What a word means beyond its letters: "obx" is the Outer Banks,
+            // and "orlando" is everywhere around it, Disney World included.
+            let meanings = Destinations.meanings(of: phrase)
+            if !meanings.labels.isEmpty {
+                either = "\(either) OR a.destination = ANY(\(bind: meanings.labels))"
+            }
+            for area in meanings.areas {
+                either = "\(either) OR \(Destinations.inside(area.circles))"
+            }
             if let month = Self.months[phrase] {
                 either = "\(either) OR EXTRACT(MONTH FROM \(unsafeRaw: local))::int = \(bind: month)"
             }

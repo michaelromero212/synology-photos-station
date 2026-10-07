@@ -278,6 +278,14 @@ Then point the server at it with `FRAMESTATION_GEONAMES_DIR=./Data/geonames`.
 Absent dataset is not an error — `place_name` stays null and clients fall back
 to coordinates.
 
+Some places go by their own names rather than their nearest town's: theme
+parks, national parks, the Outer Banks. `Destinations.swift` holds that list.
+A photo taken inside one is filed under its name, so its day says "Walt Disney
+World, Florida" where the dataset alone would say "Celebration, Florida", and a
+trip there is "Four days at Walt Disney World". A pass at boot files the photos
+already stored, and runs again whenever the list's version changes. See
+ARCHITECTURE.md, "Places go by their own names".
+
 Backfill assets that predate geocoding, or re-run after a dataset update:
 
 ```bash

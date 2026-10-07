@@ -69,7 +69,8 @@ SELECT 'DEVSEEDOTD' || lpad(g::text, 54, '0'), 1000, 'photo', 'image/jpeg', 'jpg
        'Culpeper, Virginia', 38.4716, -77.9967
 FROM generate_series(1, 16) g;
 
--- A week on the Outer Banks, across three towns: "Seven days in North Carolina".
+-- A week on the Outer Banks, across three towns: "Seven days in the Outer
+-- Banks", once the server's boot pass has filed the photos (see Destinations).
 INSERT INTO assets (sha256, byte_size, media_type, mime, blob_ext, local_captured_at, place_name, lat, lon)
 SELECT 'DEVSEEDOBX' || lpad(g::text, 54, '0'), 1000, 'photo', 'image/jpeg', 'jpg',
        ((CURRENT_DATE - interval '7 weeks') + ((g / 9) || ' days')::interval

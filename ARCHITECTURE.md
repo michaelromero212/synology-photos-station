@@ -555,6 +555,8 @@ CREATE TABLE assets (
   lat             double precision,
   lon             double precision,
   place_name      text,                   -- offline reverse geocode
+  destination     text,                   -- the name a place goes by, where not its town's (0028)
+  destination_version int NOT NULL DEFAULT 0, -- the Destinations list it was filed under
   camera_make     text, camera_model text, lens text,
   iso             int, aperture real, shutter text, focal_len real,
   exposure_bias   real,                   -- the "0 ev" field
@@ -933,6 +935,54 @@ cannot use a btree index; at this scale a sequential scan over one text column
 is milliseconds, and `pg_trgm` is one migration away if that stops being true.
 Paging is by offset rather than keyset — simpler, and the failure mode is a row
 shifting between pages if the library changes mid-scroll.
+
+### Places go by their own names
+
+The town dataset names the nearest town big enough to be in it. For the places
+a family remembers best, that's the wrong answer. Walt Disney World's parks sit
+nearest three different suburbs, so four days there came out as "Four days in
+Florida". Duck is too small for the dataset, so a week there was "Seven days in
+Southern Shores". Old Faithful is "West Yellowstone, Montana".
+
+`Destinations` is a short, hand-made list of those places, each drawn as a few
+circles over the ground it covers. It has two kinds:
+
+- **Destinations** are places the towns can't name: theme parks, national
+  parks, the Outer Banks, the Las Vegas Strip and a couple of ski resorts. A
+  photo inside one is filed under its name in `assets.destination`, beside its
+  town in `place_name`. The town stays, so it can still be searched. Day
+  headers, trips, Places, search and the Information panel all read
+  `COALESCE(destination, place_name)` (`TimelineController.placeName`), so a
+  place has the same name everywhere.
+- **Areas** are clusters of real towns that a trip moving between them is
+  called by: Orlando, the Smokies, the Florida Keys, Cape Cod, Lake Tahoe. Their
+  photos keep their towns, so a day in Kissimmee still says Kissimmee. Only a
+  trip's title uses the area, and searching "orlando" finds the photos inside it.
+
+A trip takes the most particular name that holds:
+
+1. a destination with half its photos, on at least half its days: "Six days at
+   Walt Disney World";
+2. a town with three quarters of them: "Three days in Asheville";
+3. an area with three quarters of them: "Five days in Orlando";
+4. a state with three quarters of them;
+5. otherwise, "away".
+
+Each place carries how a title says it ("at" Walt Disney World, "in the" Outer
+Banks, "on" Cape Cod). It also carries the trip kinds its name already says, so
+a theme park trip to Walt Disney World is just a trip to Walt Disney World.
+
+Photos are filed wherever coordinates are written: upload, import, rebuild and
+a location edit. A boot-time pass files every photo whose `destination_version`
+is behind `Destinations.version`. Changing the list is a server update: bump the
+version, and the library is filed again on the next start. Town names now come
+from the same coordinates the row keeps (the device's, when it sent some). They
+used to come only from the file's own GPS tags, so a photo whose position the
+phone knew but the file didn't carry got no town. `Scripts/smoke-destinations.sh`
+covers the filing, the names and the trip rules.
+
+One known limit: a family that lives inside a destination, on the Outer Banks
+say, sees its name on every day at home rather than its town's.
 
 **Tags are not searchable yet, and cannot be until the importer keeps them.**
 `MediaProbe.exifTags` requests a fixed list that does not include `-Keywords`

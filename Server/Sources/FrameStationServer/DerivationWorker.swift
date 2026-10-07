@@ -65,6 +65,8 @@ actor DerivationWorker {
     private struct RecordedSize: Decodable {
         let width: Int?
         let height: Int?
+        let lat: Double?
+        let lon: Double?
     }
 
     func start() async {
@@ -417,11 +419,6 @@ actor DerivationWorker {
         on sql: any SQLDatabase,
         geocoder: Geocoder? = nil
     ) async throws {
-        var placeName: String?
-        if let latitude = metadata.latitude, let longitude = metadata.longitude {
-            placeName = geocoder?.label(latitude: latitude, longitude: longitude)
-        }
-
         // The full dump for the `exif` jsonb column, as JSON text bound and
         // cast below. Three states, from `Metadata.raw`:
         //   • not attempted (nil)     → nil here, and the COALESCE leaves exif
@@ -442,12 +439,25 @@ actor DerivationWorker {
         }
 
         let recorded = try await sql.raw("""
-            SELECT width, height FROM assets WHERE id = \(bind: assetID)
+            SELECT width, height, lat, lon FROM assets WHERE id = \(bind: assetID)
             """).first(decoding: RecordedSize.self)
         let size = ExifOrientation.fileOrientedSize(
             recorded: (recorded?.width, recorded?.height),
             file: (metadata.width, metadata.height)
         )
+        // Named from the coordinates the row ends up with: the device's where
+        // it sent some, as `lat` below keeps them, and the file's otherwise.
+        // From the file's alone, a photo whose position the phone knew but
+        // the file didn't carry got no town at all, even with the right pin
+        // on its map.
+        let device = recorded?.lat != nil && recorded?.lon != nil
+        let latitude = device ? recorded?.lat : metadata.latitude
+        let longitude = device ? recorded?.lon : metadata.longitude
+        var placeName: String?
+        if let latitude, let longitude {
+            placeName = geocoder?.label(latitude: latitude, longitude: longitude)
+        }
+        let destination = Destinations.label(latitude: latitude, longitude: longitude)
 
         try await sql.raw("""
             UPDATE assets SET
@@ -474,6 +484,8 @@ actor DerivationWorker {
                 dynamic_range   = COALESCE(\(bind: metadata.dynamicRange), dynamic_range),
                 orientation     = COALESCE(\(bind: metadata.orientation), orientation),
                 place_name      = COALESCE(\(bind: placeName), place_name),
+                destination     = \(bind: destination),
+                destination_version = \(bind: Destinations.version),
                 exif            = COALESCE(\(bind: exifValue)::jsonb, exif)
             WHERE id = \(bind: assetID)
             """).run()

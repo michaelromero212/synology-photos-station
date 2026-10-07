@@ -595,13 +595,15 @@ struct UploadController: RouteCollection {
             INSERT INTO assets
                 (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                  captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
-                 lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                 lat, lon, place_name, destination, destination_version,
+                 camera_make, camera_model, lens, iso, aperture,
                  shutter, focal_len, exposure_bias, dynamic_range, orientation,
                  is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
                  thumb_version, derived_at, storage_path)
             SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                    captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
-                   lat, lon, place_name, camera_make, camera_model, lens, iso, aperture,
+                   lat, lon, place_name, destination, destination_version,
+                   camera_make, camera_model, lens, iso, aperture,
                    shutter, focal_len, exposure_bias, dynamic_range, orientation,
                    is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
                    thumb_version, derived_at, NULL

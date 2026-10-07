@@ -34,6 +34,13 @@ struct TimelineController: RouteCollection {
     /// with each other.
     static let visible = "NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)"
 
+    /// The name a photo's place goes by: Walt Disney World where it was taken
+    /// there, and its town everywhere else. Every query that shows a place, or
+    /// groups or matches by one, reads this, so a name is the same on a day's
+    /// header, a trip's title, the Places list and the Information panel. See
+    /// `Destinations`.
+    static let placeName = "COALESCE(a.destination, a.place_name)"
+
     /// Everything `ItemRow` decodes, except the favorite flag.
     ///
     /// Shared because it drifted, and drifted silently. Five queries across four
@@ -121,7 +128,7 @@ struct TimelineController: RouteCollection {
         // rather than only the commonest.
         let rows = try await req.sql.raw("""
             SELECT to_char(\(unsafeRaw: Self.localTime), \(bind: pattern)) AS key,
-                   a.place_name AS place,
+                   \(unsafeRaw: Self.placeName) AS place,
                    count(*)::int AS count,
                    avg(a.lat) AS latitude,
                    avg(a.lon) AS longitude,
@@ -340,7 +347,7 @@ struct TimelineController: RouteCollection {
 
     private static let dayPhotoColumns = """
         to_char(\(localTime), 'YYYY-MM-DD') AS key,
-        sa.id, a.place_name AS place, a.lat AS latitude, a.lon AS longitude,
+        sa.id, \(placeName) AS place, a.lat AS latitude, a.lon AS longitude,
         COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS contributor,
         \(localTime) AS at
         """
@@ -586,7 +593,7 @@ struct TimelineController: RouteCollection {
                    (a.burst_id IS NOT NULL) AS "isBurst",
                    a.lat AS latitude,
                    a.lon AS longitude,
-                   a.place_name AS "placeName",
+                   \(unsafeRaw: Self.placeName) AS "placeName",
                    u.id AS "uploadedByID",
                    u.display_name AS "uploadedByName",
                    sa.uploaded_at AS "uploadedAt",

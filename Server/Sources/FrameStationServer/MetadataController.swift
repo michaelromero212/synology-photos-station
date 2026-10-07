@@ -43,10 +43,10 @@ struct MetadataController: RouteCollection {
     /// `assets` — but the write is still gated on being a contributor to a space
     /// the photo is in, which is what proves you may touch it at all.
     ///
-    /// `place_name` is re-derived here rather than accepted from the client.
-    /// Search matches on that column, so a name the server didn't produce would
-    /// be a place you could see and not find. Coordinates are the input; the
-    /// words are the server's to choose.
+    /// `place_name` and `destination` are re-derived here rather than accepted
+    /// from the client. Search matches on those columns, so a name the server
+    /// didn't produce would be a place you could see and not find. Coordinates
+    /// are the input; the words are the server's to choose.
     @Sendable
     func setLocation(req: Request) async throws -> SetLocationResponse {
         let input = try req.content.decode(SetLocationRequest.self)
@@ -72,6 +72,7 @@ struct MetadataController: RouteCollection {
         let placeName = latitude.flatMap { lat in
             longitude.flatMap { req.application.geocoder?.label(latitude: lat, longitude: $0) }
         }
+        let destination = Destinations.label(latitude: latitude, longitude: longitude)
 
         try await req.withPinnedConnection { sql in
             try await sql.raw("BEGIN").run()
@@ -80,7 +81,9 @@ struct MetadataController: RouteCollection {
                     UPDATE assets
                     SET lat = \(bind: latitude),
                         lon = \(bind: longitude),
-                        place_name = \(bind: placeName)
+                        place_name = \(bind: placeName),
+                        destination = \(bind: destination),
+                        destination_version = \(bind: Destinations.version)
                     WHERE id = \(bind: assetID)
                     """).run()
                 // Every space holding this photo hears about it: the day headers
@@ -103,8 +106,9 @@ struct MetadataController: RouteCollection {
             }
         }
 
+        // The name the Information panel shows for it from now on.
         return SetLocationResponse(
-            latitude: latitude, longitude: longitude, placeName: placeName
+            latitude: latitude, longitude: longitude, placeName: destination ?? placeName
         )
     }
 

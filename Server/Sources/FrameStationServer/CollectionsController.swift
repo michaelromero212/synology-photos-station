@@ -287,19 +287,33 @@ struct CollectionsController: RouteCollection {
     }
 
     /// Where a card is — "Nags Head" from "Six days in Nags Head", or from
-    /// "Beach trip to Nags Head" — for keeping one card per place. Nil for
-    /// cards that aren't anywhere in particular.
+    /// "Beach trip to Nags Head", and "Walt Disney World" from "Four days at
+    /// Walt Disney World" — for keeping one card per place. Nil for cards that
+    /// aren't anywhere in particular.
     static func place(of collection: CollectionSummary) -> String? {
         switch collection.kind {
         case .trip, .anniversary:
-            return (collection.title.range(of: " in ") ?? collection.title.range(of: " to ")).map {
-                String(collection.title[$0.upperBound...])
-            }
+            return whereabouts(inTitle: collection.title)?.place
         case .revisit:
             return collection.title
         default:
             return nil
         }
+    }
+
+    /// The place a trip's title names and the word before it: ("at", "Walt
+    /// Disney World") from "Four days at Walt Disney World". The first of them
+    /// in the title, since what comes before it is a length, a holiday or a
+    /// kind of trip, and none of those has one.
+    static func whereabouts(inTitle title: String) -> (preposition: String, place: String)? {
+        let found = [" in ", " at ", " on ", " to "]
+            .compactMap { title.range(of: $0) }
+            .min { $0.lowerBound < $1.lowerBound }
+        guard let found else { return nil }
+        return (
+            title[found].trimmingCharacters(in: .whitespaces),
+            String(title[found.upperBound...])
+        )
     }
 
     /// Last year's version of an occasion that is about to come round again —
@@ -412,14 +426,21 @@ struct CollectionsController: RouteCollection {
     struct TripDay: Decodable {
         let day: String
         let count: Int
-        /// Everywhere this day went, not just where most of it was.
+        /// Everywhere this day went, not just where most of it was, by the
+        /// names the places go by (`TimelineController.placeName`).
         ///
         /// The daily mode was the first attempt and it quietly lost the point:
-        /// a week on the Outer Banks moves between Nags Head, Kill Devil Hills
-        /// and Duck every day, the mode collapses each day to one of them, and
-        /// the trip ended up named after whichever won a tie — "Seven days in
-        /// Duck" for a holiday that was nothing of the sort.
+        /// a week moving between Nags Head, Kill Devil Hills and Duck every day
+        /// collapsed each day to one of them, and the trip ended up named after
+        /// whichever won a tie — "Seven days in Duck" for a holiday that was
+        /// nothing of the sort.
         let places: [String]
+        /// How many of the day's photos each of `places` holds, in the same
+        /// order.
+        let placeCounts: [Int]
+        /// Where each of `places` was that day: the middle of its photos.
+        let placeLatitudes: [Double]
+        let placeLongitudes: [Double]
         let coverAssetIDs: [UUID]
     }
 
@@ -447,7 +468,8 @@ struct CollectionsController: RouteCollection {
         let rows = try await sql.raw("""
             WITH located AS (
                 SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
-                       a.lat, a.lon, a.place_name, a.id, a.derived_at, a.camera_make,
+                       a.lat, a.lon, \(unsafeRaw: TimelineController.placeName) AS place_name,
+                       a.id, a.derived_at, a.camera_make,
                        a.burst_id, a.burst_pick, a.media_type,
                        -- For the covers below; see `coverOrder`.
                        COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false) AS utility,
@@ -472,10 +494,16 @@ struct CollectionsController: RouteCollection {
             -- Places worth naming the day after: ones holding at least a fifth
             -- of it. A trip picks up stray coordinates — the drive home, a
             -- screenshot, someone else's phone with a stale fix — and a single
-            -- outlier should not be able to turn "Four days in Bay Lake" into
+            -- outlier should not be able to turn "Four days in Asheville" into
             -- "Four days away" by making the town count look like two.
+            --
+            -- Each with how many photos it holds and where they were, so the
+            -- title can tell the place most of a trip was spent from one it
+            -- passed through, and which area a place is in. See
+            -- `whereabouts(of:)`.
             per_place AS (
-                SELECT day, place_name, count(*)::int AS n
+                SELECT day, place_name, count(*)::int AS n,
+                       avg(lat) AS lat, avg(lon) AS lon
                 FROM located WHERE place_name IS NOT NULL
                 GROUP BY day, place_name
             ),
@@ -483,7 +511,11 @@ struct CollectionsController: RouteCollection {
                 SELECT day, sum(n)::int AS total FROM per_place GROUP BY day
             ),
             main_places AS (
-                SELECT p.day, ARRAY_AGG(p.place_name) AS places
+                SELECT p.day,
+                       ARRAY_AGG(p.place_name ORDER BY p.n DESC, p.place_name) AS places,
+                       ARRAY_AGG(p.n::bigint ORDER BY p.n DESC, p.place_name) AS counts,
+                       ARRAY_AGG(p.lat ORDER BY p.n DESC, p.place_name) AS lats,
+                       ARRAY_AGG(p.lon ORDER BY p.n DESC, p.place_name) AS lons
                 FROM per_place p JOIN day_total d ON d.day = p.day
                 WHERE p.n * 5 >= d.total
                 GROUP BY p.day
@@ -505,6 +537,9 @@ struct CollectionsController: RouteCollection {
             )
             SELECT p.day, p.count,
                    COALESCE(m.places, ARRAY[]::text[]) AS places,
+                   COALESCE(m.counts, ARRAY[]::bigint[]) AS "placeCounts",
+                   COALESCE(m.lats, ARRAY[]::float8[]) AS "placeLatitudes",
+                   COALESCE(m.lons, ARRAY[]::float8[]) AS "placeLongitudes",
                    p.cover AS "coverAssetIDs"
             FROM per_day p
             LEFT JOIN main_places m ON m.day = p.day
@@ -557,13 +592,9 @@ struct CollectionsController: RouteCollection {
         return runs
     }
 
-    /// "Six days in Nags Head", or the state when the trip moved around inside
-    /// one.
-    ///
-    /// A holiday on the Outer Banks touches Nags Head, Kill Devil Hills and
-    /// Duck, and naming it after whichever had the most photographs would be
-    /// arbitrary — the trip was to the coast. So several towns inside one region
-    /// are named by the region, and a trip that crosses regions says neither.
+    /// "Six days at Walt Disney World", "Seven days in the Outer Banks", "Five
+    /// days in Orlando": where the trip was, as particularly as is true. See
+    /// `whereabouts(of:)`.
     ///
     /// A week or less away over a holiday is named for the holiday — "Christmas
     /// 2024 in Asheville" is what the family calls it, and the days it covers
@@ -572,29 +603,18 @@ struct CollectionsController: RouteCollection {
     /// keeps its length.
     ///
     /// Otherwise, where the person's devices have seen what the trip was, it
-    /// is named for that: "Beach trip to Duck", "Wedding in Charleston". The
-    /// dates under the title already say how long. See `tripEvent`.
+    /// is named for that: "Beach trip to the Outer Banks", "Wedding in
+    /// Charleston". Not where the place's name already says it: a theme park
+    /// trip to Walt Disney World is a trip to Walt Disney World. The dates
+    /// under the title already say how long. See `tripEvent`.
     static func describeTrip(
         _ run: [TripDay], holidays: [String: String] = [:],
         event: CurationVocabulary.Event? = nil
     ) -> CollectionSummary {
         let ordered = run.reversed().map { $0 }        // oldest first
         let count = run.reduce(0) { $0 + $1.count }
-        let places = run.flatMap(\.places)
-        let towns = Set(places.map { $0.split(separator: ",").first.map(String.init) ?? $0 })
-        let regions = Set(places.compactMap {
-            $0.split(separator: ",").dropFirst().first
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-        })
-
-        let where_: String?
-        if towns.count == 1 {
-            where_ = towns.first
-        } else if regions.count == 1 {
-            where_ = regions.first
-        } else {
-            where_ = nil
-        }
+        let where_ = whereabouts(of: run)
+        let kind = event.flatMap { where_?.implies.contains($0.tag) == true ? nil : $0 }
 
         let weekdays = ordered.compactMap { parseDate($0.day) }
             .map { utc.component(.weekday, from: $0) }
@@ -615,11 +635,11 @@ struct CollectionsController: RouteCollection {
 
         let title: String
         if let holiday {
-            title = where_.map { "\(holiday) in \($0)" } ?? "\(holiday) away from home"
-        } else if let event, let kind = event.tripTitle {
-            title = where_.map { "\(kind) \(event.tripPreposition) \($0)" } ?? kind
+            title = where_.map { "\(holiday) \($0.locative)" } ?? "\(holiday) away from home"
+        } else if let kind, let named = kind.tripTitle {
+            title = where_.map { "\(named) \($0.phrase(kind.tripPreposition))" } ?? named
         } else {
-            title = where_.map { "\(phrase) in \($0)" } ?? "\(phrase) away"
+            title = where_.map { "\(phrase) \($0.locative)" } ?? "\(phrase) away"
         }
 
         var parts: [String] = []
@@ -642,6 +662,149 @@ struct CollectionsController: RouteCollection {
             count: count,
             coverAssetIDs: Array(run.flatMap(\.coverAssetIDs).prefix(Self.coverDepth))
         )
+    }
+
+    /// Where a trip or a day was, as a title says it.
+    struct Whereabouts {
+        /// "Walt Disney World", "the Outer Banks", "Nags Head", "Florida".
+        let name: String
+        /// "at", "in" or "on".
+        let preposition: String
+        /// Trip kinds the name already says. See `Destinations.Place.implies`.
+        var implies: Set<String> = []
+
+        /// "at Walt Disney World".
+        var locative: String { "\(preposition) \(name)" }
+
+        /// "to the Outer Banks", for "Beach trip to the Outer Banks". Any
+        /// other preposition means where it happened: "Wedding at Walt Disney
+        /// World".
+        func phrase(_ preposition: String) -> String {
+            preposition == "to" ? "to \(name)" : locative
+        }
+
+        init(name: String, preposition: String = "in", implies: Set<String> = []) {
+            self.name = name
+            self.preposition = preposition
+            self.implies = implies
+        }
+
+        init(_ place: Destinations.Place) {
+            self.init(name: place.spoken, preposition: place.preposition, implies: place.implies)
+        }
+
+        /// A stored place name as a title says it: a destination its own way,
+        /// and a town by the town alone. "Culpeper, Virginia" is "in Culpeper".
+        init(label: String) {
+            if let place = Destinations.named(label: label) {
+                self.init(place)
+            } else {
+                self.init(name: HeaderPlaces.town(label))
+            }
+        }
+
+        /// How a title naming this place says being there: "at" for "Walt
+        /// Disney World", from the list, and "in" for a town.
+        static func locative(spoken: String) -> String {
+            let preposition = Destinations.place(spoken: spoken)?.preposition ?? "in"
+            return "\(preposition) \(spoken)"
+        }
+    }
+
+    /// Where a trip was, as particularly as is true, or nil when it moved
+    /// about too much to say.
+    ///
+    /// Tried from the most particular answer down, each by the share of the
+    /// trip's photographs it holds:
+    ///
+    /// 1. A destination with half the photos, on at least half the days: "Six
+    ///    days at Walt Disney World", hotel in Kissimmee and all. Both halves,
+    ///    so one day at Epcot doesn't name a fortnight in Tampa however many
+    ///    photos it took.
+    /// 2. A town with three quarters of them: "Six days in Asheville", the
+    ///    drive down and all.
+    /// 3. An area with three quarters of them, across its towns and
+    ///    destinations: "Five days in Orlando" for Disney World, Universal and
+    ///    the rental between them, and "Five days in the Smokies" for
+    ///    Gatlinburg, Pigeon Forge and the park.
+    /// 4. A state with three quarters of them: "Ten days in Florida".
+    ///
+    /// Three quarters where it used to be every one. A week in Nags Head with
+    /// lunch in Virginia on the drive down was "Seven days away", and
+    /// whichever town a trip's few strays landed in decided between a town
+    /// and its state.
+    static func whereabouts(of run: [TripDay]) -> Whereabouts? {
+        struct Stay {
+            var photos = 0
+            var days = 0
+            var latitude = 0.0
+            var longitude = 0.0
+            var located = 0.0
+        }
+        var stays: [String: Stay] = [:]
+        for day in run {
+            for (index, label) in day.places.enumerated() {
+                let photos = index < day.placeCounts.count ? max(day.placeCounts[index], 1) : 1
+                var stay = stays[label] ?? Stay()
+                stay.photos += photos
+                stay.days += 1
+                if index < day.placeLatitudes.count, index < day.placeLongitudes.count {
+                    stay.latitude += day.placeLatitudes[index] * Double(photos)
+                    stay.longitude += day.placeLongitudes[index] * Double(photos)
+                    stay.located += Double(photos)
+                }
+                stays[label] = stay
+            }
+        }
+        let total = stays.values.reduce(0) { $0 + $1.photos }
+        guard total > 0 else { return nil }
+        let placedDays = run.filter { !$0.places.isEmpty }.count
+        func most(_ photos: Int) -> Bool { photos * 4 >= total * 3 }
+        // The alphabetically first of equals, so a title holds still between
+        // two loads of the same page.
+        func biggest(_ counts: [String: Int]) -> (key: String, photos: Int)? {
+            counts.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }
+                .map { ($0.key, $0.value) }
+        }
+
+        var destinations: [String: Int] = [:]
+        var towns: [String: Int] = [:]
+        var areas: [String: Int] = [:]
+        var regions: [String: Int] = [:]
+        for (label, stay) in stays {
+            if Destinations.named(label: label) != nil {
+                destinations[label] = stay.photos
+            } else {
+                towns[label] = stay.photos
+            }
+            if stay.located > 0 {
+                let latitude = stay.latitude / stay.located
+                let longitude = stay.longitude / stay.located
+                for area in Destinations.areas(containing: latitude, longitude) {
+                    areas[area.spoken, default: 0] += stay.photos
+                }
+            }
+            if let region = label.split(separator: ",", maxSplits: 1).dropFirst().first?
+                .trimmingCharacters(in: .whitespaces), !region.isEmpty {
+                regions[region, default: 0] += stay.photos
+            }
+        }
+
+        if let best = biggest(destinations), let place = Destinations.named(label: best.key),
+           best.photos * 2 >= total, (stays[best.key]?.days ?? 0) * 2 >= placedDays {
+            return Whereabouts(place)
+        }
+        if let best = biggest(towns), most(best.photos) {
+            return Whereabouts(label: best.key)
+        }
+        if let best = biggest(areas), most(best.photos),
+           let place = Destinations.place(spoken: best.key) {
+            return Whereabouts(place)
+        }
+        if let best = biggest(regions), most(best.photos) {
+            return Whereabouts(name: best.key)
+        }
+        return nil
     }
 
     // MARK: - Holidays and occasions
@@ -723,8 +886,8 @@ struct CollectionsController: RouteCollection {
             WITH per_day AS (
                 SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
                        count(*)::int AS count,
-                       mode() WITHIN GROUP (ORDER BY a.place_name) AS place,
-                       count(DISTINCT a.place_name)::int AS "placeCount",
+                       mode() WITHIN GROUP (ORDER BY \(unsafeRaw: TimelineController.placeName)) AS place,
+                       count(DISTINCT \(unsafeRaw: TimelineController.placeName))::int AS "placeCount",
                        count(*) FILTER (WHERE a.media_type = 'video')::int AS "videoCount",
                        min(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "firstHour",
                        max(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "lastHour",
@@ -1175,13 +1338,13 @@ struct CollectionsController: RouteCollection {
         return inPlace(phrase, place)
     }
 
-    /// "An evening in Culpeper" — and just "An evening" where there is no
-    /// location to name, rather than a sentence with a hole in it.
+    /// "An evening in Culpeper", or "at Walt Disney World" — and just "An
+    /// evening" where there is no location to name, rather than a sentence
+    /// with a hole in it.
     private static func inPlace(_ phrase: String, _ place: String?) -> String {
         guard let place else { return phrase }
         // The stored name is "Culpeper, Virginia"; a title wants the town.
-        let town = place.split(separator: ",").first.map(String.init) ?? place
-        return "\(phrase) in \(town)"
+        return "\(phrase) \(Whereabouts(label: place).locative)"
     }
 
     /// A day that happened inside one part of it.
@@ -1405,12 +1568,17 @@ struct CollectionsController: RouteCollection {
                 return nil
             }
 
-            // "in North Carolina" from "Seven days in North Carolina".
-            let place = trip.title.range(of: " in ").map {
-                String(trip.title[$0.upperBound...])
+            // "at Walt Disney World" from "Four days at Walt Disney World". A
+            // trip *to* somewhere was a time you were *in* it, or at it.
+            let title: String
+            if let (preposition, place) = whereabouts(inTitle: trip.title) {
+                let locative = preposition == "to"
+                    ? Whereabouts.locative(spoken: place)
+                    : "\(preposition) \(place)"
+                title = "\(agoPhrase(ago)) you were \(locative)"
+            } else {
+                title = "\(agoPhrase(ago)) you were away"
             }
-            let title = place.map { "\(agoPhrase(ago)) you were in \($0)" }
-                ?? "\(agoPhrase(ago)) you were away"
 
             return CollectionSummary(
                 kind: .anniversary,
@@ -1447,8 +1615,9 @@ struct CollectionsController: RouteCollection {
         spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
+        let place = TimelineController.placeName
         let rows = try await sql.raw("""
-            SELECT a.place_name AS place,
+            SELECT \(unsafeRaw: place) AS place,
                    count(*)::int AS count,
                    to_char(max(\(unsafeRaw: local)), 'YYYY-MM-DD') AS "lastSeen",
                    (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
@@ -1458,8 +1627,8 @@ struct CollectionsController: RouteCollection {
             \(Self.observed(by: userID))
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
-              AND a.place_name IS NOT NULL
-            GROUP BY a.place_name
+              AND \(unsafeRaw: place) IS NOT NULL
+            GROUP BY 1
             HAVING count(*) >= \(bind: Self.minimumItems * 3)
                AND max(\(unsafeRaw: local)) < now() - interval '2 years'
             ORDER BY max(\(unsafeRaw: local)) DESC
@@ -1467,7 +1636,7 @@ struct CollectionsController: RouteCollection {
             """).all(decoding: RevisitRow.self)
 
         return rows.map { row in
-            let town = row.place.split(separator: ",").first.map(String.init) ?? row.place
+            let town = HeaderPlaces.town(row.place)
             let when = Self.parseDate(row.lastSeen)
                 .map { Self.stampFormatter("MMMM yyyy").string(from: $0) }
             return CollectionSummary(
@@ -2099,7 +2268,7 @@ struct CollectionsController: RouteCollection {
         case .revisit:
             // Keyed by place rather than by date — the whole point of it is
             // everything from somewhere, whenever that was.
-            filter = "AND a.place_name = \(bind: key)"
+            filter = "AND \(unsafeRaw: TimelineController.placeName) = \(bind: key)"
         case .mediaType:
             guard let predicate = Self.mediaTypeFilter(key) else {
                 throw Abort(.badRequest, reason: "No such media type.")
