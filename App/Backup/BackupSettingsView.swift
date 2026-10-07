@@ -36,6 +36,11 @@ struct BackupSettings: Equatable {
         spaces.first { $0.kind == .personal }
     }
 
+    /// What these settings tell backup to send. See `BackupScope`.
+    var scope: BackupScope {
+        BackupScope(includeVideos: includeVideos, rule: rule, cutoff: futureCutoff)
+    }
+
     private enum Key {
         static let enabled = "backup.enabled"
         static let wifiOnly = "backup.wifiOnly"
@@ -93,14 +98,16 @@ struct BackupSettingsView: View {
     @State private var access = PhotoLibraryScanner.access
     private var registrar: PushRegistrar { .shared }
 
-    /// Says where the files land, in the terms the file tree uses — the same
-    /// promise Synology makes on this screen, and one this app can keep now
-    /// that uploads are written to human paths.
+    /// Says where the files land, in the terms File Station uses — the same
+    /// promise Synology makes on this screen.
+    ///
+    /// It named `/<space>/MobileBackup/iPhone`, which was never a folder this
+    /// app wrote: the server files a backup in its owner's home, under
+    /// `Photos/Personal/<year>/<month>` (see the server's `BrowseTree`).
     private var destinationExplanation: String {
-        let name = settings.targetSpace(in: session.spaces)?.name ?? "your personal space"
-        return "Photos and videos are backed up to folders created under "
-            + "/\(name)/MobileBackup/iPhone, named by the year and month they "
-            + "were taken.\n\nBackup only ever goes to your own library. To put "
+        "In File Station, photos and videos are in your home folder under "
+            + "Photos › Personal, in a folder for the year and month each was "
+            + "taken.\n\nBackup only ever goes to your own library. To put "
             + "something in a shared album, choose it there — nothing reaches "
             + "the family by default."
     }
@@ -289,6 +296,11 @@ struct BackupSettingsView: View {
             if engine.progress.skipped > 0 {
                 LabeledContent("Skipped", value: "\(engine.progress.skipped)")
             }
+            // Videos under "Photos Only", older photos under "Back up future
+            // photos": kept in the queue, and sent if the setting changes back.
+            if engine.progress.held > 0 {
+                LabeledContent("Left out by your settings", value: "\(engine.progress.held)")
+            }
             if engine.progress.bytesRemaining > 0 {
                 LabeledContent("To upload", value: Self.bytes(engine.progress.bytesRemaining))
             }
@@ -301,7 +313,9 @@ struct BackupSettingsView: View {
 
             if engine.isRunning {
                 Button("Pause") { engine.stop() }
-            } else if access == .authorized {
+            } else if access == .authorized, settings.enabled {
+                // Only with backup on: the engine won't send with it off, so
+                // the button would do nothing.
                 Button("Back Up Now") {
                     Task {
                         await engine.scanLibrary()

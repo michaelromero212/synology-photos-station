@@ -44,4 +44,41 @@ struct BackupRuleTests {
         #expect(!BackupRule.resume.retriesPreviousFailures)
         #expect(!BackupRule.futureOnly.retriesPreviousFailures)
     }
+
+    @Test("Scan-all doesn't promise to bring back what you deleted")
+    func scanAllKeepsDeletionsDeleted() {
+        #expect(BackupRule.scanAll.detail.contains("stay deleted"))
+        #expect(!BackupRule.scanAll.detail.contains("backed up again"))
+    }
+}
+
+@Suite("What's already queued follows the settings too")
+struct BackupScopeTests {
+    private let cutoff = Date(timeIntervalSince1970: 1_700_000_000)
+    private var before: Date { cutoff.addingTimeInterval(-3600) }
+    private var after: Date { cutoff.addingTimeInterval(3600) }
+
+    @Test("Photos Only holds back every video, edits and Live Photo motion included")
+    func photosOnlyHoldsVideos() {
+        let scope = BackupScope(includeVideos: false, rule: .resume, cutoff: nil)
+        #expect(!scope.includes(isVideo: true, takenAt: after))
+        #expect(!scope.includes(isVideo: true, takenAt: after, isEdit: true))
+        #expect(scope.includes(isVideo: false, takenAt: before))
+    }
+
+    @Test("Future-only holds back older photos, but not later edits of ones already sent")
+    func futureOnlyHoldsThePastButNotEdits() {
+        let scope = BackupScope(includeVideos: true, rule: .futureOnly, cutoff: cutoff)
+        #expect(!scope.includes(isVideo: false, takenAt: before))
+        #expect(scope.includes(isVideo: false, takenAt: after))
+        #expect(scope.includes(isVideo: false, takenAt: before, isEdit: true))
+        #expect(scope.includes(isVideo: false, takenAt: nil))
+    }
+
+    @Test("With nothing excluded, everything queued goes")
+    func defaultsSendEverything() {
+        let scope = BackupScope(includeVideos: true, rule: .resume, cutoff: nil)
+        #expect(scope.includes(isVideo: true, takenAt: before))
+        #expect(scope.includes(isVideo: false, takenAt: nil))
+    }
 }

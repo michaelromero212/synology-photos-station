@@ -241,6 +241,14 @@ final class ConnectionMonitor {
         }
     }
 
+    /// Whether the NAS answers right now, for a caller deciding what one failed
+    /// request meant. A dropped connection while the NAS answers is a reason to
+    /// try again, not to stop; see `BackupEngine.drainLane`.
+    func confirmReachable() async -> Bool {
+        guard hasPath else { return false }
+        return await isHealthy()
+    }
+
     private func isHealthy() async -> Bool {
         guard let client = client() else { return false }
         isProbing = true

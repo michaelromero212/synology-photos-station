@@ -126,6 +126,11 @@ final class BackupItem {
         /// an iCloud original that no longer exists) would otherwise be retried
         /// forever, blocking the queue behind it.
         case skipped
+        /// Left out by the settings as they are now: a video under "Photos
+        /// Only", or an older photo under "Back up future photos". Kept rather
+        /// than removed, so changing the setting back sends it after all. See
+        /// `BackupEngine.reconcileHolds`.
+        case held
     }
 
     var state: State {
@@ -140,6 +145,9 @@ struct BackupProgress: Equatable {
     var done: Int = 0
     var failed: Int = 0
     var skipped: Int = 0
+    /// Waiting on a setting rather than on the network. Not part of `total`:
+    /// nothing will send them until the setting changes.
+    var held: Int = 0
     var bytesRemaining: Int64 = 0
 
     var total: Int { pending + done + failed + skipped }

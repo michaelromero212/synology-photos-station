@@ -152,6 +152,24 @@ final class BackupEngine {
     /// from two threads — only interleaved cooperatively between `await`s.
     private var runContext: ModelContext?
 
+    /// The run in progress. A second `start()` waits for it rather than
+    /// returning at once, which is what lets a background wake-up hold iOS's
+    /// window open until the work it started is done. See `start()`.
+    private var runTask: Task<Void, Never>?
+
+    /// The last scan asked for. Each one waits for the one before, so two
+    /// changes made in quick succession scan twice, in order, rather than at
+    /// once against the same queue. See `scanLibrary()`.
+    private var scanChain: Task<Void, Never>?
+
+    /// Time iOS lends a run that was going when the app was put away. See
+    /// `appWentToBackground()`.
+    private var backgroundTime: UIBackgroundTaskIdentifier = .invalid
+
+    /// Starts a waiting backup when the phone is plugged in, under "Only While
+    /// Charging". See `watchPower()`.
+    private var powerObserver: NSObjectProtocol?
+
     init(
         container: ModelContainer,
         session: AppSession,
@@ -162,32 +180,45 @@ final class BackupEngine {
         self.session = session
         self.settings = settings
         self.connection = connection
+        watchPower()
     }
 
-    func update(settings: BackupSettings) { self.settings = settings }
-
-    /// How a wake-up — a scheduled window, or a silent push — reaches whichever
-    /// engine the app built. Answers whether anything actually moved.
+    /// Applies a change made on the settings screen, to what is already waiting
+    /// as well as to what comes next.
     ///
-    /// A closure rather than a shared instance: the engine needs the session and
-    /// model container that only the view tree has, and iOS may launch us
-    /// straight into a background task before any of that exists — in which case
-    /// this is nil and the wake-up is a no-op rather than a crash.
-    ///
-    /// `async` and not `() -> Void`, which is what it was and which quietly
-    /// wasted every window it was given. The old closure started a detached
-    /// `Task` and returned immediately, so `BackupScheduler` called
-    /// `setTaskCompleted` before a single photograph had been sent — telling iOS
-    /// the work was finished while it was still being started, and inviting
-    /// suspension mid-upload. Both callers now wait for the run.
-    nonisolated(unsafe) static var backgroundRunner: (@Sendable () async -> Bool)?
-
-    /// Installs `backgroundRunner` and asks for the first window.
-    func enableBackgroundRuns() {
-        Self.backgroundRunner = { [weak self] in
-            guard let self else { return false }
-            return await self.runInBackground()
+    /// Switching backup on scans the library, and so does any change to what
+    /// backup covers. It used to only start watching for *new* photos, so the
+    /// ones already on the phone waited for Back Up Now, or for whenever iOS
+    /// next granted a background window. Switching it off stops the run, which
+    /// used to carry on through everything already queued.
+    func update(settings new: BackupSettings) {
+        let old = settings
+        settings = new
+        watchPower()
+        guard new.enabled else {
+            if old.enabled { stop() }
+            return
         }
+        let coverageChanged = !old.enabled || old.rule != new.rule
+            || old.futureCutoff != new.futureCutoff || old.includeVideos != new.includeVideos
+        Task {
+            if coverageChanged {
+                reconcileHolds()
+                await scanLibrary()
+            }
+            // Switched off and straight back on: the run told to stop is still
+            // finishing the files it had in flight, and `start()` now would only
+            // join it on its way out. Let it go first.
+            if cancelled, let runTask { await runTask.value }
+            // For every change, not only those: turning off "Wi-Fi Only" on
+            // cellular, or "Only While Charging" on battery, should start what
+            // was waiting on it.
+            await start()
+        }
+    }
+
+    /// Asks iOS for the first window, and starts watching the library.
+    func enableBackgroundRuns() {
         BackupScheduler.schedule(requiresPower: settings.chargingOnly)
         startObservingLibrary()
         // So the NAS knows from the start whether this device is one worth
@@ -195,16 +226,27 @@ final class BackupEngine {
         reportBackupState(force: true)
     }
 
-    /// One wake-up's worth of work: catch up on what the library gained, drain
-    /// what is queued, and book the next window.
+    /// One wake-up's worth of work, from iOS or from the NAS: queue what the
+    /// library gained since the app last looked, send what is queued, and book
+    /// the next window.
+    ///
+    /// What the library gained comes from Photos' own change history, not a
+    /// scan. A scan describes every photo on the phone, and on a large library
+    /// that could use a push's whole half-minute before a byte went; the
+    /// history costs only the photos that changed. A full scan is only the
+    /// fallback for when that history can't be read.
     ///
     /// The return value is what iOS is told, and telling it honestly is the
     /// point: `.newData` for a window that moved photographs earns more windows,
     /// and claiming it for a window that did nothing is how an app ends up
     /// getting none.
-    private func runInBackground() async -> Bool {
+    func runInBackground() async -> Bool {
+        guard settings.enabled else { return false }
         let before = progress.done
-        await scanLibrary()
+        // As `resume` does: until the path has reported, "Wi-Fi Only" can only
+        // guess, and it must not guess in the direction that spends data.
+        await waitForPath()
+        if await catchUp() == .unavailable { await scanLibrary() }
         await start()
         // Chain the next window from the end of this one; iOS only ever honors
         // one pending request at a time.
@@ -213,13 +255,59 @@ final class BackupEngine {
     }
 
     func disableBackgroundRuns() {
-        Self.backgroundRunner = nil
         BackupScheduler.cancel()
         stopObservingLibrary()
         // Nothing to wake this device for any more. Said plainly rather than
         // left to expire, or the NAS spends its push budget on a phone that has
         // switched backup off.
         reportBackupState(force: true)
+    }
+
+    /// Asks iOS for time to finish when the app is put away mid-run.
+    ///
+    /// Without it the app was suspended within seconds of leaving it. Whatever
+    /// was mid-transfer froze where it was; coming back, the run still looked
+    /// like it was going, so nothing started a new one, and when the frozen
+    /// transfer failed the run stopped with the app open in front of it. With
+    /// it, iOS allows about half a minute: the files in flight finish, and
+    /// every chunk started in that time goes through the background session,
+    /// which carries on after the app is suspended.
+    func appWentToBackground() {
+        guard isRunning, backgroundTime == .invalid else { return }
+        backgroundTime = UIApplication.shared.beginBackgroundTask(withName: "Backup") { [weak self] in
+            // Out of time. What is mid-chunk finishes in the background session
+            // or resumes from the chunks the NAS kept.
+            self?.endBackgroundTime()
+        }
+    }
+
+    /// Hands back time borrowed by `appWentToBackground`. Safe to call
+    /// whether or not any was borrowed.
+    func endBackgroundTime() {
+        guard backgroundTime != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTime)
+        backgroundTime = .invalid
+    }
+
+    /// Under "Only While Charging", starts a backup that was waiting when the
+    /// phone is plugged in, rather than leaving it for the next time the app
+    /// is opened.
+    private func watchPower() {
+        let wanted = settings.enabled && settings.chargingOnly
+        if wanted, powerObserver == nil {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            powerObserver = NotificationCenter.default.addObserver(
+                forName: UIDevice.batteryStateDidChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.allowedOnCurrentPower else { return }
+                    Task { await self.start() }
+                }
+            }
+        } else if !wanted, let powerObserver {
+            NotificationCenter.default.removeObserver(powerObserver)
+            self.powerObserver = nil
+        }
     }
 
     /// Stops everything this engine does for the account that is signing out.
@@ -236,6 +324,11 @@ final class BackupEngine {
     func retire() {
         stop()
         disableBackgroundRuns()
+        endBackgroundTime()
+        if let powerObserver {
+            NotificationCenter.default.removeObserver(powerObserver)
+            self.powerObserver = nil
+        }
     }
 
     /// Starts watching the photo library so a photo taken with the app open is
@@ -243,9 +336,9 @@ final class BackupEngine {
     /// window or a manual "Back Up Now". Idempotent; safe to call again.
     ///
     /// The observer only covers changes while we're registered, which is the
-    /// live case. A cold launch's catch-up is still the full `scanLibrary` on
-    /// the existing triggers (background window, focused/manual backup) — this
-    /// adds live discovery on top rather than replacing that.
+    /// live case. What changed while it wasn't — the app closed, or suspended —
+    /// is `catchUp`'s, from Photos' change history, when the app comes back or
+    /// is woken in the background.
     func startObservingLibrary() {
         guard changeMonitor == nil, PhotoLibraryScanner.access == .authorized else { return }
         let monitor = PhotoLibraryChangeMonitor(options: PhotoLibraryScanner.fetchOptions())
@@ -285,7 +378,22 @@ final class BackupEngine {
 
     /// Adds anything not already queued. Safe to call repeatedly — the unique
     /// constraint on `localIdentifier` makes re-scanning idempotent.
+    ///
+    /// One at a time, in the order asked for. Switching backup on and changing
+    /// a setting a moment later both ask for a scan, and the second has to see
+    /// the settings it was asked under, so it runs after the first rather than
+    /// beside it or not at all.
     func scanLibrary() async {
+        let previous = scanChain
+        let scan = Task {
+            await previous?.value
+            await self.performScan()
+        }
+        scanChain = scan
+        await scan.value
+    }
+
+    private func performScan() async {
         guard PhotoLibraryScanner.access == .authorized else {
             lastError = "FrameStation needs access to all your photos to back them up."
             return
@@ -355,6 +463,9 @@ final class BackupEngine {
 
         added += backfillLivePhotos(candidates, known: known, context: context)
         added += queueEdits(library, known: known, context: context)
+        // Whatever "scan and back up all" just stood up again goes through the
+        // same settings as everything else.
+        reconcileHolds(context)
 
         try? context.save()
         if let mark { LibraryChangeHistory.save(mark) }
@@ -375,9 +486,10 @@ final class BackupEngine {
     ///
     /// With no mark saved yet, or one so old Photos has let its history go,
     /// there is nothing to read — only a place to start from. What came before
-    /// it is the full scan's to find, exactly as it always was.
-    private func catchUp() async {
-        guard PhotoLibraryScanner.access == .authorized else { return }
+    /// it is the full scan's to find, so that is what this answers, and the
+    /// caller runs one.
+    private func catchUp() async -> CatchUp {
+        guard PhotoLibraryScanner.access == .authorized else { return .caughtUp }
         // Taken before reading, so a photo arriving meanwhile is either in what
         // is read or after the new mark — never lost between the two. Reading
         // it twice costs nothing: the queue already knows it.
@@ -395,6 +507,13 @@ final class BackupEngine {
             }
         }
         if let now { LibraryChangeHistory.save(now) }
+        return changes == nil ? .unavailable : .caughtUp
+    }
+
+    private enum CatchUp {
+        case caughtUp
+        /// Photos couldn't say what changed, so only a full scan can.
+        case unavailable
     }
 
     /// Turns one library asset into its queue rows — the still, and a paired
@@ -523,6 +642,9 @@ final class BackupEngine {
                     guard asset.mediaType == .image
                         || (asset.mediaType == .video && includeVideos)
                     else { return }
+                    // Fetched by id, so nothing has left out a shared album
+                    // or the Hidden album the way the scan's fetch does.
+                    guard PhotoLibraryScanner.isBackedUp(asset) else { return }
                     // The line the full scan draws, drawn here too. New to the
                     // library is not the same as newly taken: a photo saved
                     // from a message, or arriving from iCloud, can be years
@@ -659,6 +781,7 @@ final class BackupEngine {
                     guard asset.hasAdjustments,
                           asset.mediaType == .image
                             || (asset.mediaType == .video && includeVideos),
+                          PhotoLibraryScanner.isBackedUp(asset),
                           let candidate = PhotoLibraryScanner.describe(asset),
                           candidate.editedAt != nil
                     else { return }
@@ -788,12 +911,43 @@ final class BackupEngine {
         )
     }
 
+    /// Every reason a run may send right now: backup switched on, a network
+    /// "Wi-Fi Only" allows, and power "Only While Charging" allows. Asked before
+    /// each file, and before each chunk of one.
+    private var maySend: Bool {
+        settings.enabled && allowedOnCurrentNetwork && allowedOnCurrentPower
+    }
+
+    /// Runs the queue, or waits for the run already going.
+    ///
+    /// Waiting rather than returning is what keeps a background wake-up's
+    /// window open. A catch-up that queues something starts a run of its own,
+    /// and the wake-up's `start()` used to see it running and return, which
+    /// told iOS the window was finished with uploads still to send.
+    ///
+    /// Checks the backup toggle itself, so nothing that calls this (a
+    /// reconnect, a new photo, a wake-up) can send with backup switched off.
     func start() async {
-        guard !isRunning else { return }
+        if let runTask {
+            await runTask.value
+            return
+        }
+        guard settings.enabled else { return }
         guard session.client != nil, settings.targetSpace(in: session.spaces) != nil else {
             lastError = "Not signed in."
             return
         }
+        let run = Task {
+            await self.run()
+            // Cleared by the run itself rather than by whoever started it, so
+            // anything waiting on it finds no run going when it resumes.
+            self.runTask = nil
+        }
+        runTask = run
+        await run.value
+    }
+
+    private func run() async {
         isRunning = true
         cancelled = false
 
@@ -813,8 +967,10 @@ final class BackupEngine {
             meter.cancel()
             throughput = nil
             throughputSamples.removeAll()
+            endBackgroundTime()
         }
         reclaimInterrupted(context)
+        reconcileHolds(context)
         refreshProgress(context)
 
         // A small pool of lanes rather than one serial loop. Each lane claims
@@ -838,9 +994,12 @@ final class BackupEngine {
                     group.addTask { @MainActor [weak self] in await self?.drainLane() }
                 }
             }
-        } while !cancelled && allowedOnCurrentNetwork && hasDestination
+        } while !cancelled && maySend && hasDestination
             && nextItem(context) != nil
 
+        // In full: the lanes kept the byte count by subtraction. See
+        // `noteFinished`.
+        refreshProgress(context)
         statusText = progress.summary
         completedRuns += 1
         // The end of a run is the one moment this device knows something the
@@ -866,7 +1025,7 @@ final class BackupEngine {
     /// because the interesting transition is between "some" and "none" rather
     /// than between four thousand and three thousand nine hundred.
     func reportBackupState(force: Bool = false) {
-        let pending = Self.backgroundRunner == nil ? 0 : progress.pending
+        let pending = settings.enabled ? progress.pending : 0
         if !force, let reportedPending, let reportedAt,
            (reportedPending > 0) == (pending > 0),
            Date().timeIntervalSince(reportedAt) < Self.reportInterval {
@@ -878,27 +1037,44 @@ final class BackupEngine {
         Task { try? await client.reportBackupState(ReportBackupStateRequest(pending: pending)) }
     }
 
-    /// One upload lane: claim, send, repeat until the queue is empty, the Wi-Fi
-    /// gate closes, or a run-ending failure trips `cancelled`.
+    /// One upload lane: claim, send, repeat until the queue is empty, a setting
+    /// says to wait, or a run-ending failure trips `cancelled`.
     private func drainLane() async {
         guard let context = runContext,
               let client = session.client,
               let space = settings.targetSpace(in: session.spaces) else { return }
 
         while !cancelled {
-            // Re-checked each claim so a lane also stops if Wi-Fi drops to
-            // cellular mid-backup. The next background window, or reopening the
-            // app on Wi-Fi, resumes from exactly here.
+            // Re-checked each claim, so a lane also stops if backup is switched
+            // off, Wi-Fi drops to cellular, or the phone comes off its charger
+            // mid-backup. Whatever starts the next run resumes from exactly here.
+            guard settings.enabled else { break }
             guard allowedOnCurrentNetwork else {
                 statusText = "Waiting for Wi‑Fi"
                 break
             }
+            guard allowedOnCurrentPower else {
+                statusText = "Waiting until charging"
+                break
+            }
             guard let item = claimNext(context) else { break }
+            let claimedBytes = item.byteSize
             let failure = await upload(
                 item, client: client, spaceID: space.id, context: context
             )
-            refreshProgress(context)
+            noteFinished(item, claimedBytes: claimedBytes, context: context)
 
+            // One dropped connection while the NAS answers isn't an outage.
+            // Stopping the run for it is what left a backup sitting still with
+            // the app open: a transfer cut off by the app being suspended
+            // failed this way on the way back, the NAS was fine, so nothing
+            // counted as a reconnect and nothing started the run again. The
+            // row is already back in the queue, and an item that keeps failing
+            // this way is blamed after three tries (see `record`).
+            if failure == .unreachable, await connection.confirmReachable() {
+                try? await Task.sleep(for: .seconds(2))
+                continue
+            }
             // Stop the whole run rather than marching the other lanes into the
             // same wall — a server that isn't there fails every item the same
             // way. Lanes already mid-transfer finish their item, then stop.
@@ -925,30 +1101,37 @@ final class BackupEngine {
     /// opening the app doesn't report to the NAS or refresh the grid for no
     /// reason.
     func resume() async {
-        guard settings.enabled, allowedOnCurrentPower else { return }
-        // At launch the path may not have reported yet, and until it has
-        // `isMetered` is only its permissive default. "Wi-Fi Only" is the
-        // setting that must not fail open, so this waits for the real answer —
-        // it comes within milliseconds — rather than start on the guess.
+        guard settings.enabled else { return }
+        // In front again, so time borrowed for leaving isn't needed.
+        endBackgroundTime()
+        await waitForPath()
+        guard connection.hasReportedPath, hasDestination else { return }
+        // Queued whatever the network or power, like a photo taken with the app
+        // open: on cellular under "Wi-Fi Only", or on battery under "Only While
+        // Charging", it waits in the grid as a tile rather than not being known
+        // about at all. A full scan only when Photos can't say what changed.
+        if await catchUp() == .unavailable { await scanLibrary() }
+        // Checked after the catch-up, not before it: that suspends, and a run
+        // that started meanwhile has lanes holding rows `reclaimInterrupted`
+        // must not touch. From here to `start()` marking itself running there
+        // is no suspension, so nothing can start in between.
+        guard runTask == nil, !isRunning, maySend else { return }
+        let context = ModelContext(container)
+        reclaimInterrupted(context)
+        guard nextItem(context) != nil else { return }
+        await start()
+    }
+
+    /// At launch the path may not have reported yet, and until it has
+    /// `isMetered` is only its permissive default. "Wi-Fi Only" is the setting
+    /// that must not fail open, so this waits for the real answer — it comes
+    /// within milliseconds — rather than start on the guess.
+    private func waitForPath() async {
         var waited = 0
         while !connection.hasReportedPath, waited < 40 {
             try? await Task.sleep(for: .milliseconds(50))
             waited += 1
         }
-        guard connection.hasReportedPath, hasDestination else { return }
-        // Queued whatever the network, like a photo taken with the app open:
-        // on cellular under "Wi-Fi Only" it waits in the grid as a tile rather
-        // than not being known about at all.
-        await catchUp()
-        // Checked after the catch-up, not before it: that suspends, and a run
-        // that started meanwhile has lanes holding rows `reclaimInterrupted`
-        // must not touch. From here to `start()` marking itself running there
-        // is no suspension, so nothing can start in between.
-        guard !isRunning, allowedOnCurrentNetwork else { return }
-        let context = ModelContext(container)
-        reclaimInterrupted(context)
-        guard nextItem(context) != nil else { return }
-        await start()
     }
 
     /// Takes one reading for `throughput`.
@@ -1080,6 +1263,10 @@ final class BackupEngine {
             // retryable.
             return .skip("No longer in the photo library")
         }
+        // Queued before shared albums were left out, or hidden since it was.
+        guard PhotoLibraryScanner.isBackedUp(asset) else {
+            return .skip(asset.isHidden ? "Hidden in Photos" : "In a shared album, not your library")
+        }
         switch kind {
         case .main:
             // Read before the export rather than after it: an edit landing in
@@ -1163,9 +1350,10 @@ final class BackupEngine {
                 resource: resource, isAutomaticBackup: true,
                 // Asked before every chunk, so a file that is part-way up when
                 // the phone leaves the house stops there rather than finishing
-                // over cellular. `drainLane` re-checks the same gate between
-                // items; this is the same question asked often enough to matter
-                // on a video.
+                // over cellular — or when backup is switched off, or the phone
+                // comes off its charger under "Only While Charging". `drainLane`
+                // re-checks the same gates between items; this is the same
+                // question asked often enough to matter on a video.
                 //
                 // Unwrapped before the hop, not optional-chained across it.
                 // `self?.x` inside the `MainActor.run` closure reads the
@@ -1174,7 +1362,7 @@ final class BackupEngine {
                 // and the phase handler below both had to be written around.
                 shouldContinue: { [weak self] in
                     guard let self else { return false }
-                    return await MainActor.run { self.allowedOnCurrentNetwork }
+                    return await MainActor.run { self.maySend }
                 }
             ) { [weak self] phase in
                 Task { @MainActor in
@@ -1237,11 +1425,12 @@ final class BackupEngine {
             connection.noteSuccess()
             return nil
         } catch UploadError.pausedByCaller {
-            // Wi-Fi went away mid-file. Put the row back exactly as it was
-            // found — including the attempt `claimNext` spent on it, because
-            // the network changing is not the item's fault and three of these
-            // would otherwise retire a perfectly good photo. `drainLane`'s own
-            // check stops the lane on the next turn of the loop.
+            // Wi-Fi went away mid-file, or backup was switched off, or the phone
+            // came off its charger. Put the row back exactly as it was found —
+            // including the attempt `claimNext` spent on it, because none of
+            // that is the item's fault and three of these would otherwise
+            // retire a perfectly good photo. `drainLane`'s own check stops the
+            // lane on the next turn of the loop.
             item.state = .pending
             item.attempts = max(item.attempts - 1, 0)
             item.lastError = nil
@@ -1317,40 +1506,56 @@ final class BackupEngine {
 
     // MARK: - Helpers
 
-    private func refreshProgress(_ context: ModelContext) {
-        // Counts come from `fetchCount`, which never builds objects — the old
-        // full-table fetch materialized every row after *every* upload, and the
-        // `done` pile grows without bound over a large backup, so that was
-        // O(n) work per item and O(n²) per run: the thing that would jank the
-        // UI at thousands. Only the outstanding rows are loaded, and only to sum
-        // their bytes and show the head of the queue.
+    /// Counts and the head of the queue, from the store.
+    ///
+    /// Counts come from `fetchCount`, which never builds objects. The outstanding
+    /// rows used to be loaded whole after every file, to sum their sizes and
+    /// show the first five hundred, so the work per file grew with the backlog:
+    /// on a first backup of thousands, each file cost more than the one before.
+    /// Now only the head is loaded, and the sizes only when `recountBytes`
+    /// asks for them; after a single file `noteFinished` subtracts instead.
+    private func refreshProgress(_ context: ModelContext, recountBytes: Bool = true) {
+        func count(_ predicate: Predicate<BackupItem>) -> Int {
+            (try? context.fetchCount(FetchDescriptor<BackupItem>(predicate: predicate))) ?? 0
+        }
         func count(_ state: BackupItem.State) -> Int {
             let raw = state.rawValue
-            return (try? context.fetchCount(
-                FetchDescriptor<BackupItem>(predicate: #Predicate { $0.stateRaw == raw })
-            )) ?? 0
+            return count(#Predicate { $0.stateRaw == raw })
         }
 
         var next = BackupProgress()
         next.done = count(.done)
         next.failed = count(.failed)
         next.skipped = count(.skipped)
+        next.held = count(.held)
 
         let pending = BackupItem.State.pending.rawValue
         let uploading = BackupItem.State.uploading.rawValue
-        let outstanding = FetchDescriptor<BackupItem>(
-            predicate: #Predicate { $0.stateRaw == pending || $0.stateRaw == uploading },
-            sortBy: [SortDescriptor(\.capturedAt, order: .reverse)]
-        )
-        let rows = (try? context.fetch(outstanding)) ?? []
-        next.pending = rows.count
-        next.bytesRemaining = rows.reduce(0) { $0 + $1.byteSize }
+        let outstanding = #Predicate<BackupItem> {
+            $0.stateRaw == pending || $0.stateRaw == uploading
+        }
+        next.pending = count(outstanding)
+
+        if recountBytes {
+            var sizes = FetchDescriptor<BackupItem>(predicate: outstanding)
+            sizes.propertiesToFetch = [\.byteSize]
+            next.bytesRemaining = ((try? context.fetch(sizes)) ?? []).reduce(0) { $0 + $1.byteSize }
+        } else {
+            next.bytesRemaining = progress.bytesRemaining
+        }
+
         // The grid only shows the head of the queue; a thousand-item backlog
         // doesn't need a thousand tiles laid out at once.
         //
         // Not a Live Photo's video half: it plays inside the still rather than
         // having a tile of its own, and there is no picture of it to draw — it
-        // held a gray square in the grid until it went.
+        // held a gray square in the grid until it went. Fetched with room to
+        // spare for those, so the head still comes to five hundred.
+        var head = FetchDescriptor<BackupItem>(
+            predicate: outstanding, sortBy: [SortDescriptor(\.capturedAt, order: .reverse)]
+        )
+        head.fetchLimit = 600
+        let rows = (try? context.fetch(head)) ?? []
         queued = Array(rows.lazy.filter {
             BackupKey.kind($0.localIdentifier) != .pairedVideo
         }.prefix(500).map {
@@ -1359,6 +1564,55 @@ final class BackupEngine {
         })
 
         progress = next
+    }
+
+    /// Brings the progress up to date after one file, without reading every
+    /// waiting row again: the file's size comes off the total if it is no
+    /// longer waiting. The total is recounted in full when a run ends.
+    private func noteFinished(_ item: BackupItem, claimedBytes: Int64, context: ModelContext) {
+        if item.state != .pending, item.state != .uploading {
+            progress.bytesRemaining = max(progress.bytesRemaining - claimedBytes, 0)
+        }
+        refreshProgress(context, recountBytes: false)
+    }
+
+    /// Holds what the settings now leave out, and lets go of what they let back
+    /// in. See `BackupScope`.
+    ///
+    /// Run when a setting changes, after a scan, and when a run starts, so
+    /// nothing is sent under a setting that says not to: switching "Photos
+    /// Only" on halfway through a backup used to leave every video already
+    /// queued to go anyway. Held rather than removed, so switching it off again
+    /// sends them after all.
+    private func reconcileHolds(_ context: ModelContext? = nil) {
+        let context = context ?? ModelContext(container)
+        let scope = settings.scope
+        let pending = BackupItem.State.pending.rawValue
+        let failed = BackupItem.State.failed.rawValue
+        let held = BackupItem.State.held.rawValue
+        let rows = (try? context.fetch(FetchDescriptor<BackupItem>(
+            predicate: #Predicate {
+                $0.stateRaw == pending || $0.stateRaw == failed || $0.stateRaw == held
+            }
+        ))) ?? []
+        var changed = false
+        for row in rows {
+            let wanted = scope.includes(
+                isVideo: row.mediaTypeRaw == MediaType.video.rawValue,
+                takenAt: row.capturedAt,
+                isEdit: BackupKey.kind(row.localIdentifier) == .edit
+            )
+            if wanted, row.state == .held {
+                row.state = .pending
+                changed = true
+            } else if !wanted, row.state != .held {
+                row.state = .held
+                changed = true
+            }
+        }
+        guard changed else { return }
+        try? context.save()
+        refreshProgress(context)
     }
 
     func retryFailed() async {

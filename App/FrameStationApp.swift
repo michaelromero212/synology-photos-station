@@ -27,8 +27,10 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         // an identifier is registered later, and the background session has to
         // exist for iOS to hand back transfers that finished while we were gone.
         BackgroundTransfers.shared.reconnect()
+        // Through the runtime, which builds what a run needs if iOS launched
+        // the app just for this — see `BackupRuntime`.
         BackupScheduler.register {
-            _ = await BackupEngine.backgroundRunner?()
+            _ = await BackupRuntime.shared.wake()
         }
         return true
     }
@@ -62,16 +64,15 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         didReceiveRemoteNotification payload: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        // `backgroundRunner` is nil when iOS woke us before the app had built an
-        // engine — signed out, or launched straight into the background. The
-        // scheduled window is still booked, so that costs promptness rather than
-        // the backup.
         guard payload[PushPayloadKey.kind] as? String == PushPayloadKey.kindBackup else {
             completionHandler(.noData)
             return
         }
-        guard let runner = BackupEngine.backgroundRunner else {
-            Diagnostics.shared.log(.backup, "woken by the NAS, but backup isn't running here")
+        // Switched off since the NAS last heard. Launched straight into the
+        // background is fine now: the runtime builds what the run needs. See
+        // `BackupRuntime`.
+        guard BackupSettings.load().enabled else {
+            Diagnostics.shared.log(.backup, "woken by the NAS, but backup is off here")
             completionHandler(.noData)
             return
         }
@@ -88,7 +89,7 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
             // background `URLSession` that outlives this handler and outlives
             // the process, so returning hands the work over rather than
             // abandoning it. See `BackgroundTransfers`.
-            let work = Task { await runner() }
+            let work = Task { await BackupRuntime.shared.wake() }
             let moved = await Self.answer(for: work)
             Diagnostics.shared.log(
                 .backup, moved ? "wake-up moved photographs" : "wake-up found nothing to do"
@@ -230,65 +231,20 @@ final class MediaTilt {
 
 @main
 struct FrameStationApp: App {
-    @State private var session = AppSession()
+    /// Shared, not made here, so a background wake-up with no screen can use
+    /// the same one. See `BackupRuntime`.
+    @State private var session = AppSession.shared
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.default
     #if os(iOS)
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    #endif
-    #if os(iOS)
-    /// Durable backup queue. On-disk because the engine must survive being
-    /// killed mid-run — see BackupQueue.
-    private let backupContainer: ModelContainer = {
-        // SwiftData puts its store in Application Support, and iOS does not
-        // create that directory for you — only `Library` itself. On a fresh
-        // install the store therefore fails to open, CoreData dumps a few
-        // hundred lines of filesystem diagnostics walking the tree looking for
-        // somewhere writable, and *then* recovers by creating the directory it
-        // needed all along. The store ends up fine; the log looks like the app
-        // is broken. Creating it first skips the whole performance.
-        if let support = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first {
-            try? FileManager.default.createDirectory(
-                at: support, withIntermediateDirectories: true
-            )
-        }
-        do { return try ModelContainer(for: BackupItem.self, ManualUpload.self) }
-        catch {
-            // Degraded, never dead.
-            //
-            // This was a `fatalError`, which made an unopenable queue a phone
-            // that cannot start its photo library at all — the one outcome
-            // worse than losing the queue. A store can fail to open for
-            // reasons that have nothing to do with the photographs: a disk
-            // full at the wrong moment, a schema the app can't migrate, a file
-            // left unreadable by a restore.
-            //
-            // An in-memory container keeps every other part of the app
-            // working: browsing, uploading by hand, shared albums, playback.
-            // Only the durable queue is lost, and it rebuilds itself from the
-            // photo library on the next scan.
-            Diagnostics.shared.log(
-                .launch, "backup queue unavailable, running in memory: \(error)"
-            )
-            do {
-                return try ModelContainer(
-                    for: BackupItem.self, ManualUpload.self,
-                    configurations: ModelConfiguration(isStoredInMemoryOnly: true)
-                )
-            } catch {
-                fatalError("Could not open even an in-memory queue: \(error)")
-            }
-        }
-    }()
     #endif
 
     var body: some Scene {
         WindowGroup {
             RootView(session: session)
             #if os(iOS)
-                .modelContainer(backupContainer)
-                .environment(\.backupContainer, backupContainer)
+                .modelContainer(BackupStore.container)
+                .environment(\.backupContainer, BackupStore.container)
             #endif
             #if os(macOS)
                 .frame(minWidth: 640, minHeight: 480)

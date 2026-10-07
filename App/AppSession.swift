@@ -109,6 +109,10 @@ final class AppSession {
     /// credential has been deliberately overridden.
     private var launchServerURL: URL?
 
+    /// The app's one session. The App holds it, and so does a background
+    /// wake-up that runs with no screen; see `BackupRuntime`.
+    static let shared = AppSession()
+
     #if DEBUG
     /// Launch-argument hook so the app can be driven headlessly for screenshots
     /// and UI verification:

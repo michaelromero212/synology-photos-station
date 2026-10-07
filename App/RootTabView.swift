@@ -178,6 +178,9 @@ struct RootTabView: View {
             switch phase {
             case .background:
                 engine?.reportBackupState(force: true)
+                // So a run going when the app is put away gets to finish what's
+                // in flight. See `BackupEngine.appWentToBackground`.
+                engine?.appWentToBackground()
                 // Curation only ever runs in the open app. See `CurationRunner`.
                 curation?.stop()
             case .active:
@@ -189,38 +192,27 @@ struct RootTabView: View {
         }
         .task { [session] in
             guard engine == nil, let container = modelContainer else { return }
-            // Before anything reads the ledger: it may belong to whoever was
-            // signed in last. See `BackupAccount.adopt`.
-            if let userID = session.user?.id {
-                BackupAccount.adopt(userID: userID, container: container)
-            }
-            // `session` is captured explicitly above so this weak capture reads
-            // as what it is: the monitor outlives this task and must not
-            // retain the session, even though the task itself holds it.
-            let monitor = ConnectionMonitor { [weak session] in session?.client }
-            monitor.start()
-            let created = BackupEngine(
-                container: container, session: session, settings: backupSettings,
-                connection: monitor
-            )
+            // The runtime's engine, which a background wake-up may have built
+            // before this screen existed. It adopts the ledger, seeds the local
+            // originals and books background windows as it builds one. See
+            // `BackupRuntime`.
+            let runtime = BackupRuntime.shared
+            let created = runtime.engine(session: session, settings: backupSettings)
+            guard let monitor = runtime.connection else { return }
             let runner = CurationRunner(
                 session: session, connection: monitor,
                 isBackingUp: { [weak created] in created?.isRunning ?? false }
             )
-            // Picking up where the outage stopped it. Waiting for the next
-            // background window instead would mean a phone that reconnects on
-            // the sofa does nothing until iOS decides to wake us.
-            monitor.onReconnect = { [weak created, weak runner] in
-                await created?.start()
-                runner?.start()
-            }
+            // A reconnect restarts backup in the runtime. Curation runs only
+            // while the app is open, so the screen adds it.
+            runtime.onReconnect = { [weak runner] in runner?.start() }
             connection = monitor
             engine = created
             curation = runner
             // Signing out has to stop this engine, and the session is what
             // knows about the sign-out. See `BackupEngine.retire`.
-            session.willSignOut = { [weak created, weak runner] in
-                created?.retire()
+            session.willSignOut = { [weak runner] in
+                BackupRuntime.shared.discard()
                 runner?.stop()
             }
             // Offered once per sign-in, the way a fresh install offers it —
@@ -235,11 +227,6 @@ struct RootTabView: View {
                     showBackupSetup = true
                 }
             }
-            // Before the first grid draws, and whether or not backup is on:
-            // this is what lets a tile whose thumbnail the NAS has not made yet
-            // be drawn from the copy still on the phone. See `LocalOriginals`.
-            created.seedLocalOriginals()
-            if backupSettings.enabled { created.enableBackgroundRuns() }
             // The launch's own `.active` can arrive before this engine exists,
             // so the first pick-up is asked for here as well. Not waited for:
             // it runs for as long as the queue does.

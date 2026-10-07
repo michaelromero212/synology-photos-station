@@ -75,7 +75,14 @@ enum PhotoLibraryScanner {
 
     /// The fetch the full scan and the change observer both use, so "inserted"
     /// means exactly the assets a scan would pick up — nothing hidden, every
-    /// burst frame, from the user's own library and shared/synced sources.
+    /// burst frame, from the user's own library and anything synced to it from
+    /// a computer.
+    ///
+    /// Not iCloud Shared Albums. Those are other people's photographs, which
+    /// Apple keeps at reduced size (2048 px photos, 720p video), and backing
+    /// them up filed them in this person's library as their own. Nor the Hidden
+    /// album: the app has no hidden photos, so they'd come back unhidden in the
+    /// grid and on the TV. See `isBackedUp` for the paths that fetch by id.
     ///
     /// `includeAllBurstAssets`: PhotoKit defaults this to false, which hands
     /// back the burst's representative and hides the other nine — so a timer
@@ -88,8 +95,19 @@ enum PhotoLibraryScanner {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.includeHiddenAssets = false
         options.includeAllBurstAssets = true
-        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+        options.includeAssetSourceTypes = [.typeUserLibrary, .typeiTunesSynced]
         return options
+    }
+
+    /// Whether backup should take this asset: the same line `fetchOptions`
+    /// draws, for the paths that fetch by identifier and so get whatever they
+    /// name. Photos' change history reports shared-album and hidden assets
+    /// along with everything else, and a row queued before this rule existed
+    /// can still name one.
+    static func isBackedUp(_ asset: PHAsset) -> Bool {
+        guard !asset.isHidden else { return false }
+        return asset.sourceType.contains(.typeUserLibrary)
+            || asset.sourceType.contains(.typeiTunesSynced)
     }
 
     /// Every photo and video in the library, newest first.
