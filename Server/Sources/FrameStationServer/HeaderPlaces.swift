@@ -5,9 +5,14 @@ import Foundation
 /// It used to be the single commonest place, which hid every other one. Two
 /// family members sharing a day from two cities showed up under whichever
 /// city had more photos, and so did one person's day trip. Now places close
-/// together count as one, named after where most of their photos were, and
-/// places farther apart are all named: "Reston and Richmond", or "Reston,
-/// Richmond and 1 more".
+/// together count as one, named after where most of their photos were.
+///
+/// A day spent in several of those names the first one it visited, in full,
+/// beside its date, and every later one gets its own line where its photos
+/// start (see `group`). It used to put them all beside the date — "Reston and
+/// Richmond" — and with each of them also heading its own photos, the day said
+/// everything twice. A month or a year still names the places it was mostly
+/// spent, "Reston, Richmond and 1 more": it has no lines of its own to do it.
 enum HeaderPlaces {
     /// One named place among a bucket's photos.
     struct Place {
@@ -45,8 +50,13 @@ enum HeaderPlaces {
         var places: Set<String> = []
     }
 
-    /// The header text for these places, or nil when none of the photos has
-    /// one.
+    /// A day's header: where it went first, in full. See the type's note.
+    static func dayLabel(_ places: [Place]) -> String? {
+        areas(places, order: .time).first?.name
+    }
+
+    /// A month's or year's header text for these places, or nil when none of
+    /// the photos has one.
     static func label(_ places: [Place], order: Order) -> String? {
         let ordered = areas(places, order: order)
         guard let lead = ordered.first else { return nil }
@@ -125,7 +135,8 @@ enum HeaderPlaces {
     struct DayGroups {
         let areas: [(name: String, count: Int)]
         let areaOf: [UUID: Int]
-        /// The header text, from the same areas.
+        /// The day's header text: the first area, in full. The rest are named
+        /// on lines of their own, from `areas`.
         let label: String?
     }
 
@@ -159,7 +170,7 @@ enum HeaderPlaces {
             )
         }
         let ordered = areas(places, order: .time)
-        let label = label(places, order: .time)
+        let label = ordered.first?.name
 
         var areaOfPlace: [String: Int] = [:]
         for (index, area) in ordered.enumerated() {

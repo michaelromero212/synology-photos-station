@@ -1,9 +1,10 @@
 #!/bin/bash
-# Day and month headers name every area their photos came from. Places
-# within about 15 miles count as one, named after where most of the photos
-# were. Farther ones are all named: "Reston and Richmond", or "Reston,
-# Richmond and 1 more". A day lists them in the order it visited them, and a
-# month leads with where most of it was spent.
+# Day and month headers name the areas their photos came from. Places within
+# about 15 miles count as one, named after where most of the photos were. A
+# day spent in several names the first it visited, in full, beside its date,
+# and each later one heads its own photos inside the day. A month names
+# several, leading with where most of it was spent: "Reston, Richmond and 3
+# more".
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-day-places.sh
 #
@@ -92,12 +93,12 @@ day(){ echo "$DAYS" | grep "^$1|" | cut -d'|' -f2; }
 echo "Days"
 check "one place stays as it was" "Reston, Virginia" "$(day 2026-05-01)"
 check "a nearby town folds into the bigger one" "Reston, Virginia" "$(day 2026-05-02)"
-check "two cities are both named, in the order visited" "Reston and Richmond" "$(day 2026-05-03)"
-check "the other way round when the day went the other way" "Richmond and Reston" "$(day 2026-05-04)"
-check "three or more name the first two" "Reston, Richmond and 1 more" "$(day 2026-05-05)"
+check "a two-city day names the first one it visited" "Reston, Virginia" "$(day 2026-05-03)"
+check "and the other one when the day went the other way" "Richmond, Virginia" "$(day 2026-05-04)"
+check "three or more still name only the first" "Reston, Virginia" "$(day 2026-05-05)"
 check "a day with no places has none" "-" "$(day 2026-05-06)"
 check "photos without a place don't change the name" "Reston, Virginia" "$(day 2026-05-07)"
-check "towns sharing a name keep their states" "Springfield, Illinois and Springfield, Massachusetts" "$(day 2026-05-08)"
+check "a town is named with its state" "Springfield, Illinois" "$(day 2026-05-08)"
 check "every photo is still counted" "${#PLAN[@]}" \
   "$(curl -s "$API/v1/spaces/$SPACE/timeline?zoom=day" -H "Authorization: Bearer $TOKEN" | jq '["total"]')"
 
@@ -157,6 +158,9 @@ for entry in "${SHARED_PLAN[@]}"; do
      WHERE id = (SELECT asset_id FROM space_assets WHERE filename = '$name.jpg')" >/dev/null
 done
 check "two people in two cities are two groups" "Reston:3 Richmond:3" "$(areas "$SHARED" "$TOKEN" 2026-05-09)"
+check "and the date line names only where the day started" "Reston, Virginia" \
+  "$(curl -s "$API/v1/spaces/$SHARED/timeline?zoom=day" -H "Authorization: Bearer $TOKEN" \
+    | python3 -c "import sys,json; print([b.get('place') for b in json.load(sys.stdin)['buckets'] if b['key'] == '2026-05-09'][0])")"
 check "an unplaced photo goes with its own person's place, not the closest stranger's" \
   "s1:0 s2:0 s3:0 s4:1 s5:1 s6:1" "$(grouped "$SHARED" "$TOKEN" 2026-05-09)"
 check "every member sees the same groups" "s1:0 s2:0 s3:0 s4:1 s5:1 s6:1" "$(grouped "$SHARED" "$TOKEN2" 2026-05-09)"

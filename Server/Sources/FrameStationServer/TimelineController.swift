@@ -159,8 +159,13 @@ struct TimelineController: RouteCollection {
             if zoom == .day, HeaderPlaces.areas(places, order: order).count > 1 {
                 spread.append(key)
             }
+            // A day names where it went first; a month or year, where it was
+            // mostly spent. See `HeaderPlaces`.
             buckets.append(TimelineBucket(
-                key: key, count: count, place: HeaderPlaces.label(places, order: order)
+                key: key, count: count,
+                place: zoom == .day
+                    ? HeaderPlaces.dayLabel(places)
+                    : HeaderPlaces.label(places, order: order)
             ))
         }
 
