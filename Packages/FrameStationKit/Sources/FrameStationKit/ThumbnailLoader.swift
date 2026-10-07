@@ -107,6 +107,32 @@ public actor ThumbnailLoader {
         memory.object(forKey: "\(assetID)-\(size)-\(version)" as NSString)?.image
     }
 
+    /// A thumbnail this device already holds from the NAS, in memory or on
+    /// disk, without asking the NAS. Nil means "not here", not "not ready".
+    ///
+    /// For a tile that hasn't heard the NAS is done but may have fetched the
+    /// thumbnail in an earlier session: the NAS's picture is the one to draw,
+    /// ahead of the camera roll's. `nonisolated` for the same reason as
+    /// `placeholder(assetID:hash:)`: a disk read shouldn't wait in line behind
+    /// the network fetches this actor serializes.
+    nonisolated public func storedThumbnail(
+        assetID: UUID, size: Int, version: Int = 0
+    ) async -> PlatformImage? {
+        let key = "\(assetID)-\(size)-\(version)"
+        if let entry = memory.object(forKey: key as NSString) { return entry.image }
+        let path = diskRoot.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
+        guard let data = try? Data(contentsOf: path),
+              let image = Self.decode(data, targetPixels: size)
+        else { return nil }
+        // Stamped as used, as `image(at:)` does, so eviction keeps it.
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: path.path
+        )
+        let cost = size * size * 4
+        memory.setObject(CacheEntry(image: image, cost: cost), forKey: key as NSString, cost: cost)
+        return image
+    }
+
     /// An already-decoded ThumbHash preview, without suspending.
     ///
     /// The same bargain as `cachedThumbnail` above, for the blurred stand-in

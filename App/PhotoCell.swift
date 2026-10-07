@@ -22,6 +22,9 @@ struct PhotoCell: View {
     /// a stand-in, so it does not count as "already loaded" and must be
     /// replaced by the server's version when that arrives.
     @State private var isLocalOriginal = false
+    /// The thumbnail version `image` came from, or nil when it didn't come from
+    /// the NAS. One the NAS has since replaced is fetched again; see `load`.
+    @State private var shownVersion: Int?
 
     /// Seeded from the decoded-image cache, so a tile whose picture is already
     /// in memory draws it in the very first frame rather than after two actor
@@ -37,6 +40,7 @@ struct PhotoCell: View {
             version: item.thumbnailVersion
         )
         _image = State(initialValue: cached)
+        _shownVersion = State(initialValue: cached == nil ? nil : item.thumbnailVersion)
         // The ThumbHash preview too, so a tile with no cached picture opens on
         // its blur instead of a gray square. This is the whole of "thumbnails
         // appear instantly": the sharp image still arrives over the network in
@@ -92,16 +96,26 @@ struct PhotoCell: View {
             // the task never re-ran and the cell sat gray until the app was
             // relaunched. The id still has to be in the key — cells are recycled
             // between photos and must reload when the photo changes.
-            .task(id: LoadKey(assetID: item.assetID, isDerived: item.isDerived)) {
+            //
+            // And on the thumbnail's version, for the same reason one step
+            // later. A new upload counts as derived as soon as its phone sends
+            // up a thumbnail, and the NAS replaces that with its own seconds
+            // afterward; for a video, a different frame. Without the version
+            // here, the tile kept the phone's until the next launch.
+            .task(id: LoadKey(
+                assetID: item.assetID, isDerived: item.isDerived,
+                version: item.thumbnailVersion
+            )) {
                 await load()
             }
     }
 
-    /// What makes a reload necessary: a different photo, or the same photo
-    /// finally having a picture to fetch.
+    /// What makes a reload necessary: a different photo, the same photo
+    /// finally having a picture to fetch, or the NAS replacing that picture.
     private struct LoadKey: Equatable {
         let assetID: UUID
         let isDerived: Bool
+        let version: Int
     }
 
     @ViewBuilder
@@ -216,14 +230,76 @@ struct PhotoCell: View {
             if image == nil { placeholder = blur }
         }
 
-        // Already painted from the memory cache by `init`; nothing to fetch.
-        // A borrowed local copy does not count: it is standing in for a
-        // thumbnail the NAS has not made yet, and when the NAS makes one this
-        // task re-runs and should go and get it.
-        if image != nil, !isLocalOriginal { return }
+        // Already drawing the NAS's thumbnail, and its current one. A borrowed
+        // local copy doesn't count, and neither does a thumbnail the NAS has
+        // since replaced: either is fetched over, and stays on screen until the
+        // new picture arrives.
+        if image != nil, shownVersion == item.thumbnailVersion { return }
+
+        // One picture per photo or video, and it's the NAS's.
+        //
+        // The copy in this phone's camera roll is the same photo but not always
+        // the same picture. A video's thumbnail is the frame the NAS picked,
+        // often not the one Photos shows, and a photo edited after its backup
+        // is the edit in the camera roll and the earlier version on the NAS. Painted
+        // first on every launch, the tile showed one and then swapped to the
+        // other, every time. So once the NAS has a thumbnail it's all a tile
+        // draws; the camera roll stands in only before there is one, or when
+        // the NAS can't be reached.
+        if item.isDerived, let loader {
+            // A nil answer is a setback, not a verdict.
+            //
+            // It used to be final: one dropped connection, one request
+            // cancelled by navigating away mid-flight, or one coalesced caller
+            // inheriting a failure, and that tile stayed gray for the life of
+            // the cell. Nothing ever asked again, which is why thumbnails
+            // "sometimes" didn't come back after leaving a tab and returning.
+            //
+            // Three tries with a widening gap, and only for photos the server
+            // has already said it derived — so this retries a genuine failure
+            // and never polls for work that hasn't been done yet.
+            for attempt in 0..<3 {
+                if let loaded = await loader.thumbnail(
+                    assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                    version: item.thumbnailVersion
+                ) {
+                    show(loaded)
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 300_000_000 << UInt64(attempt))
+                guard !Task.isCancelled else { return }
+            }
+
+            #if os(iOS)
+            // Derived, asked three times, and still nothing to draw, so the
+            // camera roll's copy beats a gray tile. Whether it covered it is
+            // also the fact that separates "the NAS is busy" from "this
+            // shortcut doesn't reach these photographs".
+            let local = await paintLocalOriginal()
+            if image == nil {
+                ThumbnailWatch.shared.blank(
+                    assetID: item.assetID, isDerived: item.isDerived,
+                    local: local, server: .refused
+                )
+            }
+            #endif
+            return
+        }
+
+        // Not derived, as far as this phone has heard, which can be out of
+        // date (see below). A thumbnail it fetched from the NAS before still
+        // beats the camera roll's copy.
+        if let loader, let stored = await loader.storedThumbnail(
+            assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+            version: item.thumbnailVersion
+        ) {
+            show(stored)
+            return
+        }
 
         #if os(iOS)
-        // The copy on this phone, first — before asking anybody for anything.
+        // Then the copy on this phone, before asking the NAS for anything.
         //
         // This is the pause. While a photograph uploads, `PendingTile` draws it
         // from the camera roll, so it is on screen with its badge. The instant
@@ -244,79 +320,44 @@ struct PhotoCell: View {
         let local = await paintLocalOriginal()
         #endif
 
-        // 202 while the derivation queue is behind: keep what we have rather
-        // than requesting an image that isn't there yet. The grid is told when
-        // that changes — see DerivationWorker — and this task is keyed on it.
-        guard item.isDerived, let loader else {
-            // Ask the server anyway, once.
-            //
-            // `isDerived` is what the *client* last heard, not what is true.
-            // A delta that never arrived, or one applied to a copy later
-            // replaced by a stale snapshot, leaves this false on an asset the
-            // NAS finished long ago — and nothing re-asks, because the task is
-            // keyed on this very flag. That is the difference between a tile
-            // that is briefly gray and one that is gray for good.
-            //
-            // One request, and a 202 if it really isn't ready, which costs the
-            // NAS almost nothing and cannot cache a miss.
-            var asked = false
-            if let loader {
-                asked = true
-                if let loaded = await loader.thumbnail(
-                    assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
-                    version: item.thumbnailVersion
-                ) {
-                    image = loaded
-                    isLocalOriginal = false
-                }
-            }
-            #if os(iOS)
-            if image == nil {
-                ThumbnailWatch.shared.blank(
-                    assetID: item.assetID, isDerived: item.isDerived,
-                    local: local, server: asked ? .refused : .notAsked
-                )
-            }
-            #endif
-            return
-        }
-
-        // A nil answer is a setback, not a verdict.
+        // Ask the server anyway, once.
         //
-        // It used to be final: one dropped connection, one request cancelled by
-        // navigating away mid-flight, or one coalesced caller inheriting a
-        // failure, and that tile stayed gray for the life of the cell. Nothing
-        // ever asked again, which is why thumbnails "sometimes" didn't come back
-        // after leaving a tab and returning.
+        // `isDerived` is what the *client* last heard, not what is true. A
+        // delta that never arrived, or one applied to a copy later replaced by
+        // a stale snapshot, leaves this false on an asset the NAS finished long
+        // ago — and nothing re-asks, because the task is keyed on this very
+        // flag. That is the difference between a tile that is briefly gray and
+        // one that is gray for good.
         //
-        // Three tries with a widening gap, and only for photos the server has
-        // already said it derived — so this retries a genuine failure and never
-        // polls for work that hasn't been done yet.
-        for attempt in 0..<3 {
+        // One request, and a 202 if it really isn't ready, which costs the NAS
+        // almost nothing and cannot cache a miss. A 202 keeps what's on screen;
+        // the grid is told when the NAS is done (see DerivationWorker), and
+        // this task is keyed on it.
+        var asked = false
+        if let loader {
+            asked = true
             if let loaded = await loader.thumbnail(
                 assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
                 version: item.thumbnailVersion
             ) {
-                image = loaded
-                isLocalOriginal = false
-                return
+                show(loaded)
             }
-            guard !Task.isCancelled else { return }
-            try? await Task.sleep(nanoseconds: 300_000_000 << UInt64(attempt))
-            guard !Task.isCancelled else { return }
         }
-
         #if os(iOS)
-        // Derived, asked three times, and still nothing to draw. Whether the
-        // local copy covered it is the fact that separates "the NAS is busy"
-        // from "this shortcut doesn't reach these photographs".
         if image == nil {
             ThumbnailWatch.shared.blank(
                 assetID: item.assetID, isDerived: item.isDerived,
-                local: local, server: .refused
+                local: local, server: asked ? .refused : .notAsked
             )
         }
         #endif
+    }
+
+    /// Draws a thumbnail the NAS made, at the version the item names.
+    private func show(_ thumbnail: PlatformImage) {
+        image = thumbnail
+        isLocalOriginal = false
+        shownVersion = item.thumbnailVersion
     }
 
     #if os(iOS)
