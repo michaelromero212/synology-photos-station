@@ -116,7 +116,7 @@ struct BackupHubView: View {
                     NavigationLink {
                         BackupSettingsView(
                             session: session, engine: engine, settings: $settings
-                        ) {}
+                        )
                     } label: {
                         Text("Backup Settings")
                     }

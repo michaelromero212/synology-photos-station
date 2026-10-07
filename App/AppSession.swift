@@ -236,6 +236,7 @@ final class AppSession {
                 credentials.clear()
                 SessionSnapshotStore.clear()
                 TimelineSnapshotStore.clearAll()
+                AlbumsSnapshotStore.clearAll()
                 phase = .disconnected
                 return false
             }
@@ -346,6 +347,7 @@ final class AppSession {
         // outlive the session that fetched it, and it must not be sitting
         // there for whoever signs in next.
         TimelineSnapshotStore.clearAll()
+        AlbumsSnapshotStore.clearAll()
         SessionSnapshotStore.clear()
         if let loader { Task { await loader.clearDiskCache() } }
         dsmPassword = ""

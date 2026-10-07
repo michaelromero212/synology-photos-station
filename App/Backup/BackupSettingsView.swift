@@ -93,7 +93,10 @@ struct BackupSettingsView: View {
     @Bindable var session: AppSession
     let engine: BackupEngine
     @Binding var settings: BackupSettings
-    let onDone: () -> Void
+    /// Closes whatever showed this: back to the Backup page when it was pushed
+    /// there, or away when it was the first-run sheet. Done did nothing from the
+    /// Backup page, which passed it an empty action.
+    @Environment(\.dismiss) private var dismiss
 
     @State private var access = PhotoLibraryScanner.access
     private var registrar: PushRegistrar { .shared }
@@ -113,106 +116,104 @@ struct BackupSettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                accessSection
+        Form {
+            accessSection
 
-                Section {
-                    Toggle("Back Up This iPhone", isOn: $settings.enabled)
-                } footer: {
-                    Text("Photos and videos are copied to your NAS. Nothing is removed from this device.")
-                }
+            Section {
+                Toggle("Back Up This iPhone", isOn: $settings.enabled)
+            } footer: {
+                Text("Photos and videos are copied to your NAS. Nothing is removed from this device.")
+            }
 
-                Section("Backup Rule") {
-                    ForEach(BackupRule.allCases) { rule in
-                        Button {
-                            settings.rule = rule
-                            // Only meaningful for the rule that draws a line
-                            // under now; stale on the other two.
-                            settings.futureCutoff = rule == .futureOnly ? Date() : nil
-                        } label: {
-                            HStack(alignment: .top, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(rule.title).foregroundStyle(.primary)
-                                    Text(rule.detail)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 8)
-                                if settings.rule == rule {
-                                    Image(systemName: "checkmark")
-                                        .font(.body.weight(.semibold))
-                                        .foregroundStyle(.tint)
-                                }
+            Section("Backup Rule") {
+                ForEach(BackupRule.allCases) { rule in
+                    Button {
+                        settings.rule = rule
+                        // Only meaningful for the rule that draws a line
+                        // under now; stale on the other two.
+                        settings.futureCutoff = rule == .futureOnly ? Date() : nil
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(rule.title).foregroundStyle(.primary)
+                                Text(rule.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            if settings.rule == rule {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.tint)
                             }
                         }
-                        .buttonStyle(.plain)
                     }
-                }
-
-                // Stated, not chosen. Backup has exactly one destination now —
-                // see `BackupSettings.targetSpace`.
-                Section {
-                    // A plain row rather than `LabeledContent` holding a
-                    // `Label`: that combination expands to fill the section and
-                    // leaves a tall empty box under a single line of text.
-                    HStack {
-                        Text("Backup Destination")
-                        Spacer(minLength: 12)
-                        Image(systemName: "person")
-                        Text(settings.targetSpace(in: session.spaces)?.name ?? "Personal Space")
-                    }
-                    .foregroundStyle(.primary)
-                } header: {
-                    Text("Backup Path")
-                } footer: {
-                    Text(destinationExplanation)
-                }
-
-                Section("Upload Settings") {
-                    Toggle("Wi-Fi Only", isOn: $settings.wifiOnly)
-                    Toggle("Only While Charging", isOn: $settings.chargingOnly)
-                    // Phrased as Synology phrases it. Stored the other way
-                    // round, so the toggle reads inverted.
-                    Toggle("Photos Only", isOn: Binding(
-                        get: { !settings.includeVideos },
-                        set: { settings.includeVideos = !$0 }
-                    ))
-                }
-
-                notificationSection
-
-                statusSection
-            }
-            .navigationTitle("Backup")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: onDone)
+                    .buttonStyle(.plain)
                 }
             }
-            .onChange(of: settings) { _, new in
-                new.save()
-                engine.update(settings: new)
-                // Asking iOS for background time only makes sense while backup
-                // is actually on; leaving a request pending after it's switched
-                // off wakes the app to do nothing.
-                if new.enabled {
-                    engine.enableBackgroundRuns()
-                } else {
-                    engine.disableBackgroundRuns()
+
+            // Stated, not chosen. Backup has exactly one destination now —
+            // see `BackupSettings.targetSpace`.
+            Section {
+                // A plain row rather than `LabeledContent` holding a
+                // `Label`: that combination expands to fill the section and
+                // leaves a tall empty box under a single line of text.
+                HStack {
+                    Text("Backup Destination")
+                    Spacer(minLength: 12)
+                    Image(systemName: "person")
+                    Text(settings.targetSpace(in: session.spaces)?.name ?? "Personal Space")
                 }
+                .foregroundStyle(.primary)
+            } header: {
+                Text("Backup Path")
+            } footer: {
+                Text(destinationExplanation)
             }
-            .task {
-                access = PhotoLibraryScanner.access
-                await registrar.refreshAuthorization()
-                // Retires any destination a previous version stored. Nothing
-                // reads it now, but leaving a shared space's id sitting in
-                // preferences invites a future change to honor it again.
-                if settings.targetSpaceID != nil {
-                    settings.targetSpaceID = nil
-                    settings.save()
-                }
+
+            Section("Upload Settings") {
+                Toggle("Wi-Fi Only", isOn: $settings.wifiOnly)
+                Toggle("Only While Charging", isOn: $settings.chargingOnly)
+                // Phrased as Synology phrases it. Stored the other way
+                // round, so the toggle reads inverted.
+                Toggle("Photos Only", isOn: Binding(
+                    get: { !settings.includeVideos },
+                    set: { settings.includeVideos = !$0 }
+                ))
+            }
+
+            notificationSection
+
+            statusSection
+        }
+        .navigationTitle("Backup")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .onChange(of: settings) { _, new in
+            new.save()
+            engine.update(settings: new)
+            // Asking iOS for background time only makes sense while backup
+            // is actually on; leaving a request pending after it's switched
+            // off wakes the app to do nothing.
+            if new.enabled {
+                engine.enableBackgroundRuns()
+            } else {
+                engine.disableBackgroundRuns()
+            }
+        }
+        .task {
+            access = PhotoLibraryScanner.access
+            await registrar.refreshAuthorization()
+            // Retires any destination a previous version stored. Nothing
+            // reads it now, but leaving a shared space's id sitting in
+            // preferences invites a future change to honor it again.
+            if settings.targetSpaceID != nil {
+                settings.targetSpaceID = nil
+                settings.save()
             }
         }
     }

@@ -33,9 +33,18 @@ final class CollectionsStore {
     /// to the NAS: two identical requests per visit.
     private var isRefreshing = false
 
+    /// Starts from the page this device saw last, so the trips and occasions
+    /// are there the moment the tab is, even with the NAS busy or out of reach.
+    /// See `AlbumsSnapshotStore`. `isStale` still says yes, because nothing has
+    /// been fetched, so the first visit asks for the current page and swaps it
+    /// in when it arrives.
     init(session: AppSession, spaceID: UUID) {
         self.session = session
         self.spaceID = spaceID
+        if let saved = AlbumsSnapshotStore.loadCollections(spaceID: spaceID) {
+            page = saved
+            hasLoaded = true
+        }
     }
 
     /// Whether it is worth asking again.
@@ -88,6 +97,10 @@ final class CollectionsStore {
         if let fresh = try? await client.collections(spaceID: spaceID) {
             page = fresh
             hasLoaded = true
+            let spaceID = spaceID
+            Task.detached(priority: .utility) {
+                AlbumsSnapshotStore.saveCollections(fresh, spaceID: spaceID)
+            }
             fetchedAt = Date()
             fetchedFor = Self.dayStamp()
             fetchedCursor = cursor

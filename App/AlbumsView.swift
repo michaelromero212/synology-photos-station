@@ -21,7 +21,17 @@ final class AlbumStore {
     /// See `CollectionsStore.isRefreshing`.
     private var isRefreshing = false
 
-    init(session: AppSession) { self.session = session }
+    /// Starts from the list this device saw last, so the page has something to
+    /// draw before the NAS answers. See `AlbumsSnapshotStore`. Counted as an
+    /// answer: an old list is still a list, and the empty state should only
+    /// show for a library that really has nothing.
+    init(session: AppSession) {
+        self.session = session
+        if let saved = AlbumsSnapshotStore.loadAlbums() {
+            albums = saved
+            hasLoaded = true
+        }
+    }
 
     /// Whether it is worth asking again.
     ///
@@ -70,8 +80,10 @@ final class AlbumStore {
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
-            albums = try await client.albums().albums
+            let fresh = try await client.albums().albums
+            albums = fresh
             hasLoaded = true
+            Task.detached(priority: .utility) { AlbumsSnapshotStore.saveAlbums(fresh) }
             fetchedAt = Date()
             fetchedCursor = cursor
             lastError = nil
@@ -168,6 +180,10 @@ struct AlbumsView: View {
         _collections = State(initialValue: session.personalSpace.map {
             session.collectionsStore(for: $0.id)
         })
+        // The count from last time, until this visit's arrives. See
+        // `AlbumsSnapshotStore`.
+        _placeTotal = State(initialValue: session.personalSpace
+            .flatMap { AlbumsSnapshotStore.loadPlaceTotal(spaceID: $0.id) } ?? 0)
     }
 
     /// Whether there is genuinely nothing to draw.
@@ -295,6 +311,10 @@ struct AlbumsView: View {
             if let total = (try? await client.places(spaceID: space.id, limit: 1))?.total {
                 placeTotal = total
                 placesFetched = (space.id, Date(), cursor)
+                let spaceID = space.id
+                Task.detached(priority: .utility) {
+                    AlbumsSnapshotStore.savePlaceTotal(total, spaceID: spaceID)
+                }
             }
         }
         // Keyed on the space so switching personal libraries finds that

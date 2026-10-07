@@ -241,12 +241,36 @@ struct PhotoCell: View {
         // The copy in this phone's camera roll is the same photo but not always
         // the same picture. A video's thumbnail is the frame the NAS picked,
         // often not the one Photos shows, and a photo edited after its backup
-        // is the edit in the camera roll and the earlier version on the NAS. Painted
-        // first on every launch, the tile showed one and then swapped to the
-        // other, every time. So once the NAS has a thumbnail it's all a tile
-        // draws; the camera roll stands in only before there is one, or when
-        // the NAS can't be reached.
+        // is the edit in the camera roll and the earlier version on the NAS.
+        // Painted first on every launch, the tile showed one and then swapped
+        // to the other, every time. So a thumbnail this device has cached is
+        // all a tile draws. The camera roll stands in only while a photo's is
+        // on its way, before the NAS has one, or when the NAS can't be
+        // reached, and never for a video the NAS has picked a frame for.
         if item.isDerived, let loader {
+            // Already on this device, and so the picture: nothing else is drawn.
+            if let stored = await loader.storedThumbnail(
+                assetID: item.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                version: item.thumbnailVersion
+            ) {
+                show(stored)
+                return
+            }
+
+            #if os(iOS)
+            // Not here yet, so it comes from the NAS, which can take a while:
+            // the first launch after a thousand-file backup found the NAS busy
+            // filing them, and every new tile sat blurred. A photo this phone
+            // took is drawn from the camera roll meanwhile. It's the same
+            // picture, so the swap when the NAS's arrives doesn't show, and
+            // once that one is cached this doesn't run again for the photo.
+            // Never a video: its frame is the NAS's choice, and Photos shows a
+            // different one. Alongside the fetch rather than before it, so the
+            // NAS is asked at once.
+            let standIn = item.mediaType == .video ? nil : Task { await paintLocalOriginal() }
+            defer { standIn?.cancel() }
+            #endif
+
             // A nil answer is a setback, not a verdict.
             //
             // It used to be final: one dropped connection, one request
@@ -273,10 +297,15 @@ struct PhotoCell: View {
 
             #if os(iOS)
             // Derived, asked three times, and still nothing to draw, so the
-            // camera roll's copy beats a gray tile. Whether it covered it is
-            // also the fact that separates "the NAS is busy" from "this
-            // shortcut doesn't reach these photographs".
-            let local = await paintLocalOriginal()
+            // camera roll's copy beats a gray tile, a video's included. Whether
+            // it covered it is also the fact that separates "the NAS is busy"
+            // from "this shortcut doesn't reach these photographs".
+            let local: ThumbnailWatch.Local
+            if let standIn {
+                local = await standIn.value
+            } else {
+                local = await paintLocalOriginal()
+            }
             if image == nil {
                 ThumbnailWatch.shared.blank(
                     assetID: item.assetID, isDerived: item.isDerived,

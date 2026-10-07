@@ -159,9 +159,13 @@ struct RootTabView: View {
         // off unless it was switched on.
         .sheet(isPresented: $showBackupSetup, onDismiss: { BackupAccount.setupOffered = true }) {
             if let engine {
-                BackupSettingsView(
-                    session: session, engine: engine, settings: $backupSettings
-                ) { showBackupSetup = false }
+                // Its own stack here, where it is the whole sheet. Pushed from
+                // the Backup page it uses that page's, rather than nesting one.
+                NavigationStack {
+                    BackupSettingsView(
+                        session: session, engine: engine, settings: $backupSettings
+                    )
+                }
             }
         }
         .environment(\.connectionMonitor, connection)
