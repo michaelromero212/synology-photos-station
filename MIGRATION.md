@@ -208,6 +208,13 @@ ssh -t nas 'sudo sh /tmp/credit-synology-uploaders.sh <space-id>'
 The 2026-10-06 Shared Space, matched: 1,472 photos to the owner, 739 and 8 to
 two other family members, and 514 to nobody. Those 514 were uploaded straight
 into the Shared Space from Synology's web page, and stay credited to the owner.
+Applied the same day: two accounts created, 747 photos credited, and the
+owner's 1,464 left as they were. The other 8 had been in the library before the
+import.
+
+Those two accounts also mean both people already have a personal library, so
+their own Synology libraries can be imported (below) without waiting for them to
+sign in first.
 Synology's users are in `user_info` (`id`, DSM `uid`, `name` as the DSM login).
 Everyone's folders are in `folder`, with `name` as a path under the owner's
 library root.
