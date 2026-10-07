@@ -69,6 +69,21 @@ upload(){
     -d "{\"spaceID\":\"$1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$3,\"height\":200,\"capturedAt\":\"$4\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
 }
 
+# As a phone sends it: the instant, with no offset of its own, and the phone's
+# offset for that date only as a fallback.
+# phone_upload <space> <name> <width> <capturedAt> <fallback offset seconds>
+phone_upload(){
+  local f="$ROOT/files/$2" SHA SZ UP
+  vips gaussnoise "$ROOT/files/n.v" "$3" 200 >/dev/null 2>&1
+  vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
+  SHA=$(shasum -a 256 "$f" | awk '{print $1}'); SZ=$(stat -f%z "$f")
+  UP=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$1\",\"sha256\":\"$SHA\",\"byteSize\":$SZ,\"filename\":\"$2\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
+  curl -s -X PUT "$API/v1/uploads/$UP/chunk/0" -H "$A" --data-binary "@$f" >/dev/null
+  curl -s -X POST "$API/v1/uploads/$UP/commit" -H "$A" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$3,\"height\":200,\"capturedAt\":\"$4\",\"capturedTZOffsetFallback\":$5,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
+}
+
 echo "Before: photos placed in the old layout"
 serve 0
 c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
@@ -157,6 +172,16 @@ check "new copies through the route are clones" "reflink" "$(kind_of "'$PE', '$P
 check "holding the photo" "$(sha "$ROOT/files/IMG_G.jpg")" "$(sha "$P/Personal/2019/09/IMG_G.jpg")"
 check "no empty copies anywhere" "0" "$(find "$P" -type f -size 0 | wc -l | tr -d ' ')"
 check "no temporary files left behind" "0" "$(find "$HOMES" -name '.framestation-*' | wc -l | tr -d ' ')"
+
+# Half past ten on the evening of May 31 in New York, which is already June 1
+# in UTC. The month folder goes by the clock it was taken on.
+phone_upload "$SP" IMG_EVE.jpg 309 2024-06-01T02:30:00Z -14400 >/dev/null
+for _ in $(seq 1 60); do
+  [ -e "$P/Personal/2024/05/IMG_EVE.jpg" ] || [ -e "$P/Personal/2024/06/IMG_EVE.jpg" ] && break
+  sleep 1
+done
+exists "a photo taken the evening of May 31 goes in May" "$P/Personal/2024/05/IMG_EVE.jpg"
+gone "not in June, where the instant falls in UTC" "$P/Personal/2024/06/IMG_EVE.jpg"
 stop
 
 echo "Paused: nothing can be linked into the homes"

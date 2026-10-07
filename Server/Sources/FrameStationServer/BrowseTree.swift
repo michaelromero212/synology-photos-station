@@ -81,6 +81,10 @@ enum BrowseTree {
         let sha256: String
         let blobExt: String
         let filename: String?
+        /// When it was taken, on the clock of wherever it was taken, carried as
+        /// a UTC date so its year and month in UTC are the local ones. It was
+        /// the instant itself, which put a photo taken after about 8 pm Eastern
+        /// on the last day of a month into the next month's folder.
         let capturedAt: Date?
         let spaceKind: String
         let spaceName: String
@@ -591,7 +595,15 @@ actor BrowseTreeWorker {
         do {
             let rows = try await sql.raw("""
                 SELECT sa.id, a.sha256, a.blob_ext AS "blobExt", sa.filename,
-                       a.captured_at AS "capturedAt",
+                       -- On the clock where it was taken, as a UTC date: see
+                       -- `Placement.capturedAt`. The file's own offset if the
+                       -- metadata job has read it, else the one the phone sent
+                       -- for that date. `local_captured_at` isn't used because
+                       -- an upload stores it as UTC until that job runs, and in
+                       -- a busy queue this sweep gets there first.
+                       (a.captured_at
+                          + COALESCE(a.captured_tz_off, a.tz_off_fallback, 0) * interval '1 second')
+                          AT TIME ZONE 'UTC' AS "capturedAt",
                        s.kind AS "spaceKind", s.name AS "spaceName"
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
