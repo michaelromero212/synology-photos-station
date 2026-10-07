@@ -70,20 +70,37 @@ struct AssetController: RouteCollection {
         let spaceID = try req.parameters.require("spaceID", as: UUID.self)
         let assetID = try req.parameters.require("assetID", as: UUID.self)
 
-        try await SpaceAccess.requireContributor(
+        let role = try await SpaceAccess.requireMembership(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
+        guard role != .viewer else {
+            throw Abort(.forbidden, reason: "You have view-only access to this space.")
+        }
 
         struct PlacementRow: Decodable {
             let id: UUID
+            let kind: String
+            /// Who it counts as added by, as "Added by" shows it.
+            let addedBy: UUID?
         }
         guard let placement = try await req.sql.raw("""
-            SELECT sa.id
+            SELECT sa.id, s.kind,
+                   COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) AS "addedBy"
             FROM space_assets sa
+            JOIN spaces s ON s.id = sa.space_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
               AND sa.deleted_at IS NULL
             """).first(decoding: PlacementRow.self) else {
             throw Abort(.notFound, reason: "No such asset in this space.")
+        }
+        // In a shared space, only whoever added it or the space's owner. See
+        // `SpacePermissions.mayRemove`; the apps hide Remove by the same rule,
+        // and this is what holds when one of them doesn't know it yet.
+        guard SpacePermissions.mayRemove(
+            kind: SpaceKind(rawValue: placement.kind) ?? .shared, role: role,
+            addedBy: placement.addedBy, user: device.userID
+        ) else {
+            throw Abort(.forbidden, reason: SpacePermissions.removalRefusal)
         }
 
         // Recording the removal is the whole of deleting, now.

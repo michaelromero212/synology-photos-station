@@ -50,6 +50,58 @@ public struct SpaceDTO: Codable, Sendable, Identifiable, Hashable {
         self.role = role
         self.memberCount = memberCount
     }
+
+    /// Whether `user` may remove from this space a photo `addedBy` someone.
+    /// See `SpacePermissions.mayRemove`.
+    public func allowsRemoving(addedBy: UUID?, by user: UUID?) -> Bool {
+        SpacePermissions.mayRemove(kind: kind, role: role, addedBy: addedBy, user: user)
+    }
+}
+
+/// Who may do what in a space, decided once for the server and every app.
+public enum SpacePermissions {
+    /// Whether `user` may remove a photo or video that `addedBy` put in a space.
+    ///
+    /// In a shared space, what somebody added is theirs to remove, and the
+    /// person who made the space may remove anything, to clear a duplicate or
+    /// a mistake — the way shared albums work in Photos. Anyone who could add
+    /// used to be able to remove anything, so one slip in a family album could
+    /// take somebody else's photographs with it. In a personal library the one
+    /// member is its owner, and may remove anything in it. Viewers remove
+    /// nothing.
+    ///
+    /// `addedBy` is who the photo counts as added by: the credited person if
+    /// there is one, otherwise whoever uploaded it, the same person "Added by"
+    /// shows.
+    public static func mayRemove(
+        kind: SpaceKind, role: SpaceRole, addedBy: UUID?, user: UUID?
+    ) -> Bool {
+        switch role {
+        case .viewer:
+            return false
+        case .owner:
+            return true
+        case .contributor:
+            return kind == .personal || (user != nil && addedBy == user)
+        }
+    }
+
+    /// Whether `user` may change who a photo is credited to.
+    ///
+    /// The same rule as removing, because the credit is what that rule reads:
+    /// with anyone able to change it, a member could credit somebody else's
+    /// photograph to themselves and then remove it. So the album's owner may
+    /// credit anything, and otherwise only the person it counts as added by
+    /// may hand it to someone else.
+    public static func mayChangeCredit(
+        kind: SpaceKind, role: SpaceRole, addedBy: UUID?, user: UUID?
+    ) -> Bool {
+        mayRemove(kind: kind, role: role, addedBy: addedBy, user: user)
+    }
+
+    /// Why a removal was refused, in the words both the server and the apps use.
+    public static let removalRefusal =
+        "Only the person who added this, or the shared album's owner, can remove it."
 }
 
 // MARK: - Auth

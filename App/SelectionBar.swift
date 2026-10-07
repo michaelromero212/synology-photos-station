@@ -112,15 +112,24 @@ final class GridSelection {
 
     // MARK: - Actions
 
-    /// Removes every selected photo from this library.
-    func remove(from space: SpaceDTO, client: FrameStationClient?) async -> Bool {
-        guard let client, !picked.isEmpty else { return false }
+    /// The selected photos this person may remove from `space`: in a shared
+    /// one, what they added, or everything if they made it. See
+    /// `SpacePermissions.mayRemove`.
+    func removable(from space: SpaceDTO, by user: UUID?) -> [TimelineItem] {
+        picked.filter { space.allowsRemoving(addedBy: $0.uploadedBy, by: user) }
+    }
+
+    /// Removes the selected photos this person may remove from this library.
+    /// The rest stay; the confirmation has already said so.
+    func remove(from space: SpaceDTO, client: FrameStationClient?, user: UUID?) async -> Bool {
+        let targets = removable(from: space, by: user)
+        guard let client, !targets.isEmpty else { return false }
         isWorking = true
         defer { isWorking = false; progress = "" }
 
         var failed = 0
-        for (index, item) in picked.enumerated() {
-            progress = "Removing \(index + 1) of \(picked.count)…"
+        for (index, item) in targets.enumerated() {
+            progress = "Removing \(index + 1) of \(targets.count)…"
             do {
                 try await client.removeAsset(spaceID: space.id, assetID: item.assetID)
             } catch {

@@ -226,6 +226,20 @@ struct MediaEditController: RouteCollection {
             )
         }
 
+        // Who may change each one's credit: in a shared space, the owner, or
+        // whoever it counts as added by. See `SpacePermissions.mayChangeCredit`.
+        // The rest are passed over, as a photo not in the space is, and the
+        // count says how many changed.
+        let role = try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+        struct KindRow: Decodable { let kind: String }
+        let kind = try await req.sql.raw("""
+            SELECT kind FROM spaces WHERE id = \(bind: spaceID)
+            """).first(decoding: KindRow.self)
+            .flatMap { SpaceKind(rawValue: $0.kind) } ?? .shared
+        let userID = device.userID
+
         // Counted inside the transaction and handed back, rather than added to a
         // `var` out here: the body is `@Sendable`, and writing to a captured
         // `var` from one is a data race as far as the compiler can tell.
@@ -236,6 +250,15 @@ struct MediaEditController: RouteCollection {
                 for assetID in input.assetIDs {
                     guard let target = try await Self.target(
                         assetID: assetID, spaceID: spaceID, on: sql
+                    ) else { continue }
+
+                    struct AddedByRow: Decodable { let addedBy: UUID? }
+                    let addedBy = try await sql.raw("""
+                        SELECT COALESCE(credited_to_user_id, uploaded_by_user_id) AS "addedBy"
+                        FROM space_assets WHERE id = \(bind: target.placementID)
+                        """).first(decoding: AddedByRow.self)?.addedBy
+                    guard SpacePermissions.mayChangeCredit(
+                        kind: kind, role: role, addedBy: addedBy, user: userID
                     ) else { continue }
 
                     try await sql.raw("""

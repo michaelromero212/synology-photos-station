@@ -432,35 +432,25 @@ struct TimelineView: View {
             ShareSheet(items: shareFiles)
         }
         .confirmationDialog(
-            selection.count == 1
-                ? "Remove this photo from \(space.name)?"
-                : "Remove \(selection.count) photos from \(space.name)?",
+            removalTitle,
             isPresented: $confirmDelete,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) {
-                Task {
-                    _ = await selection.remove(from: space, client: session.client)
-                    await store?.refresh()
+            if removableCount > 0 {
+                Button("Remove", role: .destructive) {
+                    Task {
+                        _ = await selection.remove(
+                            from: space, client: session.client, user: session.user?.id
+                        )
+                        await store?.refresh()
+                    }
                 }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
             }
-            Button("Cancel", role: .cancel) {}
         } message: {
-            // Say what removal actually does. It is not a deletion from the
-            // phone, and it is not permanent on the NAS either: it can be
-            // undone from Recently Deleted until the window closes.
-            #if os(iOS)
-            Text(
-                selection.count == 1
-                    ? "It stays on this iPhone. On your NAS it goes to Recently Deleted for \(Retention.days) days, and backup won't add it again."
-                    : "They stay on this iPhone. On your NAS they go to Recently Deleted for \(Retention.days) days, and backup won't add them again."
-            )
-            #else
-            Text(
-                "They go to Recently Deleted on your NAS for \(Retention.days) days. "
-                + "Nothing is removed from anyone's phone."
-            )
-            #endif
+            Text(removalMessage)
         }
         #endif
         #if os(iOS)
@@ -994,12 +984,24 @@ struct TimelineView: View {
         Divider()
 
         // Counted, like Photos. "Delete" over a selection you cannot see all of
-        // is the one item here that repeating will not undo.
-        Button(role: .destructive) {
-            focus(item)
-            confirmDelete = true
-        } label: {
-            Label("Delete \(n) \(noun)", systemImage: "trash")
+        // is the one item here that repeating will not undo. Counting only
+        // what this person may remove: in a shared album, what somebody else
+        // added stays (see `SpacePermissions.mayRemove`), and with nothing to
+        // remove there is no Delete at all.
+        let removable = targets.filter {
+            space.allowsRemoving(addedBy: $0.uploadedBy, by: session.user?.id)
+        }.count
+        if removable > 0 {
+            Button(role: .destructive) {
+                focus(item)
+                confirmDelete = true
+            } label: {
+                Label(
+                    removable == n ? "Delete \(n) \(noun)"
+                        : "Delete \(removable) of \(n) \(noun)",
+                    systemImage: "trash"
+                )
+            }
         }
     }
 
@@ -1035,6 +1037,56 @@ struct TimelineView: View {
                 spaceID: space.id, assetIDs: [item.assetID], rotation
             )
         }
+    }
+    #endif
+
+    #if !os(tvOS)
+    // MARK: - Removing
+
+    /// How many of the selection this person may remove from this space. In a
+    /// shared one that is what they added, or everything if they made it; see
+    /// `SpacePermissions.mayRemove`.
+    private var removableCount: Int {
+        selection.removable(from: space, by: session.user?.id).count
+    }
+
+    private var removalTitle: String {
+        switch removableCount {
+        case 0:
+            return selection.count == 1 ? "Someone else added this" : "Someone else added these"
+        case 1:
+            return selection.count == 1
+                ? "Remove this photo from \(space.name)?"
+                : "Remove 1 photo from \(space.name)?"
+        default:
+            return "Remove \(removableCount) photos from \(space.name)?"
+        }
+    }
+
+    /// What removing does, and what of the selection it leaves alone.
+    ///
+    /// It is not a deletion from the phone, and it is not permanent on the NAS
+    /// either: it can be undone from Recently Deleted until the window closes.
+    /// In a shared album, photos somebody else added stay, and this says so
+    /// before anything happens rather than after.
+    private var removalMessage: String {
+        let count = removableCount
+        guard count > 0 else { return SpacePermissions.removalRefusal }
+        #if os(iOS)
+        var text = count == 1
+            ? "It stays on this iPhone. On your NAS it goes to Recently Deleted for \(Retention.days) days, and backup won't add it again."
+            : "They stay on this iPhone. On your NAS they go to Recently Deleted for \(Retention.days) days, and backup won't add them again."
+        #else
+        var text = "They go to Recently Deleted on your NAS for \(Retention.days) days. "
+            + "Nothing is removed from anyone's phone."
+        #endif
+        let kept = selection.count - count
+        if kept == 1 {
+            text += "\n\nOne other was added by someone else, so it stays. Only they or the shared album's owner can remove it."
+        } else if kept > 1 {
+            text += "\n\n\(kept) others were added by other people, so they stay. Only whoever added them or the shared album's owner can remove them."
+        }
+        return text
     }
     #endif
 

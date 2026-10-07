@@ -1158,10 +1158,15 @@ struct AssetDetailView: View {
                         showInfo = true
                     }
                     .frame(maxWidth: .infinity)
-                    ViewerButton(symbol: "trash", label: "Remove") {
-                        confirmDelete = true
+                    // Not for a photo somebody else added to a shared album,
+                    // unless this person made the album. See
+                    // `SpacePermissions.mayRemove`.
+                    if space.allowsRemoving(addedBy: currentItem.uploadedBy, by: session.user?.id) {
+                        ViewerButton(symbol: "trash", label: "Remove") {
+                            confirmDelete = true
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -1602,6 +1607,18 @@ private struct InformationSheet: View {
     @State private var showCreditEditor = false
     @State private var showLocationEditor = false
 
+    /// In a shared space, for its owner or for whoever the photo counts as
+    /// added by. See `SpacePermissions.mayChangeCredit`.
+    private func mayEditCredit(_ detail: AssetDetail) -> Bool {
+        guard detail.isSharedSpace,
+              let space = session.spaces.first(where: { $0.id == detail.spaceID })
+        else { return false }
+        return SpacePermissions.mayChangeCredit(
+            kind: space.kind, role: space.role,
+            addedBy: detail.uploadedBy.id, user: session.user?.id
+        )
+    }
+
     var body: some View {
         if isInspector {
             content
@@ -1636,10 +1653,11 @@ private struct InformationSheet: View {
             #if !os(tvOS)
             // Only where a correction can actually be applied: a shared space,
             // where more than one person's photos are mixed together and the
-            // name on one can be wrong.
+            // name on one can be wrong. And only for someone who may change it,
+            // since the credit also decides who may remove the photo.
             InformationPanel(
                 detail: detail,
-                onEditCredit: detail.isSharedSpace ? { showCreditEditor = true } : nil,
+                onEditCredit: mayEditCredit(detail) ? { showCreditEditor = true } : nil,
                 onEditLocation: { showLocationEditor = true },
                 observation: model.observation
             )
