@@ -178,6 +178,19 @@ ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compos
 It names every photo that has coordinates and no place, and leaves the rest
 alone. Imports since don't need it.
 
+**77 HEIC photos stayed gray.** These were photos with an HDR gain map, which
+iPhones have written since iOS 18: a `tmap` item grouped with the picture by a
+`grpl` box. The server image's HEIC library, libheif 1.12 from Ubuntu 22.04,
+can't read that layout; nothing before 1.18 can
+([libheif #1190](https://github.com/strukturag/libheif/issues/1190)). Every try
+ended in "bad seek" and "Invalid input". The files themselves were whole: their
+boxes added up to the last byte, and libheif 1.23 on a Mac read them fine. The
+image now takes libheif from its developers' archive and refuses to build
+unless it decodes a synthetic gain-map HEIC (`Scripts/fixtures/`). After that
+deploy the gray photos fix themselves: each server start re-queues every photo
+still without a thumbnail. A personal library from a recent iPhone is mostly
+photos like these, so that deploy has to come before its import.
+
 ## Who shared each Shared Space photo
 
 The import credits every photo to the destination's owner, because a file

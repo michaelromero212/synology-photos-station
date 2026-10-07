@@ -93,8 +93,22 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     # default. The HEIF check below is what keeps this from being reckless — if
     # trimming ever costs vips its HEIC loader, the build fails rather than
     # shipping an image that can't thumbnail an iPhone photo.
+    #
+    # libheif comes from its developers' own archive, not Ubuntu's. Jammy ships
+    # 1.12 and even Noble only 1.17.6, and nothing before 1.18 can read the
+    # HEICs iOS 18 and later write: an HDR gain map (`tmap`, grouped by `grpl`)
+    # beside the picture. vips failed on them with "bad seek" and "Invalid
+    # input", and 77 photos from the Synology Shared Space import stayed gray.
+    # From 1.15 on, the HEVC decoder is a plugin package of its own, and
+    # without it libheif loads and then decodes nothing. Both checks below
+    # catch either going wrong.
+    && apt-get -q install -y --no-install-recommends software-properties-common gpg-agent \
+    && add-apt-repository -y ppa:strukturag/libheif \
+    && apt-get -q update \
     && apt-get -q install -y --no-install-recommends \
-         libvips-tools libheif1 libexif12 exiftool ffmpeg \
+         libvips-tools libheif1 libheif-plugin-libde265 libexif12 exiftool ffmpeg \
+    && apt-get -q purge -y software-properties-common gpg-agent \
+    && apt-get -q autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Offline reverse-geocoding dataset, baked in so the container is
@@ -122,6 +136,19 @@ RUN export DEBIAN_FRONTEND=noninteractive \
 RUN vips -l 2>/dev/null | grep -q heif \
     && echo "vips: HEIF support present" \
     || (echo "ERROR: vips has no HEIF loader; HEIC photos would fail" && exit 1)
+
+# And not just present but new enough, and able to decode what a current iPhone
+# writes. The fixture is a synthetic gradient saved with an HDR gain map the way
+# iOS does (Scripts/fixtures/make-hdr-gain-map-heic.swift), with the same
+# `tmap`, `grpl` and `idat` boxes as the photos that failed.
+COPY Scripts/fixtures/hdr-gain-map.heic /tmp/hdr-gain-map.heic
+RUN version="$(dpkg-query -W -f='${Version}' libheif1)" \
+    && (dpkg --compare-versions "$version" ge 1.18 \
+        || (echo "ERROR: libheif $version is older than 1.18 and can't read iOS 18 HEICs" && exit 1)) \
+    && (vips avg /tmp/hdr-gain-map.heic > /dev/null \
+        || (echo "ERROR: vips can't decode a HEIC with an HDR gain map" && exit 1)) \
+    && echo "libheif $version: decodes HEICs with HDR gain maps" \
+    && rm /tmp/hdr-gain-map.heic
 
 RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app vapor
 
