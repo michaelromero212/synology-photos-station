@@ -15,6 +15,17 @@ actor DerivationWorker {
     private let concurrency: Int
     private var running = false
 
+    /// Set once the lanes are running. See `deriveNow(assetID:)`.
+    private var lanesStarted = false
+
+    /// Whether a lane is building a playback rendition.
+    ///
+    /// One at a time. A 4K transcode holds its lane for minutes, and when two
+    /// ran at once after a restart they had half the lanes and the processor
+    /// besides, while photos from an import filled in behind them at about
+    /// three a minute. Only the lane holding this may claim one; see `next()`.
+    private var transcoding = false
+
     /// Idle backoff. Uploads are bursty — long quiet stretches, then a device
     /// dumps a thousand items — so polling slowly when empty costs nothing.
     private let idleDelay: Duration = .seconds(5)
@@ -56,7 +67,7 @@ actor DerivationWorker {
         let height: Int?
     }
 
-    func start() {
+    func start() async {
         guard !running else { return }
         running = true
 
@@ -68,39 +79,74 @@ actor DerivationWorker {
             return
         }
 
-        app.logger.info("derivation worker starting (\(concurrency) lanes)")
+        let transcodes = Derivatives.transcodeProcessors.map { "cores \($0)" }
+            ?? "\(Derivatives.playbackThreads) threads"
+        app.logger.info(
+            "derivation worker starting (\(concurrency) lanes, one transcode at a time on \(transcodes))"
+        )
 
         // Nothing can genuinely be running at startup, so anything left in that
         // state is from a process that died mid-job. Requeue immediately rather
-        // than waiting out the 15-minute stale window.
-        Task { [app] in
-            do {
-                try await app.sql.raw("""
-                    UPDATE derivation_jobs
-                    SET state = 'pending', attempts = GREATEST(attempts - 1, 0)
-                    WHERE state = 'running'
-                    """).run()
-            } catch {
-                app.logger.error("could not requeue abandoned jobs: \(error)")
-            }
+        // than waiting out the 15-minute stale window, and before the lanes
+        // start rather than beside them, so their first claims can see it.
+        do {
+            try await app.sql.raw("""
+                UPDATE derivation_jobs
+                SET state = 'pending', attempts = GREATEST(attempts - 1, 0)
+                WHERE state = 'running'
+                """).run()
+        } catch {
+            app.logger.error("could not requeue abandoned jobs: \(error)")
         }
 
         for lane in 0..<concurrency {
             Task.detached(priority: .utility) { [app] in
-                await Self.runLane(lane: lane, app: app, idleDelay: self.idleDelay)
+                await Self.runLane(lane: lane, worker: self, app: app, idleDelay: self.idleDelay)
             }
         }
+        lanesStarted = true
     }
 
     func stop() { running = false }
 
+    /// Makes an asset's thumbnails now, for someone who opened it before the
+    /// queue got to it. Does nothing if it has them already, or a lane is
+    /// making them.
+    ///
+    /// Run here, at full priority, rather than moved up the queue: the lanes
+    /// run behind everything else for the processor and can all be busy, and
+    /// the person is looking at the photo now. It takes the job with the same
+    /// sort of atomic claim a lane uses, so no lane can start it as well. Not
+    /// before the lanes have started, though, because until then the boot's
+    /// requeue would put a claimed job back in line and a lane would make it
+    /// a second time.
+    func deriveNow(assetID: UUID) async {
+        guard lanesStarted else { return }
+        do {
+            guard let job = try await app.sql.raw("""
+                INSERT INTO derivation_jobs (asset_id, kind, state, attempts, started_at)
+                SELECT id, 'thumbnails', 'running', 1, now()
+                FROM assets WHERE id = \(bind: assetID) AND derived_at IS NULL
+                ON CONFLICT (asset_id, kind) DO UPDATE
+                SET state = 'running', attempts = 1, started_at = now(), last_error = NULL
+                WHERE derivation_jobs.state <> 'running'
+                RETURNING id, asset_id AS "assetID", kind
+                """).first(decoding: Job.self) else { return }
+            app.logger.info("asset \(assetID) opened before its thumbnail was made; making it now")
+            await Self.process(job: job, app: app)
+        } catch {
+            app.logger.error("could not make thumbnails for \(assetID) on open: \(error)")
+        }
+    }
+
     // MARK: - Lane
 
-    private static func runLane(lane: Int, app: Application, idleDelay: Duration) async {
+    private static func runLane(
+        lane: Int, worker: DerivationWorker, app: Application, idleDelay: Duration
+    ) async {
         while !app.didShutdown {
             do {
-                let claimed = try await claim(app: app)
-                guard let job = claimed else {
+                guard let job = try await worker.next() else {
                     try await Task.sleep(for: idleDelay)
                     continue
                 }
@@ -108,6 +154,9 @@ actor DerivationWorker {
                 // CPU — see `Shell.isBackground`.
                 await Shell.$isBackground.withValue(true) {
                     await process(job: job, app: app)
+                }
+                if job.kind == Derivatives.playbackJobKind {
+                    await worker.finishedTranscoding()
                 }
             } catch is CancellationError {
                 return
@@ -118,6 +167,27 @@ actor DerivationWorker {
         }
     }
 
+    /// The next job for a lane: a transcode only if no other lane is running one.
+    private func next() async throws -> Job? {
+        guard !transcoding else {
+            return try await Self.claim(app: app, includingTranscodes: false)
+        }
+        // Taken before the claim, not after it. The actor lets other lanes in
+        // while this one waits on the database, and any of them that found the
+        // slot free meanwhile would take a transcode too.
+        transcoding = true
+        do {
+            let job = try await Self.claim(app: app, includingTranscodes: true)
+            transcoding = job?.kind == Derivatives.playbackJobKind
+            return job
+        } catch {
+            transcoding = false
+            throw error
+        }
+    }
+
+    private func finishedTranscoding() { transcoding = false }
+
     /// Atomically takes the oldest claimable job.
     ///
     /// Deliberately NOT on a pinned connection. This is a single
@@ -125,23 +195,28 @@ actor DerivationWorker {
     /// bracket — so pinning bought nothing and leaked a pooled connection per
     /// call. Four jobs would succeed and the fifth would block forever on its
     /// first query, with no error and no subprocess running.
-    private static func claim(app: Application) async throws -> Job? {
+    private static func claim(app: Application, includingTranscodes: Bool) async throws -> Job? {
         try await app.sql.raw("""
                 UPDATE derivation_jobs
                 SET state = 'running', started_at = now(), attempts = attempts + 1
                 WHERE id = (
                     SELECT j.id FROM derivation_jobs j
                     JOIN assets a ON a.id = j.asset_id
-                    WHERE j.state = 'pending'
+                    WHERE (j.state = 'pending'
                        OR (j.state = 'failed' AND j.attempts < 3)
                        -- Reclaim jobs abandoned mid-flight. Without this a
                        -- worker that dies while processing leaves the row in
                        -- 'running' forever and nothing ever picks it up again.
-                       -- 15 minutes is comfortably longer than the longest
-                       -- subprocess timeout.
+                       -- 15 minutes is comfortably longer than any subprocess
+                       -- timeout but a transcode's, and a transcode can't be
+                       -- taken from under itself: only the lane allowed to
+                       -- transcode may claim one, and it is busy with that one.
                        OR (j.state = 'running'
                            AND j.started_at < now() - interval '15 minutes'
-                           AND j.attempts < 3)
+                           AND j.attempts < 3))
+                      -- One transcode at a time; see `transcoding`.
+                      AND (\(bind: includingTranscodes)
+                           OR j.kind <> \(bind: Derivatives.playbackJobKind))
                     -- Thumbnails first: they are what someone watching the grid
                     -- is waiting on, so a burst of uploads (and the exif-dump
                     -- backfill sharing this queue) fills tiles before it spends
@@ -297,6 +372,7 @@ actor DerivationWorker {
                     sha256: asset.sha256,
                     sourceBitrate: bitrate,
                     sourceLongEdge: longEdge,
+                    sourceDurationMS: shape?.durationMS,
                     store: app.blobStore,
                     logger: app.logger
                 )

@@ -108,10 +108,10 @@ fingerprint it. The clones themselves are instant and take no space.
 
 - **The same background work as an upload:** thumbnails first, four at a
   time, then the full metadata the Information panel shows, and for each video
-  a smaller copy for streaming on cellular. A photo shows up in File Station
-  once its thumbnails exist. Place names are filled in during the import
-  itself, from each file's GPS, so a day can name and group its places from
-  the start.
+  a smaller copy for streaming on cellular, one video at a time on two of the
+  four cores. A photo shows up in File Station once its thumbnails exist.
+  Place names are filled in during the import itself, from each file's GPS,
+  so a day can name and group its places from the start.
 - **One notification.** An import is one bulk session, so a shared library's
   members get a single summary push. Personal libraries never push.
 - **Credit** goes to the destination's owner, since files don't record who added
@@ -190,6 +190,13 @@ unless it decodes a synthetic gain-map HEIC (`Scripts/fixtures/`). After that
 deploy the gray photos fix themselves: each server start re-queues every photo
 still without a thumbnail. A personal library from a recent iPhone is mostly
 photos like these, so that deploy has to come before its import.
+
+After that deploy they filled in at about three a minute. The restart's
+lanes had made their first claims before the re-queue ran, so two of the four
+had started long 4K transcodes of the imported videos, and those took most of
+the processor besides. The re-queue now runs before any lane starts, only one
+video is transcoded at a time, on two cores, and opening a photo that's still
+gray makes its thumbnail then and there.
 
 ## Who shared each Shared Space photo
 
@@ -275,7 +282,10 @@ For each person:
    these files are a tenth the size on average, so per-file work counts for
    more. Allow an evening for the biggest library, with the Mac awake and on the
    home network.
-5. **Afterward,** thumbnails fill in over the following hours. Their iPhone then
+5. **Afterward,** thumbnails fill in over the following hours. The videos'
+   cellular copies take longer, since only one is made at a time: a few
+   thousand 4K clips can take days. Until a clip has one, it plays from the
+   original, which is fine at home and may stutter on cellular. Their iPhone then
    works through the imported photos for curated albums and search, a batch at
    a time while the app is open, pausing for Low Power Mode, heat and backups.
    With tens of thousands of photos that takes a while. Nothing needs doing.

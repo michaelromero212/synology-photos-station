@@ -35,7 +35,7 @@ end-to-end encryption, sharing outside the household, web client.
 | Derivative format | JPEG, not HEIC | Encoding HEIC needs an x265 encoder the container otherwise doesn't carry; at 256 px the saving is a few KB. HEIC *decode* still works — that's libheif |
 | Metadata authority | Device wins on capture time and dimensions; server fills the rest | `PHAsset.creationDate` is reliable where EXIF is often absent, wrong, or timezone-naive |
 | Video | Own ffmpeg build in container | DSM's HEVC licensing removal doesn't apply; QuickSync via `/dev/dri` when needed |
-| Transcoding | Lazy, on first remote playback, cached | Most videos are never watched away from home |
+| Transcoding | A 1080p H.264 copy of any clip over 12 Mbps, queued at upload, built in the background one at a time on two of the four cores | A 4K original stutters on cellular, and a J4125 takes minutes per clip, too long to wait through on pressing play. Nobody is waiting on the copy itself, so it never holds up a thumbnail |
 | Auth | **DSM credentials exchanged server-side for a device token** | One password per person, managed in DSM. The app sends them once over TLS; the server validates against DSM on localhost and returns its own token. The Keychain stores the token, never the password — so a stolen phone is not a compromised NAS account, and DSM's API is never exposed |
 | Per-user data | One database, one library per user, plus a browsable per-user folder tree | Separate databases per user would make Family Shared impossible — you cannot join across databases, so shared spaces, attribution, and cross-user dedup all break |
 | Video playback | Direct play of the original over HTTP Range | AVPlayer streams and seeks natively at 1080p and 4K with no transcode and no quality loss. HLS ladders deferred until 4K-over-cellular actually hurts |
@@ -105,6 +105,16 @@ than a multi-day one.
 makes that comfortable; on the stock 4 GB it would have been a real OOM risk
 and the lane count would have needed capping via
 `FRAMESTATION_DERIVATION_LANES`.
+
+**Queue order.** Thumbnails go ahead of everything, and a photo with none yet
+goes ahead of a rebuild. A restart re-queues missing thumbnails, including
+ones whose job ran out of tries, before any lane starts, so the lanes' first
+claims see them. Only one lane at a time builds a cellular copy, held to two
+of the four cores (`taskset` on Linux), so photos always have three lanes and
+half the processor. A big video backlog drains about half as fast as it
+would on all four. And a photo opened before its thumbnail is made gets one
+then and there, at full priority, so its tile isn't gray when you go back to
+the grid.
 
 ---
 

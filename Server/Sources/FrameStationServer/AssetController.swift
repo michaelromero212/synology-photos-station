@@ -38,6 +38,8 @@ struct AssetController: RouteCollection {
         /// Where the canonical file lives. NULL for rows predating the library
         /// layout, which still read from the content-addressed store.
         let storagePath: String?
+        /// Whether its thumbnails have been made.
+        let isDerived: Bool
     }
 
     /// The file to serve: the library copy when there is one, the blob
@@ -455,12 +457,26 @@ struct AssetController: RouteCollection {
             throw Abort(.notFound, reason: "Original is missing from storage.")
         }
 
+        let mediaType = MediaType(rawValue: asset.mediaType) ?? .photo
         let path = try await Derivatives.makePreview(
             blob: blob,
             sha256: asset.sha256,
-            mediaType: MediaType(rawValue: asset.mediaType) ?? .photo,
+            mediaType: mediaType,
             store: req.blobStore
         )
+
+        // Opened before its thumbnail was made, because it's still in the
+        // queue or the queue gave up on it. The preview just showed the file
+        // can be decoded, and someone is looking at it, so its thumbnail is
+        // made now rather than when a lane gets to it; otherwise the tile is
+        // still gray when they go back to the grid. Photos only: a video's
+        // thumbnails rebuild its poster and delete the preview made from it,
+        // which may still be on its way to them.
+        if mediaType != .video, !asset.isDerived,
+           let worker = req.application.storage[DerivationWorkerKey.self] {
+            let assetID = asset.id
+            Task { await worker.deriveNow(assetID: assetID) }
+        }
         return try await streamFile(req, at: path, contentType: "image/jpeg", immutable: true)
     }
 
@@ -501,7 +517,8 @@ struct AssetController: RouteCollection {
                    a.media_type AS "mediaType",
                    a.blob_ext   AS "blobExt",
                    a.mime,
-                   a.storage_path AS "storagePath"
+                   a.storage_path AS "storagePath",
+                   a.derived_at IS NOT NULL AS "isDerived"
             FROM assets a
             WHERE a.id = \(bind: assetID)
               AND EXISTS (

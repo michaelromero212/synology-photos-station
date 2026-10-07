@@ -103,7 +103,16 @@ func configure(_ app: Application) async throws {
             ?? min(4, ProcessInfo.processInfo.activeProcessorCount)
         let worker = DerivationWorker(app: app, concurrency: lanes)
         app.storage[DerivationWorkerKey.self] = worker
-        await worker.start()
+        // Heal any live asset that reached the grid without a thumbnail, or
+        // whose thumbnail job ran out of tries, and only then start the lanes.
+        // Thumbnails outrank everything else in the queue, but only the ones
+        // that are in it: started side by side, the lanes made their first
+        // claims before the heal had run, and a restart began with lanes on
+        // long video transcodes while photos waited gray behind them.
+        Task {
+            await MetadataBackfill.enqueueMissingThumbnails(on: app)
+            await worker.start()
+        }
 
         // APNs speaks HTTP/2 only; without this the client offers 1.1 and the
         // connection is refused before any push is attempted.
@@ -171,11 +180,6 @@ func configure(_ app: Application) async throws {
         // Information panel now shows — same "no re-upload" idea, but the work
         // goes on the derivation queue rather than running inline.
         Task { await MetadataBackfill.enqueueMissingExif(on: app) }
-        // Heal any live asset that reached the grid without a thumbnail — the
-        // dedup/purge bug left a handful gray with no job. Runs after the exif
-        // enqueue, but thumbnails outrank metadata in the worker, so these fill
-        // first regardless of order.
-        Task { await MetadataBackfill.enqueueMissingThumbnails(on: app) }
         // Videos uploaded before the cellular rendition existed. Last, and
         // bounded: it is the only job here that can occupy a worker for minutes
         // at a time, and nothing on screen is waiting for it.

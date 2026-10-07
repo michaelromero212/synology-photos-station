@@ -169,7 +169,7 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | POST | `/v1/uploads/:id/commit` | Bearer | Verify hash, store blob, create asset + placement |
 | POST | `/v1/spaces/:id/assets/:assetID` | Bearer | Link an existing blob into a space (no copy) |
 | GET | `/v1/assets/:id/thumb?size=256\|512` | Bearer | Pre-generated thumbnail; `202` while still queued |
-| GET | `/v1/assets/:id/preview` | Bearer | 2048 px, rendered on first request and cached |
+| GET | `/v1/assets/:id/preview` | Bearer | 2048 px, rendered on first request and cached; a photo without thumbnails gets them then too |
 | GET | `/v1/assets/:id/original` | Bearer | Byte-exact original, Range-capable |
 | GET | `/v1/spaces/:id/timeline?zoom=` | Bearer | Bucket list + counts + places at year/month/day |
 | GET | `/v1/spaces/:id/timeline/:bucket` | Bearer | Items for one bucket |
