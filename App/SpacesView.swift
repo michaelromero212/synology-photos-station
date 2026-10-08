@@ -331,7 +331,7 @@ private struct SpaceMembersView: View {
                 // beside Remove, and the obvious reading is that the 240 leave
                 // with the person. They don't, and that is the right policy —
                 // shared memories shouldn't evaporate when someone goes — but it
-                // is not something to discover afterwards.
+                // is not something to discover afterward.
                 Text("Viewers can see everything here but can't add, edit or delete.")
             }
         }

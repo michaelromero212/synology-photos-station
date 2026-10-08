@@ -81,7 +81,7 @@ actor ActivitySweeper {
     /// again, and `notified_at` records that the push actually went out.
     ///
     /// "Quiet" has to mean two things, and for a while it only meant one.
-    /// `last_at` moves when an asset *finalises*, and the backup queue uploads
+    /// `last_at` moves when an asset *finalizes*, and the backup queue uploads
     /// strictly one item at a time — so somebody who adds ten photos and then a
     /// 4 GB video goes silent by this measure for as long as the video takes.
     /// The session closed mid-batch and the family got "Morgan added 10 photos",

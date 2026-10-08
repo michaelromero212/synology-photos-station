@@ -134,7 +134,7 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
         // playing video causes plenty — saw a controller that didn't match
         // `focus`, decided the pager was in the wrong place, and called
         // `setViewControllers` back to where the swipe started. The drag was
-        // being cancelled by its own view update, a frame before it committed.
+        // being canceled by its own view update, a frame before it committed.
         guard !context.coordinator.isTransitioning else { return }
 
         guard let target = context.coordinator.controller(for: focus.currentID) else { return }

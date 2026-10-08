@@ -192,7 +192,7 @@ public struct SetCreditRequest: Codable, Sendable, Hashable {
 /// with the family should not empty it out of your own library; whether the
 /// original stays is a second, separate decision, made later and once you can
 /// see the photos arrived. So this leaves the source placement alone, and the
-/// app offers the removal afterwards rather than assuming it.
+/// app offers the removal afterward rather than assuming it.
 ///
 /// The file is hard-linked into the shared tree rather than duplicated, so a
 /// shared photo costs a directory entry and no additional storage.

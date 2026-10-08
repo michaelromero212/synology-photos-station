@@ -62,7 +62,7 @@ echo "=== 3. an asset id is not a capability ==="
 check "cannot link another user's asset" "404" \
   "$(code -X POST "$API/v1/spaces/$PB/assets/$APRIV" -H "Authorization: Bearer $TB" \
       -H 'Content-Type: application/json' -d '{}')"
-check "still unreadable afterwards" "404" \
+check "still unreadable afterward" "404" \
   "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$APRIV/original")"
 denied "cannot link into someone else's space" \
   "$(code -X POST "$API/v1/spaces/$PA/assets/$APRIV" -H "Authorization: Bearer $TB" \

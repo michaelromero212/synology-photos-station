@@ -162,7 +162,7 @@ struct MetadataController: RouteCollection {
 
     // MARK: - Tags
 
-    /// Applies one edit and returns what the photo is tagged afterwards.
+    /// Applies one edit and returns what the photo is tagged afterward.
     ///
     /// Returning the result rather than 204 is what lets the viewer redraw its
     /// tag row without refetching the whole detail payload.
@@ -218,7 +218,7 @@ struct MetadataController: RouteCollection {
 
         // EXISTS rather than a join and DISTINCT: a tag on forty photos is
         // still one name, and this keeps it one row without having to dedupe
-        // afterwards. The live-placement check stops a name that only survives
+        // afterward. The live-placement check stops a name that only survives
         // on a deleted photo being offered.
         let rows = try await req.sql.raw("""
             SELECT t.name

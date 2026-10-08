@@ -287,7 +287,7 @@ itself records; `capturedTZOffsetFallback` is the uploading device's offset for
 that date (`secondsFromGMT(for:)`, so DST is handled — a March 2011 photo resolves
 to EST, not EDT). Derivation resolves them as
 `COALESCE(captured_tz_off, <exif>, tz_off_fallback)` and recomputes
-`local_captured_at` afterwards.
+`local_captured_at` afterward.
 
 This matters because `local_captured_at` is what the timeline buckets on. An
 earlier build sent the phone's current offset as if it were fact, which overwrote
@@ -1233,7 +1233,7 @@ recognizes, so it pages; a vertical one it fails, so the dismiss runs.
 interactive transition `viewControllers.first` already reports the *incoming*
 page, so a SwiftUI update — and a playing video causes plenty — would decide the
 pager was in the wrong place and call `setViewControllers` back to the start of
-the swipe, cancelling it a frame before it committed. Hence `isTransitioning`.
+the swipe, canceling it a frame before it committed. Hence `isTransitioning`.
 
 **Only one video plays at a time**, and that is enforced by `VideoPreloader.playOnly`
 rather than by the player view disappearing. The pages are hosted in view

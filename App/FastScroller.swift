@@ -368,7 +368,7 @@ final class ScrollProgress {
         // and chrome you cannot get back by going home is chrome you have lost.
         //
         // It also repairs the case that sent me looking: a fling back to the
-        // newest ends in a bounce, and a bounce settles by travelling *backwards*
+        // newest ends in a bounce, and a bounce settles by traveling *backwards*
         // a few points. That trailing reversal was enough to re-hide a bar the
         // fling itself had just brought back, so arriving at the end read as
         // scrolling away from it. Measured in points rather than as a fraction
@@ -383,7 +383,7 @@ final class ScrollProgress {
 
     /// Brings the bar back for a reason other than scrolling.
     ///
-    /// Arriving somewhere is not the same as travelling: coming back from the
+    /// Arriving somewhere is not the same as traveling: coming back from the
     /// viewer, the grid is re-anchored under you by `followViewer`, and that
     /// lands as one enormous offset delta. Counting it as travel would hide the
     /// bar again in the same breath it was shown, so the baseline is dropped
@@ -407,7 +407,7 @@ final class ScrollProgress {
         // scroll view keeps your position by moving the offset to match — a
         // single report can shift by thousands of points without the grid
         // appearing to move at all. Counting that as travel is how the bar came
-        // to hide itself while you were scrolling towards the newest: one
+        // to hide itself while you were scrolling toward the newest: one
         // correction of -8514pt outweighed the entire gesture. Sixteen
         // milliseconds of even a hard fling is nowhere near this, so anything
         // past it is the content resizing underneath us. Dropped, and the

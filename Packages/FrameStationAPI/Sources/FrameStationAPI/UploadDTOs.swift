@@ -252,7 +252,7 @@ public struct LinkAssetRequest: Codable, Sendable {
 /// which is what makes the picture appear on everyone's phone rather than only
 /// on the uploader's.
 ///
-/// Full derivation still runs afterwards and overwrites this with the server's
+/// Full derivation still runs afterward and overwrites this with the server's
 /// own rendering, so the handed-over copy is a head start rather than a
 /// permanent substitute — and a client that sends a poor one is corrected
 /// rather than believed forever.

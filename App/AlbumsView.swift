@@ -473,7 +473,7 @@ struct AlbumsView: View {
     /// meant most; see `CollectionsController.featuredTrips`.
     @ViewBuilder
     private func automatic(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
-        // Trips before occasions: a fortnight away is a bigger thing than most
+        // Trips before occasions: two weeks away is a bigger thing than most
         // single days, and the page should be ordered by what mattered rather
         // than by what happened most recently.
         if !found.trips.isEmpty {

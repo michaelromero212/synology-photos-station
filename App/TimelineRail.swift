@@ -16,8 +16,8 @@ import SwiftUI
 /// *what is there*, so every year looks alike whether you took four photographs
 /// that year or four thousand. Every bucket already carries a count — the
 /// manifest has always sent it and the scrubber never used it — so this draws
-/// the library's density instead. August of a holiday year is a thick bright
-/// band; the February you photographed a parcel is a hairline. You can see
+/// the library's density instead. The August of a big vacation is a thick
+/// bright band; the February you photographed a package is a hairline. You can see
 /// where the substance of your library is before you drag anywhere.
 struct TimelineRail: View {
     let buckets: [TimelineBucket]
@@ -119,8 +119,8 @@ struct TimelineRail: View {
 
     /// The library's density, as bars whose length is how much you shot then.
     ///
-    /// Square-rooted rather than linear. One extraordinary fortnight — a
-    /// wedding, a first holiday with a new camera — is often an order of
+    /// Square-rooted rather than linear. One extraordinary two weeks — a
+    /// wedding, a first vacation with a new camera — is often an order of
     /// magnitude above an ordinary month, and on a linear scale it takes the
     /// whole width while every normal month collapses to an invisible stub. The
     /// root keeps the busy periods obviously busy while leaving the quiet ones

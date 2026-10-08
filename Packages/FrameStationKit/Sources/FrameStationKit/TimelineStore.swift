@@ -504,7 +504,7 @@ public final class TimelineStore {
     /// The manifest's key for the day, month or year a capture time falls in.
     ///
     /// Formatted in UTC because the server sends capture times as the local
-    /// wall clock labelled UTC — the same convention its `to_char` keys use.
+    /// wall clock labeled UTC — the same convention its `to_char` keys use.
     nonisolated static func bucketKey(for date: Date, zoom: TimelineZoom) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

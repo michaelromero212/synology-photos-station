@@ -75,7 +75,7 @@ final class ConnectionMonitor {
     private var probe: Task<Void, Never>?
     /// The probe's own `/health` request goes through the same client the
     /// observer watches, so without this the probe would report its own result
-    /// back to itself — cancelling the task it was reporting from. While a
+    /// back to itself — canceling the task it was reporting from. While a
     /// probe is in flight its result is the only one that counts.
     private var isProbing = false
 

@@ -8,7 +8,7 @@ import Foundation
 /// two implementations agreeing.
 ///
 /// Why it matters here: the timeline manifest carries one of these per asset
-/// (~2.5 MB across a 100k library), so a grid cell paints a recognisable blur
+/// (~2.5 MB across a 100k library), so a grid cell paints a recognizable blur
 /// immediately with **zero** network requests, and the real thumbnail swaps in
 /// when it lands. See ARCHITECTURE.md §6.
 ///

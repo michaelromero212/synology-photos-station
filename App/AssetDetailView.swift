@@ -802,7 +802,7 @@ struct AssetDetailView: View {
     /// `TabView`'s page style rather than a paging `ScrollView`.
     ///
     /// Two reasons, both about the zoom. It lands on the opened photo on the
-    /// first layout pass instead of scrolling to it afterwards, and its pan
+    /// first layout pass instead of scrolling to it afterward, and its pan
     /// gesture is a `UIScrollView`'s — so when a photo is zoomed in, UIKit
     /// hands the drag to the photo and only takes it back at the edge of the
     /// content, which is exactly the hand-off Photos has.
@@ -1485,7 +1485,7 @@ private struct AssetPage: View {
             //
             // Away from home, only once the clip on screen has what it needs:
             // keyed on `isLinkBusy`, so this runs again the moment the
-            // connection frees and is cancelled the moment it is claimed.
+            // connection frees and is canceled the moment it is claimed.
             Image(platformImage: poster).resizable().scaledToFit()
                 .task(id: preloader.isLinkBusy) {
                     guard !preloader.isLinkBusy, await waitForTurn() else { return }

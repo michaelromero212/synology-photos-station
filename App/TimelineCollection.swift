@@ -419,7 +419,7 @@ final class TimelineGridController {
 
     /// Brings one tile on screen, centered, if it isn't already — and leaves
     /// the grid exactly where it is if it is. Returns whether the tile is on
-    /// screen afterwards.
+    /// screen afterward.
     ///
     /// For the viewer, which keeps the grid underneath it following the photo
     /// on screen: moved while it can't be seen, the grid is already in place

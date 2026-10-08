@@ -2,7 +2,7 @@
 --
 -- The original model hung an album off a space, so an album in Family Shared
 -- was visible to everyone in it. Albums are meant to be private: your own way
--- of organising, not a thing you publish. Ownership moves to the user.
+-- of organizing, not a thing you publish. Ownership moves to the user.
 --
 -- Contents are still `space_assets` placements, so an album can hold anything
 -- you can see — including a photo from a shared library — without that album

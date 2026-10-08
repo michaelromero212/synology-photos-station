@@ -227,7 +227,7 @@ Every upload used to hardlink its blob into `/volume1/docker/framestation/browse
 and nothing removed those links, so purged photos kept their bytes on disk. The
 server now takes that tree apart by itself on its first start, logging a
 `legacy browse tree:` summary: extra names removed, space freed, any missing
-blob restored from it, and anything it doesn't recognise left in place. To see
+blob restored from it, and anything it doesn't recognize left in place. To see
 what it will do first, ask the new image before it serves: pull, a one-off
 run, then step 3 as usual.
 

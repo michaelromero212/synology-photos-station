@@ -16,7 +16,7 @@ import UIKit
 /// grid first asks.
 ///
 /// So the value is seeded as early as the scene allows and remembered
-/// afterwards. It is a device constant in portrait — which the iPhone is locked
+/// afterward. It is a device constant in portrait — which the iPhone is locked
 /// to — and on iPad `seed()` runs again on every size change, so a rotation or a
 /// Split View resize re-reads it rather than trusting a stale number.
 ///

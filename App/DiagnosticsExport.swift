@@ -6,7 +6,7 @@ import SwiftUI
 /// The share sheet rather than a copy button, because the destination is a Mac
 /// across the room: AirDrop is right there in it, and a file arrives readable
 /// instead of as a wall of pasted text. Written to the temporary directory,
-/// which the system clears on its own — nothing to tidy up afterwards.
+/// which the system clears on its own — nothing to tidy up afterward.
 struct DiagnosticsExportButton: View {
     /// Presented by *identity* rather than by a separate boolean.
     ///

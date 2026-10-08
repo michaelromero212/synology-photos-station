@@ -487,7 +487,7 @@ final class VideoPlaybackModel {
                 + "(\(Self.mmss(position)) → \(Self.mmss(target)))"
         )
         // Glide the playhead across rather than teleporting it. The bar snapping
-        // ten seconds sideways reads as a glitch; travelling there reads as a
+        // ten seconds sideways reads as a glitch; traveling there reads as a
         // jump you asked for, which is the difference between our scrubber and
         // Apple's. Short enough not to lag the finger, and it runs on top of
         // repeated taps — hold down the skip and the bar sweeps rather than

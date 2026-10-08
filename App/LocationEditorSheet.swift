@@ -183,7 +183,7 @@ struct LocationEditorSheet: View {
 
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = text
-        // Biased towards the photo's existing position when it has one, so
+        // Biased toward the photo's existing position when it has one, so
         // correcting a nearby mistake doesn't offer the same town on another
         // continent first.
         if let current {

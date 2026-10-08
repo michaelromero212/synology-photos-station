@@ -31,7 +31,7 @@ enum BackupScheduler {
                 await run()
                 task.setTaskCompleted(success: true)
             }
-            // iOS gives no warning before it pulls the plug; cancelling cleanly
+            // iOS gives no warning before it pulls the plug; canceling cleanly
             // means the queue is left consistent for the next wake-up.
             task.expirationHandler = {
                 logger.notice("background backup expired — will resume next window")

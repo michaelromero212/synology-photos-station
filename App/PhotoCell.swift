@@ -5,7 +5,7 @@ import SwiftUI
 /// One grid cell.
 ///
 /// Paints the ThumbHash immediately — it ships inside the timeline payload, so
-/// there is a recognisable image on screen before any network request — then
+/// there is a recognizable image on screen before any network request — then
 /// crossfades to the real thumbnail when it arrives. A cell that starts gray
 /// and pops is the single most obvious way a photo grid feels cheap.
 struct PhotoCell: View {
@@ -274,7 +274,7 @@ struct PhotoCell: View {
             // A nil answer is a setback, not a verdict.
             //
             // It used to be final: one dropped connection, one request
-            // cancelled by navigating away mid-flight, or one coalesced caller
+            // canceled by navigating away mid-flight, or one coalesced caller
             // inheriting a failure, and that tile stayed gray for the life of
             // the cell. Nothing ever asked again, which is why thumbnails
             // "sometimes" didn't come back after leaving a tab and returning.

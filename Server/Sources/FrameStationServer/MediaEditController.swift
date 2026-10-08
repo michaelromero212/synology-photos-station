@@ -49,7 +49,7 @@ struct MediaEditController: RouteCollection {
     /// family is not a statement that you want it out of your own library —
     /// those are two decisions, and running them together means the second one
     /// gets made silently, by an app, on someone's behalf. So the source
-    /// placement is untouched here and the app offers the removal afterwards,
+    /// placement is untouched here and the app offers the removal afterward,
     /// once the photos are visibly sitting in the destination.
     ///
     /// The copy is the same one `link` performs: a hard link into the shared

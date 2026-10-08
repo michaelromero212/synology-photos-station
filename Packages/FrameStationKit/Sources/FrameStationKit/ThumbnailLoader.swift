@@ -180,7 +180,7 @@ public actor ThumbnailLoader {
     ///
     /// The technique Apple Photos leans on hardest: by the time a tile is on
     /// screen its bytes should already be local, so scrolling reveals pictures
-    /// rather than gray squares that fill in afterwards.
+    /// rather than gray squares that fill in afterward.
     ///
     /// Fire-and-forget, and deliberately lower priority than anything visible —
     /// see `acquire`. A prefetch that competed with the tiles someone is

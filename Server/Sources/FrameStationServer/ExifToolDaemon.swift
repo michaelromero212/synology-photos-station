@@ -61,7 +61,7 @@ actor ExifToolDaemon {
     /// Runs one exiftool command — the arguments exactly as they would follow
     /// `exiftool` on a command line — and returns what it printed.
     ///
-    /// Not abandoned when the caller is cancelled: a command left half-read
+    /// Not abandoned when the caller is canceled: a command left half-read
     /// would have its output taken for the next one's. It runs to its end, or
     /// to `timeout`, where the whole process is thrown away instead.
     func run(_ arguments: [String], timeout: Duration = .seconds(30)) async throws -> Data {

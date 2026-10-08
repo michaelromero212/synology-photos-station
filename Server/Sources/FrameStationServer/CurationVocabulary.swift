@@ -229,7 +229,7 @@ enum CurationVocabulary {
         /// the page. The place follows: "Birthday party in Culpeper".
         let title: String
         /// What a trip of it is called, or nil when it doesn't name a trip. A
-        /// birthday on holiday was still the holiday.
+        /// birthday on vacation was still the vacation.
         let tripTitle: String?
         /// "Beach trip *to* Duck", but "Wedding *in* Charleston".
         let tripPreposition: String

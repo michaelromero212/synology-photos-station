@@ -24,7 +24,7 @@ should change. The build number goes up every single time.
 ## What the project already satisfies
 
 Each of these was missing or wrong once, and each would have cost an upload.
-They are listed so a future change that breaks one is recognisable.
+They are listed so a future change that breaks one is recognizable.
 
 - **`PrivacyInfo.xcprivacy`** — required of every app since May 2024, refused
   without it when the binary reaches a "required reason" API. This one reaches

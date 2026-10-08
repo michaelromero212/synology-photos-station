@@ -202,6 +202,9 @@ lacks "nor for a neighborhood" "Passy" "$T"
 lacks "no trip is named for a state it was more particular than" "in Florida" "$T"
 lacks "nor for a suburb" "Celebration" "$T"
 check "a year on, the trip comes back" "A year ago you were at Walt Disney World" "$(hero 2026-03-13)"
+subtitles(){ curl -s "$API/v1/spaces/$SPACE/collections?date=$1" -H "$AUTH" \
+  | python3 -c "import sys,json; print('|'.join(c['subtitle'] or '' for c in json.load(sys.stdin).get('allTrips') or []))"; }
+has "dates read the American way" "March 10–13, 2025" "$(subtitles 2026-10-12)"
 
 echo "What the photos showed"
 # observe <labels> <names...>: what the devices saw in these photos.

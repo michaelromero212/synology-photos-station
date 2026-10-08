@@ -8,7 +8,7 @@
 --
 -- So the app finds the occasion and the person supplies the meaning, once. That
 -- is the one thing a self-hosted library can do that a guessing one cannot: be
--- *right*, and stay right every year afterwards.
+-- *right*, and stay right every year afterward.
 --
 -- Per user by construction. Two people in the same household remember the same
 -- afternoon differently, and neither should be able to rename it for the other.

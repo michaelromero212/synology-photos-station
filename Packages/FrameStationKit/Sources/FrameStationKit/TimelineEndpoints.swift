@@ -259,7 +259,7 @@ extension FrameStationClient {
     }
 
     /// Adds and removes tags in one call, returning what the photo carries
-    /// afterwards — so the viewer can redraw without refetching its detail.
+    /// afterward — so the viewer can redraw without refetching its detail.
     @discardableResult
     public func editTags(
         spaceID: UUID, assetID: UUID, add: [String] = [], remove: [String] = []
@@ -339,7 +339,7 @@ extension FrameStationClient {
     /// Returns the ids they carry **in the destination**, which are not the ids
     /// that were sent — the destination gets its own rows — so the app can walk
     /// them there rather than asking anyone to take its word for it. The source
-    /// ids come back too, for offering to remove the originals afterwards.
+    /// ids come back too, for offering to remove the originals afterward.
     @discardableResult
     public func share(
         spaceID: UUID, assetIDs: [UUID], to destinationSpaceID: UUID

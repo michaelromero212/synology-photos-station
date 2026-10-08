@@ -216,7 +216,7 @@ enum FileUpload {
     /// its hard drives and answer before the next one set off, so the link sat
     /// idle for every one of those writes. In a phone's log of an eight-file
     /// burst, a 287 MB video was still sending 27 seconds in, long after the
-    /// photos beside it had finished. With a second chunk already travelling
+    /// photos beside it had finished. With a second chunk already traveling
     /// while the NAS writes the first, the wait overlaps the transfer instead
     /// of following it.
     ///
@@ -267,7 +267,7 @@ enum FileUpload {
                 // gate checked only at the top of a file lets the whole of that
                 // video go out over cellular after the network has already
                 // changed underneath it. This is the point where stopping is
-                // free. At most the chunks already travelling finish, and the
+                // free. At most the chunks already traveling finish, and the
                 // server keeps them for the next run to resume from.
                 if let shouldContinue, await !shouldContinue() {
                     throw UploadError.pausedByCaller
@@ -353,7 +353,7 @@ enum FileUpload {
         private let alreadySent: Int64
         private let total: Int64
         private var finishedBytes: Int64 = 0
-        private var travelling: [Int: Int64] = [:]
+        private var traveling: [Int: Int64] = [:]
 
         init(alreadySent: Int64, total: Int64) {
             self.alreadySent = alreadySent
@@ -364,7 +364,7 @@ enum FileUpload {
         func sending(_ index: Int, sent: Int64) -> Int64 {
             lock.lock()
             defer { lock.unlock() }
-            travelling[index] = sent
+            traveling[index] = sent
             return current
         }
 
@@ -372,14 +372,14 @@ enum FileUpload {
         func finished(_ index: Int, bytes: Int64) -> Int64 {
             lock.lock()
             defer { lock.unlock() }
-            travelling[index] = nil
+            traveling[index] = nil
             finishedBytes += bytes
             return current
         }
 
         /// Called with the lock held.
         private var current: Int64 {
-            min(alreadySent + finishedBytes + travelling.values.reduce(0, +), total)
+            min(alreadySent + finishedBytes + traveling.values.reduce(0, +), total)
         }
     }
 

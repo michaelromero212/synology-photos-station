@@ -43,12 +43,12 @@ enum LegacyBrowseTree {
         var duplicates = 0
         var freedBytes: Int64 = 0
         var restored = 0
-        var unrecognised: [String] = []
+        var unrecognized: [String] = []
         var failures = 0
 
         var isEmpty: Bool {
             extraNames == 0 && permanentlyDeleted == 0 && duplicates == 0
-                && restored == 0 && unrecognised.isEmpty && failures == 0
+                && restored == 0 && unrecognized.isEmpty && failures == 0
         }
 
         var summary: String {
@@ -58,7 +58,7 @@ enum LegacyBrowseTree {
                     + "deleted photo(s) and \(duplicates) duplicate(s)"
             )
             parts.append("restored \(restored) missing blob(s)")
-            parts.append("left \(unrecognised.count) unrecognised file(s) in place")
+            parts.append("left \(unrecognized.count) unrecognized file(s) in place")
             if failures > 0 { parts.append("\(failures) failure(s), see above") }
             return parts.joined(separator: ", ")
         }
@@ -118,8 +118,8 @@ enum LegacyBrowseTree {
                 store: app.blobStore, sql: app.sql, logger: app.logger, dryRun: false
             ) else { return }
             app.logger.notice("legacy browse tree: \(report.summary)")
-            for path in report.unrecognised.prefix(20) {
-                app.logger.notice("legacy browse tree: left unrecognised \(path)")
+            for path in report.unrecognized.prefix(20) {
+                app.logger.notice("legacy browse tree: left unrecognized \(path)")
             }
         } catch {
             app.logger.error("legacy browse tree: \(String(reflecting: error))")
@@ -202,7 +202,7 @@ enum LegacyBrowseTree {
             """).first(decoding: Wanted.self)
 
         guard let wanted, wanted.known else {
-            report.unrecognised.append(file.path)
+            report.unrecognized.append(file.path)
             return
         }
 
@@ -304,8 +304,8 @@ struct RetireLegacyBrowseCommand: AsyncCommand {
             return
         }
         context.console.print((signature.dryRun ? "Would have " : "") + report.summary)
-        for path in report.unrecognised {
-            context.console.print("  unrecognised: \(path)")
+        for path in report.unrecognized {
+            context.console.print("  unrecognized: \(path)")
         }
     }
 }

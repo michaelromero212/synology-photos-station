@@ -50,7 +50,7 @@ echo "=== 3. automatic backup does not undo it ==="
 # This is the requirement: the photo is still on the phone, backup runs again.
 check "probe declines" "removed" "$(probe true | jq '["status"]')"
 check "no upload session offered" "" "$(probe true | jq '["uploadID"]')"
-check "still absent afterwards" "0" "$(q "select count(*) from space_assets where space_id='$SP' and deleted_at is null;")"
+check "still absent afterward" "0" "$(q "select count(*) from space_assets where space_id='$SP' and deleted_at is null;")"
 
 echo
 echo "=== 4. but a deliberate re-add works ==="

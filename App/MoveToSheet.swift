@@ -69,7 +69,7 @@ struct MoveToSheet: View {
         } message: {
             Text(
                 "Everyone in \(pending?.name ?? "the album") will see them and be notified. "
-                + "Your copies stay in \(source.name) — you can remove them afterwards if you want."
+                + "Your copies stay in \(source.name) — you can remove them afterward if you want."
             )
         }
     }

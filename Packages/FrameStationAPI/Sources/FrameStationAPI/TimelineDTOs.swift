@@ -127,7 +127,7 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     public let aspectRatio: Double
     public let mediaType: MediaType
     public let durationMs: Int?
-    /// Base64 ThumbHash. Paints a recognisable blur with zero network.
+    /// Base64 ThumbHash. Paints a recognizable blur with zero network.
     public let thumbHash: String?
     public let isFavorite: Bool
     /// Only meaningful in shared spaces; drives the "Added by" row.

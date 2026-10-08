@@ -78,7 +78,7 @@ struct CollectionsController: RouteCollection {
         // 1am — would otherwise answer for the wrong one.
         let today = req.query[String.self, at: "date"].flatMap(Self.parseDate) ?? Date()
         // Rotates the covers daily and holds them still in between, so a card
-        // stays recognisable for as long as anyone is looking at it.
+        // stays recognizable for as long as anyone is looking at it.
         let seed = Self.dayStamp(today)
 
         // What the person's own devices saw, for their own library. Empty
@@ -112,8 +112,8 @@ struct CollectionsController: RouteCollection {
             on: req.sql
         )
 
-        // Days already inside a trip are not also occasions of their own. The
-        // fortnight in the Outer Banks is one card, not one card plus fourteen,
+        // Days already inside a trip are not also occasions of their own. Two
+        // weeks on the Outer Banks are one card, not one card plus fourteen,
         // and a Christmas spent away is already in the trip's name.
         let claimed = Set(trips.flatMap { Self.days(inKey: $0.key) })
 
@@ -279,8 +279,8 @@ struct CollectionsController: RouteCollection {
     /// Photographs because they are the family's own vote — forty on Labor Day
     /// means Labor Day mattered, four means it didn't, whatever the calendar
     /// thinks of it. Fading so that last summer can beat a bigger summer from
-    /// ten years ago, but gently: the fortnight in Maine is still worth offering
-    /// three years on, where a hard cutoff at a year would drop it for a
+    /// ten years ago, but gently: two weeks in Maine are still worth offering
+    /// three years on, where a hard cutoff at a year would drop them for a
     /// four-photo afternoon.
     static func weight(_ collection: CollectionSummary, today: Date) -> Double {
         let age = start(of: collection).map { today.timeIntervalSince($0) / (365.25 * 86_400) } ?? 10
@@ -433,7 +433,7 @@ struct CollectionsController: RouteCollection {
         /// The daily mode was the first attempt and it quietly lost the point:
         /// a week moving between Nags Head, Kill Devil Hills and Duck every day
         /// collapsed each day to one of them, and the trip ended up named after
-        /// whichever won a tie — "Seven days in Duck" for a holiday that was
+        /// whichever won a tie — "Seven days in Duck" for a vacation that was
         /// nothing of the sort.
         let places: [String]
         /// How many of the day's photos each of `places` holds, in the same
@@ -457,9 +457,9 @@ struct CollectionsController: RouteCollection {
     /// away are one trip.
     ///
     /// Eighty kilometers rather than ten: the bar has to clear the ordinary
-    /// radius of a life. Work, school, the shops and the next town over are all
+    /// radius of a life. Work, school, the stores and the next town over are all
     /// "not home" and none of them are trips, and a threshold that called them
-    /// trips would bury the fortnight in the Outer Banks under two hundred
+    /// trips would bury two weeks on the Outer Banks under two hundred
     /// commutes.
     ///
     /// A single day that far away is a day out, not a trip, so a run has to
@@ -581,9 +581,9 @@ struct CollectionsController: RouteCollection {
 
     /// Groups consecutive days into trips. Rows arrive newest-first.
     ///
-    /// A single missing day doesn't end a trip — there are days on any holiday
-    /// when nobody takes a photograph, and splitting a fortnight into two
-    /// because of one rainy Tuesday would be worse than useless.
+    /// A single missing day doesn't end a trip — there are days on any vacation
+    /// when nobody takes a photograph, and splitting two weeks away into two
+    /// trips because of one rainy Tuesday would be worse than useless.
     static func tripRuns(from rows: [TripDay]) -> [[TripDay]] {
         var runs: [[TripDay]] = []
         for row in rows {
@@ -605,9 +605,9 @@ struct CollectionsController: RouteCollection {
     ///
     /// A week or less away over a holiday is named for the holiday — "Christmas
     /// 2024 in Asheville" is what the family calls it, and the days it covers
-    /// are claimed by the trip, so it is the only card that can say so. A
-    /// fortnight that happens to include Labor Day was not a Labor Day trip, and
-    /// keeps its length.
+    /// are claimed by the trip, so it is the only card that can say so. Two
+    /// weeks away that happen to include Labor Day were not a Labor Day trip,
+    /// and keep their length.
     ///
     /// Otherwise, where the person's devices have seen what the trip was, it
     /// is named for that: "Beach trip to the Outer Banks", "Wedding in
@@ -652,13 +652,7 @@ struct CollectionsController: RouteCollection {
         var parts: [String] = []
         if let from = ordered.first.flatMap({ parseDate($0.day) }),
            let to = ordered.last.flatMap({ parseDate($0.day) }) {
-            let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
-            // "12–16 August 2026" inside one month, "28 August – 2 September
-            // 2024" across two. Abbreviating only the left-hand end read as a
-            // mistake rather than as concision.
-            let left = stampFormatter(sameMonth ? "d" : "d MMMM").string(from: from)
-            let dash = sameMonth ? "–" : " – "
-            parts.append("\(left)\(dash)\(stampFormatter("d MMMM yyyy").string(from: to))")
+            parts.append(dateRange(from: from, to: to))
         }
 
         return CollectionSummary(
@@ -726,7 +720,7 @@ struct CollectionsController: RouteCollection {
     ///
     /// 1. A destination with half the photos, on at least half the days: "Six
     ///    days at Walt Disney World", hotel in Kissimmee and all. Both halves,
-    ///    so one day at Epcot doesn't name a fortnight in Tampa however many
+    ///    so one day at Epcot doesn't name two weeks in Tampa however many
     ///    photos it took.
     /// 2. A town with three quarters of them: "Six days in Asheville", the
     ///    drive down and all.
@@ -1024,7 +1018,7 @@ struct CollectionsController: RouteCollection {
         if name == nil, summary.recursAnnually, let day = parseDate(run.first.day) {
             summary = CollectionSummary(
                 kind: summary.kind, key: summary.key,
-                title: "Every year on \(stampFormatter("d MMMM").string(from: day))",
+                title: "Every year on \(stampFormatter("MMMM d").string(from: day))",
                 // The place back in: the old title carried it, this one doesn't.
                 subtitle: subtitle(run, place: run.place), count: summary.count,
                 coverAssetIDs: summary.coverAssetIDs, isNamed: summary.isNamed,
@@ -1377,7 +1371,7 @@ struct CollectionsController: RouteCollection {
         String(day.dropFirst(5))
     }
 
-    /// Names a stretch of days. A weekend is worth recognising by name; four
+    /// Names a stretch of days. A weekend is worth recognizing by name; four
     /// days in a row is worth counting.
     ///
     /// Nil where neither applies and there is no place to hang it on, which is
@@ -1430,11 +1424,7 @@ struct CollectionsController: RouteCollection {
         if run.span == 1 {
             parts.append(longDay(run.first.day) ?? run.first.day)
         } else if let from = parseDate(run.first.day), let to = parseDate(run.last.day) {
-            // "12–16 August 2026", collapsing the month when it doesn't change.
-            let sameMonth = utc.component(.month, from: from) == utc.component(.month, from: to)
-            let left = stampFormatter(sameMonth ? "d" : "d MMMM").string(from: from)
-            let dash = sameMonth ? "–" : " – "
-            parts.append("\(left)\(dash)\(stampFormatter("d MMMM yyyy").string(from: to))")
+            parts.append(dateRange(from: from, to: to))
         }
         // The caller passes nil when the title already named the place, so a
         // card never reads "An evening in Culpeper · Culpeper, Virginia" — nor
@@ -1483,7 +1473,7 @@ struct CollectionsController: RouteCollection {
         guard !rows.isEmpty else { return [:] }
 
         var table: [String: String] = [:]
-        // Annual first so a year-specific name written afterwards overwrites it.
+        // Annual first so a year-specific name written afterward overwrites it.
         for row in rows where row.year == nil {
             for year in years {
                 table[Self.key(year: year, month: row.month, day: row.day)] = row.name
@@ -1790,7 +1780,7 @@ struct CollectionsController: RouteCollection {
             return Season(name: "Last summer", span: "June – August \(year)",
                           from: "\(year)-06-01", to: "\(year)-08-31")
         default:
-            return Season(name: "Last autumn", span: "September – November \(year)",
+            return Season(name: "Last fall", span: "September – November \(year)",
                           from: "\(year)-09-01", to: "\(year)-11-30")
         }
     }
@@ -2315,7 +2305,7 @@ struct CollectionsController: RouteCollection {
         case .day, .trip:
             // Both carry a run key: a single date, or "first..last". Matching on
             // the range rather than the enumerated days keeps the query one
-            // comparison wide however long the holiday was.
+            // comparison wide however long the trip was.
             let ends = key.components(separatedBy: "..")
             let from = ends.first ?? key
             let to = ends.last ?? key
@@ -2403,7 +2393,7 @@ struct CollectionsController: RouteCollection {
     ///
     /// The seed is the current date, so covers hold still all day and differ
     /// tomorrow. Rotating them *while someone is looking* would defeat the one
-    /// job a cover has, which is to make a card recognisable.
+    /// job a cover has, which is to make a card recognizable.
     /// How many photographs to send for a card.
     ///
     /// Five is what the hero cycles through. Sending them costs nothing — they
@@ -2485,7 +2475,7 @@ struct CollectionsController: RouteCollection {
         count == 1 ? "1 photo" : "\(count) photos"
     }
 
-    /// "25 August 2019".
+    /// "August 25, 2019".
     private static func dayLabel(month: Int, day: Int, year: Int) -> String {
         var components = DateComponents()
         components.year = year
@@ -2494,7 +2484,7 @@ struct CollectionsController: RouteCollection {
         guard let date = Self.utc.date(from: components) else {
             return "\(year)"
         }
-        return stampFormatter("d MMMM yyyy").string(from: date)
+        return stampFormatter("MMMM d, yyyy").string(from: date)
     }
 
     /// "A busy Saturday" — the weekday is the part people actually recall about
@@ -2506,6 +2496,23 @@ struct CollectionsController: RouteCollection {
 
     private static func longDay(_ key: String) -> String? {
         guard let date = parseDate(key) else { return nil }
-        return stampFormatter("d MMMM yyyy").string(from: date)
+        return stampFormatter("MMMM d, yyyy").string(from: date)
+    }
+
+    /// The days a trip or an occasion covers, the American way: "August
+    /// 12–16, 2026" inside one month, "August 28 – September 2, 2026" across
+    /// two, and "December 30, 2024 – January 2, 2025" across a new year, which
+    /// needs both years. The month is said once where it doesn't change, and
+    /// never left off one end only, which read as a mistake.
+    static func dateRange(from: Date, to: Date) -> String {
+        let sameYear = utc.component(.year, from: from) == utc.component(.year, from: to)
+        let sameMonth = sameYear
+            && utc.component(.month, from: from) == utc.component(.month, from: to)
+        if sameMonth {
+            return stampFormatter("MMMM d").string(from: from) + "–"
+                + stampFormatter("d, yyyy").string(from: to)
+        }
+        let left = stampFormatter(sameYear ? "MMMM d" : "MMMM d, yyyy").string(from: from)
+        return "\(left) – \(stampFormatter("MMMM d, yyyy").string(from: to))"
     }
 }

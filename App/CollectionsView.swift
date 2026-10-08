@@ -650,7 +650,7 @@ struct CollectionDetailView: View {
 ///
 /// So the app finds the occasion and the person supplies the meaning, once. That
 /// is the thing a library you own can do that a guessing one cannot: be right,
-/// and stay right every year afterwards.
+/// and stay right every year afterward.
 struct NameOccasionSheet: View {
     let session: AppSession
     let spaceID: UUID

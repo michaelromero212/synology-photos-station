@@ -88,7 +88,7 @@ extension TimelineZoom {
     /// How many photos fit across at this stop.
     ///
     /// Zooming out means smaller tiles and more of them: eleven across is for
-    /// recognising a season at a glance, three is for looking at the photos.
+    /// recognizing a season at a glance, three is for looking at the photos.
     /// Three is where the library opens and stays the tightest stop — this
     /// control exists to leave that grid, not to replace it.
     ///
@@ -96,7 +96,7 @@ extension TimelineZoom {
     /// this app is meant to read as a continuation of it rather than as a
     /// denser cousin. The difference is bigger than one column sounds: at four
     /// across a phone-width tile is about 97pt, which is small enough that
-    /// faces stop being recognisable and the grid becomes a texture you scan
+    /// faces stop being recognizable and the grid becomes a texture you scan
     /// rather than a set of photographs you look at.
     var columns: Int {
         switch self {

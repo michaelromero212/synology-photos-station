@@ -312,7 +312,7 @@ final class PendingUploads {
             $0.spaceID == spaceID && $0.state == .pending
         }) else { return nil }
         items[index].state = .uploading
-        // Marked on disk too, so a run that dies mid-file is recognisable as
+        // Marked on disk too, so a run that dies mid-file is recognizable as
         // one that was in flight rather than one that never started.
         if let row = row(
             localIdentifier: items[index].localIdentifier, spaceID: spaceID

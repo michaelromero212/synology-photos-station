@@ -76,7 +76,7 @@ enum Derivatives {
     /// there should be none. Green (46, 140, 62) arrived as (73, 138, 70). With
     /// this flag every patch lands within two units of the original.
     ///
-    /// Still stripped afterwards, and that is correct rather than a compromise:
+    /// Still stripped afterward, and that is correct rather than a compromise:
     /// the pixels really are sRGB now, and untagged means sRGB by convention, so
     /// dropping the profile costs nothing and keeps the file small.
     private static let exportProfile = ["--export-profile", "srgb"]

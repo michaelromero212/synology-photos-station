@@ -27,7 +27,7 @@ import SwiftUI
 /// and no page list. Swiping did nothing, the slideshow played a single frame,
 /// and nothing anywhere said why.
 ///
-/// Travelling as one value makes that impossible — the destination receives
+/// Traveling as one value makes that impossible — the destination receives
 /// the context as its argument rather than looking it up.
 struct OpenedPhoto: Identifiable, Hashable {
     let item: TimelineItem
@@ -371,7 +371,7 @@ struct TimelineView: View {
         //
         // Selecting, the bar above returns to carry the count and the X, and
         // the system puts its back chevron in the same corner: two round
-        // buttons side by side, one cancelling the selection and one silently
+        // buttons side by side, one canceling the selection and one silently
         // throwing it away along with the screen. Photos hides the back button
         // the moment you start selecting, and it is right — you finish with the
         // selection, then you leave.
@@ -1181,7 +1181,7 @@ struct TimelineView: View {
     ///
     /// Only the *explicit* load is dropped. Each day's own `.task` still runs
     /// when its section is realized, and that one is tied to the section's
-    /// lifetime, so a day the drag sweeps past has its request cancelled when it
+    /// lifetime, so a day the drag sweeps past has its request canceled when it
     /// leaves the screen a frame later. The difference is between work that can
     /// be called off and work that cannot.
     private func scrub(

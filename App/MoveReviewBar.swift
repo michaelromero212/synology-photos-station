@@ -3,7 +3,7 @@ import SwiftUI
 
 #if os(iOS)
 
-/// What arrived, a way to walk it, and the offer to tidy up afterwards.
+/// What arrived, a way to walk it, and the offer to tidy up afterward.
 ///
 /// Sharing photos into the family library is the kind of action people want to
 /// see the result of before they believe it, and "8 shared" in a toast asks for

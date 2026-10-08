@@ -133,7 +133,7 @@ final class BackupEngine {
     private let container: ModelContainer
     private var session: AppSession
     private var settings: BackupSettings
-    private var cancelled = false
+    private var canceled = false
     private let connection: ConnectionMonitor
 
     /// The item an outage stopped on, and how many runs in a row it has done
@@ -209,7 +209,7 @@ final class BackupEngine {
             // Switched off and straight back on: the run told to stop is still
             // finishing the files it had in flight, and `start()` now would only
             // join it on its way out. Let it go first.
-            if cancelled, let runTask { await runTask.value }
+            if canceled, let runTask { await runTask.value }
             // For every change, not only those: turning off "Wi-Fi Only" on
             // cellular, or "Only While Charging" on battery, should start what
             // was waiting on it.
@@ -949,7 +949,7 @@ final class BackupEngine {
 
     private func run() async {
         isRunning = true
-        cancelled = false
+        canceled = false
 
         let context = ModelContext(container)
         runContext = context
@@ -994,7 +994,7 @@ final class BackupEngine {
                     group.addTask { @MainActor [weak self] in await self?.drainLane() }
                 }
             }
-        } while !cancelled && maySend && hasDestination
+        } while !canceled && maySend && hasDestination
             && nextItem(context) != nil
 
         // In full: the lanes kept the byte count by subtraction. See
@@ -1038,13 +1038,13 @@ final class BackupEngine {
     }
 
     /// One upload lane: claim, send, repeat until the queue is empty, a setting
-    /// says to wait, or a run-ending failure trips `cancelled`.
+    /// says to wait, or a run-ending failure trips `canceled`.
     private func drainLane() async {
         guard let context = runContext,
               let client = session.client,
               let space = settings.targetSpace(in: session.spaces) else { return }
 
-        while !cancelled {
+        while !canceled {
             // Re-checked each claim, so a lane also stops if backup is switched
             // off, Wi-Fi drops to cellular, or the phone comes off its charger
             // mid-backup. Whatever starts the next run resumes from exactly here.
@@ -1079,12 +1079,12 @@ final class BackupEngine {
             // same wall — a server that isn't there fails every item the same
             // way. Lanes already mid-transfer finish their item, then stop.
             if failure == .unreachable || failure == .authentication {
-                cancelled = true
+                canceled = true
             }
         }
     }
 
-    func stop() { cancelled = true }
+    func stop() { canceled = true }
 
     /// Picks backup up when the app comes to the front: the photos taken while
     /// it was closed, and whatever was still queued.
