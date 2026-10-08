@@ -40,7 +40,8 @@ struct HealthController: RouteCollection {
             version: Build.version,
             database: database,
             migrationsApplied: migrations,
-            revision: Build.revision
+            revision: Build.revision,
+            capabilities: [BackgroundUploadRequest.capability]
         )
     }
 }

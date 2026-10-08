@@ -189,16 +189,21 @@ public struct HealthResponse: Codable, Sendable, Hashable {
     /// built by CI. `version` is a hand-bumped label and can't tell one build
     /// from another; this can. Optional so either side can be older.
     public let revision: String?
+    /// What this server can do beyond what every server can, such as
+    /// `BackgroundUploadRequest.capability`. Nil from a server that predates
+    /// the list, which can do none of it.
+    public let capabilities: [String]?
 
     public init(
         status: String, version: String, database: String, migrationsApplied: Int,
-        revision: String? = nil
+        revision: String? = nil, capabilities: [String]? = nil
     ) {
         self.status = status
         self.version = version
         self.database = database
         self.migrationsApplied = migrationsApplied
         self.revision = revision
+        self.capabilities = capabilities
     }
 }
 

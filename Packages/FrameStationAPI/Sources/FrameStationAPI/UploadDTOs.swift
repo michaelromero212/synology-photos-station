@@ -227,6 +227,74 @@ public struct CommitUploadResponse: Codable, Sendable, Hashable {
     }
 }
 
+/// One file sent in a single request, by iOS on the app's behalf while the app
+/// isn't running. See `UploadController.background` on the server, and the
+/// app's background upload extension.
+///
+/// iOS sends the photo itself as the request body and nothing else, so what
+/// the server needs to know about it travels in a header: this, as JSON,
+/// base64url-encoded. It says everything a commit says, because it ends the
+/// same way one does.
+public struct BackgroundUploadRequest: Codable, Sendable {
+    /// The request header this travels in.
+    public static let header = "X-FrameStation-Upload"
+    /// The response header carrying the asset the file became, or already was.
+    public static let assetIDHeader = "X-FrameStation-Asset-ID"
+    /// The response header saying which: see `BackgroundUploadResult`.
+    public static let resultHeader = "X-FrameStation-Result"
+    /// The capability `/health` lists when the server takes these.
+    public static let capability = "background-upload"
+
+    public let filename: String
+    /// How long the body is meant to be, when the phone knows. A body that
+    /// arrives another length is refused rather than stored.
+    public let byteSize: Int64?
+    /// The backup's own upload, which never brings back a photo removed on
+    /// purpose, as in `UploadProbeRequest.isAutomaticBackup`.
+    public let isAutomaticBackup: Bool
+    public let commit: CommitUploadRequest
+
+    public init(
+        filename: String, byteSize: Int64?, isAutomaticBackup: Bool, commit: CommitUploadRequest
+    ) {
+        self.filename = filename
+        self.byteSize = byteSize
+        self.isAutomaticBackup = isAutomaticBackup
+        self.commit = commit
+    }
+
+    /// The header's value: the request as JSON, base64url without padding.
+    public func headerValue() throws -> String {
+        try FrameStationCoding.encoder.encode(self).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    /// The request a header's value carries, or nil when it isn't one.
+    public init?(headerValue: String) {
+        var base64 = headerValue
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let decoded = try? FrameStationCoding.decoder.decode(Self.self, from: data)
+        else { return nil }
+        self = decoded
+    }
+}
+
+/// What became of a background upload, in `BackgroundUploadRequest.resultHeader`.
+public enum BackgroundUploadResult: String, Codable, Sendable {
+    /// Stored as a new photo.
+    case stored
+    /// Already in the library, or in another of the person's libraries and
+    /// now in this one as well. Nothing new was stored.
+    case have
+    /// Removed from this library on purpose, so not brought back.
+    case removed
+}
+
 /// Links an already-stored blob into a space — the `.have` path, and how a
 /// photo moves from Personal to Family Shared without copying bytes.
 public struct LinkAssetRequest: Codable, Sendable {

@@ -755,6 +755,43 @@ Chunk receipt is tracked as a **bitmap in `upload_sessions.received_mask`**,
 updated with Postgres `set_bit()` so parallel chunk PUTs cannot lose bits to a
 read-modify-write race. A resumed `probe` returns exactly the missing indices.
 
+**One copy per library.** `UploadController.record` writes every upload's
+photo, whether committed from chunks or sent whole. It takes a transaction-level
+advisory lock on the library and the file's hash, and records nothing new when
+that library already holds the bytes. Two uploads of one file used to race past
+their probes and both land, the same photo twice in the grid. That race is real
+now that iOS uploads in the background while the app may be uploading the same
+photo itself.
+
+### Background uploads
+
+`POST /v1/uploads/background` takes a photo in one request: the whole body is
+the file, and what a commit would say travels in an `X-FrameStation-Upload`
+header (`BackgroundUploadRequest`, base64url JSON). iOS sends these for the app
+through PhotoKit's background upload extension, which is how a photo reaches the
+NAS minutes after it's taken with the app closed.
+
+- The body streams to the blob store's staging area, hashed as it arrives, in
+  4 MB writes on the thread pool, so a long video never sits in memory. DSM's
+  reverse proxy passes it through unbuffered and without a size cap
+  (`client_max_body_size 0`, `proxy_request_buffering off`).
+- It follows the probe's rules, then ends the way `commit` does: a photo
+  removed on purpose isn't brought back, and one the person already has in any
+  library is linked rather than stored again.
+- The answer is in headers, which is all of a response the extension gets to
+  read: `X-FrameStation-Result` (`stored`, `have` or `removed`) and
+  `X-FrameStation-Asset-ID`.
+- Not resumable. iOS first asks with `OPTIONS` whether the server speaks the
+  draft resumable-upload protocol, and gets a 501. Saying yes would mean a 104
+  answer mid-request, which DSM's proxy can't be relied on to pass. So iOS
+  sends each file whole and starts again if a transfer drops; a long video that
+  keeps failing is left to the app's chunked upload.
+- `/health` lists `background-upload` in `capabilities`, so the app turns the
+  feature on only against a server that has it.
+
+`Scripts/smoke-background-upload.sh` covers it: 32 checks, including three
+copies racing and a race against a chunked upload's commit.
+
 ### JSON coding contract
 
 `FrameStationAPI.FrameStationCoding` supplies the encoder and decoder for **both**

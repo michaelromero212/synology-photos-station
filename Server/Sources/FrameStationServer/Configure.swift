@@ -75,6 +75,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: DSMAuthController())
     try app.grouped("v1").register(collection: SessionController())
     try app.grouped("v1").register(collection: UploadController())
+    try app.grouped("v1").register(collection: BackgroundUploadController())
     try app.grouped("v1").register(collection: AssetController())
     try app.grouped("v1").register(collection: TimelineController())
     try app.grouped("v1").register(collection: SearchController())

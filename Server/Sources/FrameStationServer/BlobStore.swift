@@ -292,6 +292,25 @@ struct BlobStore: Sendable {
         return destination
     }
 
+    /// Keeps a file that arrived whole, already hashed as it came in: a
+    /// background upload, which has no chunks to check. Moved into `blobs/`,
+    /// the same volume, so nothing is copied. If the same bytes are already
+    /// stored, the copy that just arrived is dropped and the stored one kept.
+    @discardableResult
+    func keepStaged(uploadID: UUID, sha256: String, fileExtension: String) throws -> URL {
+        let destination = blobPath(sha256: sha256, fileExtension: fileExtension)
+        if fm.fileExists(atPath: destination.path) {
+            discardStaging(uploadID: uploadID)
+            return destination
+        }
+        try fm.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try fm.moveItem(at: uploadDataPath(uploadID: uploadID), to: destination)
+        discardStaging(uploadID: uploadID)
+        return destination
+    }
+
     func blobExists(sha256: String, fileExtension: String) -> Bool {
         fm.fileExists(atPath: blobPath(sha256: sha256, fileExtension: fileExtension).path)
     }

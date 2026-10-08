@@ -69,17 +69,9 @@ struct UploadController: RouteCollection {
         // Only for automatic backup: a deliberate re-add is allowed to undo a
         // deletion, which is what someone means when they pick the photo again.
         if input.isAutomaticBackup {
-            struct RemovedRow: Decodable { let id: UUID }
-            let removed = try await req.sql.raw("""
-                SELECT sa.id FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
-                WHERE sa.space_id = \(bind: input.spaceID)
-                  AND sa.uploaded_by_user_id = \(bind: device.userID)
-                  AND sa.deleted_at IS NOT NULL
-                  AND a.sha256 = \(bind: sha)
-                LIMIT 1
-                """).first(decoding: RemovedRow.self)
-            if removed != nil {
+            if try await Self.removedOnPurpose(
+                sha256: sha, spaceID: input.spaceID, userID: device.userID, on: req.sql
+            ) {
                 return UploadProbeResponse(
                     status: .removed, assetID: nil, uploadID: nil,
                     chunkSize: Self.chunkSize, chunkCount: 0, missingChunks: []
@@ -97,19 +89,12 @@ struct UploadController: RouteCollection {
         // Identical bytes still share one blob — the store is content-addressed
         // and `assemble` keeps the file already there — so only the transfer
         // saving is lost, and only across users.
-        if let existing = try await req.sql.raw("""
-            SELECT a.id FROM assets a
-            WHERE a.sha256 = \(bind: sha)
-              AND EXISTS (
-                  SELECT 1 FROM space_assets sa
-                  JOIN space_members m ON m.space_id = sa.space_id
-                  WHERE sa.asset_id = a.id AND sa.deleted_at IS NULL
-                    AND m.user_id = \(bind: device.userID)
-              )
-            """).first(decoding: IDRow.self) {
+        if let existing = try await Self.visibleAsset(
+            sha256: sha, userID: device.userID, on: req.sql
+        ) {
             return UploadProbeResponse(
                 status: .have,
-                assetID: existing.id,
+                assetID: existing,
                 uploadID: nil,
                 chunkSize: Self.chunkSize,
                 chunkCount: 0,
@@ -170,6 +155,42 @@ struct UploadController: RouteCollection {
             chunkCount: chunkCount,
             missingChunks: missing
         )
+    }
+
+    /// Whether the person removed these bytes from this library on purpose.
+    /// Backup declines to send them again, or a deleted photo would come
+    /// straight back on the next run while it still sits in the camera roll.
+    static func removedOnPurpose(
+        sha256: String, spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> Bool {
+        struct RemovedRow: Decodable { let id: UUID }
+        return try await sql.raw("""
+            SELECT sa.id FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.uploaded_by_user_id = \(bind: userID)
+              AND sa.deleted_at IS NOT NULL
+              AND a.sha256 = \(bind: sha256)
+            LIMIT 1
+            """).first(decoding: RemovedRow.self) != nil
+    }
+
+    /// The asset holding these bytes in any library this person can see, so
+    /// they can be linked rather than sent again. Scoped to the person's own
+    /// libraries: see `probe` for why a lookup across the whole NAS would leak.
+    static func visibleAsset(
+        sha256: String, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> UUID? {
+        try await sql.raw("""
+            SELECT a.id FROM assets a
+            WHERE a.sha256 = \(bind: sha256)
+              AND EXISTS (
+                  SELECT 1 FROM space_assets sa
+                  JOIN space_members m ON m.space_id = sa.space_id
+                  WHERE sa.asset_id = a.id AND sa.deleted_at IS NULL
+                    AND m.user_id = \(bind: userID)
+              )
+            """).first(decoding: IDRow.self)?.id
     }
 
     // MARK: - Chunk
@@ -329,6 +350,36 @@ struct UploadController: RouteCollection {
 
         timing.mark("probe")
 
+        let result = try await Self.record(
+            sha256: session.sha256, byteSize: session.byteSize, filename: session.filename,
+            fileExtension: fileExtension, input: input, probed: probed,
+            device: device, uploadID: uploadID, req: req
+        )
+
+        timing.mark("record")
+
+        let summary = timing.summary
+        req.logger.info(
+            "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated)) in \(summary)"
+        )
+        return result
+    }
+
+    /// Records a stored file as a photo in a space: the asset, its placement,
+    /// the change, the activity, what the file says, and the jobs that render
+    /// it. Shared by `commit` and `BackgroundUploadController`, which differ only
+    /// in how the bytes arrived.
+    ///
+    /// One copy per library. Two uploads of the same file can race: the app's
+    /// own and the one iOS sends in the background, or two of the person's
+    /// devices. Both pass their checks before either has recorded anything, and
+    /// both used to be recorded, the same photo twice in the grid. Taken in turn
+    /// on the file's hash, the second finds the first's photo and joins it.
+    static func record(
+        sha256: String, byteSize: Int64, filename: String, fileExtension: String,
+        input: CommitUploadRequest, probed: MediaProbe.Metadata?,
+        device: AuthenticatedDevice, uploadID: UUID?, req: Request
+    ) async throws -> CommitUploadResponse {
         // The blob store is where the file lives; the browsable tree is a
         // mirror, and `BrowseTreeWorker` is now the only thing that writes it.
         //
@@ -360,11 +411,34 @@ struct UploadController: RouteCollection {
         // It is also the right shape. A photo is never on the timeline without
         // its capture time and place, or without the job that makes its
         // thumbnails: all of it becomes visible at the same moment, or none.
-        let result = try await req.withPinnedConnection { sql -> CommitUploadResponse in
+        return try await req.withPinnedConnection { sql -> CommitUploadResponse in
             try await sql.raw("BEGIN").run()
             do {
+                try await sql.raw("""
+                    SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "\(input.spaceID)/\(sha256)"), 0))
+                    """).run()
+                struct PlacedRow: Decodable { let id: UUID; let assetID: UUID }
+                if let placed = try await sql.raw("""
+                    SELECT sa.id, sa.asset_id AS "assetID"
+                    FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+                    WHERE sa.space_id = \(bind: input.spaceID) AND sa.deleted_at IS NULL
+                      AND a.sha256 = \(bind: sha256)
+                    LIMIT 1
+                    """).first(decoding: PlacedRow.self) {
+                    if let uploadID {
+                        try await sql.raw("""
+                            UPDATE upload_sessions SET committed_at = now() WHERE id = \(bind: uploadID)
+                            """).run()
+                    }
+                    try await sql.raw("COMMIT").run()
+                    return CommitUploadResponse(
+                        assetID: placed.assetID, spaceAssetID: placed.id,
+                        deduplicated: true, changeSeq: 0
+                    )
+                }
+
                 let alreadyStored = try await sql.raw("""
-                    SELECT id FROM assets WHERE sha256 = \(bind: session.sha256)
+                    SELECT id FROM assets WHERE sha256 = \(bind: sha256)
                     """).first(decoding: IDRow.self) != nil
 
                 guard let asset = try await sql.raw("""
@@ -374,7 +448,7 @@ struct UploadController: RouteCollection {
                          local_captured_at, lat, lon, is_raw,
                          live_group_id, burst_id, burst_pick, media_subtypes, storage_path)
                     VALUES
-                        (\(bind: session.sha256), \(bind: session.byteSize),
+                        (\(bind: sha256), \(bind: byteSize),
                          \(bind: input.mediaType.rawValue), \(bind: input.mime),
                          \(bind: fileExtension),
                          \(bind: input.width), \(bind: input.height), \(bind: input.durationMs),
@@ -399,7 +473,7 @@ struct UploadController: RouteCollection {
                     VALUES
                         (\(bind: input.spaceID), \(bind: asset.id), \(bind: device.userID),
                          \(bind: device.deviceID), \(bind: input.sourceLocalID),
-                         \(bind: session.filename))
+                         \(bind: filename))
                     ON CONFLICT (space_id, asset_id)
                     DO UPDATE SET deleted_at = NULL
                     RETURNING id
@@ -475,9 +549,11 @@ struct UploadController: RouteCollection {
                     )
                 }
 
-                try await sql.raw("""
-                    UPDATE upload_sessions SET committed_at = now() WHERE id = \(bind: uploadID)
-                    """).run()
+                if let uploadID {
+                    try await sql.raw("""
+                        UPDATE upload_sessions SET committed_at = now() WHERE id = \(bind: uploadID)
+                        """).run()
+                }
 
                 try await sql.raw("COMMIT").run()
 
@@ -492,14 +568,6 @@ struct UploadController: RouteCollection {
                 throw error
             }
         }
-
-        timing.mark("record")
-
-        let summary = timing.summary
-        req.logger.info(
-            "committed \(session.filename) (\(session.byteSize) bytes, dedup: \(result.deduplicated)) in \(summary)"
-        )
-        return result
     }
 
     /// Runs `body` inside a savepoint, so a failure in it undoes only its own
@@ -648,6 +716,20 @@ struct UploadController: RouteCollection {
             throw Abort(.notFound, reason: "No such asset.")
         }
 
+        return try await Self.place(
+            assetID: assetID, in: spaceID, sourceLocalID: input.sourceLocalID,
+            mediaType: MediaType(rawValue: media.mediaType) ?? .photo,
+            device: device, req: req
+        )
+    }
+
+    /// Puts an asset the person can already see into a space, copying its file
+    /// where the library layout calls for one. The second half of `link`, and
+    /// how a background upload of a photo the NAS already has ends.
+    static func place(
+        assetID: UUID, in spaceID: UUID, sourceLocalID: String?, mediaType: MediaType,
+        device: AuthenticatedDevice, req: Request
+    ) async throws -> CommitUploadResponse {
         // Already here: nothing to copy, nothing to insert.
         let alreadyPlaced = try await req.sql.raw("""
             SELECT id FROM space_assets
@@ -661,7 +743,7 @@ struct UploadController: RouteCollection {
         if alreadyPlaced != nil {
             targetAssetID = assetID
         } else {
-            targetAssetID = try await Self.copyIntoSpace(
+            targetAssetID = try await copyIntoSpace(
                 assetID: assetID, req: req
             ) ?? assetID
         }
@@ -676,7 +758,7 @@ struct UploadController: RouteCollection {
                         (space_id, asset_id, uploaded_by_user_id, source_device_id, source_local_id)
                     VALUES
                         (\(bind: spaceID), \(bind: targetAssetID), \(bind: device.userID),
-                         \(bind: device.deviceID), \(bind: input.sourceLocalID))
+                         \(bind: device.deviceID), \(bind: sourceLocalID))
                     ON CONFLICT (space_id, asset_id)
                     DO UPDATE SET deleted_at = NULL
                     RETURNING id
@@ -696,7 +778,7 @@ struct UploadController: RouteCollection {
                     try await ActivityTracker.record(
                         spaceID: spaceID,
                         userID: device.userID,
-                        mediaType: MediaType(rawValue: media.mediaType) ?? .photo,
+                        mediaType: mediaType,
                         on: sql
                     )
                 }
