@@ -6,6 +6,10 @@
 # because the parks sit nearest three different suburbs. A trip between the
 # parks and a rental in Kissimmee is "Five days in Orlando".
 #
+# And the same for anyone's travels, not only the places on the list: a city's
+# neighborhoods are named for the city ("Paris", not "Paris 16 Passy"), and a
+# trip abroad for its country or continent ("Five days in Italy").
+#
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-destinations.sh
 #
 # Runs its own server against its own database and blob store. Needs the town
@@ -82,6 +86,13 @@ ANIMAL_KINGDOM="28.3576 -81.5902"; SPRINGS="28.3709 -81.5194"; KISSIMMEE="28.292
 UNIVERSAL="28.4744 -81.4678"; SEAWORLD="28.4114 -81.4612"
 DUCK="36.1696 -75.7552"; COROLLA="36.3766 -75.8306"
 ASHEVILLE="35.5951 -82.5515"; WYTHEVILLE="36.9485 -81.0848"
+EIFFEL="48.8584 2.2945"; LOUVRE="48.8606 2.3376"; SACRE_COEUR="48.8867 2.3431"; NOTRE_DAME="48.8530 2.3499"
+COLOSSEUM="41.8902 12.4922"; TREVI="41.9009 12.4833"; FLORENCE="43.7696 11.2558"; ZURICH="47.3769 8.5417"
+WESTMINSTER="51.4993 -0.1273"; TOWER="51.5081 -0.0759"; BRITISH_MUSEUM="51.5194 -0.1270"; CAMDEN="51.5414 -0.1460"
+LINCOLN="38.8893 -77.0502"; CAPITOL="38.8899 -77.0091"; GEORGETOWN="38.9097 -77.0654"
+ZION_CANYON="37.2502 -112.9566"; BRYCE="37.6266 -112.1677"; PAGE="36.9147 -111.4558"
+GRAND_CANYON="36.0544 -112.1401"
+KAANAPALI="20.9256 -156.6950"; WAILEA="20.6873 -156.4416"; HANA="20.7575 -155.9884"
 
 # shoot <prefix> <day> <hour before the first> <count> <place>
 shoot(){
@@ -112,7 +123,29 @@ shoot d25 2023-12-25 9 5 MAGIC_KINGDOM; shoot d26 2023-12-26 9 3 ANIMAL_KINGDOM
 # Three days in Asheville, with lunch in Virginia on the drive down.
 shoot e10w 2024-09-10 9 2 WYTHEVILLE; shoot e10a 2024-09-10 15 4 ASHEVILLE
 shoot e11 2024-09-11 9 5 ASHEVILLE;   shoot e12 2024-09-12 9 5 ASHEVILLE
-check "every photo arrived" "149" "$(q "SELECT count(*) FROM assets")"
+# Four days in Paris, which the town dataset lists by arrondissement.
+shoot f15 2024-04-15 9 4 EIFFEL; shoot f16 2024-04-16 9 4 LOUVRE
+shoot f17 2024-04-17 9 4 SACRE_COEUR; shoot f18 2024-04-18 9 4 NOTRE_DAME
+# Rome, then Florence.
+shoot g06 2024-05-06 9 4 COLOSSEUM; shoot g07 2024-05-07 9 4 TREVI; shoot g08 2024-05-08 9 4 COLOSSEUM
+shoot g09 2024-05-09 9 4 FLORENCE;  shoot g10 2024-05-10 9 4 FLORENCE
+# Zion and Bryce, then Page and the Grand Canyon.
+shoot k07 2024-10-07 9 6 ZION_CANYON; shoot k08 2024-10-08 9 5 ZION_CANYON; shoot k09 2024-10-09 9 4 BRYCE
+shoot k10 2024-10-10 9 6 PAGE; shoot k11p 2024-10-11 9 2 PAGE; shoot k11g 2024-10-11 13 4 GRAND_CANYON
+shoot k12 2024-10-12 9 2 GRAND_CANYON
+# Three days in London, borough by borough.
+shoot l11w 2023-09-11 9 4 WESTMINSTER; shoot l11t 2023-09-11 14 2 TOWER
+shoot l12 2023-09-12 9 4 BRITISH_MUSEUM; shoot l13 2023-09-13 9 4 CAMDEN
+# A weekend in Washington, neighborhood by neighborhood.
+shoot m14l 2023-10-14 9 3 LINCOLN; shoot m14c 2023-10-14 13 3 CAPITOL; shoot m15 2023-10-15 9 4 GEORGETOWN
+# Paris, Zurich and Rome.
+shoot n05 2023-06-05 9 4 EIFFEL; shoot n06 2023-06-06 9 4 LOUVRE; shoot n07 2023-06-07 9 4 ZURICH
+shoot n08 2023-06-08 9 4 ZURICH; shoot n09 2023-06-09 9 4 COLOSSEUM; shoot n10 2023-06-10 9 4 TREVI
+# A week around Maui.
+shoot o06 2023-03-06 9 4 KAANAPALI; shoot o07 2023-03-07 9 4 KAANAPALI; shoot o08 2023-03-08 9 4 KAANAPALI
+shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023-03-11 9 4 HANA
+shoot o12 2023-03-12 9 2 WAILEA
+check "every photo arrived" "288" "$(q "SELECT count(*) FROM assets")"
 
 DISNEY=39; OBX=23; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
@@ -139,6 +172,11 @@ check "a day at Epcot is headed Walt Disney World" "Walt Disney World, Florida" 
 check "a day in Duck is headed the Outer Banks" "Outer Banks, North Carolina" "$(day 2025-07-15)"
 check "a day at Universal, the rental folded into it" "Universal Orlando, Florida" "$(day 2024-06-03)"
 check "home is still its town" "Culpeper, Virginia" "$(day 2025-01-05)"
+check "a day by the Eiffel Tower is headed Paris, not its arrondissement" "Paris, Île-de-France" \
+  "$(day 2024-04-15)"
+check "a day at the Colosseum is headed Rome" "Rome, Lazio" "$(day 2024-05-08)"
+check "a day in Westminster is headed London" "London, England" "$(day 2023-09-11)"
+check "a day on Capitol Hill is headed Washington" "Washington, District of Columbia" "$(day 2023-10-14)"
 check "the Information panel says the same" "Walt Disney World, Florida" \
   "$(curl -s "$API/v1/spaces/$SPACE/assets/$(id a2e1)/detail" -H "$AUTH" | jq '["placeName"]')"
 
@@ -152,6 +190,15 @@ has "a week in Duck is a week in the Outer Banks" "Seven days in the Outer Banks
 has "Universal, Disney World and SeaWorld from Kissimmee is Orlando" "Five days in Orlando" "$T"
 has "Christmas there is named for both" "Christmas 2023 at Walt Disney World" "$T"
 has "a town most of a trip was in names it, the drive down and all" "Three days in Asheville" "$T"
+has "four days across Paris's arrondissements are four days in Paris" "Four days in Paris" "$T"
+has "and three across London's boroughs, three in London" "Three days in London" "$T"
+has "a weekend around the Capitol is a weekend in Washington" "A weekend in Washington" "$T"
+has "Rome and Florence are a trip to Italy" "Five days in Italy" "$T"
+has "Paris, Zurich and Rome are a trip to Europe" "Six days in Europe" "$T"
+has "two parks in Utah and two places in Arizona name both" "Six days in Utah and Arizona" "$T"
+has "a week around Maui is spent on Maui" "Seven days on Maui" "$T"
+lacks "no trip is named for a region nobody says" "Île-de-France" "$T"
+lacks "nor for a neighborhood" "Passy" "$T"
 lacks "no trip is named for a state it was more particular than" "in Florida" "$T"
 lacks "nor for a suburb" "Celebration" "$T"
 check "a year on, the trip comes back" "A year ago you were at Walt Disney World" "$(hero 2026-03-13)"
@@ -200,17 +247,23 @@ check "and filed there" "Walt Disney World, Florida" "$(q "SELECT destination FR
 check "moved home, it is in its town again" "Culpeper, Virginia" "$(locate "$H" $CULPEPER)"
 check "and filed under nothing" "" "$(q "SELECT destination FROM assets WHERE id = '$H'")"
 
-echo "Filing an older library"
-q "UPDATE assets SET destination = NULL, destination_version = 0 WHERE destination IS NOT NULL" >/dev/null
+echo "Naming an older library again"
+# As a library stored under the old rules looks: no destinations, and
+# neighborhoods under their own names.
+q "UPDATE assets SET destination = NULL, destination_version = 0, place_version = 0" >/dev/null
+q "UPDATE assets SET place_name = 'Paris 16 Passy, Île-de-France' WHERE id = '$(id f151)'" >/dev/null
 stop; serve
 for _ in $(seq 1 60); do
-  [ "$(q "SELECT count(*) FROM assets WHERE destination_version = 0 AND lat IS NOT NULL")" = "0" ] && break; sleep 0.5
+  [ "$(q "SELECT count(*) FROM assets WHERE (destination_version = 0 OR place_version = 0) AND lat IS NOT NULL")" = "0" ] \
+    && break; sleep 0.5
 done
+check "a restart names the arrondissement for Paris" "Paris, Île-de-France" \
+  "$(q "SELECT place_name FROM assets WHERE id = '$(id f151)'")"
 check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "destinations: filed" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 288 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

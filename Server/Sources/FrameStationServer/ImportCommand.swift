@@ -449,7 +449,7 @@ struct ImportCommand: AsyncCommand {
                         INSERT INTO assets
                             (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                              captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
-                             lat, lon, place_name, destination, destination_version,
+                             lat, lon, place_name, place_version, destination, destination_version,
                              camera_make, camera_model, lens, iso, aperture,
                              shutter, focal_len, exposure_bias, dynamic_range, orientation,
                              is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
@@ -457,7 +457,7 @@ struct ImportCommand: AsyncCommand {
                         SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                                captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
                                lat, lon, COALESCE(place_name, \(bind: placeName)),
-                               destination, destination_version,
+                               place_version, destination, destination_version,
                                camera_make, camera_model, lens, iso, aperture,
                                shutter, focal_len, exposure_bias, dynamic_range, orientation,
                                is_raw, COALESCE(\(bind: liveGroupID), live_group_id), burst_id, burst_pick,
@@ -473,7 +473,7 @@ struct ImportCommand: AsyncCommand {
                     INSERT INTO assets
                         (sha256, byte_size, media_type, mime, blob_ext, width, height,
                          duration_ms, captured_at, captured_tz_off, local_captured_at,
-                         lat, lon, place_name, destination, destination_version,
+                         lat, lon, place_name, place_version, destination, destination_version,
                          camera_make, camera_model, lens, iso, aperture, shutter,
                          focal_len, exposure_bias, dynamic_range, orientation, is_raw,
                          live_group_id)
@@ -486,6 +486,7 @@ struct ImportCommand: AsyncCommand {
                             + COALESCE(\(bind: metadata.capturedTZOffset), 0) * interval '1 second')
                             AT TIME ZONE 'UTC',
                          \(bind: metadata.latitude), \(bind: metadata.longitude), \(bind: placeName),
+                         \(bind: app.geocoder?.isLoaded == true ? Geocoder.version : 0),
                          \(bind: Destinations.label(latitude: metadata.latitude, longitude: metadata.longitude)),
                          \(bind: Destinations.version),
                          \(bind: metadata.cameraMake), \(bind: metadata.cameraModel), \(bind: metadata.lens),

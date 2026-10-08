@@ -171,10 +171,10 @@ func configure(_ app: Application) async throws {
         // with no device involved. See `CurationVocabulary.retag`.
         Task { await CurationVocabulary.retag(on: app) }
 
-        // Photos taken at Walt Disney World or on the Outer Banks filed under
-        // those names, the first time and after the list changes. See
-        // `Destinations`.
-        Task { await Destinations.backfill(on: app) }
+        // Every stored photo's place named again when the rules for naming
+        // one change: Paris for its arrondissements, Walt Disney World for its
+        // parks. See `PlaceFiling`.
+        Task { await PlaceFiling.refile(on: app) }
 
         // Fill dates and the screenshot kind into already-stored assets from
         // their filenames, so the library that predates this reading gains the

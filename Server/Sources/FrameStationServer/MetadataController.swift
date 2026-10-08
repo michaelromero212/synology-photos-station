@@ -82,6 +82,8 @@ struct MetadataController: RouteCollection {
                     SET lat = \(bind: latitude),
                         lon = \(bind: longitude),
                         place_name = \(bind: placeName),
+                        place_version = CASE WHEN \(bind: req.application.geocoder?.isLoaded == true)
+                                            THEN \(bind: Geocoder.version) ELSE place_version END,
                         destination = \(bind: destination),
                         destination_version = \(bind: Destinations.version)
                     WHERE id = \(bind: assetID)

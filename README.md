@@ -282,9 +282,14 @@ Some places go by their own names rather than their nearest town's: theme
 parks, national parks, the Outer Banks. `Destinations.swift` holds that list.
 A photo taken inside one is filed under its name, so its day says "Walt Disney
 World, Florida" where the dataset alone would say "Celebration, Florida", and a
-trip there is "Four days at Walt Disney World". A pass at boot files the photos
-already stored, and runs again whenever the list's version changes. See
-ARCHITECTURE.md, "Places go by their own names".
+trip there is "Four days at Walt Disney World". A city's neighborhoods are named
+for the city ("Paris", not "Paris 16 Passy"), and a trip abroad for its country.
+A pass at boot names the photos already stored again whenever those rules
+change. See ARCHITECTURE.md, "Places go by their own names".
+
+The dataset is now ten columns and a country table, so rebuild it once with
+`./Scripts/fetch-geonames.sh` if yours predates that. An older five-column one
+still loads, with neighborhoods under their own names.
 
 Backfill assets that predate geocoding, or re-run after a dataset update:
 

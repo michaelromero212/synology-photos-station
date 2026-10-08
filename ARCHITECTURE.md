@@ -555,6 +555,7 @@ CREATE TABLE assets (
   lat             double precision,
   lon             double precision,
   place_name      text,                   -- offline reverse geocode
+  place_version   int NOT NULL DEFAULT 0, -- the Geocoder rules place_name was named under (0029)
   destination     text,                   -- the name a place goes by, where not its town's (0028)
   destination_version int NOT NULL DEFAULT 0, -- the Destinations list it was filed under
   camera_make     text, camera_model text, lens text,
@@ -955,9 +956,29 @@ circles over the ground it covers. It has two kinds:
   `COALESCE(destination, place_name)` (`TimelineController.placeName`), so a
   place has the same name everywhere.
 - **Areas** are clusters of real towns that a trip moving between them is
-  called by: Orlando, the Smokies, the Florida Keys, Cape Cod, Lake Tahoe. Their
-  photos keep their towns, so a day in Kissimmee still says Kissimmee. Only a
-  trip's title uses the area, and searching "orlando" finds the photos inside it.
+  called by: Orlando, the Smokies, the Florida Keys, Cape Cod, Lake Tahoe and
+  Hawaii's islands. Their photos keep their towns, so a day in Kissimmee still
+  says Kissimmee. Only a trip's title uses the area, and searching "orlando"
+  finds the photos inside it.
+
+The list only helps where it has an entry. Two rules help everyone else's
+travels, wherever they go:
+
+- **A city's neighborhoods are named for the city.** The dataset lists Times
+  Square, Paris's arrondissements, London's boroughs and Rome's Celio as places
+  of their own. So a day by the Eiffel Tower was headed "Paris 16 Passy", and
+  four days in Paris came out as "Four days in Île-de-France", because no one
+  piece held enough of them. `Geocoder` folds a place into a city three ways:
+  the dataset marks it a section (`PPLX`) and the city's reach covers it, which
+  grows with the city's size; it shares a municipality's own code, as the
+  arrondissements share Paris's; or it lies inside a capital's own division,
+  close in. The rules are tight on purpose. In the US the deepest code is a
+  township, so a shared code alone would have made Levittown "Hempstead". About
+  10,500 of the dataset's 171,000 places are folded.
+- **A trip abroad is named for its country.** Nobody calls a week in Rome and
+  Florence "Lazio and Tuscany". At home a trip still takes its state. Countries
+  whose provinces are what people go to (Canada, Australia, New Zealand, the
+  UK) keep them abroad too: "Ten days in Scotland".
 
 A trip takes the most particular name that holds:
 
@@ -965,21 +986,31 @@ A trip takes the most particular name that holds:
    Walt Disney World";
 2. a town with three quarters of them: "Three days in Asheville";
 3. an area with three quarters of them: "Five days in Orlando";
-4. a state with three quarters of them;
-5. otherwise, "away".
+4. at home, a state with three quarters of them, or two that hold them between
+   them: "Six days in Utah and Arizona";
+5. abroad, the country, two countries ("in France and Italy") or, for three or
+   more, the continent: "Six days in Europe";
+6. otherwise, "away".
 
 Each place carries how a title says it ("at" Walt Disney World, "in the" Outer
 Banks, "on" Cape Cod). It also carries the trip kinds its name already says, so
 a theme park trip to Walt Disney World is just a trip to Walt Disney World.
 
 Photos are filed wherever coordinates are written: upload, import, rebuild and
-a location edit. A boot-time pass files every photo whose `destination_version`
-is behind `Destinations.version`. Changing the list is a server update: bump the
-version, and the library is filed again on the next start. Town names now come
-from the same coordinates the row keeps (the device's, when it sent some). They
-used to come only from the file's own GPS tags, so a photo whose position the
-phone knew but the file didn't carry got no town. `Scripts/smoke-destinations.sh`
-covers the filing, the names and the trip rules.
+a location edit. A boot-time pass (`PlaceFiling`) names every photo again whose
+`place_version` is behind `Geocoder.version` or whose `destination_version` is
+behind `Destinations.version`. So changing either is a server update: bump the
+version, and the library is named again on the next start. The pass runs in
+batches with a pause between them, so it never holds up the app's requests.
+Town names now come from the same coordinates the row keeps (the device's, when
+it sent some). They used to come only from the file's own GPS tags, so a photo
+whose position the phone knew but the file didn't carry got no town.
+`Scripts/smoke-destinations.sh` covers the filing, the names and the trip rules.
+
+Loading the dataset is part of the server's start, so it has to be quick. The
+cities file is read byte by byte rather than split into strings line by line,
+and the release build loads all of it, neighborhoods folded, in about 0.2 s on
+an M-series Mac. That's faster than the old loader, which did less.
 
 One known limit: a family that lives inside a destination, on the Outer Banks
 say, sees its name on every day at home rather than its town's.

@@ -69,7 +69,9 @@ struct GeocodeCommand: AsyncCommand {
                 do {
                     for (id, label) in resolved {
                         try await sql.raw("""
-                            UPDATE assets SET place_name = \(bind: label) WHERE id = \(bind: id)
+                            UPDATE assets
+                            SET place_name = \(bind: label), place_version = \(bind: Geocoder.version)
+                            WHERE id = \(bind: id)
                             """).run()
                     }
                     try await sql.raw("COMMIT").run()

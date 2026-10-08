@@ -114,16 +114,19 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
 # Offline reverse-geocoding dataset, baked in so the container is
 # self-contained — no volume to mount, no network at runtime, and the family's
 # coordinates never leave the NAS. GeoNames cities1000, CC BY 4.0. Trimmed from
-# 19 columns to the 5 the geocoder reads, ~30 MB of text down to ~6 MB.
+# 19 columns to the 10 the geocoder reads, ~30 MB of text down to ~9 MB, and the
+# country table to the 3 a trip abroad is named with. See Scripts/fetch-geonames.sh.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get -q update && apt-get -q install -y --no-install-recommends curl unzip \
     && mkdir -p /opt/geonames /tmp/gn \
     && curl -fsSL -o /tmp/gn/cities.zip https://download.geonames.org/export/dump/cities1000.zip \
     && curl -fsSL -o /tmp/gn/admin1.txt https://download.geonames.org/export/dump/admin1CodesASCII.txt \
+    && curl -fsSL -o /tmp/gn/countries.txt https://download.geonames.org/export/dump/countryInfo.txt \
     && unzip -qo /tmp/gn/cities.zip -d /tmp/gn \
-    && awk -F'\t' 'NF>=11 && $5 != "" && $6 != "" { printf "%s\t%s\t%s\t%s\t%s\n", $3, $5, $6, $9, $11 }' \
+    && awk -F'\t' 'NF>=15 && $5 != "" && $6 != "" { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $3, $5, $6, $9, $11, $8, $12, $13, $14, $15 }' \
          /tmp/gn/cities1000.txt > /opt/geonames/cities.tsv \
     && awk -F'\t' 'NF>=2 { printf "%s\t%s\n", $1, $2 }' /tmp/gn/admin1.txt > /opt/geonames/admin1.tsv \
+    && awk -F'\t' '!/^#/ && NF>=9 { printf "%s\t%s\t%s\n", $1, $5, $9 }' /tmp/gn/countries.txt > /opt/geonames/countries.tsv \
     && printf 'GeoNames (https://www.geonames.org/) - CC BY 4.0\n' > /opt/geonames/ATTRIBUTION.txt \
     && rm -rf /tmp/gn \
     && apt-get -q purge -y unzip && apt-get -q autoremove -y \

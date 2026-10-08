@@ -484,6 +484,8 @@ actor DerivationWorker {
                 dynamic_range   = COALESCE(\(bind: metadata.dynamicRange), dynamic_range),
                 orientation     = COALESCE(\(bind: metadata.orientation), orientation),
                 place_name      = COALESCE(\(bind: placeName), place_name),
+                place_version   = CASE WHEN \(bind: geocoder?.isLoaded == true)
+                                      THEN \(bind: Geocoder.version) ELSE place_version END,
                 destination     = \(bind: destination),
                 destination_version = \(bind: Destinations.version),
                 exif            = COALESCE(\(bind: exifValue)::jsonb, exif)

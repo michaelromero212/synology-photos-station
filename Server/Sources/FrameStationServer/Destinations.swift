@@ -1,6 +1,5 @@
 import Foundation
 import SQLKit
-import Vapor
 
 /// The places people call by their own names rather than by the nearest town.
 ///
@@ -32,7 +31,7 @@ import Vapor
 ///   inside it.
 ///
 /// Change the list and bump `version`, and every photo with coordinates is
-/// filed again on the next boot. See `backfill`.
+/// filed again on the next boot. See `PlaceFiling`.
 enum Destinations {
     /// Bump with any change to the lists below.
     static let version = 1
@@ -168,58 +167,6 @@ enum Destinations {
     private static let bySpoken: [String: Place] = Dictionary(
         (destinations + areas).map { ($0.spoken, $0) }, uniquingKeysWith: { first, _ in first }
     )
-
-    // MARK: - Filing photos
-
-    /// Files every photo with coordinates under the current list, the first
-    /// time and whenever `version` changes.
-    ///
-    /// In batches along the primary key, off the boot path. A row whose
-    /// coordinates changed between reading and writing it is left for the
-    /// edit that changed them, which files it itself.
-    static func backfill(on app: Application) async {
-        struct Row: Decodable {
-            let id: UUID
-            let lat: Double
-            let lon: Double
-        }
-        let sql = app.sql
-        var cursor = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-        var filed = 0, named = 0
-        do {
-            while true {
-                let rows = try await sql.raw("""
-                    SELECT id, lat, lon FROM assets
-                    WHERE id > \(bind: cursor)
-                      AND lat IS NOT NULL AND lon IS NOT NULL
-                      AND destination_version < \(bind: version)
-                    ORDER BY id
-                    LIMIT 1000
-                    """).all(decoding: Row.self)
-                guard let last = rows.last else { break }
-                cursor = last.id
-
-                // Empty for none: an array bind can't carry a NULL element.
-                let labels = rows.map { label(latitude: $0.lat, longitude: $0.lon) ?? "" }
-                try await sql.raw("""
-                    UPDATE assets AS a
-                    SET destination = NULLIF(v.destination, ''),
-                        destination_version = \(bind: version)
-                    FROM unnest(\(bind: rows.map(\.id))::uuid[], \(bind: rows.map(\.lat))::float8[],
-                                \(bind: rows.map(\.lon))::float8[], \(bind: labels)::text[])
-                         AS v(id, lat, lon, destination)
-                    WHERE a.id = v.id AND a.lat = v.lat AND a.lon = v.lon
-                    """).run()
-                filed += rows.count
-                named += labels.filter { !$0.isEmpty }.count
-            }
-            if filed > 0 {
-                app.logger.info("destinations: filed \(filed) photos, \(named) at a destination")
-            }
-        } catch {
-            app.logger.error("destinations: filing stopped: \(error)")
-        }
-    }
 
     // MARK: - The list
 
@@ -507,6 +454,27 @@ enum Destinations {
         area("Jackson Hole", "Wyoming", "in", aliases: ["jackson", "hole"], [
             Circle(43.600, -110.750, km: 22),   // Jackson, Teton Village and the south of the park
             Circle(43.860, -110.600, km: 12),   // Jackson Lake
+        ]),
+        // Hawaii's islands, which a week is spent on more than in any town.
+        area("Maui", "Hawaii", "on", aliases: ["maui"], [
+            Circle(20.920, -156.660, km: 15),   // Lahaina, Kaanapali and Kapalua
+            Circle(20.790, -156.450, km: 18),   // Kahului, Kihei and Wailea
+            Circle(20.750, -156.250, km: 15),   // Upcountry and Haleakala
+            Circle(20.750, -156.050, km: 12),   // Hana
+        ]),
+        area("Oahu", "Hawaii", "on", aliases: ["oahu"], [
+            Circle(21.470, -157.980, km: 32),
+            Circle(21.330, -157.750, km: 12),   // Waikiki to Makapuu
+        ]),
+        area("Kauai", "Hawaii", "on", aliases: ["kauai"], [
+            Circle(22.070, -159.530, km: 32),
+        ]),
+        area("Big Island", "Hawaii", "on", the: true, aliases: ["big", "island"], [
+            Circle(19.640, -155.990, km: 30),   // Kona
+            Circle(19.720, -155.080, km: 30),   // Hilo
+            Circle(19.420, -155.290, km: 25),   // Volcano and Kilauea
+            Circle(20.020, -155.670, km: 25),   // Waimea and Kohala
+            Circle(19.100, -155.650, km: 25),   // The south
         ]),
     ]
 }

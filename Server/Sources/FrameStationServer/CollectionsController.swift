@@ -108,7 +108,8 @@ struct CollectionsController: RouteCollection {
         )
         let trips = try await trips(
             spaceID: spaceID, seed: seed, userID: device.userID,
-            holidays: holidays, evidence: evidence, on: req.sql
+            holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
+            on: req.sql
         )
 
         // Days already inside a trip are not also occasions of their own. The
@@ -441,6 +442,9 @@ struct CollectionsController: RouteCollection {
         /// Where each of `places` was that day: the middle of its photos.
         let placeLatitudes: [Double]
         let placeLongitudes: [Double]
+        /// Where the library has most of its photos, so a trip can tell it
+        /// went abroad.
+        let home: String?
         let coverAssetIDs: [UUID]
     }
 
@@ -462,7 +466,8 @@ struct CollectionsController: RouteCollection {
     /// span at least two.
     private func trips(
         spaceID: UUID, seed: String, userID: UUID, holidays: [String: String],
-        evidence: [String: DayEvidence] = [:], on sql: any SQLDatabase
+        evidence: [String: DayEvidence] = [:], geocoder: Geocoder? = nil,
+        on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
         let rows = try await sql.raw("""
@@ -540,6 +545,7 @@ struct CollectionsController: RouteCollection {
                    COALESCE(m.counts, ARRAY[]::bigint[]) AS "placeCounts",
                    COALESCE(m.lats, ARRAY[]::float8[]) AS "placeLatitudes",
                    COALESCE(m.lons, ARRAY[]::float8[]) AS "placeLongitudes",
+                   (SELECT place_name FROM busiest) AS home,
                    p.cover AS "coverAssetIDs"
             FROM per_day p
             LEFT JOIN main_places m ON m.day = p.day
@@ -564,7 +570,8 @@ struct CollectionsController: RouteCollection {
             .map {
                 Self.describeTrip(
                     $0, holidays: holidays,
-                    event: Self.tripEvent(days: $0.map(\.day), evidence: evidence)
+                    event: Self.tripEvent(days: $0.map(\.day), evidence: evidence),
+                    geocoder: geocoder
                 )
             }
     }
@@ -609,11 +616,11 @@ struct CollectionsController: RouteCollection {
     /// under the title already say how long. See `tripEvent`.
     static func describeTrip(
         _ run: [TripDay], holidays: [String: String] = [:],
-        event: CurationVocabulary.Event? = nil
+        event: CurationVocabulary.Event? = nil, geocoder: Geocoder? = nil
     ) -> CollectionSummary {
         let ordered = run.reversed().map { $0 }        // oldest first
         let count = run.reduce(0) { $0 + $1.count }
-        let where_ = whereabouts(of: run)
+        let where_ = whereabouts(of: run, geocoder: geocoder)
         let kind = event.flatMap { where_?.implies.contains($0.tag) == true ? nil : $0 }
 
         let weekdays = ordered.compactMap { parseDate($0.day) }
@@ -727,13 +734,21 @@ struct CollectionsController: RouteCollection {
     ///    destinations: "Five days in Orlando" for Disney World, Universal and
     ///    the rental between them, and "Five days in the Smokies" for
     ///    Gatlinburg, Pigeon Forge and the park.
-    /// 4. A state with three quarters of them: "Ten days in Florida".
+    /// 4. At home, a state with three quarters of them, "Ten days in Florida",
+    ///    or two between them, "Ten days in Utah and Arizona". Abroad, the
+    ///    country, "Ten days in Italy", or two, "in France and Italy", or the
+    ///    continent of three or more, "in Europe": nobody calls a week in Rome
+    ///    and Florence "Lazio and Tuscany". Except where a country's regions
+    ///    are what people go to: Ontario, Scotland, Queensland.
     ///
     /// Three quarters where it used to be every one. A week in Nags Head with
     /// lunch in Virginia on the drive down was "Seven days away", and
     /// whichever town a trip's few strays landed in decided between a town
     /// and its state.
-    static func whereabouts(of run: [TripDay]) -> Whereabouts? {
+    ///
+    /// Without the town dataset (`geocoder`) there are no countries to tell
+    /// apart, and a trip abroad is named by its regions like one at home.
+    static func whereabouts(of run: [TripDay], geocoder: Geocoder? = nil) -> Whereabouts? {
         struct Stay {
             var photos = 0
             var days = 0
@@ -762,20 +777,31 @@ struct CollectionsController: RouteCollection {
         func most(_ photos: Int) -> Bool { photos * 4 >= total * 3 }
         // The alphabetically first of equals, so a title holds still between
         // two loads of the same page.
-        func biggest(_ counts: [String: Int]) -> (key: String, photos: Int)? {
-            counts.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }
-                .map { ($0.key, $0.value) }
+        func ranked(_ counts: [String: Int]) -> [(key: String, photos: Int)] {
+            counts.map { ($0.key, $0.value) }
+                .sorted { $0.photos != $1.photos ? $0.photos > $1.photos : $0.key < $1.key }
+        }
+        func biggest(_ counts: [String: Int]) -> (key: String, photos: Int)? { ranked(counts).first }
+        // Two that hold most of it between them, each a real part of it.
+        func pair(_ counts: [String: Int]) -> String? {
+            let top = ranked(counts)
+            guard top.count >= 2, most(top[0].photos + top[1].photos), top[1].photos * 4 >= total
+            else { return nil }
+            return "\(top[0].key) and \(top[1].key)"
         }
 
         var destinations: [String: Int] = [:]
+        // By the town alone, so Niagara Falls on both sides of the border is
+        // one place.
         var towns: [String: Int] = [:]
         var areas: [String: Int] = [:]
         var regions: [String: Int] = [:]
+        var countries: [String: Int] = [:]
         for (label, stay) in stays {
             if Destinations.named(label: label) != nil {
                 destinations[label] = stay.photos
             } else {
-                towns[label] = stay.photos
+                towns[HeaderPlaces.town(label), default: 0] += stay.photos
             }
             if stay.located > 0 {
                 let latitude = stay.latitude / stay.located
@@ -788,6 +814,9 @@ struct CollectionsController: RouteCollection {
                 .trimmingCharacters(in: .whitespaces), !region.isEmpty {
                 regions[region, default: 0] += stay.photos
             }
+            if let country = geocoder?.country(ofLabel: label) {
+                countries[country, default: 0] += stay.photos
+            }
         }
 
         if let best = biggest(destinations), let place = Destinations.named(label: best.key),
@@ -795,17 +824,53 @@ struct CollectionsController: RouteCollection {
             return Whereabouts(place)
         }
         if let best = biggest(towns), most(best.photos) {
-            return Whereabouts(label: best.key)
+            return Whereabouts(name: best.key)
         }
         if let best = biggest(areas), most(best.photos),
            let place = Destinations.place(spoken: best.key) {
             return Whereabouts(place)
         }
-        if let best = biggest(regions), most(best.photos) {
-            return Whereabouts(name: best.key)
+
+        let home = run.lazy.compactMap(\.home).first.flatMap { geocoder?.country(ofLabel: $0) }
+        let country = biggest(countries)
+        let abroad = home != nil && country != nil && country?.key != home
+        if !abroad || Self.namedRegions.contains(country?.key ?? "") {
+            if let best = biggest(regions), most(best.photos) {
+                return Whereabouts(name: best.key)
+            }
+            if let both = pair(regions) { return Whereabouts(name: both) }
+        }
+        guard abroad, let geocoder else { return nil }
+
+        var named: [String: Int] = [:]
+        var continents: [String: (photos: Int, countries: Int)] = [:]
+        for (code, photos) in countries {
+            if let name = geocoder.countryName(code) { named[name, default: 0] += photos }
+            if let continent = geocoder.continent(code) {
+                continents[continent, default: (0, 0)].photos += photos
+                continents[continent, default: (0, 0)].countries += 1
+            }
+        }
+        if let best = biggest(named), most(best.photos) { return Whereabouts(name: best.key) }
+        if let both = pair(named) { return Whereabouts(name: both) }
+        if let (code, held) = continents.max(by: { $0.value.photos < $1.value.photos }),
+           most(held.photos), held.countries >= 3, let name = Self.continents[code] {
+            return Whereabouts(name: name)
         }
         return nil
     }
+
+    /// Countries whose states and provinces are what people say they went
+    /// to, abroad as at home: "Ten days in Ontario", "A week in Scotland".
+    /// Elsewhere a trip abroad is named for the country.
+    static let namedRegions: Set<String> = ["US", "CA", "AU", "NZ", "GB"]
+
+    /// The continents a trip through several countries is named for. North
+    /// America isn't one: a week in Vermont and Quebec isn't "in North
+    /// America", and gets the pair of them instead.
+    static let continents = [
+        "EU": "Europe", "AS": "Asia", "AF": "Africa", "SA": "South America",
+    ]
 
     // MARK: - Holidays and occasions
 
