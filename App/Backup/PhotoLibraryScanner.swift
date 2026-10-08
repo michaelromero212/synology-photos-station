@@ -4,6 +4,7 @@ import FrameStationKit
 import Foundation
 import Photos
 import UIKit
+import UniformTypeIdentifiers
 
 /// Reads the system photo library and turns it into queue rows.
 enum PhotoLibraryScanner {
@@ -189,15 +190,32 @@ enum PhotoLibraryScanner {
         case .fullSizePhoto: source = .photo
         case .fullSizeVideo: source = .video
         case .fullSizePairedVideo: source = .pairedVideo
-        default: return resource.originalFilename
+        default: return name(of: resource)
         }
         guard let original = resources.first(where: { $0.type == source }) else {
-            return resource.originalFilename
+            return name(of: resource)
         }
         return BackupKey.renderFilename(
-            original: original.originalFilename,
-            renderExtension: (resource.originalFilename as NSString).pathExtension
+            original: name(of: original),
+            renderExtension: (name(of: resource) as NSString).pathExtension
         )
+    }
+
+    /// A file's own name, as PhotoKit records it.
+    ///
+    /// iOS 27 renamed `originalFilename` to `filename`, which can also be
+    /// missing, and then the name is made from the file's type. Both branches
+    /// stay: the app still runs on iOS 17, while the background upload
+    /// extension, which compiles this file too, needs iOS 27.
+    private static func name(of resource: PHAssetResource) -> String {
+        if #available(iOS 27, *) {
+            return resource.filename
+                ?? UTType(resource.uniformTypeIdentifier)?.preferredFilenameExtension
+                    .map { "Photo.\($0)" }
+                ?? "Photo"
+        } else {
+            return resource.originalFilename
+        }
     }
 
     /// Whether a file is an edited render rather than something the camera made.
