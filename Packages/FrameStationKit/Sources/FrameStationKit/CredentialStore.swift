@@ -19,12 +19,21 @@ public struct CredentialStore: Sendable {
     }
 
     private let service: String
+    private let account: String
+    /// A keychain group shared with an extension, such as the background
+    /// upload extension's app group. Nil for the app's own item, which only
+    /// the app can read.
+    private let accessGroup: String?
 
-    public init(service: String = "com.michaelromero.FrameStation") {
+    public init(
+        service: String = "com.michaelromero.FrameStation",
+        account: String = "device-credentials",
+        accessGroup: String? = nil
+    ) {
         self.service = service
+        self.account = account
+        self.accessGroup = accessGroup
     }
-
-    private var account: String { "device-credentials" }
 
     public func save(_ credentials: Credentials) throws {
         let payload = try JSONEncoder().encode(
@@ -65,11 +74,13 @@ public struct CredentialStore: Sendable {
     }
 
     private func baseQuery() -> [String: Any] {
-        [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if let accessGroup { query[kSecAttrAccessGroup as String] = accessGroup }
+        return query
     }
 
     private struct Stored: Codable {

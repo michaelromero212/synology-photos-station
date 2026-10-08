@@ -195,6 +195,9 @@ final class BackupEngine {
         let old = settings
         settings = new
         watchPower()
+        // iOS's background uploads follow the same settings. See
+        // `BackgroundUploads`.
+        Task { await BackgroundUploads.sync(settings: new, session: session) }
         guard new.enabled else {
             if old.enabled { stop() }
             return
@@ -221,6 +224,7 @@ final class BackupEngine {
     func enableBackgroundRuns() {
         BackupScheduler.schedule(requiresPower: settings.chargingOnly)
         startObservingLibrary()
+        Task { await BackgroundUploads.sync(settings: settings, session: session) }
         // So the NAS knows from the start whether this device is one worth
         // waking — see `reportBackupState`.
         reportBackupState(force: true)
@@ -324,6 +328,7 @@ final class BackupEngine {
     func retire() {
         stop()
         disableBackgroundRuns()
+        BackgroundUploads.signedOut()
         endBackgroundTime()
         if let powerObserver {
             NotificationCenter.default.removeObserver(powerObserver)
@@ -468,7 +473,10 @@ final class BackupEngine {
         reconcileHolds(context)
 
         try? context.save()
-        if let mark { LibraryChangeHistory.save(mark) }
+        if let mark {
+            LibraryChangeHistory.save(mark)
+            BackgroundUploads.caughtUp(to: mark)
+        }
         refreshProgress(context)
         statusText = added > 0 ? "Queued \(added) new item\(added == 1 ? "" : "s")" : "Up to date"
     }
@@ -494,6 +502,10 @@ final class BackupEngine {
         // is read or after the new mark — never lost between the two. Reading
         // it twice costs nothing: the queue already knows it.
         let now = LibraryChangeHistory.currentMark()
+        // First, what iOS sent while the app was closed, so those photos are
+        // known before the history below names them. See
+        // `BackgroundUploads.absorb`.
+        BackgroundUploads.absorb(into: ModelContext(container))
         // Off the main actor. A long absence can be a long history.
         let changes = await Task.detached(priority: .userInitiated) {
             LibraryChangeHistory.changesSinceMark()
@@ -506,7 +518,10 @@ final class BackupEngine {
                 await enqueueEdits(withIdentifiers: changes.updated)
             }
         }
-        if let now { LibraryChangeHistory.save(now) }
+        if let now {
+            LibraryChangeHistory.save(now)
+            BackgroundUploads.caughtUp(to: now)
+        }
         return changes == nil ? .unavailable : .caughtUp
     }
 
@@ -970,6 +985,7 @@ final class BackupEngine {
             endBackgroundTime()
         }
         reclaimInterrupted(context)
+        BackgroundUploads.absorb(into: context)
         reconcileHolds(context)
         refreshProgress(context)
 
@@ -1342,6 +1358,9 @@ final class BackupEngine {
             try? context.save()
             return nil
         }
+
+        // Sent from here, so not by iOS as well. See `BackgroundUploads`.
+        BackgroundUploads.cancelJob(forKey: item.localIdentifier)
 
         do {
             let localIdentifier = item.localIdentifier

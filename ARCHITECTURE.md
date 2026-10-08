@@ -792,6 +792,49 @@ NAS minutes after it's taken with the app closed.
 `Scripts/smoke-background-upload.sh` covers it: 32 checks, including three
 copies racing and a race against a chunked upload's commit.
 
+**The phone's half** is `FrameStation-BackgroundUpload`, an ExtensionKit
+extension at the `com.apple.photos.background-upload` extension point (iOS 27;
+`BackgroundUploadExtension`). iOS runs it when the library gains photos and
+conditions allow. Each run:
+
+1. retries what failed in transit, once;
+2. records what finished, for the app, and acknowledges it;
+3. makes a job for each photo added since its mark, plus a Live Photo's motion
+   under one group id, then moves the mark past them.
+
+It compiles the app's own `PhotoLibraryScanner` and `UploadDescriptor`, so it
+sends the same files with the same details the app would. It shares three
+things with the app through the app group (`BackgroundUploadShared`): a copy
+of the sign-in in the group's keychain, what backup covers, and its progress.
+
+The two never send the same photo on purpose:
+
+- The app moves the extension's mark forward whenever it reads the library
+  itself, so the extension only sends photos the app hasn't seen.
+- At each catch-up and run, the app takes in the extension's results
+  (`BackgroundUploads.absorb`), marking those rows done. That way it never
+  reads and hashes a photo just to learn the NAS has it. A Live Photo half that
+  failed is queued under the group id its other half went with.
+- Right before the app sends a file, it cancels any job iOS hasn't finished
+  for it.
+
+When both send anyway, the advisory lock above keeps one copy.
+
+It's on only when backup is on, with full library access, against a NAS whose
+`/health` lists the capability, at the address the build declared. That
+address is iOS's `BackgroundUploadURLBase`, fixed at build time: it comes from
+`BACKGROUND_UPLOAD_HOST` in the gitignored `Config/Local.xcconfig`, because the
+repo is public. "Wi-Fi Only" maps to `preventsExpensiveNetworkAccess`. "Only
+While Charging" keeps it off, since iOS can't hold these jobs for a charger and
+the overnight `BGProcessingTask` already does. Each build has its own app group
+(`group.com.michaelromero.FrameStation`, `.dev` for Debug).
+
+To test without waiting for iOS's own schedule, turn on Settings → Developer →
+Photos → Resource Upload Test Mode on the phone (iOS 27), with a development
+build run from Xcode. It doesn't work in the simulator. Apple's forums
+reported that on iOS 26.4 the extension wasn't scheduled while iCloud Photos
+was on, which Apple called a bug; it's untested on iOS 27.
+
 ### JSON coding contract
 
 `FrameStationAPI.FrameStationCoding` supplies the encoder and decoder for **both**

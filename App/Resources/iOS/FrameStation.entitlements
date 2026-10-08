@@ -7,5 +7,11 @@
 	     sandbox host, which is what PushRegistrar.environment mirrors. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- Shared with the background upload extension: the sign-in it uploads
+	     with, what backup covers, and its record of what it sent. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(APP_GROUP)</string>
+	</array>
 </dict>
 </plist>

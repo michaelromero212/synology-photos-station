@@ -1,0 +1,15 @@
+// Build settings that differ from one household to the next.
+//
+// BACKGROUND_UPLOAD_HOST is the NAS's public host and port, such as
+// photos.example.com:8443. The background upload extension declares it to
+// iOS as its BackgroundUploadURLBase, which iOS checks every upload's
+// destination against, and the app compares it with the address it's
+// signed in to. Set it in Config/Local.xcconfig, which git ignores: this
+// repository is public, and the address is yours.
+//
+// Left empty, background uploads stay off and backup runs as it always has.
+// Just the host and port: in an xcconfig, // begins a comment, so a whole URL
+// would be cut off after "https:".
+BACKGROUND_UPLOAD_HOST =
+
+#include? "Local.xcconfig"

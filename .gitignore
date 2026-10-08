@@ -7,6 +7,9 @@ Server/*.p8
 # commands with <nas-host> / <nas-lan-ip> placeholders; this file is the only
 # place the actual values live, and this repository is public.
 DEPLOY.local.md
+# The same hostname, for the build: the background upload extension declares it
+# to iOS. Config/FrameStation.xcconfig includes this when it exists.
+Config/Local.xcconfig
 
 # Swift / SPM
 .build/

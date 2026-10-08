@@ -5,37 +5,6 @@ import Foundation
 import Photos
 import UIKit
 
-extension UploadDescriptor {
-    /// Reads a `PHAsset` directly. The timezone rule is the one documented in
-    /// ARCHITECTURE.md §4: never claim to know the photographer's offset, only
-    /// offer this device's as a fallback the server may use if the file records
-    /// none of its own.
-    init(asset: PHAsset, candidate: PhotoLibraryScanner.Candidate) {
-        self.init(
-            filename: candidate.filename,
-            mime: candidate.mime,
-            mediaType: candidate.mediaType,
-            width: asset.pixelWidth,
-            height: asset.pixelHeight,
-            durationMs: asset.duration > 0 ? Int(asset.duration * 1000) : nil,
-            capturedAt: asset.creationDate,
-            capturedTZOffset: nil,
-            capturedTZOffsetFallback: asset.creationDate.map {
-                TimeZone.current.secondsFromGMT(for: $0)
-            },
-            latitude: asset.location?.coordinate.latitude,
-            longitude: asset.location?.coordinate.longitude,
-            isRaw: candidate.isRaw,
-            liveGroupID: nil,
-            burstID: asset.burstIdentifier,
-            burstPick: asset.burstSelectionTypes.contains(.userPick)
-                || asset.burstSelectionTypes.contains(.autoPick),
-            subtypes: candidate.subtypes,
-            sourceLocalID: asset.localIdentifier
-        )
-    }
-}
-
 /// The photo-library end of uploading.
 ///
 /// Everything here is about getting bytes *out of PhotoKit*; the transfer

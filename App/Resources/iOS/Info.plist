@@ -27,6 +27,10 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>FSAppGroup</key>
+	<string>$(APP_GROUP)</string>
+	<key>FSBackgroundUploadURLBase</key>
+	<string>https://$(BACKGROUND_UPLOAD_HOST)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>

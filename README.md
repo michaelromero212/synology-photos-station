@@ -262,6 +262,21 @@ The container installs `libvips-tools`, `libheif1`, `exiftool`, and `ffmpeg`,
 and the build **fails** if vips lacks a HEIF loader — most of an iPhone library
 is HEIC, and that is not a thing to discover in production.
 
+### Background backup on iPhone
+
+On iOS 27 the app backs up new photos while it's closed, through PhotoKit's
+background upload extension. iOS needs the NAS's address at build time, so put
+its public host and port in `Config/Local.xcconfig`, which git ignores:
+
+```
+BACKGROUND_UPLOAD_HOST = photos.example.com:8443
+```
+
+Just the host and port: in an xcconfig, `//` starts a comment. Without it the
+app builds and backs up as before, only not while closed. The first build run
+from Xcode registers the extension and its app group with your developer
+account. See ARCHITECTURE.md, "Background uploads".
+
 ### Reverse geocoding
 
 Day headers and the Information panel map show `Culpeper, Virginia` rather than

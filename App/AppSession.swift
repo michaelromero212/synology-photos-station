@@ -234,6 +234,9 @@ final class AppSession {
             if case FrameStationClientError.http(let status, _) = error,
                status == 401 || status == 403 {
                 credentials.clear()
+                #if os(iOS)
+                BackgroundUploadShared.credentials?.clear()
+                #endif
                 SessionSnapshotStore.clear()
                 TimelineSnapshotStore.clearAll()
                 AlbumsSnapshotStore.clearAll()
@@ -318,6 +321,11 @@ final class AppSession {
         let key = "install.hasLaunchedBefore"
         guard !defaults.bool(forKey: key) else { return }
         credentials.clear()
+        #if os(iOS)
+        // And the copy made for backing up in the background, which outlives
+        // the app the same way.
+        BackgroundUploadShared.credentials?.clear()
+        #endif
         defaults.set(true, forKey: key)
     }
 
