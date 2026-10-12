@@ -170,7 +170,7 @@ struct AlbumController: RouteCollection {
             guard try await req.sql.raw("""
                 SELECT id FROM spaces WHERE id = \(bind: spaceID) AND kind = 'shared'
                 """).first(decoding: IDRow.self) != nil else {
-                throw Abort(.badRequest, reason: "Only a shared library has family albums.")
+                throw Abort(.badRequest, reason: "Only a shared library has shared albums.")
             }
         }
         guard let created = try await req.sql.raw("""

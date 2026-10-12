@@ -440,18 +440,22 @@ Non-membership answers 404, not 403, so a refused request can't be used to
 confirm that a space or asset exists.
 
 
-### Albums: yours alone, or the family's
+### Albums: Personal or Shared
 
-Two kinds, chosen when an album is made ("Who can see it" on New Album), and
-an album never moves between them.
+Two kinds, chosen on New Album with a Personal | Shared switch, and an album
+never moves between them. The switch's note says who will see the album and
+which section of the Albums page it will be in, and the page keeps the two
+apart: personal albums under **Albums** ("Only you can see these"), shared
+ones under **Shared Albums**, each beneath the shared library it belongs to.
+Where a person should look is never a guess.
 
-**Yours alone**, the default (`albums.space_id` null). It belongs to a
-*person*, not to a library. Nobody else can read one, list one, or learn that
-it exists, including members of a shared library whose photos it contains. An
-album like this is how you organize, not something you publish.
+**Personal**, the default (`albums.space_id` null). It belongs to a *person*,
+not to a library. Nobody else can read one, list one, or learn that it exists,
+including members of a shared library whose photos it contains. An album like
+this is how you organize, not something you publish.
 
-**A family album** (`space_id` set, migration 0031) belongs to a shared
-library, and every member sees it under Shared Albums. It holds only that
+**Shared** (a "family album" in the code; `space_id` set, migration 0031)
+belongs to a shared library, and every member sees it. It holds only that
 library's photos. Adding one from your own library shares it in first: a copy
 in the library, the original untouched, and the usual "added photos" notice to
 the family. This runs through `MediaEditController.shareIn`, the same code as
@@ -461,9 +465,10 @@ taken out by whoever added it, the creator or the owner. Viewers only look.
 Leaving the library takes its albums off your list; they stay for everyone
 still in it.
 
-A shared *library* is the family's photos; a shared *album* is a set of them
-with a name. The app calls libraries "Shared Libraries" everywhere for that
-reason. They were "Shared Albums" until family albums existed.
+A shared *library* is everything its members share; a shared *album* is a set
+of those photos with a name. On the Albums page each library heads its own
+albums under Shared Albums. Menus that put photos into a library say "Shared
+Library".
 
 For both kinds, `album_assets` references a `space_asset` (the placement)
 rather than the bare asset, and every read re-checks membership. So a personal

@@ -429,8 +429,7 @@ struct AlbumsView: View {
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
-                    family(store, side: side)
-                    sharedLibraries()
+                    shared(store, side: side)
                     if let space = session.personalSpace {
                         places(space: space)
                     }
@@ -569,29 +568,14 @@ struct AlbumsView: View {
         }
     }
 
-    /// The albums that are yours alone.
+    /// Personal albums, and only those. New Album's "Personal" says this is
+    /// where one goes, and the note under the heading says who sees them.
     @ViewBuilder
     private func manual(_ store: AlbumStore, side: CGFloat) -> some View {
         let albums = store.personal
         if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Your Albums")
-                albumGrid(albums, store: store, side: side)
-            }
-        }
-    }
-
-    /// Albums in the shared libraries you're in: every member sees them, so
-    /// they sit apart from yours, each saying whose library it's in.
-    ///
-    /// On every platform, unlike the libraries below them. These are albums,
-    /// and the Mac's sidebar lists libraries, not albums.
-    @ViewBuilder
-    private func family(_ store: AlbumStore, side: CGFloat) -> some View {
-        let albums = store.family
-        if !albums.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Shared Albums")
+                sectionHeader("Albums", note: "Only you can see these.")
                 albumGrid(albums, store: store, side: side)
             }
         }
@@ -648,7 +632,8 @@ struct AlbumsView: View {
         return session.sharedSpaces.first { $0.id == spaceID }?.name
     }
 
-    /// What the family shares, on the same page as what you filed yourself.
+    /// Everything shared, in one section: each shared library you're in, then
+    /// the shared albums made in it.
     ///
     /// These had a tab of their own. It was the wrong shape twice over: a whole
     /// tab that was empty for anyone who shares nothing, and — for anyone who
@@ -657,41 +642,68 @@ struct AlbumsView: View {
     /// same page as your own albums, and it is right: the thing that differs is
     /// who can see them, not what they are.
     ///
+    /// The library and its albums together, under one heading, where they were
+    /// briefly two sections: which shared album belongs to which library then
+    /// needs no explaining, and personal albums are only ever under Albums.
+    ///
     /// Below your own albums rather than above. Yours are the ones you reach
     /// for daily; these are the ones you visit when somebody adds to them, and
     /// the notification is what sends you.
     ///
-    /// Not on a Mac. A window has a sidebar, and the sidebar already gives every
-    /// shared album a row of its own — putting them here as well would be the
-    /// same list twice, and these rows would be the dead half of it, since the
-    /// destination that answers them belongs to the tab bar's stack.
-    ///
-    /// "Shared Libraries", not "Shared Albums", since albums can now live inside
-    /// them: a library is where the family's photos are, and a shared album is
-    /// a set of them with a name.
+    /// No library rows on a Mac. A window has a sidebar, and the sidebar already
+    /// gives every shared library a row of its own — putting them here as well
+    /// would be the same list twice, and these rows would be the dead half of
+    /// it, since the destination that answers them belongs to the tab bar's
+    /// stack. The albums show there all the same.
     @ViewBuilder
-    private func sharedLibraries() -> some View {
-        #if !os(macOS)
-        let shared = session.sharedSpaces
-        if !shared.isEmpty {
+    private func shared(_ store: AlbumStore, side: CGFloat) -> some View {
+        let albums = store.family
+        #if os(macOS)
+        let libraries: [SpaceDTO] = []
+        #else
+        let libraries = session.sharedSpaces
+        #endif
+        if !albums.isEmpty || !libraries.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Shared Libraries")
-                VStack(spacing: 8) {
-                    ForEach(shared) { space in
+                sectionHeader("Shared Albums", note: sharedNote)
+                VStack(alignment: .leading, spacing: 14) {
+                    #if !os(macOS)
+                    ForEach(libraries) { space in
                         NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
-                            sharedAlbumRow(space)
+                            libraryRow(space)
                         }
                         .buttonStyle(.plain)
+                        .padding(.horizontal, spacing)
+                        let inside = albums.filter { $0.spaceID == space.id }
+                        if !inside.isEmpty {
+                            albumGrid(inside, store: store, side: side)
+                        }
+                    }
+                    #endif
+                    // The albums of a library this device hasn't heard of yet,
+                    // and every one on a Mac: shown, never dropped.
+                    let elsewhere = albums.filter { album in
+                        !libraries.contains { $0.id == album.spaceID }
+                    }
+                    if !elsewhere.isEmpty {
+                        albumGrid(elsewhere, store: store, side: side)
                     }
                 }
-                .padding(.horizontal, spacing)
             }
         }
-        #endif
+    }
+
+    /// Who sees what's under Shared Albums.
+    private var sharedNote: String {
+        let names = session.sharedSpaces.map(\.name)
+        guard names.count == 1, let only = names.first else {
+            return "Everyone in a shared library can see its albums."
+        }
+        return "Everyone in \(only) can see these."
     }
 
     #if !os(macOS)
-    private func sharedAlbumRow(_ space: SpaceDTO) -> some View {
+    private func libraryRow(_ space: SpaceDTO) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "person.2.fill")
                 .font(.system(size: 17))
@@ -822,12 +834,21 @@ struct AlbumsView: View {
         .contentShape(Rectangle())
     }
 
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text)
-            .font(.system(.title3, design: .default, weight: .bold))
-            .tracking(-0.3)
-            .padding(.horizontal, spacing)
-            .padding(.bottom, 10)
+    /// With `note`, a line under the heading saying who can see what's in it:
+    /// the one thing that tells Albums and Shared Albums apart at a glance.
+    private func sectionHeader(_ text: String, note: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(text)
+                .font(.system(.title3, design: .default, weight: .bold))
+                .tracking(-0.3)
+            if let note {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, spacing)
+        .padding(.bottom, 10)
     }
 
 }
@@ -874,11 +895,13 @@ private struct AlbumCard: View {
     }
 }
 
-/// Making an album: a name, and who can see it.
+/// Making an album: a name, and Personal or Shared.
 ///
-/// Yours alone unless you choose a shared library, where everyone in it sees
-/// the album and can add to it. The choice is made here, once: an album
-/// doesn't move between the two.
+/// Personal unless you choose Shared, which puts it in a shared library where
+/// everyone sees it and can add to it. The footer says who can see it and
+/// which section of the Albums page it will be in, so nobody has to guess
+/// where it went. The choice is made here, once: an album doesn't move
+/// between the two.
 struct NewAlbumSheet: View {
     @Bindable var session: AppSession
     let store: AlbumStore
@@ -886,16 +909,25 @@ struct NewAlbumSheet: View {
     var spaceAssetIDs: [UUID] = []
     let onDone: (AlbumDTO?) -> Void
 
+    enum Kind: Hashable { case personal, shared }
+
     @State private var name = ""
-    /// The shared library it goes in. Nil for yours alone.
+    @State private var kind = Kind.personal
+    /// Which shared library, when there's more than one to choose from.
     @State private var library: UUID?
     @State private var isCreating = false
 
-    /// The shared libraries a family album can go in: the ones you can add to,
-    /// and only on a NAS that has family albums.
+    /// The shared libraries a shared album can go in: the ones you can add
+    /// to, and only on a NAS that has shared albums.
     private var libraries: [SpaceDTO] {
         guard store.supportsFamily else { return [] }
         return session.sharedSpaces.filter { $0.role != .viewer }
+    }
+
+    /// The library a shared album would go in: the one picked, or the only one.
+    private var chosen: SpaceDTO? {
+        guard kind == .shared else { return nil }
+        return libraries.first { $0.id == library } ?? libraries.first
     }
 
     private var trimmed: String {
@@ -913,26 +945,27 @@ struct NewAlbumSheet: View {
                 if libraries.isEmpty {
                     Section {
                     } footer: {
-                        Text("Only you can see this album, even when it holds photos from a shared library.")
+                        Text(Self.personalNote)
                     }
                 } else {
                     Section {
-                        Picker("Who can see it", selection: $library) {
-                            Text("Only Me").tag(UUID?.none)
-                            ForEach(libraries) { space in
-                                Text(space.name).tag(UUID?.some(space.id))
+                        Picker("Album type", selection: $kind) {
+                            Text("Personal").tag(Kind.personal)
+                            Text("Shared").tag(Kind.shared)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        if kind == .shared, libraries.count > 1 {
+                            Picker("Shared with", selection: Binding(
+                                get: { chosen?.id }, set: { library = $0 }
+                            )) {
+                                ForEach(libraries) { space in
+                                    Text(space.name).tag(UUID?.some(space.id))
+                                }
                             }
                         }
-                        #if !os(tvOS)
-                        .pickerStyle(.inline)
-                        // The section header says it; inline, the label would
-                        // be a second "Who can see it" as the list's first row.
-                        .labelsHidden()
-                        #endif
-                    } header: {
-                        Text("Who can see it")
                     } footer: {
-                        Text(footer)
+                        Text(chosen.map(Self.sharedNote) ?? Self.personalNote)
                     }
                 }
             }
@@ -949,7 +982,7 @@ struct NewAlbumSheet: View {
                         isCreating = true
                         Task {
                             let album = await store.create(
-                                name: trimmed, spaceID: library, spaceAssetIDs: spaceAssetIDs
+                                name: trimmed, spaceID: chosen?.id, spaceAssetIDs: spaceAssetIDs
                             )
                             isCreating = false
                             onDone(album)
@@ -961,11 +994,12 @@ struct NewAlbumSheet: View {
         }
     }
 
-    private var footer: String {
-        guard let library, let space = libraries.first(where: { $0.id == library }) else {
-            return "Only you can see this album, even when it holds photos from a shared library."
-        }
-        return "Everyone in \(space.name) can see this album and add to it. "
-            + "Photos you add from your own library are shared to \(space.name) too."
+    static let personalNote = "Only you can see a personal album, even when it holds photos "
+        + "from a shared library. You'll find it under Albums."
+
+    static func sharedNote(_ space: SpaceDTO) -> String {
+        "Everyone in \(space.name) can see a shared album and add to it. You'll find it "
+            + "under Shared Albums. Photos you add from your own library are shared to "
+            + "\(space.name) too."
     }
 }

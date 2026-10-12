@@ -38,7 +38,9 @@ struct AddToAlbumSheet: View {
                         }
 
                         if !store.personal.isEmpty {
-                            Section("Your Albums") {
+                            // The same two headings as the Albums page, so an
+                            // album is found under the same name in both.
+                            Section("Albums") {
                                 ForEach(store.personal) { album in
                                     row(album, systemImage: "rectangle.stack")
                                 }
