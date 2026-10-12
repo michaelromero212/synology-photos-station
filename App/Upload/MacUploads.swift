@@ -228,10 +228,11 @@ final class MacUploads {
 
         let id = item.id
         return try await FileUpload.send(
-            file: item.url, descriptor: descriptor, to: spaceID, client: client
-        ) { [weak self] phase in
-            Task { @MainActor in self?.record(phase, for: id) }
-        }
+            file: item.url, descriptor: descriptor, to: spaceID, client: client,
+            onPhase: { [weak self] phase in
+                Task { @MainActor in self?.record(phase, for: id) }
+            }
+        )
     }
 
     private func record(_ phase: FileUpload.Phase, for id: UUID) {
