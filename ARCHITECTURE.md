@@ -440,24 +440,50 @@ Non-membership answers 404, not 403, so a refused request can't be used to
 confirm that a space or asset exists.
 
 
-### Albums are private, and borrow their permissions rather than owning any
+### Albums: yours alone, or the family's
 
-An album belongs to a *person*, not to a library. Nobody else can read one,
-list one, or learn that it exists — including members of a shared library whose
-photos it contains. That is the whole point: an album is how you organize, not
-something you publish.
+Two kinds, chosen when an album is made ("Who can see it" on New Album), and
+an album never moves between them.
 
-`album_assets` references a `space_asset` — the placement — rather than the bare
-asset, and every read re-checks that the owner is still a member of each
-placement's space. So an album may draw from a shared library, and leaving that
-library takes those photos back out of the album rather than leaving a private
-window into a space you were removed from. Adding a placement you can't see
-isn't an error; the insert matches no row and nothing happens, which also means
-it can't be used to probe whether an id exists.
+**Yours alone**, the default (`albums.space_id` null). It belongs to a
+*person*, not to a library. Nobody else can read one, list one, or learn that
+it exists, including members of a shared library whose photos it contains. An
+album like this is how you organize, not something you publish.
 
-Deleting an album deletes the collection, never the photos. Covers must be a
-photo the album actually contains, or the cover field becomes a way to display
-an arbitrary asset.
+**A family album** (`space_id` set, migration 0031) belongs to a shared
+library, and every member sees it under Shared Albums. It holds only that
+library's photos. Adding one from your own library shares it in first: a copy
+in the library, the original untouched, and the usual "added photos" notice to
+the family. This runs through `MediaEditController.shareIn`, the same code as
+Add to Shared Library, so the two paths can't drift. Contributors add. The
+album's creator or the library's owner renames or deletes it. A photo in it is
+taken out by whoever added it, the creator or the owner. Viewers only look.
+Leaving the library takes its albums off your list; they stay for everyone
+still in it.
+
+A shared *library* is the family's photos; a shared *album* is a set of them
+with a name. The app calls libraries "Shared Libraries" everywhere for that
+reason. They were "Shared Albums" until family albums existed.
+
+For both kinds, `album_assets` references a `space_asset` (the placement)
+rather than the bare asset, and every read re-checks membership. So a personal
+album may draw from a shared library, and leaving that library takes those
+photos back out of the album rather than leaving a private window into a space
+you were removed from. Adding a placement you can't see isn't an error: the
+insert matches no row and nothing happens, which also means it can't be used to
+probe whether an id exists. Anything that would confirm an album exists is a
+404 to someone who can't see it.
+
+Old apps keep working: the list includes family albums only when asked
+(`?shared=true`), so an app from before them never files one under "Your
+Albums". The app offers a family album only after the server has said it has
+them (`includesFamilyAlbums`), so an older server can't quietly make one
+private.
+
+Deleting an album deletes the collection, never the photos, and the app asks
+first, saying so. Covers must be a photo the album actually contains, or the
+cover field becomes a way to display an arbitrary asset.
+`Scripts/smoke-family-albums.sh` checks every role against both kinds.
 
 
 ### The File Station tree

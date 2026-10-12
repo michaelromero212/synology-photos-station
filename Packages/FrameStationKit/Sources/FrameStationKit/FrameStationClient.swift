@@ -144,8 +144,12 @@ public actor FrameStationClient {
 
     // MARK: - Albums
 
-    public func albums() async throws -> AlbumListResponse {
-        try await send(.get, "v1/albums")
+    /// Your albums, and with `includeFamily` the family albums of every shared
+    /// library you're in. Asked for, so an app that predates them never sees
+    /// them; a server that predates them ignores the question and says so by
+    /// leaving `includesFamilyAlbums` out.
+    public func albums(includeFamily: Bool = false) async throws -> AlbumListResponse {
+        try await send(.get, includeFamily ? "v1/albums?shared=true" : "v1/albums")
     }
 
     public func createAlbum(_ body: CreateAlbumRequest) async throws -> AlbumDTO {

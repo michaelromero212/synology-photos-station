@@ -74,7 +74,7 @@ struct MacRootView: View {
             // Each space by name, rather than a "Shared" row that asks again.
             let shared = session.spaces.filter { $0.kind == .shared }
             if !shared.isEmpty {
-                Section("Shared Albums") {
+                Section("Shared Libraries") {
                     ForEach(shared) { space in
                         Label(space.name, systemImage: "person.2")
                             .tag(MacDestination.space(space.id))
@@ -97,7 +97,7 @@ struct MacRootView: View {
             Section("Utilities") {
                 Label("Recently Deleted", systemImage: "trash")
                     .tag(MacDestination.recentlyDeleted)
-                Label("Manage Shared Albums", systemImage: "person.2.badge.gearshape")
+                Label("Manage Shared Libraries", systemImage: "person.2.badge.gearshape")
                     .tag(MacDestination.spaces)
             }
         }
@@ -191,7 +191,7 @@ struct MacRootView: View {
                 ContentUnavailableView {
                     Label("Album Unavailable", systemImage: "person.2.slash")
                 } description: {
-                    Text("This shared album is no longer available to you.")
+                    Text("This shared library is no longer available to you.")
                 }
             }
 

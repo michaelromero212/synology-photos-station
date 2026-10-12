@@ -27,6 +27,10 @@ enum FileUpload {
 
     struct Result {
         let assetID: UUID?
+        /// Where the photo now sits in the space it was sent to, so whoever
+        /// sent it can point at exactly that one. Nil where the server had no
+        /// copy to place.
+        let spaceAssetID: UUID?
         /// The server already had these bytes, so only a placement was created.
         let deduplicated: Bool
         /// Whether the space gained a photograph it didn't already hold — true
@@ -91,6 +95,7 @@ enum FileUpload {
             // Already on the NAS — another family member's copy, or an earlier
             // run. Link it rather than sending the bytes again.
             var added = false
+            var placement: UUID?
             if let assetID = probe.assetID {
                 let linked = try await client.linkAsset(
                     spaceID: spaceID, assetID: assetID,
@@ -99,13 +104,14 @@ enum FileUpload {
                 // The server logs a change only when it placed something; a
                 // space that already held the photo gets a sequence of zero.
                 added = linked.changeSeq > 0
+                placement = linked.spaceAssetID
             }
             #if os(iOS)
             await rememberLocalOriginal(assetID: probe.assetID, descriptor: descriptor)
             #endif
             return Result(
-                assetID: probe.assetID, deduplicated: true, addedToSpace: added,
-                byteSize: size, sha256: digest
+                assetID: probe.assetID, spaceAssetID: placement, deduplicated: true,
+                addedToSpace: added, byteSize: size, sha256: digest
             )
 
         case .need, .partial:
@@ -134,8 +140,8 @@ enum FileUpload {
             )
             #endif
             return Result(
-                assetID: committed.assetID, deduplicated: false, addedToSpace: true,
-                byteSize: size, sha256: digest
+                assetID: committed.assetID, spaceAssetID: committed.spaceAssetID,
+                deduplicated: false, addedToSpace: true, byteSize: size, sha256: digest
             )
         }
     }

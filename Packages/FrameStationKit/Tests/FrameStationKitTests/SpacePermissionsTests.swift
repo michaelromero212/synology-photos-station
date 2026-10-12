@@ -9,7 +9,7 @@ struct SpacePermissionsTests {
     private let me = UUID()
     private let someoneElse = UUID()
 
-    @Test("In a shared album, what you added is yours to remove")
+    @Test("In a shared library, what you added is yours to remove")
     func ownPhotoInSharedAlbum() {
         #expect(SpacePermissions.mayRemove(kind: .shared, role: .contributor, addedBy: me, user: me))
     }
@@ -32,7 +32,7 @@ struct SpacePermissionsTests {
         #expect(!SpacePermissions.mayRemove(kind: .shared, role: .viewer, addedBy: me, user: me))
     }
 
-    @Test("Without knowing who's asking, nothing in a shared album can go")
+    @Test("Without knowing who's asking, nothing in a shared library can go")
     func unknownUser() {
         #expect(!SpacePermissions.mayRemove(kind: .shared, role: .contributor, addedBy: nil, user: nil))
     }

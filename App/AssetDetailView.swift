@@ -681,11 +681,11 @@ struct AssetDetailView: View {
                         }
                     }
                 } label: {
-                    Label("Add to Shared Album", systemImage: model.addedTo.isEmpty
+                    Label("Add to Shared Library", systemImage: model.addedTo.isEmpty
                           ? "rectangle.stack.badge.plus"
                           : "rectangle.stack.badge.person.crop.fill")
                 }
-                .help("Add to a shared album")
+                .help("Add to a shared library")
             }
         }
 
@@ -1214,7 +1214,7 @@ struct AssetDetailView: View {
 
         if !session.sharedSpaces.filter({ $0.id != space.id }).isEmpty {
             Divider()
-            Menu("Add to Shared Album") {
+            Menu("Add to Shared Library") {
                 ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
                     Button(target.name) {
                         Task { [model = currentModel] in

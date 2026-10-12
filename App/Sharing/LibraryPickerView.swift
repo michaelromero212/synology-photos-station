@@ -95,6 +95,9 @@ struct LibraryPickerView: View {
     let space: SpaceDTO
     let onFinished: (Int) -> Void
     let onCancel: () -> Void
+    /// Where exactly the picked photos landed, once the last one has. Long
+    /// after the sheet has closed, for whoever has something to do with them.
+    var onLanded: (@MainActor ([UUID]) -> Void)?
 
     @State private var model = LibraryPickerModel()
     private let columns = 4
@@ -187,7 +190,11 @@ struct LibraryPickerView: View {
         let chosen = model.chosenAssets()
         guard !chosen.isEmpty else { return }
         let pending = session.pendingUploads
-        Task { await pending.upload(chosen, to: space, client: client) }
+        let onLanded = onLanded
+        Task {
+            let batch = await pending.upload(chosen, to: space, client: client)
+            onLanded?(batch.placements)
+        }
         onFinished(chosen.count)
     }
 }

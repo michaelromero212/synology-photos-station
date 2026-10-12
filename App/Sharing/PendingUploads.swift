@@ -148,11 +148,12 @@ final class PendingUploads {
     /// home wifi for the rest of the house. (It used to be serial "to match the
     /// backup queue"; the backup queue went parallel, so this follows.)
     ///
-    /// Returns the number that failed, for whoever wants to say so.
+    /// Returns how many failed, and where the rest landed, for whoever wants
+    /// to say so or to do something with exactly those photos.
     @discardableResult
     func upload(
         _ assets: [PHAsset], to space: SpaceDTO, client: FrameStationClient
-    ) async -> Int {
+    ) async -> Batch {
         let queued = assets.map {
             Item(
                 localIdentifier: $0.localIdentifier,
@@ -161,6 +162,8 @@ final class PendingUploads {
                 state: .pending
             )
         }
+        let keys = queued.map { Self.placementKey($0.localIdentifier, in: $0.spaceID) }
+        awaited.formUnion(keys)
         items.append(contentsOf: queued)
         // Written down before a byte moves, so an interruption leaves a record
         // rather than a gap.
@@ -179,7 +182,26 @@ final class PendingUploads {
 
         let failed = await drain(spaceID: space.id, client: client)
         completedBatches += 1
-        return failed
+        let placements = keys.compactMap { placed.removeValue(forKey: $0) }
+        awaited.subtract(keys)
+        return Batch(failed: failed, placements: placements)
+    }
+
+    /// What one batch did.
+    struct Batch {
+        let failed: Int
+        /// Where its photos landed in the space, in the order they were picked.
+        let placements: [UUID]
+    }
+
+    /// The photos a running batch is waiting to hear about, and where those
+    /// have landed. Only theirs: a photo resumed at launch has nobody waiting
+    /// for it, and keeping its placement would only grow this.
+    private var awaited: Set<String> = []
+    private var placed: [String: UUID] = [:]
+
+    private static func placementKey(_ localIdentifier: String, in spaceID: UUID) -> String {
+        "\(spaceID.uuidString)/\(localIdentifier)"
     }
 
     /// Runs the lanes until this space has nothing outstanding.
@@ -244,6 +266,10 @@ final class PendingUploads {
                     LocalOriginals.shared.record(
                         assetID: assetID, localIdentifier: claimed.localIdentifier
                     )
+                }
+                let key = Self.placementKey(claimed.localIdentifier, in: spaceID)
+                if awaited.contains(key), let placement = result.spaceAssetID {
+                    placed[key] = placement
                 }
                 // Before the `defer` above lets go of the pending tile, so the
                 // photograph is never absent from the grid in between. Not for

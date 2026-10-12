@@ -38,7 +38,7 @@ struct MoveToSheet: View {
                         Label("Nowhere to add these", systemImage: "person.2")
                     } description: {
                         Text(
-                            "Photos can only be added to a shared album. "
+                            "Photos can only be added to a shared library. "
                             + "Create one and everyone in it sees the same photos."
                         )
                     }

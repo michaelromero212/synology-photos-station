@@ -15,12 +15,12 @@ struct AddToAlbumSheet: View {
     let spaceAssetIDs: [UUID]
     let onFinished: (String?) -> Void
 
-    @State private var albums: [AlbumDTO] = []
     @State private var isLoading = true
     @State private var isWorking = false
-    @State private var newName = ""
     @State private var showNewAlbum = false
     @State private var failure: String?
+
+    private var store: AlbumStore { session.albumStore() }
 
     var body: some View {
         NavigationStack {
@@ -37,21 +37,27 @@ struct AddToAlbumSheet: View {
                             }
                         }
 
-                        if !albums.isEmpty {
+                        if !store.personal.isEmpty {
                             Section("Your Albums") {
-                                ForEach(albums) { album in
-                                    Button {
-                                        Task { await add(to: album) }
-                                    } label: {
-                                        HStack {
-                                            Label(album.name, systemImage: "rectangle.stack")
-                                                .foregroundStyle(.primary)
-                                            Spacer()
-                                            Text("\(album.itemCount)")
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
+                                ForEach(store.personal) { album in
+                                    row(album, systemImage: "rectangle.stack")
                                 }
+                            }
+                        }
+
+                        // Only the ones you can add to. Adding shares a photo
+                        // with the whole library, which the footer says before
+                        // anyone taps.
+                        let family = store.family.filter(\.mayAdd)
+                        if !family.isEmpty {
+                            Section {
+                                ForEach(family) { album in
+                                    row(album, systemImage: "person.2.crop.square.stack")
+                                }
+                            } header: {
+                                Text("Shared Albums")
+                            } footer: {
+                                Text("Photos from your own library are shared with everyone in the album's library too.")
                             }
                         }
 
@@ -74,12 +80,17 @@ struct AddToAlbumSheet: View {
                     Button("Cancel") { onFinished(nil) }
                 }
             }
-            .alert("New Album", isPresented: $showNewAlbum) {
-                TextField("Album name", text: $newName)
-                Button("Cancel", role: .cancel) { newName = "" }
-                Button("Create") { Task { await create() } }
-            } message: {
-                Text(title)
+            // The same sheet as the Albums page's New Album, with these photos
+            // in it from the start: name and contents in one call, so a new
+            // album is never briefly empty on the server, and the same choice
+            // of who can see it.
+            .sheet(isPresented: $showNewAlbum) {
+                NewAlbumSheet(
+                    session: session, store: store, spaceAssetIDs: spaceAssetIDs
+                ) { album in
+                    showNewAlbum = false
+                    if let album { onFinished("Added to \(album.name)") }
+                }
             }
             .task {
                 await load()
@@ -92,10 +103,25 @@ struct AddToAlbumSheet: View {
         return "\(count) item\(count == 1 ? "" : "s")"
     }
 
+    private func row(_ album: AlbumDTO, systemImage: String) -> some View {
+        Button {
+            Task { await add(to: album) }
+        } label: {
+            HStack {
+                Label(album.name, systemImage: systemImage)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text("\(album.itemCount)")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The Albums page's own list, asked again, so this sheet and that page
+    /// never disagree about what albums there are.
     private func load() async {
         defer { isLoading = false }
-        guard let client = session.client else { return }
-        albums = (try? await client.albums().albums) ?? []
+        await store.refresh()
     }
 
     private func add(to album: AlbumDTO) async {
@@ -105,25 +131,6 @@ struct AddToAlbumSheet: View {
         do {
             _ = try await client.addToAlbum(
                 album.id, AlbumAssetsRequest(spaceAssetIDs: spaceAssetIDs)
-            )
-            albumsChanged()
-            onFinished("Added to \(album.name)")
-        } catch {
-            failure = error.localizedDescription
-        }
-    }
-
-    private func create() async {
-        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        newName = ""
-        guard !name.isEmpty, let client = session.client else { return }
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            // Name and contents in one call, so a new album is never briefly
-            // empty on the server.
-            let album = try await client.createAlbum(
-                CreateAlbumRequest(name: name, spaceAssetIDs: spaceAssetIDs)
             )
             albumsChanged()
             onFinished("Added to \(album.name)")

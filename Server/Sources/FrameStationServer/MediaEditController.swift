@@ -94,14 +94,6 @@ struct MediaEditController: RouteCollection {
             throw Abort(.forbidden, reason: "Photos can only be shared into a shared space.")
         }
 
-        struct SourceRow: Decodable {
-            let mediaType: String
-        }
-
-        struct PlacedRow: Decodable {
-            let assetID: UUID
-        }
-
         var landed: [UUID] = []
         var sources: [UUID] = []
         var already: [UUID] = []
@@ -112,79 +104,15 @@ struct MediaEditController: RouteCollection {
         // instead: each photo either arrives completely or not at all, and the
         // response says which ones did.
         for assetID in input.assetIDs {
-            // You may only place a photo you can already see. Without this,
-            // holding an asset id would be enough to pull any file in the
-            // household into a space you happen to belong to — and ids leak far
-            // more easily than blobs do. Skipped rather than refused, so one
-            // stale id in a batch doesn't discard the other forty-nine.
-            guard let source = try await req.sql.raw("""
-                SELECT a.media_type AS "mediaType" FROM assets a
-                WHERE a.id = \(bind: assetID)
-                  AND EXISTS (
-                      SELECT 1 FROM space_assets sa
-                      WHERE sa.asset_id = a.id AND sa.space_id = \(bind: sourceID)
-                        AND sa.deleted_at IS NULL
-                  )
-                """).first(decoding: SourceRow.self) else { continue }
-
-            // Already there: nothing to copy and nothing to announce. Sharing
-            // the same photo twice should be quiet, not a second notification.
-            //
-            // Quiet to the family, not to the person sharing. Which copy it is
-            // goes back with the response, so the app can say these were there
-            // already and point at them, rather than report "0 shared" and
-            // leave them thinking the share failed.
-            let existing = try await req.sql.raw("""
-                SELECT sa.asset_id AS "assetID" FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
-                WHERE sa.space_id = \(bind: destination.id) AND sa.deleted_at IS NULL
-                  AND a.sha256 = (SELECT sha256 FROM assets WHERE id = \(bind: assetID))
-                LIMIT 1
-                """).first(decoding: PlacedRow.self)
-            if let existing {
-                already.append(existing.assetID)
-                continue
+            guard let shared = try await Self.shareIn(
+                assetID: assetID, from: sourceID, to: destination.id, device: device, req: req
+            ) else { continue }
+            if shared.isNew {
+                landed.append(shared.assetID)
+                sources.append(assetID)
+            } else {
+                already.append(shared.assetID)
             }
-
-            let targetAssetID = try await UploadController.copyIntoSpace(
-                assetID: assetID, req: req
-            ) ?? assetID
-
-            try await req.withPinnedConnection { sql in
-                try await sql.raw("BEGIN").run()
-                do {
-                    guard let placement = try await sql.raw("""
-                        INSERT INTO space_assets
-                            (space_id, asset_id, uploaded_by_user_id, source_device_id)
-                        VALUES
-                            (\(bind: destination.id), \(bind: targetAssetID),
-                             \(bind: device.userID), \(bind: device.deviceID))
-                        ON CONFLICT (space_id, asset_id)
-                        DO UPDATE SET deleted_at = NULL
-                        RETURNING id
-                        """).first(decoding: IDRow.self) else {
-                        throw Abort(.internalServerError, reason: "Could not place asset in space.")
-                    }
-
-                    _ = try await ChangeLog.append(
-                        spaceID: destination.id, entity: "space_asset",
-                        entityID: placement.id, op: "insert", on: sql
-                    )
-                    try await ActivityTracker.record(
-                        spaceID: destination.id,
-                        userID: device.userID,
-                        mediaType: MediaType(rawValue: source.mediaType) ?? .photo,
-                        on: sql
-                    )
-                    try await sql.raw("COMMIT").run()
-                } catch {
-                    try? await sql.raw("ROLLBACK").run()
-                    throw error
-                }
-            }
-
-            landed.append(targetAssetID)
-            sources.append(assetID)
         }
 
         return ShareAssetsResponse(
@@ -194,6 +122,106 @@ struct MediaEditController: RouteCollection {
             destinationSpaceID: destination.id,
             alreadySharedAssetIDs: already
         )
+    }
+
+    /// One photo shared into a shared library: the library's copy, and where
+    /// it sits there.
+    struct SharedIn {
+        let assetID: UUID
+        let placementID: UUID
+        /// False when the library had it already.
+        let isNew: Bool
+    }
+
+    /// Shares one photo from `sourceID` into the shared library `destinationID`,
+    /// leaving it where it is. Nil when the photo isn't in the source.
+    ///
+    /// The caller has already checked that the person may share out of the
+    /// source and into the destination. `share` uses this, and so does adding a
+    /// photo from elsewhere to a family album, so the two can't drift apart.
+    static func shareIn(
+        assetID: UUID, from sourceID: UUID, to destinationID: UUID,
+        device: AuthenticatedDevice, req: Request
+    ) async throws -> SharedIn? {
+        struct SourceRow: Decodable {
+            let mediaType: String
+        }
+
+        struct PlacedRow: Decodable {
+            let id: UUID
+            let assetID: UUID
+        }
+
+        // You may only place a photo you can already see. Without this,
+        // holding an asset id would be enough to pull any file in the
+        // household into a space you happen to belong to — and ids leak far
+        // more easily than blobs do. Skipped rather than refused, so one
+        // stale id in a batch doesn't discard the other forty-nine.
+        guard let source = try await req.sql.raw("""
+            SELECT a.media_type AS "mediaType" FROM assets a
+            WHERE a.id = \(bind: assetID)
+              AND EXISTS (
+                  SELECT 1 FROM space_assets sa
+                  WHERE sa.asset_id = a.id AND sa.space_id = \(bind: sourceID)
+                    AND sa.deleted_at IS NULL
+              )
+            """).first(decoding: SourceRow.self) else { return nil }
+
+        // Already there: nothing to copy and nothing to announce. Sharing
+        // the same photo twice should be quiet, not a second notification.
+        //
+        // Quiet to the family, not to the person sharing. Which copy it is
+        // goes back with the response, so the app can say these were there
+        // already and point at them, rather than report "0 shared" and
+        // leave them thinking the share failed.
+        if let existing = try await req.sql.raw("""
+            SELECT sa.id, sa.asset_id AS "assetID" FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: destinationID) AND sa.deleted_at IS NULL
+              AND a.sha256 = (SELECT sha256 FROM assets WHERE id = \(bind: assetID))
+            LIMIT 1
+            """).first(decoding: PlacedRow.self) {
+            return SharedIn(assetID: existing.assetID, placementID: existing.id, isNew: false)
+        }
+
+        let targetAssetID = try await UploadController.copyIntoSpace(
+            assetID: assetID, req: req
+        ) ?? assetID
+
+        let placementID = try await req.withPinnedConnection { sql -> UUID in
+            try await sql.raw("BEGIN").run()
+            do {
+                guard let placement = try await sql.raw("""
+                    INSERT INTO space_assets
+                        (space_id, asset_id, uploaded_by_user_id, source_device_id)
+                    VALUES
+                        (\(bind: destinationID), \(bind: targetAssetID),
+                         \(bind: device.userID), \(bind: device.deviceID))
+                    ON CONFLICT (space_id, asset_id)
+                    DO UPDATE SET deleted_at = NULL
+                    RETURNING id
+                    """).first(decoding: IDRow.self) else {
+                    throw Abort(.internalServerError, reason: "Could not place asset in space.")
+                }
+
+                _ = try await ChangeLog.append(
+                    spaceID: destinationID, entity: "space_asset",
+                    entityID: placement.id, op: "insert", on: sql
+                )
+                try await ActivityTracker.record(
+                    spaceID: destinationID,
+                    userID: device.userID,
+                    mediaType: MediaType(rawValue: source.mediaType) ?? .photo,
+                    on: sql
+                )
+                try await sql.raw("COMMIT").run()
+                return placement.id
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+        return SharedIn(assetID: targetAssetID, placementID: placementID, isNew: true)
     }
 
     /// Corrects who a photo is attributed to.

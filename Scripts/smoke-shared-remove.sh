@@ -79,7 +79,7 @@ P1=$(upload "$MT" "$MINE" p1.jpg 321)
 
 echo "A member of the shared album"
 check "can't remove a photo someone else added" "403" "$(remove "$MT" "$SHARED" "$O1")"
-check "and is told why" "Only the person who added this, or the shared album's owner, can remove it." \
+check "and is told why" "Only the person who added this, or the shared library's owner, can remove it." \
   "$(jq '["reason"]' < "$ROOT/reply")"
 check "and the photo is still there" "f" "$(gone "$SHARED" "$O1")"
 check "can remove one they added" "204" "$(remove "$MT" "$SHARED" "$M1")"

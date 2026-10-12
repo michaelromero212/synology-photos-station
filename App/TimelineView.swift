@@ -969,7 +969,7 @@ struct TimelineView: View {
                     }
                 }
             } label: {
-                Label("Add to Shared Album", systemImage: "person.2")
+                Label("Add to Shared Library", systemImage: "person.2")
             }
         }
 
@@ -1082,9 +1082,9 @@ struct TimelineView: View {
         #endif
         let kept = selection.count - count
         if kept == 1 {
-            text += "\n\nOne other was added by someone else, so it stays. Only they or the shared album's owner can remove it."
+            text += "\n\nOne other was added by someone else, so it stays. Only they or the shared library's owner can remove it."
         } else if kept > 1 {
-            text += "\n\n\(kept) others were added by other people, so they stay. Only whoever added them or the shared album's owner can remove them."
+            text += "\n\n\(kept) others were added by other people, so they stay. Only whoever added them or the shared library's owner can remove them."
         }
         return text
     }
@@ -2043,7 +2043,7 @@ struct TimelineView: View {
                 Button {
                     showMoveTo = true
                 } label: {
-                    Label("Add to Shared Album", systemImage: "person.2.badge.plus")
+                    Label("Add to Shared Library", systemImage: "person.2.badge.plus")
                 }
                 Divider()
                 #endif

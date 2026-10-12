@@ -111,7 +111,7 @@ struct BackupSettingsView: View {
         "In File Station, photos and videos are in your home folder under "
             + "Photos › Personal, in a folder for the year and month each was "
             + "taken.\n\nBackup only ever goes to your own library. To put "
-            + "something in a shared album, choose it there — nothing reaches "
+            + "something in a shared library, choose it there — nothing reaches "
             + "the family by default."
     }
 
@@ -279,7 +279,7 @@ struct BackupSettingsView: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Get told when someone adds photos or videos to a shared album.")
+            Text("Get told when someone adds photos or videos to a shared library.")
         }
     }
 

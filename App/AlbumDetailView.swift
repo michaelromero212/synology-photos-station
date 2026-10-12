@@ -16,6 +16,8 @@ struct AlbumDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showRename = false
     @State private var newName = ""
+    @State private var confirmDelete = false
+    @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @State private var showPicker = false
     #endif
@@ -40,11 +42,15 @@ struct AlbumDetailView: View {
                 ContentUnavailableView {
                     Label("Empty album", systemImage: "rectangle.stack")
                 } description: {
-                    Text("Add photos from this device and they'll appear here.")
+                    Text(album.mayAdd
+                        ? "Add photos from this device and they'll appear here."
+                        : "Photos added to this album will appear here.")
                 } actions: {
                     #if os(iOS)
-                    Button("Add Photos") { showPicker = true }
-                        .buttonStyle(.borderedProminent)
+                    if album.mayAdd {
+                        Button("Add Photos") { showPicker = true }
+                            .buttonStyle(.borderedProminent)
+                    }
                     #endif
                 }
             } else {
@@ -58,37 +64,63 @@ struct AlbumDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    #if os(iOS)
-                    Button {
-                        showPicker = true
+            // Only what you may do here: a viewer of a shared library gets no
+            // menu at all, rather than one whose every item says no.
+            if album.mayAdd || album.mayManage {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        #if os(iOS)
+                        if album.mayAdd {
+                            Button {
+                                showPicker = true
+                            } label: {
+                                Label("Add Photos", systemImage: "plus")
+                            }
+                        }
+                        #endif
+                        if album.mayManage {
+                            Button {
+                                newName = album.name
+                                showRename = true
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                confirmDelete = true
+                            } label: {
+                                Label("Delete Album", systemImage: "trash")
+                            }
+                        }
                     } label: {
-                        Label("Add Photos", systemImage: "plus")
+                        Image(systemName: "ellipsis.circle")
                     }
-                    #endif
-                    Button {
-                        newName = album.name
-                        showRename = true
-                    } label: {
-                        Label("Rename", systemImage: "pencil")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
                 }
             }
+        }
+        .confirmationDialog(
+            "Delete “\(album.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
+        ) {
+            Button("Delete Album", role: .destructive) {
+                Task {
+                    if await store.delete(album) { dismiss() }
+                }
+            }
+        } message: {
+            Text(album.deletionMessage(library: library))
         }
         #if os(iOS)
         .sheet(isPresented: $showPicker) {
             if let space = session.personalSpace {
                 // Uploads land in your own library first, then join the album.
                 // An album is a view onto photos, never a place they live —
-                // otherwise a photo could exist only inside a collection.
+                // otherwise a photo could exist only inside a collection. A
+                // family album then shares them into its library.
                 LibraryPickerView(session: session, space: space) { _ in
                     showPicker = false
-                    Task { await addRecentUploads(to: space) }
                 } onCancel: {
                     showPicker = false
+                } onLanded: { placements in
+                    Task { await add(placements) }
                 }
             }
         }
@@ -138,12 +170,16 @@ struct AlbumDetailView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
-                            Button(role: .destructive) {
-                                Task { await remove(item) }
-                            } label: {
-                                // "Remove from Album", not "Delete" — the
-                                // photo stays in the library.
-                                Label("Remove from Album", systemImage: "minus.circle")
+                            // Whose photo it is to take out of a family album
+                            // is the NAS's call, and it says why when it's no.
+                            if album.mayAdd {
+                                Button(role: .destructive) {
+                                    Task { await remove(item) }
+                                } label: {
+                                    // "Remove from Album", not "Delete" — the
+                                    // photo stays in the library.
+                                    Label("Remove from Album", systemImage: "minus.circle")
+                                }
                             }
                         }
                     }
@@ -188,26 +224,24 @@ struct AlbumDetailView: View {
         }
     }
 
+    /// The shared library a family album is in, by name.
+    private var library: String? {
+        guard let spaceID = album.spaceID else { return nil }
+        return session.sharedSpaces.first { $0.id == spaceID }?.name
+    }
+
     #if os(iOS)
-    /// After the picker uploads into the space, pull the newest placements in
-    /// and attach them.
+    /// Adds exactly the photos the picker sent, once they're on the NAS.
     ///
-    /// Reads the space's own timeline rather than tracking ids through the
-    /// upload: the picker's job is to get photos into a library, and an album
-    /// is a second, separate step that shouldn't complicate it.
-    private func addRecentUploads(to space: SpaceDTO) async {
-        guard let client = session.client else { return }
+    /// This used to add whatever was newest in the library's last three days.
+    /// The picker closes before its uploads finish, so that was rarely what had
+    /// been picked, and in a family album it would have shared the rest of
+    /// those days with everyone.
+    private func add(_ placements: [UUID]) async {
+        guard !placements.isEmpty, let client = session.client else { return }
         do {
-            let existing = Set(items.map(\.id))
-            let manifest = try await client.timeline(spaceID: space.id, zoom: TimelineZoom.day)
-            var candidates: [UUID] = []
-            for bucket in manifest.buckets.prefix(3) {
-                let page = try await client.bucket(spaceID: space.id, key: bucket.key, zoom: TimelineZoom.day)
-                candidates.append(contentsOf: page.items.map(\.id).filter { !existing.contains($0) })
-            }
-            guard !candidates.isEmpty else { return }
             album = try await client.addToAlbum(
-                album.id, AlbumAssetsRequest(spaceAssetIDs: candidates)
+                album.id, AlbumAssetsRequest(spaceAssetIDs: placements)
             )
             await load()
             await store.refresh()

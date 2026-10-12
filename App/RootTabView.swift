@@ -418,7 +418,7 @@ struct RootTabView: View {
             ContentUnavailableView {
                 Label("Album unavailable", systemImage: "person.2.slash")
             } description: {
-                Text("This shared album isn't available to you any more.")
+                Text("This shared library isn't available to you anymore.")
             }
         }
     }
@@ -582,7 +582,7 @@ struct MoreView: View {
                 // modifier on the screen itself.
                 SpacesView(session: session)
             } label: {
-                Label("Manage Shared Albums", systemImage: "person.2.badge.gearshape")
+                Label("Manage Shared Libraries", systemImage: "person.2.badge.gearshape")
             }
             #if os(iOS)
             NavigationLink {

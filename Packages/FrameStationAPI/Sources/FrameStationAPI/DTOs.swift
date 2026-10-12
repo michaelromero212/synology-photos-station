@@ -101,7 +101,7 @@ public enum SpacePermissions {
 
     /// Why a removal was refused, in the words both the server and the apps use.
     public static let removalRefusal =
-        "Only the person who added this, or the shared album's owner, can remove it."
+        "Only the person who added this, or the shared library's owner, can remove it."
 }
 
 // MARK: - Auth
@@ -257,6 +257,8 @@ public struct PlaybackURLResponse: Codable, Sendable, Hashable {
 
 // MARK: - Albums
 
+/// An album somebody made by hand: yours alone, or a family album that
+/// belongs to a shared library.
 public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let id: UUID
     public let name: String
@@ -265,10 +267,20 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let coverAssetID: UUID?
     public let createdAt: Date
     public let updatedAt: Date
+    /// The shared library a family album belongs to. Nil for an album that's
+    /// yours alone, and from a server that predates family albums.
+    public let spaceID: UUID?
+    /// Whether you may rename or delete it: always for your own; for a family
+    /// album, if you made it or own its library. Nil from an older server,
+    /// where every album was your own.
+    public let canManage: Bool?
+    /// Whether you may add photos. False in a library you can only view.
+    public let canAdd: Bool?
 
     public init(
         id: UUID, name: String, itemCount: Int,
-        coverAssetID: UUID?, createdAt: Date, updatedAt: Date
+        coverAssetID: UUID?, createdAt: Date, updatedAt: Date,
+        spaceID: UUID? = nil, canManage: Bool? = nil, canAdd: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -276,22 +288,40 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
         self.coverAssetID = coverAssetID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.spaceID = spaceID
+        self.canManage = canManage
+        self.canAdd = canAdd
     }
+
+    public var isFamily: Bool { spaceID != nil }
+    public var mayManage: Bool { canManage ?? true }
+    public var mayAdd: Bool { canAdd ?? true }
 }
 
 public struct AlbumListResponse: Codable, Sendable {
     public let albums: [AlbumDTO]
-    public init(albums: [AlbumDTO]) { self.albums = albums }
+    /// True when the list includes family albums, which a server only does
+    /// when it has them. Nil from an older server: offer no family albums.
+    public let includesFamilyAlbums: Bool?
+
+    public init(albums: [AlbumDTO], includesFamilyAlbums: Bool? = nil) {
+        self.albums = albums
+        self.includesFamilyAlbums = includesFamilyAlbums
+    }
 }
 
 public struct CreateAlbumRequest: Codable, Sendable {
     public let name: String
     /// Optional first contents, so "select photos → new album" is one call.
     public let spaceAssetIDs: [UUID]
+    /// The shared library a family album belongs to. Nil for one that's yours
+    /// alone.
+    public let spaceID: UUID?
 
-    public init(name: String, spaceAssetIDs: [UUID] = []) {
+    public init(name: String, spaceAssetIDs: [UUID] = [], spaceID: UUID? = nil) {
         self.name = name
         self.spaceAssetIDs = spaceAssetIDs
+        self.spaceID = spaceID
     }
 }
 
@@ -305,7 +335,8 @@ public struct UpdateAlbumRequest: Codable, Sendable {
 }
 
 /// Placements to add — not bare asset ids, so an album can only ever contain
-/// photos the owner can already see.
+/// photos the owner can already see. A family album takes photos from
+/// elsewhere by sharing them into its library first.
 public struct AlbumAssetsRequest: Codable, Sendable {
     public let spaceAssetIDs: [UUID]
     public init(spaceAssetIDs: [UUID]) { self.spaceAssetIDs = spaceAssetIDs }

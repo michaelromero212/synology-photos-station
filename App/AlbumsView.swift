@@ -7,10 +7,18 @@ import SwiftUI
 @Observable
 @MainActor
 final class AlbumStore {
+    /// Yours alone and family albums, together. See `personal` and `family`.
     private(set) var albums: [AlbumDTO] = []
     private(set) var isLoading = false
     private(set) var lastError: String?
     private(set) var hasLoaded = false
+    /// Whether the NAS has family albums, which it says by listing them. Only
+    /// then does New Album offer to put one in a shared library: an older
+    /// server would quietly make it private.
+    private(set) var supportsFamily = false
+
+    var personal: [AlbumDTO] { albums.filter { !$0.isFamily } }
+    var family: [AlbumDTO] { albums.filter(\.isFamily) }
 
     private weak var session: AppSession?
     /// When the list was last answered, and how far into the personal
@@ -30,6 +38,7 @@ final class AlbumStore {
         if let saved = AlbumsSnapshotStore.loadAlbums() {
             albums = saved
             hasLoaded = true
+            supportsFamily = saved.contains(where: \.isFamily)
         }
     }
 
@@ -80,8 +89,10 @@ final class AlbumStore {
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
-            let fresh = try await client.albums().albums
+            let response = try await client.albums(includeFamily: true)
+            let fresh = response.albums
             albums = fresh
+            supportsFamily = response.includesFamilyAlbums == true
             hasLoaded = true
             Task.detached(priority: .utility) { AlbumsSnapshotStore.saveAlbums(fresh) }
             fetchedAt = Date()
@@ -92,11 +103,15 @@ final class AlbumStore {
         }
     }
 
+    /// A new album: yours alone, or with `spaceID` a family album in that
+    /// shared library, starting with `spaceAssetIDs` if there are any.
     @discardableResult
-    func create(name: String) async -> AlbumDTO? {
+    func create(name: String, spaceID: UUID? = nil, spaceAssetIDs: [UUID] = []) async -> AlbumDTO? {
         guard let client = session?.client else { return nil }
         do {
-            let album = try await client.createAlbum(CreateAlbumRequest(name: name))
+            let album = try await client.createAlbum(
+                CreateAlbumRequest(name: name, spaceAssetIDs: spaceAssetIDs, spaceID: spaceID)
+            )
             await refresh()
             return album
         } catch {
@@ -105,14 +120,30 @@ final class AlbumStore {
         }
     }
 
-    func delete(_ album: AlbumDTO) async {
-        guard let client = session?.client else { return }
+    /// Whether it went. Only the album: its photos stay where they are.
+    @discardableResult
+    func delete(_ album: AlbumDTO) async -> Bool {
+        guard let client = session?.client else { return false }
         do {
             try await client.deleteAlbum(album.id)
             await refresh()
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
+    }
+}
+
+extension AlbumDTO {
+    /// What deleting it does, said before it's done: the album goes, and for a
+    /// family album it goes for everyone; the photos never do.
+    func deletionMessage(library: String?) -> String {
+        if isFamily {
+            let library = library ?? "the shared library"
+            return "It's deleted for everyone in \(library). The photos stay in \(library)."
+        }
+        return "Only the album is deleted. The photos stay in your library."
     }
 }
 
@@ -146,6 +177,10 @@ struct AlbumsView: View {
     @State private var store: AlbumStore?
     @State private var collections: CollectionsStore?
     @State private var showCreate = false
+    /// The album waiting on "Delete Album?". Deleting used to happen on the
+    /// menu tap itself, and an album somebody built by hand was one slip away
+    /// from gone.
+    @State private var deleting: AlbumDTO?
     /// The card being named, if any. Held here rather than per-card so only one
     /// sheet can ever be up.
     ///
@@ -257,7 +292,7 @@ struct AlbumsView: View {
         }
         .sheet(isPresented: $showCreate) {
             if let store {
-                NewAlbumSheet(session: session, store: store) { showCreate = false }
+                NewAlbumSheet(session: session, store: store) { _ in showCreate = false }
             }
         }
         #if !os(tvOS)
@@ -394,7 +429,8 @@ struct AlbumsView: View {
                         automatic(found, space: space)
                     }
                     manual(store, side: side)
-                    sharedAlbums()
+                    family(store, side: side)
+                    sharedLibraries()
                     if let space = session.personalSpace {
                         places(space: space)
                     }
@@ -533,34 +569,83 @@ struct AlbumsView: View {
         }
     }
 
+    /// The albums that are yours alone.
     @ViewBuilder
     private func manual(_ store: AlbumStore, side: CGFloat) -> some View {
-        if !store.albums.isEmpty {
+        let albums = store.personal
+        if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 sectionHeader("Your Albums")
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
-                    spacing: spacing
-                ) {
-                    ForEach(store.albums) { album in
-                        NavigationLink {
-                            AlbumDetailView(session: session, album: album, store: store)
+                albumGrid(albums, store: store, side: side)
+            }
+        }
+    }
+
+    /// Albums in the shared libraries you're in: every member sees them, so
+    /// they sit apart from yours, each saying whose library it's in.
+    ///
+    /// On every platform, unlike the libraries below them. These are albums,
+    /// and the Mac's sidebar lists libraries, not albums.
+    @ViewBuilder
+    private func family(_ store: AlbumStore, side: CGFloat) -> some View {
+        let albums = store.family
+        if !albums.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("Shared Albums")
+                albumGrid(albums, store: store, side: side)
+            }
+        }
+    }
+
+    private func albumGrid(_ albums: [AlbumDTO], store: AlbumStore, side: CGFloat) -> some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
+            spacing: spacing
+        ) {
+            ForEach(albums) { album in
+                NavigationLink {
+                    AlbumDetailView(session: session, album: album, store: store)
+                } label: {
+                    AlbumCard(
+                        album: album, side: side, loader: session.loader,
+                        library: libraryName(of: album)
+                    )
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    if album.mayManage {
+                        Button(role: .destructive) {
+                            deleting = album
                         } label: {
-                            AlbumCard(album: album, side: side, loader: session.loader)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                Task { await store.delete(album) }
-                            } label: {
-                                Label("Delete Album", systemImage: "trash")
-                            }
+                            Label("Delete Album", systemImage: "trash")
                         }
                     }
                 }
-                .padding(.horizontal, spacing)
+                // On the card, not the page: where the question appears as a
+                // popover, it points at the album it's asking about.
+                .confirmationDialog(
+                    "Delete “\(album.name)”?",
+                    isPresented: Binding(
+                        get: { deleting?.id == album.id },
+                        set: { if !$0 { deleting = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Album", role: .destructive) {
+                        Task { await store.delete(album) }
+                    }
+                } message: {
+                    Text(album.deletionMessage(library: libraryName(of: album)))
+                }
             }
         }
+        .padding(.horizontal, spacing)
+    }
+
+    /// The shared library a family album is in, by name.
+    private func libraryName(of album: AlbumDTO) -> String? {
+        guard let spaceID = album.spaceID else { return nil }
+        return session.sharedSpaces.first { $0.id == spaceID }?.name
     }
 
     /// What the family shares, on the same page as what you filed yourself.
@@ -580,13 +665,17 @@ struct AlbumsView: View {
     /// shared album a row of its own — putting them here as well would be the
     /// same list twice, and these rows would be the dead half of it, since the
     /// destination that answers them belongs to the tab bar's stack.
+    ///
+    /// "Shared Libraries", not "Shared Albums", since albums can now live inside
+    /// them: a library is where the family's photos are, and a shared album is
+    /// a set of them with a name.
     @ViewBuilder
-    private func sharedAlbums() -> some View {
+    private func sharedLibraries() -> some View {
         #if !os(macOS)
         let shared = session.sharedSpaces
         if !shared.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Shared Albums")
+                sectionHeader("Shared Libraries")
                 VStack(spacing: 8) {
                     ForEach(shared) { space in
                         NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
@@ -747,6 +836,8 @@ private struct AlbumCard: View {
     let album: AlbumDTO
     let side: CGFloat
     let loader: ThumbnailLoader?
+    /// The shared library a family album is in, said under its name.
+    var library: String?
 
     @State private var cover: PlatformImage?
 
@@ -767,23 +858,49 @@ private struct AlbumCard: View {
             .clipped()
 
             Text(album.name).font(.subheadline.weight(.medium)).lineLimit(1)
-            Text("\(album.itemCount) item\(album.itemCount == 1 ? "" : "s")")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(details)
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         .task(id: album.coverAssetID) {
             guard let assetID = album.coverAssetID, let loader else { return }
             cover = await loader.thumbnail(assetID: assetID, size: 512)
         }
     }
+
+    private var details: String {
+        let count = "\(album.itemCount) item\(album.itemCount == 1 ? "" : "s")"
+        guard let library else { return count }
+        return "\(library) · \(count)"
+    }
 }
 
-private struct NewAlbumSheet: View {
+/// Making an album: a name, and who can see it.
+///
+/// Yours alone unless you choose a shared library, where everyone in it sees
+/// the album and can add to it. The choice is made here, once: an album
+/// doesn't move between the two.
+struct NewAlbumSheet: View {
     @Bindable var session: AppSession
     let store: AlbumStore
-    let onDone: () -> Void
+    /// Photos to start it with, when it's made from a selection.
+    var spaceAssetIDs: [UUID] = []
+    let onDone: (AlbumDTO?) -> Void
 
     @State private var name = ""
+    /// The shared library it goes in. Nil for yours alone.
+    @State private var library: UUID?
     @State private var isCreating = false
+
+    /// The shared libraries a family album can go in: the ones you can add to,
+    /// and only on a NAS that has family albums.
+    private var libraries: [SpaceDTO] {
+        guard store.supportsFamily else { return [] }
+        return session.sharedSpaces.filter { $0.role != .viewer }
+    }
+
+    private var trimmed: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         NavigationStack {
@@ -792,8 +909,31 @@ private struct NewAlbumSheet: View {
                     TextField("Iceland 2012", text: $name)
                 } header: {
                     Text("Name")
-                } footer: {
-                    Text("Albums are private to you. Nobody else can see them, even for photos from a shared library.")
+                }
+                if libraries.isEmpty {
+                    Section {
+                    } footer: {
+                        Text("Only you can see this album, even when it holds photos from a shared library.")
+                    }
+                } else {
+                    Section {
+                        Picker("Who can see it", selection: $library) {
+                            Text("Only Me").tag(UUID?.none)
+                            ForEach(libraries) { space in
+                                Text(space.name).tag(UUID?.some(space.id))
+                            }
+                        }
+                        #if !os(tvOS)
+                        .pickerStyle(.inline)
+                        // The section header says it; inline, the label would
+                        // be a second "Who can see it" as the list's first row.
+                        .labelsHidden()
+                        #endif
+                    } header: {
+                        Text("Who can see it")
+                    } footer: {
+                        Text(footer)
+                    }
                 }
             }
             .navigationTitle("New Album")
@@ -802,24 +942,30 @@ private struct NewAlbumSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onDone)
+                    Button("Cancel") { onDone(nil) }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         isCreating = true
                         Task {
-                            await store.create(
-                                name: name.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let album = await store.create(
+                                name: trimmed, spaceID: library, spaceAssetIDs: spaceAssetIDs
                             )
                             isCreating = false
-                            onDone()
+                            onDone(album)
                         }
                     }
-                    .disabled(
-                        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCreating
-                    )
+                    .disabled(trimmed.isEmpty || isCreating)
                 }
             }
         }
+    }
+
+    private var footer: String {
+        guard let library, let space = libraries.first(where: { $0.id == library }) else {
+            return "Only you can see this album, even when it holds photos from a shared library."
+        }
+        return "Everyone in \(space.name) can see this album and add to it. "
+            + "Photos you add from your own library are shared to \(space.name) too."
     }
 }
