@@ -9,7 +9,9 @@ export PATH="/opt/homebrew/bin:$PATH"
 export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
 export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
 mkdir -p "$SCRATCH/geo"; PASS=0; FAIL=0
-q() { psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+# The same database as the server and the backfill command: pointed at another
+# server, this used to read and clear the dev library instead.
+q() { psql "$FRAMESTATION_DATABASE_URL" -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -70,17 +72,19 @@ has "detail placeName" "Culpeper" \
 
 echo
 echo "=== 4. backfill command ==="
-q "UPDATE assets SET place_name = NULL;" >/dev/null
-check "cleared" "0" "$(q 'select count(place_name) from assets;')"
+# Only this test's photos. The library around them keeps its names.
+MINE="'$A_CULP','$A_NYC','$A_LON','$A_TOK','$A_SYD','$A_SEA'"
+q "UPDATE assets SET place_name = NULL WHERE id IN ($MINE);" >/dev/null
+check "cleared" "0" "$(q "select count(place_name) from assets where id in ($MINE);")"
 OUT=$(cd "$SERVER_DIR" && swift run FrameStationServer geocode 2>/dev/null)
 echo "$OUT" | grep -E "Named:|No match:" | sed 's/^/  /'
-check "5 of 6 named again" "5" "$(q 'select count(place_name) from assets;')"
+check "5 of 6 named again" "5" "$(q "select count(place_name) from assets where id in ($MINE);")"
 # The mid-ocean asset can never resolve, so it is re-examined every run —
 # correct, and cheap. What must hold is that a second run changes nothing.
 OUT2=$(cd "$SERVER_DIR" && swift run FrameStationServer geocode 2>/dev/null)
 has "second run finds nothing new" "Named:     0" "$OUT2"
 has "second run still sees the unnamable one" "No match:  1" "$OUT2"
-check "count unchanged" "5" "$(q 'select count(place_name) from assets;')"
+check "count unchanged" "5" "$(q "select count(place_name) from assets where id in ($MINE);")"
 
 echo
 echo "════════════════════════════════════"

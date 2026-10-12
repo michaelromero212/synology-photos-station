@@ -241,9 +241,15 @@ struct SpaceController: RouteCollection {
             throw Abort(.forbidden, reason: "The owner can't be removed. Delete the space instead.")
         }
 
+        // Their kept albums of this library leave with them.
         try await req.sql.raw("""
-            DELETE FROM space_members
-            WHERE space_id = \(bind: spaceID) AND user_id = \(bind: userID)
+            WITH gone AS (
+                DELETE FROM space_members
+                WHERE space_id = \(bind: spaceID) AND user_id = \(bind: userID)
+                RETURNING user_id
+            )
+            DELETE FROM curated_albums
+            WHERE space_id = \(bind: spaceID) AND user_id IN (SELECT user_id FROM gone)
             """).run()
 
         return .noContent

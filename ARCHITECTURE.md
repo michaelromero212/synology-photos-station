@@ -1184,6 +1184,58 @@ if the Private Cloud Compute model appears anywhere. The Information panel
 shows what was detected in each photo, so the reading can be judged photo by
 photo.
 
+### Curated albums are kept as the rules improve
+
+The page works its trips and occasions out afresh on every visit, and the rules
+behind them keep changing: better place names, holidays that need evidence,
+events the phone learns to see. Left at that, each improvement could retitle,
+split or quietly drop an album someone had come to know. Apple's Photos keeps
+its memories and trips across iOS updates, and `CuratedAlbums` does the same.
+**Improvements may rename, refine and add. They may not drop.**
+
+**Saved the first time it's shown.** `curated_albums` holds one row per album,
+per person, per library, under a stable id. Trips are saved, and so are
+occasions that are something: a holiday, a name the person gave a day, an
+event. The "Every year on August 14" prompts aren't saved, because they're
+questions.
+
+**Still found, it follows the rules.** A better name is the point of an
+improvement, so a kept album takes the new title. A small change in dates is
+the same album. It matches identical dates first, then the most days in
+common, closest first.
+
+**No longer found, it stays as it was.** It keeps its last title, and its
+photos are counted again on each visit. It goes only when:
+
+- none of its photos are left. While they're all in Recently Deleted it waits,
+  and restoring them brings it back;
+- a trip now covers its days, and shows those photos;
+- it was a day the person named and they took the name back. That's their
+  decision, not a rule change;
+- it was a holiday shown on its date alone, and the person's own analysis has
+  since found the day wasn't that holiday (no tree on Christmas). Shown
+  before analysis, a holiday is `provisional`. Once their analysis confirms
+  it, the flag clears for good, and a later reading that disagrees, such as
+  a stricter vocabulary, can't take it away.
+
+An album from a setting the person switched off (holidays, or curation) waits
+until the setting is back on. A prompt never takes a kept album's place.
+
+**Per person, and it leaves with them.** Rows are keyed by library and person,
+like the page. Leaving a shared library deletes the person's rows for it, and
+deleting their AI data deletes their event albums. `hidden` marks an album the
+person removed, which is never shown or found again. Nothing in the app sets it
+yet.
+
+**Cheap on every visit.** One indexed read. Writes happen only when something
+changed, as one statement per kind. A kept album's photos are counted with a
+single pass over the library, joined by day rather than by date range.
+
+**Keys are day ranges** (`2025-03-10..2025-03-13`), and matching relies on
+that. Changing how trips or occasions are keyed needs a migration of this
+table; otherwise every album would show twice. `Scripts/smoke-kept-albums.sh`
+plays rule changes against a library and checks nothing a person saw is lost.
+
 ---
 
 ## 9a. UI reference

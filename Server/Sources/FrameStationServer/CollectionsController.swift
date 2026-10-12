@@ -98,18 +98,27 @@ struct CollectionsController: RouteCollection {
         // Turned off, there are no holidays at all, here or in trip names. On,
         // a holiday the devices have looked at has to look like itself.
         let years = try await libraryYears(spaceID: spaceID, on: req.sql)
-        let holidays = curation.holidays
-            ? Self.evidenced(Holidays.table(forYears: years), by: evidence)
-            : [:]
+        let calendar = curation.holidays ? Holidays.table(forYears: years) : [:]
+        let holidays = Self.evidenced(calendar, by: evidence)
         let events = Self.events(in: evidence, excluding: holidays)
 
         let onThisDay = try await onThisDayCollections(
             spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
         )
-        let trips = try await trips(
-            spaceID: spaceID, seed: seed, userID: device.userID,
-            holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
-            on: req.sql
+        // Kept as they were shown, so improving the rules below never makes
+        // an album someone knows disappear. See `CuratedAlbums`.
+        let keeper = CuratedAlbums(
+            spaceID: spaceID, userID: device.userID, sql: req.sql, logger: req.logger
+        )
+        let saved = await keeper.load()
+
+        let trips = await keeper.keep(
+            trips: try await trips(
+                spaceID: spaceID, seed: seed, userID: device.userID,
+                holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
+                on: req.sql
+            ),
+            saved: saved, limit: Self.allTripsLimit, seed: seed
         )
 
         // Days already inside a trip are not also occasions of their own. Two
@@ -117,9 +126,23 @@ struct CollectionsController: RouteCollection {
         // and a Christmas spent away is already in the trip's name.
         let claimed = Set(trips.flatMap { Self.days(inKey: $0.key) })
 
-        let occasions = try await occasions(
-            spaceID: spaceID, seed: seed, userID: device.userID, years: years,
-            holidays: holidays, events: events, excluding: claimed, on: req.sql
+        let named = try await occasionNames(
+            spaceID: spaceID, userID: device.userID, years: years, on: req.sql
+        )
+        let occasions = await keeper.keep(
+            occasions: try await occasions(
+                spaceID: spaceID, seed: seed, userID: device.userID, named: named,
+                holidays: holidays, events: events, excluding: claimed, on: req.sql
+            ),
+            saved: saved, claimed: claimed,
+            standing: CuratedAlbums.Standing(
+                named: named, showEvents: curation.enabled, showHolidays: curation.holidays,
+                // A holiday shown on its date alone is the person's analysis
+                // still to come, which can withdraw it.
+                unseen: Set(calendar.filter { Self.looksLike($1, on: $0, by: evidence) == nil }.keys),
+                unlike: Set(calendar.keys).subtracting(holidays.keys)
+            ),
+            limit: Self.allOccasionsLimit, seed: seed
         )
         let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
@@ -879,6 +902,9 @@ struct CollectionsController: RouteCollection {
         /// Found by what the photographs showed rather than by the calendar
         /// or a name. See `CurationVocabulary.events`.
         var isEvent = false
+        /// Named for a holiday, which the person can turn off. See
+        /// `CuratedAlbums`.
+        var isHoliday = false
     }
 
     /// Everything a day can say about itself, gathered in one pass.
@@ -920,15 +946,12 @@ struct CollectionsController: RouteCollection {
     /// is one Christmas — so the grouping happens after the query and the limit
     /// applies to the *runs*.
     private func occasions(
-        spaceID: UUID, seed: String, userID: UUID, years: [Int],
+        spaceID: UUID, seed: String, userID: UUID, named: [String: String],
         holidays: [String: String], events: [String: CurationVocabulary.Event] = [:],
         excluding claimed: Set<String>,
         on sql: any SQLDatabase
     ) async throws -> [Occasion] {
         let local = TimelineController.localTime
-        let named = try await occasionNames(
-            spaceID: spaceID, userID: userID, years: years, on: sql
-        )
         let recurring = try await recurringDates(spaceID: spaceID, on: sql)
 
         // Joined and split rather than interpolated: these strings are
@@ -1004,8 +1027,9 @@ struct CollectionsController: RouteCollection {
         guard var summary = describe(
             run, holidays: holidays, named: named, recurring: recurring, events: events
         ) else { return nil }
-        let given = run.days.compactMap { named[$0.day] }.first
-            ?? holiday(in: run, holidays: holidays)?.name
+        let userName = run.days.compactMap { named[$0.day] }.first
+        let holidayName = userName == nil ? holiday(in: run, holidays: holidays)?.name : nil
+        let given = userName ?? holidayName
         // An event only where nothing better names the day, matching the
         // order `describe` titles it in.
         let found = given == nil ? event(in: run, events: events) : nil
@@ -1025,7 +1049,9 @@ struct CollectionsController: RouteCollection {
                 recursAnnually: summary.recursAnnually
             )
         }
-        return Occasion(summary: summary, occasion: name, isEvent: found != nil)
+        return Occasion(
+            summary: summary, occasion: name, isEvent: found != nil, isHoliday: holidayName != nil
+        )
     }
 
     /// The holiday a run is, if it holds one. Where it holds two — Christmas
@@ -1178,13 +1204,18 @@ struct CollectionsController: RouteCollection {
     static func evidenced(
         _ holidays: [String: String], by evidence: [String: DayEvidence]
     ) -> [String: String] {
-        holidays.filter { day, name in
-            guard let rules = CurationVocabulary.holidayEvidence[name],
-                  let seen = evidence[day], seen.isAnalyzed
-            else { return true }
-            return rules.contains { rule in
-                seen.count(rule.tag) >= rule.minPhotos && seen.share(rule.tag) >= rule.minShare
-            }
+        holidays.filter { day, name in looksLike(name, on: day, by: evidence) != false }
+    }
+
+    /// Whether a holiday's photos look like it: nil until the devices have
+    /// looked at its day. A holiday that asks for no evidence always does.
+    static func looksLike(
+        _ name: String, on day: String, by evidence: [String: DayEvidence]
+    ) -> Bool? {
+        guard let rules = CurationVocabulary.holidayEvidence[name] else { return true }
+        guard let seen = evidence[day], seen.isAnalyzed else { return nil }
+        return rules.contains { rule in
+            seen.count(rule.tag) >= rule.minPhotos && seen.share(rule.tag) >= rule.minShare
         }
     }
 
@@ -1352,18 +1383,62 @@ struct CollectionsController: RouteCollection {
     }
 
     /// Every date a run key spans, so a trip can claim its own days.
+    ///
+    /// Counted out by hand. The keys are this file's own `yyyy-MM-dd`, and a
+    /// `DateFormatter` made for every day cost the Albums page more than half
+    /// a millisecond a trip.
     static func days(inKey key: String) -> [String] {
         let ends = key.components(separatedBy: "..")
-        guard let first = ends.first.flatMap(parseDate),
-              let last = ends.last.flatMap(parseDate) else { return ends }
+        guard let first = ends.first.flatMap(KeyDay.init),
+              let last = ends.last.flatMap(KeyDay.init) else { return ends }
         var result: [String] = []
         var cursor = first
         while cursor <= last, result.count < 400 {
-            result.append(stampFormatter("yyyy-MM-dd").string(from: cursor))
-            guard let next = utc.date(byAdding: .day, value: 1, to: cursor) else { break }
-            cursor = next
+            result.append(Self.key(year: cursor.year, month: cursor.month, day: cursor.day))
+            cursor = cursor.next
         }
         return result
+    }
+
+    /// A day of a run key, and the one after it.
+    private struct KeyDay: Comparable {
+        let year: Int
+        let month: Int
+        let day: Int
+
+        init?(_ stamp: String) {
+            let parts = stamp.split(separator: "-", omittingEmptySubsequences: false)
+            guard parts.count == 3, parts.map(\.count) == [4, 2, 2],
+                  parts.allSatisfy({ $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+                  let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+                  (1...12).contains(month), (1...Self.length(of: month, in: year)).contains(day)
+            else { return nil }
+            self.init(year: year, month: month, day: day)
+        }
+
+        private init(year: Int, month: Int, day: Int) {
+            self.year = year
+            self.month = month
+            self.day = day
+        }
+
+        var next: KeyDay {
+            if day < Self.length(of: month, in: year) { return KeyDay(year: year, month: month, day: day + 1) }
+            if month < 12 { return KeyDay(year: year, month: month + 1, day: 1) }
+            return KeyDay(year: year + 1, month: 1, day: 1)
+        }
+
+        static func length(of month: Int, in year: Int) -> Int {
+            switch month {
+            case 2: return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) ? 29 : 28
+            case 4, 6, 9, 11: return 30
+            default: return 31
+            }
+        }
+
+        static func < (lhs: KeyDay, rhs: KeyDay) -> Bool {
+            (lhs.year, lhs.month, lhs.day) < (rhs.year, rhs.month, rhs.day)
+        }
     }
 
     /// `"2026-08-14"` → `"08-14"`.
@@ -1431,10 +1506,15 @@ struct CollectionsController: RouteCollection {
         // "Three places in one day · Asheville", which is worse, because it
         // contradicts the line above it.
         if let place { parts.append(place) }
-        if run.videoCount > 0, run.videoCount * 2 <= run.count {
-            parts.append(run.videoCount == 1 ? "1 video" : "\(run.videoCount) videos")
-        }
+        if let videos = videoNote(videos: run.videoCount, of: run.count) { parts.append(videos) }
         return parts.joined(separator: " · ")
+    }
+
+    /// "3 videos", where a day's videos are worth a mention: some, but no more
+    /// than half of it.
+    static func videoNote(videos: Int, of count: Int) -> String? {
+        guard videos > 0, videos * 2 <= count else { return nil }
+        return videos == 1 ? "1 video" : "\(videos) videos"
     }
 
     /// Small numbers read better as words in a title.

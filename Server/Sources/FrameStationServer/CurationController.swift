@@ -142,6 +142,11 @@ struct CurationController: RouteCollection {
         try await req.sql.raw("""
             DELETE FROM media_observations WHERE user_id = \(bind: device.userID)
             """).run()
+        // And the albums it found: an event is only known from what the
+        // devices saw. Trips it named are renamed the next time they're shown.
+        try await req.sql.raw("""
+            DELETE FROM curated_albums WHERE user_id = \(bind: device.userID) AND is_event
+            """).run()
         req.logger.info("curation: deleted a person's analysis data")
         return .noContent
     }
