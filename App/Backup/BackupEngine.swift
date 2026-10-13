@@ -74,6 +74,17 @@ final class BackupEngine {
     /// backup stopping, short enough to follow a change of network.
     private static let throughputWindow: Duration = .seconds(20)
     private var throughputSamples: [(at: ContinuousClock.Instant, bytes: Int64)] = []
+    /// The speed the time left is worked out from: each reading blended into
+    /// the last, so one big video finishing, or one slow read from the
+    /// library, doesn't swing the answer by an hour. Nil at the start of a run.
+    private var smoothedRate: Double?
+    /// When this run started measuring, for how long it has to measure before
+    /// it says how long the rest will take.
+    private var measuringSince: ContinuousClock.Instant?
+    /// What has to have gone by before the time left is worth showing: a full
+    /// window of sending, and enough of it to judge a speed by.
+    private static let settleTime: Duration = .seconds(20)
+    private static let settleBytes: Int64 = 8_000_000
 
     /// How many transfers run at once. Small on purpose: enough that photos
     /// flow past a big video, not so many that a home uplink or the NAS is
@@ -982,6 +993,8 @@ final class BackupEngine {
             meter.cancel()
             throughput = nil
             throughputSamples.removeAll()
+            smoothedRate = nil
+            measuringSince = nil
             endBackgroundTime()
         }
         reclaimInterrupted(context)
@@ -1152,15 +1165,22 @@ final class BackupEngine {
 
     /// Takes one reading for `throughput`.
     ///
-    /// Speed is the bytes that went out across the window, over the window.
-    /// Time left is what is still to go over that speed: every queued file's
-    /// size, less what the uploads in flight have already sent. Shown only
-    /// once there are five seconds to go on — the first moments of a run are
-    /// all reading photos out of the library, and a speed worked out from them
-    /// would promise hours.
+    /// Speed is the bytes that went out across the window, over the window,
+    /// blended into the readings before it. Time left is what is still to go
+    /// over that speed: every queued file's size, less what the uploads in
+    /// flight have already sent.
+    ///
+    /// The speed shows after five seconds. The time left waits, saying
+    /// "Estimating…", until the run has sent for a full window and at least
+    /// `settleBytes`. It used to show at five seconds too, and the first
+    /// moments of a run are mostly reading photos out of the library: a large
+    /// backup was promised days, then hours, then minutes, in its first half
+    /// minute.
     private func measureThroughput() {
         let now = ContinuousClock.now
-        throughputSamples.append((now, BackgroundTransfers.shared.bytesSent))
+        let sent = BackgroundTransfers.shared.bytesSent
+        if measuringSince == nil { measuringSince = now }
+        throughputSamples.append((now, sent))
         throughputSamples.removeAll { now - $0.at > Self.throughputWindow }
         guard let first = throughputSamples.first,
               now - first.at >= .seconds(5)
@@ -1171,9 +1191,17 @@ final class BackupEngine {
             throughput = Throughput(bytesPerSecond: 0, secondsRemaining: nil)
             return
         }
+        let smoothed = smoothedRate.map { 0.3 * rate + 0.7 * $0 } ?? rate
+        smoothedRate = smoothed
+
+        let settled = measuringSince.map { now - $0 >= Self.settleTime } ?? false
+            && throughputSamples[throughputSamples.count - 1].bytes - first.bytes >= Self.settleBytes
         let inFlight = activeUploads.reduce(Int64(0)) { $0 + $1.sentBytes }
         let left = max(progress.bytesRemaining - inFlight, 0)
-        throughput = Throughput(bytesPerSecond: rate, secondsRemaining: Double(left) / rate)
+        throughput = Throughput(
+            bytesPerSecond: smoothed,
+            secondsRemaining: settled ? Double(left) / smoothed : nil
+        )
     }
 
     /// Whether there is anywhere to send to: signed in, with a space to back up

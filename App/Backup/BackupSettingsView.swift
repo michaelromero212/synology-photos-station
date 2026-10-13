@@ -307,9 +307,11 @@ struct BackupSettingsView: View {
             }
             if let throughput = engine.throughput, throughput.bytesPerSecond > 0 {
                 LabeledContent("Speed", value: throughput.speed)
-                if let timeLeft = throughput.timeLeft() {
-                    LabeledContent("Time left", value: timeLeft)
-                }
+            }
+            // Said as soon as there's something to wait for, and filled in
+            // once the run has sent enough to judge by. See `measureThroughput`.
+            if engine.isRunning, engine.progress.bytesRemaining > 0 {
+                LabeledContent("Time left", value: engine.throughput?.timeLeft() ?? "Estimating…")
             }
 
             if engine.isRunning {

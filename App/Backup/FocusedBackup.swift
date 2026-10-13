@@ -129,10 +129,12 @@ struct FocusedBackupView: View {
 
                 // How fast, and so how long — the two things somebody leaving a
                 // phone on the charger for a large backup actually wants to know.
-                if waiting > 0, let throughput = engine.throughput,
-                   throughput.bytesPerSecond > 0 {
+                // "Estimating time…" until the run has sent enough to say,
+                // rather than a first guess that's off by days.
+                if waiting > 0, engine.isRunning {
+                    let speed = engine.throughput.flatMap { $0.bytesPerSecond > 0 ? $0.speed : nil }
                     Text(
-                        [throughput.speed, throughput.timeLeft(remaining: true)]
+                        [speed, engine.throughput?.timeLeft(remaining: true) ?? "Estimating time…"]
                             .compactMap { $0 }
                             .joined(separator: " · ")
                     )
