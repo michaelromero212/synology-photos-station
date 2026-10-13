@@ -1275,6 +1275,29 @@ that. Changing how trips or occasions are keyed needs a migration of this
 table; otherwise every album would show twice. `Scripts/smoke-kept-albums.sh`
 plays rule changes against a library and checks nothing a person saw is lost.
 
+### The row the Albums page opens on
+
+Photos opens on a row of featured memories and photos to swipe through, a
+fresh set each day, and this page does the same. It used to be one card a day,
+and in a young library that was the same handful in turn. The NAS sends
+`featured`, up to six cards, in this order:
+
+1. **Tied to today:** On This Day, the trip you were on this week in an earlier
+   year, a holiday coming up ("CHRISTMAS IS COMING UP").
+2. **The day's highlights:** the latest trip, a place you haven't been in a
+   while, last season, the latest holiday or occasion.
+3. **Featured photos:** two between the highlights. These are photos the
+   person's own phone rated well, never a screenshot or a receipt, at least a
+   month old, from two different days. Each opens the day it was taken. They
+   appear only where the person's devices have analyzed the library, since
+   without their ratings "featured" would mean "random".
+
+All of it is turned by the date, so each day starts somewhere new and the row
+holds still while you look. No set of photos appears twice in the row, and
+none of them repeats in the sections below. `hero` is the row's first card,
+which is all an older app draws. `Scripts/smoke-kept-albums.sh` checks the
+row.
+
 ---
 
 ## 9a. UI reference

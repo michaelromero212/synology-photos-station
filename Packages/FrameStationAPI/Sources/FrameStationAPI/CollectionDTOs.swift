@@ -185,13 +185,17 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// Every holiday and occasion, newest first — what "See All" opens under
     /// `days`.
     public let allOccasions: [CollectionSummary]?
+    /// The row of cards the page opens on, to swipe through: what's tied to
+    /// today, a featured photo or two, then the day's highlights. `hero` is
+    /// its first card, for apps that draw only one. Nil from an older server.
+    public let featured: [CollectionSummary]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
-        case allTrips, allOccasions
+        case allTrips, allOccasions, featured
     }
 
     /// Read card by card, so a card this build can't read is left out instead
@@ -225,6 +229,7 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         favorites = card(.favorites)
         allTrips = cards(.allTrips)
         allOccasions = cards(.allOccasions)
+        featured = cards(.featured)
     }
 
     public init(
@@ -237,8 +242,10 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         recentlyAdded: CollectionSummary? = nil,
         favorites: CollectionSummary? = nil,
         allTrips: [CollectionSummary]? = nil,
-        allOccasions: [CollectionSummary]? = nil
+        allOccasions: [CollectionSummary]? = nil,
+        featured: [CollectionSummary]? = nil
     ) {
+        self.featured = featured
         self.hero = hero
         self.trips = trips
         self.days = days

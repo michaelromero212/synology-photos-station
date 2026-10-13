@@ -177,21 +177,32 @@ struct CollectionsController: RouteCollection {
         let pool = ([trips.first, away.first, season, latestOccasion]).compactMap { $0 }
 
         let turn = Self.utc.ordinality(of: .day, in: .year, for: today) ?? 0
-        var hero: CollectionSummary?
-        if !anchored.isEmpty {
-            hero = anchored[turn % anchored.count]
-        } else if !pool.isEmpty {
-            hero = pool[turn % pool.count]
-        } else {
-            hero = nil
-        }
+
+        // The row the page opens on, the way Photos opens on its featured
+        // memories and photos: a handful of cards to swipe, each with its own
+        // reason to be looked at today. What's tied to today comes first, then
+        // the day's highlights with a featured photo or two between them. All
+        // turned by the date, so each day starts somewhere new and the row
+        // holds still while you're looking at it. The first card is `hero`,
+        // all an older app draws.
+        let photos = curation.enabled && curation.isPersonal
+            ? try await featuredPhotos(
+                spaceID: spaceID, userID: device.userID, today: today, seed: seed, on: req.sql
+            )
+            : []
+        var featured = Self.featuredRow(
+            today: Self.rotated(anchored, by: turn),
+            highlights: Self.rotated(pool, by: turn),
+            photos: photos
+        )
 
         // Last Christmas on top of the page in December needs saying why, or
         // it reads as the page being a year behind.
-        if let chosen = hero, chosen.key == comingUp?.key,
-           let name = occasions.first(where: { $0.summary.key == chosen.key })?.occasion {
-            hero = chosen.withKicker("\(name.uppercased()) IS COMING UP")
+        if let comingUp, let name = occasions.first(where: { $0.summary.key == comingUp.key })?.occasion,
+           let index = featured.firstIndex(where: { $0.key == comingUp.key }) {
+            featured[index] = featured[index].withKicker("\(name.uppercased()) IS COMING UP")
         }
+        let hero = featured.first
 
         // Whatever became the hero is not also listed below it. Matched on the
         // *key* rather than the id: an anniversary is a trip wearing a
@@ -202,15 +213,19 @@ struct CollectionsController: RouteCollection {
         // before it as a row is one idea said twice.
         let heroKey = hero?.key
         let heroOccasion = occasions.first { $0.summary.key == heroKey }?.occasion
+        // Every card in the top row, not only the first: one swipe brings any
+        // of them up above the sections, and the same trip there and in a row
+        // just below it is the same photographs twice on one screen.
+        let featuredKeys = Set(featured.map(\.key))
 
         return CollectionsResponse(
             hero: hero,
             trips: Self.featuredTrips(
-                trips.filter { $0.key != heroKey },
+                trips.filter { !featuredKeys.contains($0.key) },
                 today: today, heroPlace: hero.flatMap(Self.place(of:))
             ),
             days: Self.featuredOccasions(
-                occasions.filter { $0.summary.key != heroKey },
+                occasions.filter { !featuredKeys.contains($0.summary.key) },
                 today: today, comingUp: comingUp, heroOccasion: heroOccasion
             ),
             // Somewhere you haven't been in years is a lovely thing to open on
@@ -222,8 +237,109 @@ struct CollectionsController: RouteCollection {
             recentlyAdded: arrived,
             favorites: marked,
             allTrips: trips,
-            allOccasions: occasions.map(\.summary)
+            allOccasions: occasions.map(\.summary),
+            featured: featured
         )
+    }
+
+    /// At most this many cards to swipe through at the top of the page.
+    static let featuredLimit = 6
+
+    /// The top row's cards in order: today's, then the highlights with a
+    /// featured photo after the first and the third, so photos and places
+    /// alternate rather than bunching. Each set of photos once: an
+    /// anniversary is a trip wearing a different sentence, and the same trip
+    /// twice in one row is one card too many.
+    static func featuredRow(
+        today: [CollectionSummary], highlights: [CollectionSummary], photos: [CollectionSummary]
+    ) -> [CollectionSummary] {
+        var rest: [CollectionSummary] = []
+        var waiting = photos[...]
+        for (index, card) in highlights.enumerated() {
+            rest.append(card)
+            if index % 2 == 0, let photo = waiting.popFirst() { rest.append(photo) }
+        }
+        rest += waiting
+
+        var seen = Set<String>()
+        return (today + rest)
+            .filter { seen.insert($0.key).inserted }
+            .prefix(featuredLimit)
+            .map { $0 }
+    }
+
+    /// `items` begun at `turn`, wrapping round, so each day starts with a
+    /// different one.
+    static func rotated<Item>(_ items: [Item], by turn: Int) -> [Item] {
+        guard !items.isEmpty else { return [] }
+        let start = turn % items.count
+        return Array(items[start...] + items[..<start])
+    }
+
+    /// Two of the library's best-looking photos, as Photos features its own:
+    /// rated well by the person's own phone, never a screenshot or a receipt,
+    /// at least a month old so they're a rediscovery rather than a rerun of
+    /// the camera roll, from two different days, and a different pair each
+    /// day. Each opens the day it was taken.
+    ///
+    /// Only where the person's devices have analyzed the library; without
+    /// their ratings, "featured" would only mean "random".
+    private func featuredPhotos(
+        spaceID: UUID, userID: UUID, today: Date, seed: String, on sql: any SQLDatabase
+    ) async throws -> [CollectionSummary] {
+        struct PhotoRow: Decodable {
+            let id: UUID
+            let day: String
+            let place: String?
+        }
+        struct CountRow: Decodable {
+            let day: String
+            let count: Int
+        }
+        guard let cutoff = Self.utc.date(byAdding: .day, value: -30, to: today) else { return [] }
+        let local = TimelineController.localTime
+        let candidates = try await sql.raw("""
+            SELECT a.id, to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
+                   \(unsafeRaw: TimelineController.placeName) AS place
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN media_observations o ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND a.media_type = 'photo' AND a.derived_at IS NOT NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND NOT COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false)
+              AND COALESCE(o.aesthetic, 0) > \(bind: Self.goodLooking)
+              AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD') < \(bind: Self.dayStamp(cutoff))
+            ORDER BY md5(a.id::text || \(bind: seed))
+            LIMIT 12
+            """).all(decoding: PhotoRow.self)
+
+        var days = Set<String>()
+        let picked = candidates.filter { days.insert($0.day).inserted }.prefix(2)
+        guard !picked.isEmpty else { return [] }
+
+        let counts = try await sql.raw("""
+            SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day, count(*)::int AS count
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD') = ANY(\(bind: picked.map(\.day))::text[])
+            GROUP BY 1
+            """).all(decoding: CountRow.self)
+        let byDay = Dictionary(counts.map { ($0.day, $0.count) }, uniquingKeysWith: { first, _ in first })
+
+        return picked.map { photo in
+            let date = Self.longDay(photo.day) ?? photo.day
+            return CollectionSummary(
+                kind: .day, key: photo.day,
+                title: photo.place ?? date,
+                subtitle: photo.place == nil ? nil : date,
+                count: byDay[photo.day] ?? 1,
+                coverAssetIDs: [photo.id],
+                kicker: "FEATURED PHOTO"
+            )
+        }
     }
 
     /// The years the library holds, for tables that are built per year.

@@ -182,6 +182,24 @@ check "for good" "0" "$(saved "title = 'Christmas 2024' AND provisional")"
 for i in 1 2 3 4 5 6; do observe "x25$i" 2 "$SKY"; done
 has "so a later reading that disagrees can't take it away" "Christmas 2024" "$(titles)"
 
+echo "The row the page opens on"
+# row → "kicker or kind: title" for each card in the top row, then a line of
+# facts about the page around it.
+row(){ curl -s "$API/v1/spaces/$SPACE/collections?date=2026-10-12" -H "$AUTH" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+cards = d.get('featured') or []
+keys = [c['key'] for c in cards]
+below = [c['key'] for c in (d.get('trips') or []) + (d.get('days') or [])]
+print('|'.join((c.get('kicker') or c['kind']) + ': ' + c['title'] for c in cards))
+print(len(cards), len(set(keys)) == len(keys), bool(d.get('hero')) and d['hero']['key'] == keys[0],
+      not set(keys) & set(below))"; }
+R=$(row)
+has "photos the person's own phone rated well are featured" "FEATURED PHOTO: " "$(echo "$R" | head -1)"
+check "several cards, none twice, the first the one an older app shows, none repeated below" \
+  "True True True" "$(echo "$R" | tail -1 | cut -d' ' -f2-)"
+check "and no more than six" "1" "$(echo "$R" | tail -1 | awk '{print ($1 > 1 && $1 <= 6)}')"
+
 echo "Named by the person"
 name(){ code -X PUT "$API/v1/spaces/$SPACE/collections/name" -H "$AUTH" -H 'Content-Type: application/json' \
   -d "{\"day\":\"2025-02-20\",\"name\":\"$1\",\"everyYear\":false}"; }

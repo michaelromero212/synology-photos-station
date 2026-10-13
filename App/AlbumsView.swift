@@ -198,6 +198,8 @@ struct AlbumsView: View {
     /// menu tap itself, and an album somebody built by hand was one slip away
     /// from gone.
     @State private var deleting: AlbumDTO?
+    /// Which of the top row's cards is showing, for its page dots.
+    @State private var featuredCard: String?
     /// The card being named, if any. Held here rather than per-card so only one
     /// sheet can ever be up.
     ///
@@ -494,24 +496,56 @@ struct AlbumsView: View {
         }
     }
 
-    /// The one card the page opens on.
+    /// The cards the page opens on, swiped through the way Photos opens on its
+    /// featured memories and photos: what's tied to today, a featured photo or
+    /// two, and the day's highlights, each saying why it's there.
     ///
-    /// Picked by the server, which also takes whatever it picked out of the
-    /// sections below so the same place is never offered twice — see its
-    /// `heroKey`. Absent rather than empty on a library too young to have
-    /// noticed anything, in which case the page simply starts with the shelves.
+    /// Picked and ordered by the server, which also takes the first out of the
+    /// sections below so the same place is never offered twice in one glance —
+    /// see its `heroKey`. One card is drawn as one card, and a server from
+    /// before the row sends only that one. Absent on a library too young to
+    /// have noticed anything, when the page simply starts with the shelves.
     @ViewBuilder
     private func hero(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
-        if let hero = found.hero {
-            NavigationLink {
-                CollectionDetailView(session: session, space: space, collection: hero)
-            } label: {
-                CollectionHeroCard(collection: hero, loader: session.loader)
+        let cards = found.featured ?? found.hero.map { [$0] } ?? []
+        if cards.count > 1 {
+            VStack(spacing: 12) {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(cards, id: \.featuredID) { card in
+                            heroLink(card, space: space)
+                                .padding(.horizontal, spacing)
+                                .containerRelativeFrame(.horizontal)
+                        }
+                    }
+                    .scrollTargetLayout()
+                }
+                .scrollTargetBehavior(.paging)
+                .scrollIndicators(.hidden)
+                .scrollPosition(id: $featuredCard)
+                // The cards' shadows fall outside the row; clipped, each card
+                // would sit in a hard-edged box. The neighbors are a whole
+                // screen away either side, so nothing else shows.
+                .scrollClipDisabled()
+                PageDots(
+                    count: cards.count,
+                    current: cards.firstIndex { $0.featuredID == featuredCard } ?? 0
+                )
             }
-            .buttonStyle(.plain)
-            .nameable(hero) { naming = $0 }
-            .padding(.horizontal, spacing)
+        } else if let card = cards.first {
+            heroLink(card, space: space)
+                .padding(.horizontal, spacing)
         }
+    }
+
+    private func heroLink(_ card: CollectionSummary, space: SpaceDTO) -> some View {
+        NavigationLink {
+            CollectionDetailView(session: session, space: space, collection: card)
+        } label: {
+            CollectionHeroCard(collection: card, loader: session.loader)
+        }
+        .buttonStyle(.plain)
+        .nameable(card) { naming = $0 }
     }
 
     /// Everything else the server worked out: a few trips and a few occasions,
@@ -858,6 +892,31 @@ struct AlbumsView: View {
         .padding(.bottom, 10)
     }
 
+}
+
+extension CollectionSummary {
+    /// Unique within the top row: the server never puts one set of photos in
+    /// it twice, and the kind keeps two cards apart even if it did.
+    fileprivate var featuredID: String { "\(kind.rawValue)/\(key)" }
+}
+
+/// Which of the top row's cards is showing, and how many there are.
+private struct PageDots: View {
+    let count: Int
+    let current: Int
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(0..<count, id: \.self) { index in
+                Circle()
+                    .fill(index == current ? Color.primary : Color.secondary.opacity(0.35))
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: current)
+        .accessibilityElement()
+        .accessibilityLabel("Card \(current + 1) of \(count)")
+    }
 }
 
 /// One card on the Albums page: an album, or a shared library drawn as one.
