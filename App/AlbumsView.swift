@@ -137,6 +137,22 @@ final class AlbumStore {
         }
     }
 
+    /// Whether it took. An album has no folder in File Station (only a shared
+    /// library does), so a new name is the album's alone and nothing on the
+    /// NAS moves.
+    @discardableResult
+    func rename(_ album: AlbumDTO, to name: String) async -> Bool {
+        guard let client = session?.client else { return false }
+        do {
+            _ = try await client.updateAlbum(album.id, UpdateAlbumRequest(name: name))
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
     /// Whether it went. Only the album: its photos stay where they are.
     @discardableResult
     func delete(_ album: AlbumDTO) async -> Bool {
@@ -200,6 +216,11 @@ struct AlbumsView: View {
     @State private var deleting: AlbumDTO?
     /// Which of the top row's cards is showing, for its page dots.
     @State private var featuredCard: String?
+    /// Edit mode: every album and shared library card wears a badge, and
+    /// tapping one opens its settings instead of its photos.
+    @State private var editing = false
+    @State private var editingAlbum: AlbumDTO?
+    @State private var managingLibrary: SpaceDTO?
     /// The card being named, if any. Held here rather than per-card so only one
     /// sheet can ever be up.
     ///
@@ -301,7 +322,13 @@ struct AlbumsView: View {
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if hasEditable {
+                    Button(editing ? "Done" : "Edit") {
+                        withAnimation(.snappy) { editing.toggle() }
+                    }
+                    .fontWeight(editing ? .semibold : .regular)
+                }
                 Button {
                     showCreate = true
                 } label: {
@@ -313,6 +340,22 @@ struct AlbumsView: View {
             if let store {
                 NewAlbumSheet(session: session, store: store) { _ in showCreate = false }
             }
+        }
+        .sheet(item: $editingAlbum) { album in
+            if let store {
+                AlbumSettingsSheet(
+                    album: album, store: store, library: libraryName(of: album)
+                ) { editingAlbum = nil }
+            }
+        }
+        .sheet(item: $managingLibrary, onDismiss: {
+            // A rename shows on the card, and leaving takes the card away.
+            Task {
+                await session.refreshSpaces()
+                await store?.refresh()
+            }
+        }) { space in
+            LibrarySettingsSheet(session: session, space: space) { managingLibrary = nil }
         }
         #if !os(tvOS)
         .sheet(item: $naming) { collection in
@@ -401,6 +444,11 @@ struct AlbumsView: View {
         .onAppear {
             Task { await collections?.refreshIfStale() }
             Task { await store?.refreshIfStale() }
+        }
+        // With nothing left to edit the button goes, so Edit mode goes with it
+        // rather than staying on with no way out.
+        .onChange(of: hasEditable) { _, has in
+            if !has { editing = false }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -626,7 +674,12 @@ struct AlbumsView: View {
         let albums = store.personal
         if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Albums", note: "Only you can see these.")
+                sectionHeader(
+                    "Albums",
+                    note: editing
+                        ? "Only you can see these. Tap one to rename or delete it."
+                        : "Only you can see these."
+                )
                 albumGrid(albums, store: store, side: side)
             }
         }
@@ -645,14 +698,27 @@ struct AlbumsView: View {
         Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns)
     }
 
+    @ViewBuilder
     private func albumCell(_ album: AlbumDTO, store: AlbumStore, side: CGFloat) -> some View {
+        let card = AlbumCard(
+            album: album, side: side, loader: session.loader, library: libraryName(of: album)
+        )
+        if editing {
+            Button { editingAlbum = album } label: {
+                card.overlay(alignment: .topTrailing) { EditBadge() }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit \(album.name)")
+        } else {
+            browsableAlbumCell(album, card: card, store: store)
+        }
+    }
+
+    private func browsableAlbumCell(_ album: AlbumDTO, card: AlbumCard, store: AlbumStore) -> some View {
         NavigationLink {
             AlbumDetailView(session: session, album: album, store: store)
         } label: {
-            AlbumCard(
-                album: album, side: side, loader: session.loader,
-                library: libraryName(of: album)
-            )
+            card
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -685,14 +751,33 @@ struct AlbumsView: View {
     /// A shared library as an album card, the same as the albums made in it:
     /// its most recently added photo for a cover, and who's in it and how
     /// much. Opens the whole library.
+    @ViewBuilder
     private func libraryCell(_ space: SpaceDTO, store: AlbumStore, side: CGFloat) -> some View {
-        NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
-            AlbumCard(
-                library: space, summary: store.libraries.first { $0.id == space.id },
-                side: side, loader: session.loader
-            )
+        let card = AlbumCard(
+            library: space, summary: store.libraries.first { $0.id == space.id },
+            side: side, loader: session.loader
+        )
+        if editing {
+            Button { managingLibrary = space } label: {
+                card.overlay(alignment: .topTrailing) { EditBadge() }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit \(space.name)")
+        } else {
+            NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) { card }
+                .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
+    }
+
+    /// Whether Edit has anything to work on: an album, or a shared library's
+    /// card (which the Mac shows in its sidebar instead).
+    private var hasEditable: Bool {
+        guard let store else { return false }
+        #if os(macOS)
+        return !store.albums.isEmpty
+        #else
+        return !store.albums.isEmpty || !session.sharedSpaces.isEmpty
+        #endif
     }
 
     /// The shared library a family album is in, by name.
@@ -730,7 +815,9 @@ struct AlbumsView: View {
         let cards = sharedCards(store)
         if !cards.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("Shared Albums", note: sharedNote)
+                sectionHeader(
+                    "Shared Albums", note: editing ? sharedNote + " Tap one to change it." : sharedNote
+                )
                 LazyVGrid(columns: gridColumns(side: side), spacing: spacing) {
                     ForEach(cards) { card in
                         switch card {
@@ -1098,5 +1185,166 @@ struct NewAlbumSheet: View {
         "Everyone in \(space.name) can see a shared album and add to it. You'll find it "
             + "under Shared Albums. Photos you add from your own library are shared to "
             + "\(space.name) too."
+    }
+}
+
+/// What a card wears in Edit mode: tapping it changes the album rather than
+/// opening it.
+private struct EditBadge: View {
+    var body: some View {
+        Image(systemName: "pencil.circle.fill")
+            .font(.title2)
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, Color.accentColor)
+            .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+            .padding(8)
+            .transition(.scale.combined(with: .opacity))
+    }
+}
+
+/// An album's settings from Edit mode: its name, who can see it, and deleting
+/// it, as far as you may change them. Someone who can't is told who can.
+struct AlbumSettingsSheet: View {
+    let album: AlbumDTO
+    let store: AlbumStore
+    /// The shared library a shared album is in, by name.
+    let library: String?
+    let onDone: () -> Void
+
+    @State private var name: String
+    @State private var isSaving = false
+    @State private var confirmDelete = false
+    @State private var failure: String?
+
+    init(album: AlbumDTO, store: AlbumStore, library: String?, onDone: @escaping () -> Void) {
+        self.album = album
+        self.store = store
+        self.library = library
+        self.onDone = onDone
+        _name = State(initialValue: album.name)
+    }
+
+    private var trimmed: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var whoSees: String {
+        guard album.isFamily else {
+            return "Only you can see this album. It's under Albums."
+        }
+        return "Everyone in \(library ?? "its shared library") can see this album. "
+            + "It's under Shared Albums."
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if album.mayManage {
+                        TextField("Name", text: $name)
+                    } else {
+                        Text(album.name)
+                    }
+                } header: {
+                    Text("Name")
+                } footer: {
+                    Text(whoSees)
+                }
+                if album.mayManage {
+                    Section {
+                        Button("Delete Album", role: .destructive) { confirmDelete = true }
+                    }
+                } else {
+                    Section {
+                    } footer: {
+                        Text("Only the person who made this album, or the owner of "
+                            + "\(library ?? "its shared library"), can rename or delete it.")
+                    }
+                }
+                if let failure {
+                    Section {
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle(album.isFamily ? "Shared Album" : "Album")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(album.mayManage ? "Cancel" : "Done", action: onDone)
+                }
+                if album.mayManage {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            isSaving = true
+                            Task {
+                                if await store.rename(album, to: trimmed) {
+                                    onDone()
+                                } else {
+                                    failure = store.lastError ?? "That didn't save. Try again."
+                                }
+                                isSaving = false
+                            }
+                        }
+                        .disabled(trimmed.isEmpty || trimmed == album.name || isSaving)
+                    }
+                }
+            }
+            .confirmationDialog(
+                "Delete “\(album.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
+            ) {
+                Button("Delete Album", role: .destructive) {
+                    Task {
+                        if await store.delete(album) {
+                            onDone()
+                        } else {
+                            failure = store.lastError ?? "That didn't delete. Try again."
+                        }
+                    }
+                }
+            } message: {
+                Text(album.deletionMessage(library: library))
+            }
+        }
+    }
+}
+
+/// A shared library's settings from Edit mode: the same screen Shared
+/// Libraries opens, so renaming it (and its folder in everyone's File
+/// Station), its people, and leaving it work one way wherever they're reached.
+struct LibrarySettingsSheet: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let onDone: () -> Void
+
+    @State private var model: SpacesModel?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let model {
+                    SpaceMembersView(
+                        space: space, model: model, currentUserID: session.user?.id,
+                        onMembershipChanged: { Task { await session.refreshSpaces() } },
+                        underTabBar: false
+                    )
+                } else {
+                    ProgressView()
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onDone)
+                }
+            }
+        }
+        .task {
+            if model == nil, let client = session.client {
+                model = SpacesModel(client: client)
+            }
+        }
     }
 }

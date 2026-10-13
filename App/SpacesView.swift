@@ -188,7 +188,10 @@ struct SpacesView: View {
     }
 }
 
-private struct SpaceMembersView: View {
+/// One shared library's settings: its name and people for its owner, Leave for
+/// everyone else. Reached from Shared Libraries and from the Albums page's
+/// Edit mode, so the two can never disagree about what they allow.
+struct SpaceMembersView: View {
     let space: SpaceDTO
     let model: SpacesModel
     /// So the caller can find itself in the roster — "Leave" is the same call as

@@ -493,6 +493,13 @@ Albums". The app offers a family album only after the server has said it has
 them (`includesFamilyAlbums`), so an older server can't quietly make one
 private.
 
+**Edit** on the Albums page badges every album and shared library card, and
+tapping one opens its settings instead of its photos. An album's settings hold
+its name, who can see it, and Delete, for whoever may change them; anyone else
+is told who can. A library's are the same screen Shared Libraries opens: name
+and people for its owner, Leave for everyone else. Deleting a whole shared
+library isn't offered; it would take a family's photos from everyone at once.
+
 Deleting an album deletes the collection, never the photos, and the app asks
 first, saying so. Covers must be a photo the album actually contains, or the
 cover field becomes a way to display an arbitrary asset.
@@ -538,6 +545,18 @@ upgrading.
 An account created by invite rather than DSM login has no home directory to
 write into. That is recorded as `browse_error` on the placement rather than
 retried forever.
+
+**A shared library's folder follows its name.** Renaming one renames
+`Photos/Shared/<name>` in every member's home. It used to change only the
+database, so the old folder stayed and later photos went into a second one. A
+sweep step, `relocateRenamed`, finds copies filed under a name their library no
+longer has and moves them. Where the old folder holds nothing of another
+library's, it moves the whole folder in one rename, which is instant and keeps
+anything a member added there. Where the new name is already a folder, it moves
+them one by one. Albums, personal or shared, have no folders, so renaming an
+album touches nothing on disk. Leaving a library takes its photos out of your
+home, as it always did, and now the folders that empties too.
+`Scripts/smoke-browse-rename.sh` covers both.
 
 ## 5. Database
 

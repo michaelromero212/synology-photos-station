@@ -357,6 +357,7 @@ actor BrowseTreeWorker {
     private func sweep() async {
         let sql = app.sql
         await relocatePersonal(on: sql)
+        await relocateRenamed(on: sql)
         if await linkingWorks() {
             await refillHollow(on: sql)
             await placeMissing(on: sql)
@@ -566,6 +567,135 @@ actor BrowseTreeWorker {
         }
     }
 
+    /// Copies filed under a name their shared library no longer has.
+    ///
+    /// A library's folder is named for it, in every member's home, and renaming
+    /// the library used to change only the database: the old folder stayed, and
+    /// every photo added afterward went into a second one under the new name.
+    /// So each sweep moves what's filed under an old name. The whole folder in
+    /// one rename where it holds nothing of any other library's, which is
+    /// instant however many photos it holds and keeps anything a member added
+    /// or edited in it; photo by photo where the new name is already a folder.
+    /// A sweep, like everything here, so a rename the NAS restarted in the
+    /// middle of is finished by the next one.
+    private func relocateRenamed(on sql: any SQLDatabase) async {
+        struct Member: Decodable {
+            let spaceID: UUID
+            let userID: UUID
+            let spaceName: String
+            let dsmUsername: String?
+        }
+        struct Entry: Decodable {
+            let id: UUID
+            let path: String
+            let sha256: String
+        }
+        struct CountRow: Decodable { let count: Int }
+        do {
+            // Every member of every shared library: a handful of rows.
+            let members = try await sql.raw("""
+                SELECT m.space_id AS "spaceID", m.user_id AS "userID", s.name AS "spaceName",
+                       u.dsm_username AS "dsmUsername"
+                FROM space_members m
+                JOIN spaces s ON s.id = m.space_id AND s.kind = 'shared'
+                JOIN users u ON u.id = m.user_id
+                """).all(decoding: Member.self)
+
+            let manager = FileManager.default
+            var moved = 0
+            for member in members {
+                guard let user = member.dsmUsername, !user.isEmpty else { continue }
+                let shared = "\(configuration.homesRoot)/\(BrowseTree.sanitise(user))/Photos/Shared"
+                let folder = "\(shared)/\(BrowseTree.sanitise(member.spaceName))"
+                let misfiled = try await sql.raw("""
+                    SELECT be.id, be.path, a.sha256
+                    FROM browse_entries be
+                    JOIN space_assets sa ON sa.id = be.space_asset_id
+                    JOIN assets a ON a.id = sa.asset_id
+                    WHERE sa.space_id = \(bind: member.spaceID) AND be.user_id = \(bind: member.userID)
+                      AND NOT starts_with(be.path, \(bind: folder + "/"))
+                      AND NOT (be.id = ANY(\(bind: Array(unmovable))::uuid[]))
+                    LIMIT 500
+                    """).all(decoding: Entry.self)
+                guard !misfiled.isEmpty else { continue }
+
+                // By the folder each is in now: the old name, normally just one.
+                var byFolder: [String: [Entry]] = [:]
+                for entry in misfiled {
+                    guard entry.path.hasPrefix(shared + "/") else {
+                        // Not this layout's, such as one under the old shared
+                        // root. Left exactly where it is.
+                        unmovable.insert(entry.id)
+                        continue
+                    }
+                    let name = entry.path.dropFirst(shared.count + 1).prefix { $0 != "/" }
+                    byFolder["\(shared)/\(name)", default: []].append(entry)
+                }
+
+                for (old, entries) in byFolder {
+                    let others = try await sql.raw("""
+                        SELECT count(*)::int AS count FROM browse_entries be
+                        JOIN space_assets sa ON sa.id = be.space_asset_id
+                        WHERE be.user_id = \(bind: member.userID) AND sa.space_id <> \(bind: member.spaceID)
+                          AND starts_with(be.path, \(bind: old + "/"))
+                        """).first(decoding: CountRow.self)?.count ?? 0
+
+                    if others == 0, manager.fileExists(atPath: old), !manager.fileExists(atPath: folder) {
+                        try manager.moveItem(atPath: old, toPath: folder)
+                        try await sql.raw("""
+                            UPDATE browse_entries be
+                            SET path = \(bind: folder) || substr(be.path, length(\(bind: old)) + 1)
+                            FROM space_assets sa
+                            WHERE sa.id = be.space_asset_id AND sa.space_id = \(bind: member.spaceID)
+                              AND be.user_id = \(bind: member.userID)
+                              AND starts_with(be.path, \(bind: old + "/"))
+                            """).run()
+                        moved += entries.count
+                        continue
+                    }
+
+                    var emptied: [String: String] = [:]
+                    for entry in entries {
+                        var target = folder + entry.path.dropFirst(old.count)
+                        if manager.fileExists(atPath: entry.path) {
+                            if manager.fileExists(atPath: target) {
+                                target = Self.deduplicated(target, sha256: entry.sha256)
+                            }
+                            try manager.createDirectory(
+                                atPath: (target as NSString).deletingLastPathComponent,
+                                withIntermediateDirectories: true
+                            )
+                            try manager.moveItem(atPath: entry.path, toPath: target)
+                            moved += 1
+                            let photos = (shared as NSString).deletingLastPathComponent
+                            emptied[(entry.path as NSString).deletingLastPathComponent] = photos
+                        }
+                        try await sql.raw("""
+                            UPDATE browse_entries SET path = \(bind: target) WHERE id = \(bind: entry.id)
+                            """).run()
+                    }
+                    for (emptiedFolder, photos) in emptied.sorted(by: { $0.key.count > $1.key.count }) {
+                        Self.removeEmptied(emptiedFolder, under: photos)
+                    }
+                }
+            }
+            if moved > 0 {
+                app.logger.info("browse tree: moved \(moved) photos to their shared library's new name")
+            }
+        } catch {
+            app.logger.error("browse tree rename failed: \(String(reflecting: error))")
+        }
+    }
+
+    /// The `Photos` folder a copy is under, in its person's home.
+    private func photosFolder(of path: String) -> String? {
+        let homes = configuration.homesRoot + "/"
+        guard path.hasPrefix(homes) else { return nil }
+        let user = path.dropFirst(homes.count).prefix { $0 != "/" }
+        guard !user.isEmpty else { return nil }
+        return "\(homes)\(user)/Photos"
+    }
+
     /// Removes a folder the move left empty, then its parent, and so on up
     /// to, but never including, the person's `Photos` folder.
     ///
@@ -654,6 +784,7 @@ actor BrowseTreeWorker {
                 LIMIT 200
                 """).all(decoding: StaleRow.self)
 
+            var emptied: [String: String] = [:]
             for row in rows {
                 // Unlinked rather than recycled. It is one of several names for
                 // the same extents — the blob store still holds the file, and
@@ -663,6 +794,14 @@ actor BrowseTreeWorker {
                 try? await sql.raw("""
                     DELETE FROM browse_entries WHERE id = \(bind: row.id)
                     """).run()
+                if let photos = photosFolder(of: row.path) {
+                    emptied[(row.path as NSString).deletingLastPathComponent] = photos
+                }
+            }
+            // And the folders that leaves empty: someone who left a shared
+            // library shouldn't keep a skeleton of it, year by month.
+            for (folder, photos) in emptied.sorted(by: { $0.key.count > $1.key.count }) {
+                Self.removeEmptied(folder, under: photos)
             }
             if !rows.isEmpty {
                 app.logger.info("browse tree: withdrew \(rows.count) entries")
