@@ -499,12 +499,31 @@ final class VideoPlaybackModel {
     /// Playback belongs in the "playback" category, otherwise a video plays
     /// silently whenever the ringer switch is off — which looks like broken
     /// audio, not a deliberate mute.
+    ///
+    /// Done on a queue of its own, never the main thread. Switching the session
+    /// on blocks for as long as the audio system takes, which is tens of
+    /// milliseconds, on every play and every resume — Xcode flagged it as a hang
+    /// risk, and it was most of the time starting a clip used to cost the main
+    /// thread. The asynchronous `activate(options:)` would do the same, but only
+    /// from iOS 27, and Apple's own advice for every version is to switch the
+    /// session on from a thread that can afford to wait. Serial, so a quick
+    /// play-pause-play still lands in order. The clip starts at once and is
+    /// heard the moment the session is up.
     private func configureAudioSession() {
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Self.audioSessionQueue.async {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .moviePlayback)
+            try? session.setActive(true)
+        }
         #endif
     }
+
+    #if os(iOS)
+    private static let audioSessionQueue = DispatchQueue(
+        label: "com.michaelromero.FrameStation.audio-session", qos: .userInitiated
+    )
+    #endif
 
     /// Duration and frame rate, loaded rather than read.
     ///
@@ -1097,11 +1116,13 @@ struct VideoPlayerView: View {
     /// out of its tile in the grid. It prepares, and claims the connection,
     /// but starts once it has arrived.
     ///
-    /// Starting is main-thread work — the audio session alone is tens of
-    /// milliseconds, and the whole of it came to ninety — and the flight out
-    /// of the grid is drawn by SwiftUI, on that same thread. Started in the
-    /// middle of it, the clip stopped the flight dead for five frames. Photos
-    /// starts a clip once it is open, too.
+    /// Photos starts a clip once it is open, and so does this. It began as a
+    /// fix for a stutter: starting was ninety milliseconds of main-thread work,
+    /// most of it switching the audio session on, and the flight out of the
+    /// grid was then drawn by SwiftUI on that same thread — started mid-flight,
+    /// the clip stopped it dead for five frames. Both have moved since: the
+    /// flight is Core Animation's (see `ViewerStage`) and the audio session is
+    /// switched on off the main thread (see `configureAudioSession`).
     var holdsPlayback: Bool = false
     /// Supplied by the viewer so it survives this page scrolling out of view
     /// and back, and so a video can be prepared before it is watched.
