@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrameStation Photos – Support</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --link: #0066cc; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000000; --fg: #f5f5f7; --muted: #a1a1a6; --link: #2997ff; } }
+  body { background: var(--bg); color: var(--fg); font: 17px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; margin: 0; padding: 48px 16px; }
+  main { max-width: 680px; margin: 0 auto; }
+  h1 { font-size: 32px; margin: 0 0 4px; } h2 { font-size: 21px; margin-top: 36px; }
+  .muted { color: var(--muted); } a { color: var(--link); }
+</style>
+</head>
+<body>
+<main>
+<h1>FrameStation Photos</h1>
+<p class="muted">Your family's photo library, on your own Synology NAS.</p>
+
+<h2>Getting started</h2>
+<p>FrameStation Photos connects to a FrameStation server running on your NAS. Setup
+instructions for the server are in the
+<a href="https://github.com/michaelromero212/synology-photos-station#readme">project README</a>.
+Once it's running, open the app and enter your server address. Sign in with your DSM
+account, or use the invite code someone in your family sent you.</p>
+
+<h2>Common questions</h2>
+<p><strong>The app says it can't reach my server.</strong> Check that your phone is on a
+network that can reach the NAS, and that the server address and port are correct.</p>
+<p><strong>Backup is paused.</strong> Check the backup settings: with Wi-Fi Only or Only
+While Charging turned on, backup waits until those are true. It also needs access to your
+Photos library.</p>
+<p><strong>Where are deleted photos?</strong> In Recently Deleted for 29 days, then
+they're removed for good.</p>
+
+<h2>Get help</h2>
+<p>Report a problem or ask a question by
+<a href="https://github.com/michaelromero212/synology-photos-station/issues">opening an issue on GitHub</a>.</p>
+
+<p><a href="privacy.html">Privacy Policy</a></p>
+</main>
+</body>
+</html>
