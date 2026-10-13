@@ -351,8 +351,7 @@ struct AssetDetailView: View {
         // pass — viewer and pager evicting each other's players in a loop, which
         // froze the app on opening any video.
         .overlay {
-            // Gone for a drag down, as in Photos: only the photo moves.
-            if showChrome && !isZoomed && !(stage?.isDragging ?? false) {
+            if showChrome && !isZoomed {
                 ZStack {
                     VStack(spacing: 0) {
                         topChrome
@@ -365,6 +364,9 @@ struct AssetDetailView: View {
                             .transition(.opacity)
                     }
                 }
+                // Out of the way for a drag down, as in Photos: only the photo
+                // moves.
+                .modifier(StageHidesChrome(stage: stage))
             }
         }
         .overlay { toastLayer }
@@ -815,7 +817,9 @@ struct AssetDetailView: View {
                     canBegin: { !isZoomed },
                     onChange: { stage.dragChanged($0) },
                     onEnd: { translation, velocity in
-                        if stage.dragEnded(translation, velocity: velocity) { leave() }
+                        if stage.dragEnded(translation, velocity: velocity) {
+                            leave(velocity: velocity)
+                        }
                     }
                 )
             }
@@ -835,8 +839,7 @@ struct AssetDetailView: View {
         }
         .ignoresSafeArea()
         // Where a drag down has taken the photo. Nothing moves otherwise.
-        .scaleEffect(stage?.dragScale ?? 1)
-        .offset(stage?.dragOffset ?? .zero)
+        .modifier(StageFollowsDrag(stage: stage))
         // A photo left zoomed shouldn't hold the pager hostage once you've
         // swiped away from it.
         .onChange(of: currentID) { _, _ in
@@ -1023,7 +1026,9 @@ struct AssetDetailView: View {
     /// when `onDisappear` would: there, the bar slid back in after the grid had
     /// already settled, and every trip into a photograph ended with the app
     /// reassembling itself. Started together, the bar comes back with the grid.
-    private func leave() {
+    ///
+    /// `velocity` is a drag's, as it was let go, for the photo to leave with.
+    private func leave(velocity: CGSize = .zero) {
         GridChrome.shared.viewerClosed(tabBarToken)
         focusReport?.cancel()
         // Over the grid: the photo flies back into its tile, which the stage
@@ -1033,7 +1038,8 @@ struct AssetDetailView: View {
             onFocus(currentItem)
             stage.close(
                 current: currentItem,
-                image: currentModel.image ?? currentModel.placeholder
+                image: currentModel.image ?? currentModel.placeholder,
+                velocity: velocity
             )
             return
         }

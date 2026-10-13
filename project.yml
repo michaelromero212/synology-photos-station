@@ -106,6 +106,13 @@ targets:
         # flash than the one it replaces.
         UILaunchScreen:
           UIColorName: LaunchBackground
+        # Lets the app's own animations run at the screen's full rate on an
+        # iPhone with ProMotion. Without it an iPhone holds them to 60 Hz while
+        # its scroll views run at 120, which is why paging between photos felt
+        # smooth and the zoom out of the grid, the drag down and the zoom back
+        # felt heavy beside it: half the frames, in the same viewer. iPad
+        # needs no key for this.
+        CADisableMinimumFrameDurationOnPhone: true
         ITSAppUsesNonExemptEncryption: false
         # Full library access. Limited access silently breaks backup — the app
         # detects it and says so rather than backing up twelve photos.

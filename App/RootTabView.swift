@@ -111,35 +111,20 @@ struct RootTabView: View {
         // coming to *rest* under it is a constant margin on each screen — see
         // `floatingTabBarClearance`.
         .overlay(alignment: .bottom) {
-            // Gone while a grid is selecting or a photo is open, because each
-            // puts its own bar in exactly this place and two of them there is
-            // one too many. See `GridChrome`.
-            ZStack {
-                if !GridChrome.shared.hidesTabBar {
-                    FloatingTabBar(
-                        items: [
-                            .init(tab: Tabs.photos, title: "Photos", symbol: "photo.on.rectangle"),
-                            .init(tab: Tabs.albums, title: "Albums", symbol: "rectangle.stack"),
-                            .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
-                        ],
-                        selection: $tab,
-                        onSearch: { searchSpace = spaceOnScreen }
-                    )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            // The bar's animation, on the bar alone. An overlay, so neither its
-            // arrival nor its departure resizes a scroll view.
-            //
-            // This sat on the whole tab container, and an `.animation(_:value:)`
-            // animates *everything* beneath it that changes in the same moment
-            // as its value — the lesson `RootView` records about the sign-in
-            // fade. A photo opening hides the bar in the very frame its zoom
-            // out of the grid begins, so the zoom was taken over by this
-            // quarter-second ease: SwiftUI counted the zoom's own spring as
-            // finished before it had started, and the viewer cut in over a
-            // photo still near its tile.
-            .animation(.easeInOut(duration: 0.22), value: GridChrome.shared.hidesTabBar)
+            // Out of the way while a grid is selecting or a photo is open,
+            // because each puts its own bar in exactly this place and two of
+            // them there is one too many. See `GridChrome` and
+            // `TabBarStepsAside`.
+            FloatingTabBar(
+                items: [
+                    .init(tab: Tabs.photos, title: "Photos", symbol: "photo.on.rectangle"),
+                    .init(tab: Tabs.albums, title: "Albums", symbol: "rectangle.stack"),
+                    .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
+                ],
+                selection: $tab,
+                onSearch: { searchSpace = spaceOnScreen }
+            )
+            .modifier(TabBarStepsAside())
         }
         .sheet(item: $searchSpace) { space in
             NavigationStack {

@@ -831,7 +831,7 @@ struct TimelineView: View {
                 .animation(.easeOut(duration: 0.2), value: review?.index)
                 // Out of the grid while its photo is open, so the photo has an
                 // empty place to fly back into. See `ViewerStage.liftedID`.
-                .opacity(viewerStage.liftedID == item.id ? 0 : 1)
+                .modifier(LiftedFromGrid(stage: viewerStage, id: item.id))
                 .contentShape(Rectangle())
                 .onTapGesture {
                     // A new viewer hasn't moved the grid yet. See `followFocus`.
@@ -1532,6 +1532,11 @@ struct TimelineView: View {
             version: item.thumbnailVersion
         ) ?? session.loader?.cachedPlaceholder(assetID: item.assetID)
         viewerStage.tileFrame = { item in tileFrame(for: item) }
+        // The bar over the grid comes back while the photo is still on its way
+        // home, under the black as it fades — not once it has landed, which
+        // was the grid putting itself back together after you'd arrived. See
+        // `followViewer`.
+        viewerStage.willClose = { scrollProgress.showTopBar() }
         viewerStage.present(opened, from: tileFrame(for: item), image: image)
     }
 

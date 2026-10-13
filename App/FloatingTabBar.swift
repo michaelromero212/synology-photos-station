@@ -108,6 +108,38 @@ final class GridChrome {
     var hidesTabBar: Bool { !bottomBars.isEmpty || !openViewers.isEmpty }
 }
 
+/// The bar moved out of the way while `GridChrome` says it should be, and back.
+///
+/// Moved off the bottom of the screen and faded, not taken out. Taken out, the
+/// bar was built again each time it came back, glass and all — forty to fifty
+/// milliseconds of the main thread, measured, and it came back in the very
+/// frame a photo set off home to the grid. That was a stall at the start of
+/// every close. A bar that's kept only has to move.
+///
+/// A modifier of its own so that only this reads `hidesTabBar`: read in the
+/// root's body, every change rebuilt the root as well.
+///
+/// The animation is on the bar alone. It sat on the whole tab container once,
+/// and an `.animation(_:value:)` animates everything beneath it that changes
+/// in the same moment as its value — the lesson `RootView` records about the
+/// sign-in fade. A photo opening hides the bar in the very frame its zoom out
+/// of the grid begins, and the zoom was taken over by this quarter-second
+/// ease.
+struct TabBarStepsAside: ViewModifier {
+    /// Far enough down to clear the screen, shadow and all.
+    private static let drop = FloatingTabBarMetrics.height + FloatingTabBarMetrics.bottomInset + 16
+
+    func body(content: Content) -> some View {
+        let hides = GridChrome.shared.hidesTabBar
+        content
+            .offset(y: hides ? Self.drop : 0)
+            .opacity(hides ? 0 : 1)
+            .allowsHitTesting(!hides)
+            .accessibilityHidden(hides)
+            .animation(.easeInOut(duration: 0.22), value: hides)
+    }
+}
+
 /// The bar along the bottom: three places in a pill, and search on its own.
 ///
 /// Drawn here rather than by the system, which is a decision worth the cost of

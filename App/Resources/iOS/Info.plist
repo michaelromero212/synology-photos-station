@@ -7,6 +7,8 @@
 		<string>com.michaelromero.FrameStation.backup</string>
 		<string>com.michaelromero.FrameStation.refresh</string>
 	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
