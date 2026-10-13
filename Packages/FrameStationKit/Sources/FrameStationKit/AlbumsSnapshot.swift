@@ -40,6 +40,15 @@ public enum AlbumsSnapshotStore {
         save(albums, to: "albums.json")
     }
 
+    /// The shared libraries' cards under Shared Albums, covers and all.
+    public static func loadLibraries() -> [SharedLibrarySummary]? {
+        load([SharedLibrarySummary].self, from: "libraries.json")
+    }
+
+    public static func saveLibraries(_ libraries: [SharedLibrarySummary]) {
+        save(libraries, to: "libraries.json")
+    }
+
     // MARK: - Collections
 
     public static func loadCollections(spaceID: UUID) -> CollectionsResponse? {

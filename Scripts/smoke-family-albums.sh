@@ -116,6 +116,20 @@ check "its photos aren't theirs to see" "404" "$(code "$API/v1/albums/$BEACH/ite
 check "nor to add to" "404" "$(add "$AX" "$BEACH" "$XP1")"
 check "nor to delete" "404" "$(code -X DELETE "$API/v1/albums/$BEACH" -H "$AX")"
 
+echo "Shared libraries as album cards"
+# cards <auth> [shared] → each library card as "name members items cover?", or
+# none when the list carries no cards at all.
+cards(){ curl -s "$API/v1/albums${2:+?shared=true}" -H "$1" | python3 -c "
+import sys, json
+libs = json.load(sys.stdin).get('libraries')
+print('none' if libs is None else '|'.join('%s %d %d %s' % (
+    l['name'], l['memberCount'], l['itemCount'], 'cover' if l.get('coverAssetID') else 'nocover')
+    for l in libs))"; }
+check "a member's list has the library as a card, with its cover" "Family 3 3 cover" "$(cards "$AM" shared)"
+check "so does a viewer's" "Family 3 3 cover" "$(cards "$AV" shared)"
+check "someone outside it gets no card for it" "" "$(cards "$AX" shared)"
+check "and an older app's list has no cards" "none" "$(cards "$AM")"
+
 echo "Adding"
 check "a member adds a library photo" "200" "$(add "$AM" "$BEACH" "$F3")"
 BEFORE=$(q "SELECT count(*) FROM space_assets WHERE space_id = '$FAMILY' AND deleted_at IS NULL")

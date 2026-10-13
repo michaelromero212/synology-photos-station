@@ -303,10 +303,38 @@ public struct AlbumListResponse: Codable, Sendable {
     /// True when the list includes family albums, which a server only does
     /// when it has them. Nil from an older server: offer no family albums.
     public let includesFamilyAlbums: Bool?
+    /// The shared libraries you're in, drawn as album cards under Shared
+    /// Albums, alongside the family albums. Nil without `?shared=true`, and
+    /// from an older server.
+    public let libraries: [SharedLibrarySummary]?
 
-    public init(albums: [AlbumDTO], includesFamilyAlbums: Bool? = nil) {
+    public init(
+        albums: [AlbumDTO], includesFamilyAlbums: Bool? = nil,
+        libraries: [SharedLibrarySummary]? = nil
+    ) {
         self.albums = albums
         self.includesFamilyAlbums = includesFamilyAlbums
+        self.libraries = libraries
+    }
+}
+
+/// A shared library as the Albums page shows it: a card like any album's,
+/// with its most recently added photo for a cover.
+public struct SharedLibrarySummary: Codable, Sendable, Identifiable, Hashable {
+    /// The library's space id.
+    public let id: UUID
+    public let name: String
+    public let memberCount: Int
+    public let itemCount: Int
+    /// Nil while the library is empty.
+    public let coverAssetID: UUID?
+
+    public init(id: UUID, name: String, memberCount: Int, itemCount: Int, coverAssetID: UUID?) {
+        self.id = id
+        self.name = name
+        self.memberCount = memberCount
+        self.itemCount = itemCount
+        self.coverAssetID = coverAssetID
     }
 }
 

@@ -93,7 +93,7 @@ struct AlbumController: RouteCollection {
     // MARK: - Reading
 
     /// The caller's own albums, and with `?shared=true` the family albums of
-    /// every shared library they belong to.
+    /// every shared library they belong to, and those libraries themselves.
     ///
     /// Family albums only when asked for: an app from before them would file
     /// them under the person's own albums, as though they were private.
@@ -108,8 +108,36 @@ struct AlbumController: RouteCollection {
             """).all(decoding: AlbumRow.self)
         return AlbumListResponse(
             albums: rows.map { dto(Self.access($0, caller: device.userID)) },
-            includesFamilyAlbums: family ? true : nil
+            includesFamilyAlbums: family ? true : nil,
+            libraries: family ? try await libraries(of: device.userID, on: req.sql) : nil
         )
+    }
+
+    /// The shared libraries a person is in, as cards for the Albums page:
+    /// their size, and the photo added most recently for a cover, one with a
+    /// thumbnail ready and a photo over a video where there's a choice. Here,
+    /// with the albums, rather than on `/me`, so a cover is as fresh as the
+    /// page it's drawn on.
+    private func libraries(
+        of userID: UUID, on sql: any SQLDatabase
+    ) async throws -> [SharedLibrarySummary] {
+        try await sql.raw("""
+            SELECT s.id, s.name,
+                   (SELECT count(*) FROM space_members WHERE space_id = s.id)::int AS "memberCount",
+                   (SELECT count(*) FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+                    WHERE sa.space_id = s.id AND sa.deleted_at IS NULL
+                      AND \(unsafeRaw: TimelineController.visible))::int AS "itemCount",
+                   (SELECT sa.asset_id FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+                    WHERE sa.space_id = s.id AND sa.deleted_at IS NULL
+                      AND \(unsafeRaw: TimelineController.visible)
+                    ORDER BY (a.derived_at IS NOT NULL) DESC, (a.media_type = 'photo') DESC,
+                             sa.uploaded_at DESC
+                    LIMIT 1) AS "coverAssetID"
+            FROM spaces s
+            JOIN space_members m ON m.space_id = s.id AND m.user_id = \(bind: userID)
+            WHERE s.kind = 'shared'
+            ORDER BY s.name
+            """).all(decoding: SharedLibrarySummary.self)
     }
 
     private func detail(_ req: Request) async throws -> AlbumDTO {

@@ -466,9 +466,17 @@ Leaving the library takes its albums off your list; they stay for everyone
 still in it.
 
 A shared *library* is everything its members share; a shared *album* is a set
-of those photos with a name. On the Albums page each library heads its own
-albums under Shared Albums. Menus that put photos into a library say "Shared
-Library".
+of those photos with a name. On the Albums page both are the same card under
+Shared Albums, each library followed by its own albums. A library's card has
+its most recently added photo for a cover and "3 people · 2,791 items" beneath
+it, sent with the album list (`?shared=true` adds `libraries`) rather than on
+`/me`, so it's as fresh as the albums beside it. Menus that put photos into a
+library say "Shared Library".
+
+The app learns that the NAS has shared albums from the list itself, and keeps
+that across launches: a NAS that sends library cards has them. If New Album
+opens before the app has heard, it asks, so the Personal | Shared switch is
+never missing for someone about to make their first shared album.
 
 For both kinds, `album_assets` references a `space_asset` (the placement)
 rather than the bare asset, and every read re-checks membership. So a personal

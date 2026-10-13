@@ -198,7 +198,7 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/stream/:assetID` | Signed | The bytes that signed URL points at |
 | GET | `/v1/activity` | Bearer | Recent shared-space contributions, with an unread watermark |
 | POST | `/v1/activity/read` | Bearer | Move the watermark |
-| GET/POST | `/v1/albums` | Bearer | List, create. Yours alone by default; with `spaceID`, a family album in a shared library (`?shared=true` lists those) |
+| GET/POST | `/v1/albums` | Bearer | List, create. Personal by default; with `spaceID`, a shared album in a shared library (`?shared=true` lists those, and each shared library as a card) |
 | GET/PATCH/DELETE | `/v1/albums/:id` | Bearer | Detail, rename, remove |
 | GET | `/v1/albums/:id/items` | Bearer | Contents |
 | POST/DELETE | `/v1/albums/:id/assets` | Bearer | Add a selection, or remove one |
