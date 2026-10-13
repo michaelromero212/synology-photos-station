@@ -580,21 +580,37 @@ struct MoreView: View {
 
         Section {
             AutoPlayToggle()
-            VideoQualityPicker()
-            // iOS only: the point of exporting is to read a log from a
-            // phone that was on cellular, where the console cannot reach.
-            // A Mac can just be looked at.
-            #if os(iOS)
-            DiagnosticsExportButton()
-            #endif
-        } header: {
-            Text("Playback")
-        } footer: {
+            // Under its own switch, as Playback Quality's line sits under its
+            // picker. As the section's footer it came last, below the quality
+            // line, and read as though it described that.
             Text(
                 "When a video ends, continue to the next video from the "
                 + "same day. Turn this off to play only the video you opened."
             )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            VideoQualityPicker()
+        } header: {
+            Text("Playback")
         }
+
+        // A tool for chasing a stall, not a setting, so only the build run
+        // from Xcode has it. TestFlight and the App Store get Release builds,
+        // which never show it. The log behind it runs in every build — see
+        // `Diagnostics`.
+        //
+        // iOS only: the point of exporting is to read a log from a phone that
+        // was on cellular, where the console cannot reach. A Mac can just be
+        // looked at.
+        #if os(iOS) && DEBUG
+        Section {
+            DiagnosticsExportButton()
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("Development builds only. Not in TestFlight or App Store builds.")
+        }
+        #endif
 
         Section("Offline") {
             NavigationLink {

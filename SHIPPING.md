@@ -47,6 +47,11 @@ They are listed so a future change that breaks one is recognizable.
   Xcode flags.
 - **Release archive builds arm64-only, with dSYMs**, so TestFlight crash reports
   symbolicate.
+- **Debugging tools stay in development builds.** Export Playback Logs (More →
+  Diagnostics) is compiled only into builds run from Xcode, under
+  `#if DEBUG`; a Release archive — what TestFlight and the App Store get —
+  doesn't contain it. Anything added for chasing a bug goes behind the same
+  check, or testers see it.
 
 ## What needs your Apple account
 

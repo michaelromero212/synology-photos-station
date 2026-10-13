@@ -1,7 +1,10 @@
-#if os(iOS)
+#if os(iOS) && DEBUG
 import SwiftUI
 
 /// Hands the diagnostics log over as a Markdown file.
+///
+/// Development builds only — compiled out of the Release builds TestFlight
+/// and the App Store get. See `MoreView`.
 ///
 /// The share sheet rather than a copy button, because the destination is a Mac
 /// across the room: AirDrop is right there in it, and a file arrives readable

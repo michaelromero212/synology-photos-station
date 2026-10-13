@@ -67,8 +67,9 @@ final class Diagnostics {
     private var entries: [Entry] = []
     private let startedAt = Date()
 
-    /// Flipped off in a release build's UI, but the machinery stays: the whole
-    /// point is to gather evidence from a phone that is not plugged in.
+    /// Only a development build can export it (see `DiagnosticsExportButton`),
+    /// but the machinery stays in every build: it is bounded and cheap, and
+    /// the network side feeds `NetworkLocality`, which playback depends on.
     /// Trimmed in batches, not one at a time.
     ///
     /// `removeFirst` on an Array shifts every remaining element, so trimming on
