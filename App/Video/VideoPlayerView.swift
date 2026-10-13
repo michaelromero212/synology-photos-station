@@ -1288,11 +1288,19 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 }
 
-/// Playback controls, laid out the way Synology lays them out: a transport row
-/// centered on the video itself, and a single row underneath carrying elapsed
-/// time, the scrubber, time remaining, and mute.
+/// Playback controls: a transport row centered on the video itself, and a
+/// single row underneath — elapsed time, the scrubber, time remaining and mute —
+/// on a pill of dark glass, as Photos draws its own.
 struct VideoControls: View {
     let model: VideoPlaybackModel
+
+    /// Dark enough under every control here for white to read over the
+    /// brightest frame. Plain glass takes on the brightness of what's behind
+    /// it: over a near-white clip the skip and play buttons measured 2.1 and
+    /// 2.6 to 1 against their white glyphs, and the times 4.4 to 1 — under
+    /// the 3 a control needs and the 4.5 small text does. With this, the times
+    /// measure 6.5 to 1. Over a dark clip it simply reads as dark.
+    private static let glassTint = Color.black.opacity(0.5)
 
     @State private var isMuted = false
 
@@ -1305,6 +1313,9 @@ struct VideoControls: View {
             }
         }
         .foregroundStyle(.white)
+        // Dark whatever the app's appearance, as the rest of the viewer's chrome
+        // is: glass in the light scheme turns pale, and these glyphs are white.
+        .viewerChromeScheme()
     }
 
     /// Skip back, play/pause, skip forward. The skips flank the ring rather
@@ -1327,7 +1338,7 @@ struct VideoControls: View {
             Image(systemName: symbol)
                 .font(.system(size: 30, weight: .medium))
                 .frame(width: 56, height: 56)
-                .glassCircle(fallback: .ultraThinMaterial)
+                .glassCircle(tint: Self.glassTint, fallback: .ultraThinMaterial)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -1341,7 +1352,7 @@ struct VideoControls: View {
             Image(systemName: playSymbol)
                 .font(.system(size: 30, weight: .medium))
                 .frame(width: 78, height: 78)
-                .glassCircle(fallback: .ultraThinMaterial)
+                .glassCircle(tint: Self.glassTint, fallback: .ultraThinMaterial)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -1376,13 +1387,17 @@ struct VideoControls: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isMuted ? "Unmute" : "Mute")
         }
-        // No glass capsule. Synology draws this row straight onto the picture —
-        // elapsed, track, remaining, mute, edge to edge — and boxing it in a
-        // pill made ours read as a widget sitting on the video rather than part
-        // of the player. A shadow carries legibility over a bright frame
-        // instead, which is what the timecodes needed the capsule for.
-        .shadow(radius: 6)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        // A pill of dark glass under the track and the times, the way Photos
+        // draws its own, so they read over a white frame as well as a black one.
+        //
+        // This row used to sit straight on the picture, Synology's way, with a
+        // shadow standing in for a background — and over a light video the
+        // shadow lost: a white track and white times on white, with nothing to
+        // say where the clip had got to. Tinted — see `glassTint`.
+        .glassCapsule(tint: Self.glassTint, interactive: false)
+        .padding(.horizontal, 16)
         // Held clear of the viewer's action bar, which floats at the very
         // bottom. Sideways there is far less height to spend — the rotated
         // layer is only as tall as the screen is wide — so the portrait figure
