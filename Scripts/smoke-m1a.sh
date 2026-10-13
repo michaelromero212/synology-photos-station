@@ -175,6 +175,26 @@ check "still one file on disk" "1"    "$(find "$SCRATCH/blobroot/blobs" -type f 
 check "change_log has 2 rows"  "2"    "$($PSQL 'select count(*) from change_log;')"
 
 echo
+echo "=== 11b. the video plays: a link, then ranges through it ==="
+# What a player does: ask for a link, then fetch the file through it a piece
+# at a time. In October 2026 the stream's query stopped selecting a column its
+# row needed and failed on every request — no video anywhere would play while
+# everything else answered — and this is the check CI runs before an image can
+# reach the NAS, so that can't ship again.
+LINK=$(curl -s "$API/v1/assets/$ASSET/playback" -H "$AUTH" | jq_get '["url"]')
+check "a playback link is issued" "1" "$([ -n "$LINK" ] && echo 1 || echo 0)"
+check "the first bytes come back as a range" "206" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-99' "$LINK")"
+check "and are the file's own" "$(head -c 100 "$SRC" | od -An -tx1 | tr -d ' \n')" \
+  "$(curl -s -H 'Range: bytes=0-99' "$LINK" | od -An -tx1 | tr -d ' \n')"
+check "a range from the middle is the file's own too" \
+  "$(tail -c +20000001 "$SRC" | head -c 100 | od -An -tx1 | tr -d ' \n')" \
+  "$(curl -s -H 'Range: bytes=20000000-20000099' "$LINK" | od -An -tx1 | tr -d ' \n')"
+check "a link with a forged signature is refused" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-99' \
+     "$(echo "$LINK" | sed -E 's/sig=[^&]*/sig=AAAA/')")"
+
+echo
 echo "=== 12. hash mismatch is caught and rejected ==="
 LIE=$(python3 -c "print('a'*64)")
 dd if=/dev/urandom of="$SCRATCH/lie.bin" bs=1024 count=64 2>/dev/null
@@ -200,6 +220,9 @@ check "HTTP 404 on foreign session" "404" "$C5"
 C6=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/v1/spaces/$SPACE/assets/$ASSET" \
   -H "Authorization: Bearer $T2" -H 'Content-Type: application/json' -d '{}')
 check "HTTP 404 linking into a space you're not in" "404" "$C6"
+C7=$(curl -s -o /dev/null -w "%{http_code}" "$API/v1/assets/$ASSET/playback" \
+  -H "Authorization: Bearer $T2")
+check "HTTP 404 asking to play a video you can't see" "404" "$C7"
 
 echo
 echo "════════════════════════════════════"

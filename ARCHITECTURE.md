@@ -385,6 +385,34 @@ The tradeoff, stated plainly: a signed URL appears in the server's access log. I
 is scoped to one asset, expires in five minutes, and the log lives on the same
 NAS as the blobs it points at.
 
+**Keeping a clip playing when its link stops working.** A link stops working in
+three ordinary ways: it runs out (five minutes, while the player keeps fetching
+the clip a piece at a time), the server restarts (the signing key is per boot
+unless `FRAMESTATION_STREAM_SECRET` pins it, so every update throws away every
+link), or the phone changes networks under it. None of them fails the player.
+Refused, AVPlayer asks again with the same dead link a dozen times a second and
+stalls for good, with nothing in its status or its error log to say why —
+measured on the dev server restarted mid-clip. So `VideoPlaybackModel` handles it
+itself:
+
+- A link that won't see the clip out is renewed *before* playing or resuming —
+  a neighbor made ready minutes ago, or a long pause.
+- A stall is asked about directly: one byte of the clip by the same link.
+  Refused means fetch a fresh link and carry on from the same moment in the same
+  player; answered means the network is just slow; no answer means the NAS is
+  still coming back, so it asks again every three seconds.
+- Reconnecting shows the spinner, never an error. Only after about half a minute
+  of failed attempts — or a minute stalled with no answer — does "Can't Play
+  This Video" appear, now with Try Again, and the connection monitor seeing the
+  NAS again starts it by itself.
+
+The stream path is checked end to end before any image is published:
+`smoke-m1a.sh` (run by `smoke-image.sh` in CI) fetches a link and real byte
+ranges through it, and `smoke-m2.sh` does the same for both representations.
+That gap is how an October 2026 server change shipped with no video playing
+anywhere: the stream query decoded a row it no longer selected every column of,
+while every other request — and so every other check — went on answering.
+
 Direct play only. `ffmpeg` transcoding 4K on a J4125 is not on the table, and on
 a home network it isn't needed — the file streams as-is and a seek fetches only
 the bytes being watched. HLS would slot in as a different `kind` in

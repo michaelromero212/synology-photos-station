@@ -40,6 +40,21 @@ struct AssetController: RouteCollection {
         let storagePath: String?
         /// Whether its thumbnails have been made.
         let isDerived: Bool
+
+        /// The columns an `AssetRow` is decoded from, for every query that
+        /// decodes one — selected from `assets a`.
+        ///
+        /// One list, because there were two. `isDerived` was added to the row
+        /// and to one of the queries that read it; the other, the one a video
+        /// streams through, went on selecting the old columns, failed to decode
+        /// on every request, and no video anywhere would play — "Can't Play
+        /// This Video" for a NAS that was answering everything else.
+        static let columns = """
+            a.id, a.sha256, a.media_type AS "mediaType",
+            a.blob_ext AS "blobExt", a.mime,
+            a.storage_path AS "storagePath",
+            a.derived_at IS NOT NULL AS "isDerived"
+            """
     }
 
     /// The file to serve: the library copy when there is one, the blob
@@ -256,9 +271,7 @@ struct AssetController: RouteCollection {
         // The signature proves the link was issued; membership is still checked
         // now, so revoking someone mid-lifetime takes effect immediately.
         guard let asset = try await req.sql.raw("""
-            SELECT a.id, a.sha256, a.media_type AS "mediaType",
-                   a.blob_ext AS "blobExt", a.mime,
-                   a.storage_path AS "storagePath"
+            SELECT \(unsafeRaw: AssetRow.columns)
             FROM assets a
             WHERE a.id = \(bind: assetID)
               AND EXISTS (
@@ -529,13 +542,7 @@ struct AssetController: RouteCollection {
         // 404 rather than 403 on a non-member: the existence of an asset is
         // itself information someone outside the space shouldn't get.
         guard let asset = try await req.sql.raw("""
-            SELECT a.id,
-                   a.sha256,
-                   a.media_type AS "mediaType",
-                   a.blob_ext   AS "blobExt",
-                   a.mime,
-                   a.storage_path AS "storagePath",
-                   a.derived_at IS NOT NULL AS "isDerived"
+            SELECT \(unsafeRaw: AssetRow.columns)
             FROM assets a
             WHERE a.id = \(bind: assetID)
               AND EXISTS (

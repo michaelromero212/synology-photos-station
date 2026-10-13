@@ -178,6 +178,29 @@ check "timeline total is 4" "4" "$(echo "$M" | jq_get '["total"]')"
 check "activity flagged as bulk" "t" "$(q 'select is_bulk from activity_sessions limit 1;')"
 
 echo
+echo "=== 11b. a video plays ==="
+# The link the app asks for, then the file through it, in the pieces a player
+# asks for. In October 2026 the stream's query stopped selecting a column its
+# row needed, failed on every request, and no video in any library would
+# play — while everything else answered. Nothing else in these suites streams.
+VID=$(q "select id from assets where media_type='video' limit 1;")
+for QUALITY in original mobile; do
+  [ "$QUALITY" = original ] && WHAT="the original" || WHAT="the smaller version"
+  URL=$(curl -s "$API/v1/assets/$VID/playback?quality=$QUALITY" -H "Authorization: Bearer $TOKEN" \
+    | jq_get '["url"]')
+  check "a link to $WHAT is issued" "1" "$([ -n "$URL" ] && echo 1 || echo 0)"
+  check "its first bytes come back as a range" "206" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-99' "$URL")"
+  check "exactly the hundred bytes asked for" "100" \
+    "$(curl -s -H 'Range: bytes=0-99' "$URL" | wc -c | tr -d ' ')"
+  check "and a range further in" "206" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=1000-1999' "$URL")"
+done
+TAMPERED=$(echo "$URL" | sed -E 's/sig=[^&]*/sig=AAAA/')
+check "a link with a forged signature is refused" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-99' "$TAMPERED")"
+
+echo
 echo "=== 12. the same photos into a second library get rows of their own ==="
 # A Synology Shared Space holding photos somebody also has in their own
 # library: same bytes, different folder.

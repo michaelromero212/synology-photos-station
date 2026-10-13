@@ -23,6 +23,13 @@ extension Image {
     }
 }
 
+/// A clip the NAS still turns away with a fresh link: removed, or no longer
+/// shared with this person. Said as that, not as a connection problem.
+struct PlaybackRefused: LocalizedError {
+    let status: Int
+    var errorDescription: String? { "This video isn't available right now." }
+}
+
 /// Fetches a signed URL and plays it.
 ///
 /// Direct play: the stored file is streamed as-is over HTTP Range, so a 4K clip
@@ -64,6 +71,12 @@ final class VideoPlaybackModel {
     @ObservationIgnored private var recoveryObserver: NSKeyValueObservation?
     /// Records each stutter for the exported report.
     @ObservationIgnored private var stalledObserver: (any NSObjectProtocol)?
+    /// The link the player holds, so a stall can be asked about. See
+    /// `checkLinkWhileStalled`.
+    @ObservationIgnored private var linkURL: URL?
+    @ObservationIgnored private var linkCheck: Task<Void, Never>?
+    /// Looks in on a clip a few seconds after it was told to play. See `start`.
+    @ObservationIgnored private var startWatch: Task<Void, Never>?
     #if DEBUG
     // Streaming diagnostics, console-only — see `diagnose`.
     @ObservationIgnored private var diagBufferEmpty: NSKeyValueObservation?
@@ -90,6 +103,43 @@ final class VideoPlaybackModel {
     @ObservationIgnored var onLinkFree: (() -> Void)?
     /// Whether this watch has already reported itself far enough ahead.
     @ObservationIgnored private var isAhead = false
+
+    // MARK: Staying connected
+
+    /// True while a fresh link is being fetched for a clip that lost its own.
+    /// The view shows a spinner for it, not an error. See `reconnect`.
+    private(set) var isReconnecting = false
+    /// What `prepare` was asked for, kept so a fresh link can be fetched
+    /// without the page having to ask again.
+    @ObservationIgnored private var source: (
+        assetID: UUID, client: FrameStationClient, quality: PlaybackQuality
+    )?
+    /// When the link the player holds stops working, and how long the NAS
+    /// made it last. The NAS signs each one for minutes, not for the session
+    /// (`PlaybackToken.lifetime`), and the player keeps fetching more of the
+    /// clip as it plays — so a link can run out partway through a long clip,
+    /// across a long pause, or before a neighbor got ready early is watched.
+    @ObservationIgnored private var linkExpiresAt: Date?
+    @ObservationIgnored private var linkLifetime: TimeInterval = 300
+    @ObservationIgnored private var recovery: Task<Void, Never>?
+    /// Failures since the clip last played properly. Reset by progress, so
+    /// a clip that keeps failing stops trying and says so, and one that fails
+    /// once an hour never runs out of tries.
+    @ObservationIgnored private var failuresWithoutProgress = 0
+    @ObservationIgnored private var positionAtInstall: Double = 0
+    /// So one link running out mid-play is renewed once, not every tick.
+    @ObservationIgnored private var renewingLink = false
+
+    /// How long to wait before each attempt to reconnect: at once, then
+    /// backing off. About half a minute in all — long enough to ride out a
+    /// NAS restarting for an update or a phone moving between networks.
+    private static let reconnectDelays: [Double] = [0, 1, 2, 4, 8, 15]
+    /// Failed clips in a row, with no playing in between, before giving up.
+    private static let maxFailuresWithoutProgress = 3
+    /// Played this far on one link, the clip counts as working again.
+    private static let progressThatCounts: Double = 3
+    /// Seconds of a link's life kept in hand before it is relied on.
+    private static let linkMargin: TimeInterval = 30
 
     /// How far past the playhead the buffer has to reach before this clip
     /// stops needing the connection to itself — or the end of the clip, if
@@ -129,7 +179,8 @@ final class VideoPlaybackModel {
     func prepare(
         assetID: UUID, client: FrameStationClient?, quality: PlaybackQuality = .default
     ) async {
-        guard let client, player == nil, !isPreparing else { return }
+        guard let client, player == nil, !isPreparing, recovery == nil else { return }
+        source = (assetID, client, quality)
         isPreparing = true
         isLoading = true
         defer {
@@ -145,6 +196,7 @@ final class VideoPlaybackModel {
                 .quality,
                 "Asked for \(quality.rawValue); server served \(playback.kind)"
             )
+            noteLink(playback)
             let item = AVPlayerItem(url: playback.url)
             // Preloaded, so buffer only a little ahead. Both pages either side
             // are warmed the moment the pager settles; left uncapped, each
@@ -155,6 +207,7 @@ final class VideoPlaybackModel {
             let player = AVPlayer(playerItem: item)
             self.player = player
             lastError = nil
+            positionAtInstall = 0
 
             track(player)
             await describe(item)
@@ -162,10 +215,183 @@ final class VideoPlaybackModel {
             // play before there was anything to play.
             if wantsPlayback { start() }
         } catch {
-            lastError = error
-            // A clip that can't play doesn't need the connection.
-            onLinkFree?()
+            Diagnostics.shared.log(
+                .playback, "Couldn't get a link to play: \(Self.describe(error))"
+            )
+            // On screen, try again rather than give up on one failed request.
+            // A neighbor just waits: it tries again when it's shown.
+            if wantsPlayback {
+                reconnect(because: "the link request failed", at: 0)
+            } else {
+                lastError = error
+                // A clip that can't play doesn't need the connection.
+                onLinkFree?()
+            }
         }
+    }
+
+    private func noteLink(_ playback: PlaybackURLResponse) {
+        linkURL = playback.url
+        linkExpiresAt = playback.expiresAt
+        linkLifetime = max(60, playback.expiresAt.timeIntervalSinceNow)
+        renewingLink = false
+    }
+
+    /// Whether the link in hand won't see this clip out but a fresh one would
+    /// see it further — a neighbor got ready minutes ago, or a long pause.
+    /// Replaced before playing, it never fails a few seconds in.
+    private var linkNeedsRenewing: Bool {
+        guard let linkExpiresAt else { return false }
+        let left = linkExpiresAt.timeIntervalSinceNow
+        let remaining = duration > 0 ? max(0, duration - position) : linkLifetime
+        // What a fresh link could promise: the rest of the clip if it fits,
+        // otherwise nearly all of the link's life.
+        let wanted = min(remaining + Self.linkMargin, linkLifetime - Self.linkMargin)
+        return left < wanted
+    }
+
+    /// Picks the clip up again with a fresh link, from where it was.
+    ///
+    /// For any way the connection to the clip can be lost. The link ran out —
+    /// the NAS signs them for minutes. The NAS restarted for an update, which
+    /// throws every link it signed away. The phone moved between networks
+    /// under a stream. The link request itself failed. Each used to leave
+    /// "Can't Play This Video" on screen with nothing to press; now it gets a
+    /// spinner, and the clip carries on from the same moment.
+    ///
+    /// Backs off over about half a minute, and gives up — showing the error,
+    /// with Try Again — only when nothing in that time worked.
+    private func reconnect(because reason: String, at seconds: Double? = nil) {
+        guard let source, recovery == nil else { return }
+        let resumeAt = seconds ?? position
+        Diagnostics.shared.log(
+            .playback, "Reconnecting at \(Self.mmss(resumeAt)): \(reason)"
+        )
+        isReconnecting = true
+        lastError = nil
+        isPlaying = false
+        recovery = Task { [weak self] in
+            var lastFailure: (any Error)?
+            for (attempt, delay) in Self.reconnectDelays.enumerated() {
+                if delay > 0 {
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+                guard !Task.isCancelled, let self else { return }
+                do {
+                    let playback = try await source.client.playbackURL(
+                        assetID: source.assetID, quality: source.quality
+                    )
+                    guard !Task.isCancelled else { return }
+                    Diagnostics.shared.log(
+                        .playback, "Reconnected on attempt \(attempt + 1)"
+                    )
+                    // Done before installing: `start`, which installing calls,
+                    // stands back while a reconnect is under way, and would
+                    // leave the clip running with the controls saying paused.
+                    self.recovery = nil
+                    self.isReconnecting = false
+                    self.install(playback, at: resumeAt)
+                    return
+                } catch {
+                    lastFailure = error
+                    Diagnostics.shared.log(
+                        .playback,
+                        "Reconnect attempt \(attempt + 1) failed: \(Self.describe(error))"
+                    )
+                }
+            }
+            guard let self else { return }
+            Diagnostics.shared.log(.playback, "Gave up reconnecting")
+            self.recovery = nil
+            self.isReconnecting = false
+            self.lastError = lastFailure ?? URLError(.cannotConnectToHost)
+            self.onLinkFree?()
+        }
+    }
+
+    /// Puts a fresh link in the player, at `seconds`, playing if the clip is
+    /// wanted. The same player, so the layer on screen never changes hands.
+    private func install(_ playback: PlaybackURLResponse, at seconds: Double) {
+        noteLink(playback)
+        let item = AVPlayerItem(url: playback.url)
+        item.preferredForwardBufferDuration = wantsPlayback
+            ? Self.playingForwardBuffer : Self.preloadForwardBuffer
+        positionAtInstall = seconds
+        if let player {
+            untrackItem()
+            player.replaceCurrentItem(with: item)
+            trackItem(item, on: player)
+        } else {
+            let player = AVPlayer(playerItem: item)
+            self.player = player
+            track(player)
+            Task { await describe(item) }
+        }
+        if seconds > 0 {
+            position = seconds
+            player?.seek(
+                to: CMTime(seconds: seconds, preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero
+            )
+        }
+        if wantsPlayback { start() }
+    }
+
+    /// Try Again, and the NAS coming back: a clip that gave up starts over
+    /// from where it stopped, with all its attempts back.
+    func retry() {
+        guard lastError != nil || player == nil else { return }
+        failuresWithoutProgress = 0
+        wantsPlayback = true
+        reconnect(because: "trying again", at: position)
+    }
+
+    /// The player gave up on the link it had: refused, or cut off.
+    private func itemFailed(_ item: AVPlayerItem, _ error: (any Error)?, while stage: String) {
+        // A failure from an item already replaced is history.
+        guard item === player?.currentItem else { return }
+        var details = Self.describe(error)
+        // AVFoundation's own record says what the server answered, which the
+        // error alone often doesn't: a refused link is a 404 here. The address
+        // is left out — it carries the link's signature.
+        if let event = item.errorLog()?.events.last {
+            details += " — log: \(event.errorDomain) \(event.errorStatusCode)"
+            if let comment = event.errorComment, !comment.isEmpty {
+                details += " \(comment)"
+            }
+        }
+        Diagnostics.shared.log(
+            .playback, "Playback failed \(stage) at \(Self.mmss(position)): \(details)"
+        )
+        isPlaying = false
+        failuresWithoutProgress += 1
+        guard failuresWithoutProgress <= Self.maxFailuresWithoutProgress else {
+            Diagnostics.shared.log(.playback, "Failed too often without playing; stopping")
+            lastError = error ?? URLError(.networkConnectionLost)
+            onLinkFree?()
+            return
+        }
+        reconnect(because: "the player lost its link \(stage)")
+    }
+
+    /// An error as the log should show it: where it came from and its code,
+    /// and the same for what caused it. Codes rather than sentences — the
+    /// sentence for a refused link and for a dead network can be the same.
+    static func describe(_ error: (any Error)?) -> String {
+        guard let error else { return "no error given" }
+        let ns = error as NSError
+        var text = "\(ns.domain) \(ns.code)"
+        if let client = error as? FrameStationClientError, case .http(let status, _) = client {
+            text += " (HTTP \(status))"
+        }
+        var cause = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        var depth = 0
+        while let underlying = cause, depth < 3 {
+            text += " ← \(underlying.domain) \(underlying.code)"
+            cause = underlying.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return text
     }
 
     /// Claims the connection for this clip ahead of its first byte — see
@@ -180,7 +406,21 @@ final class VideoPlaybackModel {
     func start() {
         wantsPlayback = true
         needsLink()
-        guard let player else { return }
+        guard let player else {
+            // Shown with nothing to play: the link request failed while this
+            // was a neighbor. Ask again now that it's wanted.
+            if !isPreparing, recovery == nil, source != nil {
+                reconnect(because: "it was shown without a link", at: position)
+            }
+            return
+        }
+        guard recovery == nil else { return }
+        if linkNeedsRenewing {
+            reconnect(
+                because: "its link was about to run out", at: hasFinished ? 0 : position
+            )
+            return
+        }
         configureAudioSession()
         // On screen now: ask for a real cushion so the playing clip can get
         // ahead — the neighbours stay capped low, so it isn't fighting them for
@@ -204,6 +444,19 @@ final class VideoPlaybackModel {
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
         isPlaying = true
+        // A clip that never gets going reports no stall — it was never playing
+        // to stall — so one still waiting a few seconds on is asked about the
+        // same way. A link the NAS stopped accepting while this sat ready as a
+        // neighbor is the case: it waits forever otherwise.
+        startWatch?.cancel()
+        startWatch = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self, !Task.isCancelled, self.wantsPlayback,
+                  let item = self.player?.currentItem,
+                  self.player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+            else { return }
+            self.checkLinkWhileStalled(item)
+        }
     }
 
     /// How far ahead this clip may read.
@@ -293,12 +546,19 @@ final class VideoPlaybackModel {
                 if !self.isAhead, let item = player.currentItem {
                     self.noteIfAhead(item, at: time)
                 }
+                self.noteProgress()
             }
         }
+        if let item = player.currentItem { trackItem(item, on: player) }
+    }
 
+    /// Everything watched on the item itself, so a fresh link — a new item in
+    /// the same player — is watched the same way. See `install`.
+    private func trackItem(_ item: AVPlayerItem, on player: AVPlayer) {
+        untrackItem()
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
-            object: player.currentItem, queue: .main
+            object: item, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.isPlaying = false
@@ -313,13 +573,11 @@ final class VideoPlaybackModel {
         // these the viewer sits on a frozen frame with no spinner and nothing
         // to explain itself. AVPlayer streams outside our URLSession, so this
         // is the only place that failure is visible.
-        statusObserver = player.currentItem?.observe(\.status, options: [.new]) {
+        statusObserver = item.observe(\.status, options: [.new]) {
             [weak self] item, _ in
             guard item.status == .failed else { return }
             MainActor.assumeIsolated {
-                self?.lastError = item.error ?? URLError(.cannotConnectToHost)
-                self?.isPlaying = false
-                self?.onLinkFree?()
+                self?.itemFailed(item, item.error, while: "loading")
             }
         }
 
@@ -336,7 +594,7 @@ final class VideoPlaybackModel {
         // notification: the stall says it has gone wrong, this says it is safe
         // to carry on. Guarded by `isPlaying`, which is intent, so a clip the
         // viewer paused is never started again behind their back.
-        recoveryObserver = player.currentItem?.observe(
+        recoveryObserver = item.observe(
             \.isPlaybackLikelyToKeepUp, options: [.new]
         ) { [weak self] item, _ in
             MainActor.assumeIsolated {
@@ -365,12 +623,13 @@ final class VideoPlaybackModel {
         // each one is recorded with what the connection was managing at the
         // time — `measure` reads AVFoundation's own accounting.
         stalledObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemPlaybackStalled, object: player.currentItem, queue: .main
+            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 Diagnostics.shared.log(.stall, "Stalled at \(Self.mmss(self.position))")
                 self.measure("at stall")
+                self.checkLinkWhileStalled(item)
             }
         }
 
@@ -380,15 +639,149 @@ final class VideoPlaybackModel {
 
         stallObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
-            object: player.currentItem, queue: .main
+            object: item, queue: .main
         ) { [weak self] note in
             let failure = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? (any Error)
             MainActor.assumeIsolated {
-                self?.lastError = failure ?? URLError(.networkConnectionLost)
-                self?.isPlaying = false
-                self?.onLinkFree?()
+                self?.itemFailed(item, failure, while: "playing")
             }
         }
+
+    }
+
+    /// Asks the NAS, while the clip is stalled, whether it still accepts the
+    /// link — and fetches a fresh one the moment it doesn't.
+    ///
+    /// A link that has run out, or one the NAS no longer knows because it
+    /// restarted for an update, is refused with a 404, and the player does not
+    /// fail over that. It asks again with the same dead link, a dozen times a
+    /// second, and stalls for good: no error, no end, a frozen frame with a
+    /// play button. Nothing it reports says why — not its status, not its
+    /// error log. Measured on the dev server restarted mid-clip.
+    ///
+    /// So a stall is asked about directly: one byte of the clip, by the same
+    /// link. Refused means renew. Answered means the network is merely slow,
+    /// and the player rides that out itself. No answer means the NAS is still
+    /// on its way back, and it is asked again a few seconds later, for as long
+    /// as the clip stays stalled.
+    private func checkLinkWhileStalled(_ item: AVPlayerItem) {
+        guard linkCheck == nil, recovery == nil, let url = linkURL else { return }
+        linkCheck = Task { [weak self] in
+            defer { self?.linkCheck = nil }
+            for attempt in 0..<20 {
+                if attempt > 0 { try? await Task.sleep(for: .seconds(3)) }
+                guard !Task.isCancelled, let self, item === self.player?.currentItem,
+                      self.recovery == nil,
+                      self.player?.timeControlStatus != .playing
+                else { return }
+                var request = URLRequest(url: url, timeoutInterval: 10)
+                request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+                let status = (try? await URLSession.shared.data(for: request))
+                    .flatMap { ($0.1 as? HTTPURLResponse)?.statusCode }
+                guard !Task.isCancelled else { return }
+                Diagnostics.shared.log(
+                    .playback,
+                    "Link check while stalled at \(Self.mmss(self.position)): "
+                        + (status.map { "HTTP \($0)" } ?? "no answer")
+                )
+                switch status {
+                case .some(400..<500):
+                    self.linkRefused(status: status ?? 404)
+                    return
+                case .some(200..<300):
+                    return
+                default:
+                    continue
+                }
+            }
+            // A minute without an answer. Rather than a frozen frame with no
+            // explanation, stop asking and say so — with Try Again, and the NAS
+            // answering again starts it by itself. See `connectionReturned`.
+            guard let self, !Task.isCancelled, item === self.player?.currentItem,
+                  self.player?.timeControlStatus != .playing
+            else { return }
+            Diagnostics.shared.log(.playback, "No answer from the NAS for a minute; stopping")
+            self.player?.pause()
+            self.isPlaying = false
+            self.lastError = URLError(.cannotConnectToHost)
+            self.onLinkFree?()
+        }
+    }
+
+    /// The NAS answering again, as the connection monitor sees it. A clip that
+    /// gave up starts again from where it stopped; one still stalled has its
+    /// link asked about at once, rather than at its next three-second check.
+    func connectionReturned() {
+        if lastError != nil {
+            retry()
+        } else if wantsPlayback, let item = player?.currentItem,
+                  player?.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            linkCheck?.cancel()
+            linkCheck = nil
+            checkLinkWhileStalled(item)
+        }
+    }
+
+    /// The NAS turned the link down: renew it, unless it has been turned down
+    /// over and over without the clip playing in between — then it isn't the
+    /// link, and the clip says so.
+    private func linkRefused(status: Int) {
+        failuresWithoutProgress += 1
+        guard failuresWithoutProgress <= Self.maxFailuresWithoutProgress else {
+            Diagnostics.shared.log(.playback, "Refused too often without playing; stopping")
+            player?.pause()
+            isPlaying = false
+            lastError = PlaybackRefused(status: status)
+            onLinkFree?()
+            return
+        }
+        reconnect(because: "the NAS refused its link (\(status))")
+    }
+
+    private func untrackItem() {
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
+        if let stalledObserver { NotificationCenter.default.removeObserver(stalledObserver) }
+        statusObserver?.invalidate()
+        recoveryObserver?.invalidate()
+        linkCheck?.cancel()
+        endObserver = nil
+        stallObserver = nil
+        stalledObserver = nil
+        statusObserver = nil
+        recoveryObserver = nil
+        linkCheck = nil
+    }
+
+    /// Called every tick of the clock while there's a player.
+    ///
+    /// A clip that has played a few seconds on its current link is working
+    /// again, and earns back its tries. And a link about to run out in the
+    /// middle of a clip with more still to fetch is renewed a little early,
+    /// rather than left to fail and stall first.
+    private func noteProgress() {
+        if failuresWithoutProgress > 0,
+           position - positionAtInstall >= Self.progressThatCounts {
+            failuresWithoutProgress = 0
+        }
+        guard isPlaying, !renewingLink, recovery == nil,
+              let linkExpiresAt, linkExpiresAt.timeIntervalSinceNow < 15,
+              duration - position > 15,
+              let item = player?.currentItem, !bufferReachesEnd(item)
+        else { return }
+        renewingLink = true
+        reconnect(because: "its link was running out mid-play")
+    }
+
+    /// Whether everything left of the clip is already on the phone, so a link
+    /// running out can't matter.
+    private func bufferReachesEnd(_ item: AVPlayerItem) -> Bool {
+        let now = item.currentTime()
+        guard duration > 0,
+              let range = item.loadedTimeRanges.map(\.timeRangeValue)
+                .first(where: { $0.containsTime(now) })
+        else { return false }
+        return range.end.seconds >= duration - 0.5
     }
 
     /// Releases the connection once the buffer is well past the playhead, or
@@ -458,14 +851,26 @@ final class VideoPlaybackModel {
     // MARK: - Transport
 
     func togglePlayPause() {
-        guard let player else { return }
+        guard let player, recovery == nil else { return }
         if isPlaying {
             Diagnostics.shared.log(.action, "Pause at \(Self.mmss(position))")
             measure("paused")
             player.pause()
             isPlaying = false
+            // Paused by hand: a reconnect while it sits there mustn't start it.
+            wantsPlayback = false
         } else {
             Diagnostics.shared.log(.action, "Play at \(Self.mmss(position))")
+            wantsPlayback = true
+            // Back after a long pause, the link may have run out. Renewed
+            // before playing rather than failing a moment after.
+            if linkNeedsRenewing {
+                reconnect(
+                    because: "resumed after its link ran out",
+                    at: hasFinished ? 0 : position
+                )
+                return
+            }
             // Pressing play on a finished clip starts it again rather than
             // sitting on the last frame doing nothing.
             if hasFinished { seek(to: 0, exact: true) }
@@ -645,18 +1050,14 @@ final class VideoPlaybackModel {
     #endif
 
     func stop() {
+        recovery?.cancel()
+        recovery = nil
+        startWatch?.cancel()
+        startWatch = nil
+        isReconnecting = false
         if let observer { player?.removeTimeObserver(observer) }
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
-        statusObserver?.invalidate()
         observer = nil
-        endObserver = nil
-        stallObserver = nil
-        statusObserver = nil
-        recoveryObserver?.invalidate()
-        recoveryObserver = nil
-        if let stalledObserver { NotificationCenter.default.removeObserver(stalledObserver) }
-        stalledObserver = nil
+        untrackItem()
         #if DEBUG
         diagBufferEmpty = nil
         diagKeepUp = nil
@@ -742,7 +1143,10 @@ struct VideoPlayerView: View {
                 VideoPlayer(player: player)
                 #endif
             }
-            if model.isLoading {
+            // Reconnecting is loading, as far as anyone watching can tell: a
+            // spinner while the clip gets a fresh link, never an error for a
+            // connection that is being put back. See `VideoPlaybackModel.reconnect`.
+            if model.isLoading || model.isReconnecting {
                 // `controlSize` doesn't exist on tvOS, where the system sizes
                 // controls for the 10-foot layout itself.
                 #if os(tvOS)
@@ -752,14 +1156,19 @@ struct VideoPlayerView: View {
                 #endif
             }
             if let error = model.lastError {
-                ContentUnavailableView(
-                    "Can't Play This Video",
-                    systemImage: connection?.state == .online || connection == nil
-                        ? "exclamationmark.triangle" : "wifi.slash",
-                    description: Text(
-                        ConnectionMonitor.mediaMessage(for: error, state: connection?.state)
+                ContentUnavailableView {
+                    Label(
+                        "Can't Play This Video",
+                        systemImage: connection?.state == .online || connection == nil
+                            ? "exclamationmark.triangle" : "wifi.slash"
                     )
-                )
+                } description: {
+                    Text(ConnectionMonitor.mediaMessage(for: error, state: connection?.state))
+                } actions: {
+                    // The message says "try again". There was nothing to press:
+                    // trying again meant leaving the photo and coming back.
+                    Button("Try Again") { model.retry() }
+                }
             }
         }
         .task {
@@ -788,6 +1197,13 @@ struct VideoPlayerView: View {
         }
         .onChange(of: holdsPlayback) { _, held in
             if !held, isActive { model.start() }
+        }
+        // The NAS answering again is the moment to try, not the next tap. The
+        // message for an outage has always said "This will play once it's
+        // back"; until this, it didn't.
+        .onChange(of: connection?.state) { _, state in
+            guard state == .online, isActive else { return }
+            model.connectionReturned()
         }
         .onDisappear { model.pause() }
         // The model already tracks this for the replay button; the viewer

@@ -301,7 +301,10 @@ extension ConnectionMonitor {
         }
 
         guard let error else { return "Something went wrong loading this." }
-        switch TransferFailure.classify(error) {
+        // The player wraps a dropped connection in an error of its own, which
+        // reads as the video's fault. The network error underneath is the one
+        // that says what happened.
+        switch TransferFailure.classify(networkCause(of: error) ?? error) {
         case .unreachable:
             // The monitor may not have caught up yet — a single failed request
             // is classified here before the banner has confirmed anything.
@@ -311,6 +314,21 @@ extension ConnectionMonitor {
         case .itemFailed:
             return error.localizedDescription
         }
+    }
+
+    /// The network error inside one of the player's own, if there is one.
+    private static func networkCause(of error: any Error) -> URLError? {
+        if let url = error as? URLError { return url }
+        var cause = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+        var depth = 0
+        while let underlying = cause, depth < 3 {
+            if underlying.domain == NSURLErrorDomain {
+                return URLError(URLError.Code(rawValue: underlying.code))
+            }
+            cause = underlying.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return nil
     }
 }
 
