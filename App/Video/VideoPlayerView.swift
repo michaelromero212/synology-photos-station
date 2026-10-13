@@ -1295,12 +1295,8 @@ struct VideoControls: View {
     let model: VideoPlaybackModel
 
     /// Dark enough under every control here for white to read over the
-    /// brightest frame. Plain glass takes on the brightness of what's behind
-    /// it: over a near-white clip the skip and play buttons measured 2.1 and
-    /// 2.6 to 1 against their white glyphs, and the times 4.4 to 1 — under
-    /// the 3 a control needs and the 4.5 small text does. With this, the times
-    /// measure 6.5 to 1. Over a dark clip it simply reads as dark.
-    private static let glassTint = Color.black.opacity(0.5)
+    /// brightest frame. See `Color.viewerGlassTint`.
+    private static let glassTint = Color.viewerGlassTint
 
     @State private var isMuted = false
 

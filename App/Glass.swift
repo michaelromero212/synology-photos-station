@@ -70,6 +70,18 @@ extension View {
     }
 }
 
+extension Color {
+    /// The tint under every control the viewer floats over a photo or a video.
+    ///
+    /// Plain glass takes on the brightness of what's behind it, and the
+    /// viewer's glyphs and labels are white: over a near-white frame the back
+    /// button measured 2.2 to 1, the play button 2.6, the times 4.4 — under
+    /// the 3 a control needs and the 4.5 small text does. At half black they
+    /// measure 6.5 to 8, and over a dark picture it simply reads as dark —
+    /// which is how Photos draws its own video controls.
+    static let viewerGlassTint = Color.black.opacity(0.5)
+}
+
 /// Groups glass siblings so the system can blend and morph them together.
 ///
 /// Two `.glassEffect()` views sitting next to each other each sample the

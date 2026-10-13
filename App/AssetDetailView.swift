@@ -1011,7 +1011,7 @@ struct AssetDetailView: View {
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(currentModel.addError == nil ? .white : .orange)
                     .padding(.horizontal, 16).padding(.vertical, 10)
-                    .glassCapsule(interactive: false)
+                    .glassCapsule(tint: .viewerGlassTint, interactive: false)
                     .padding(.bottom, 150)
             }
             .viewerChromeScheme()
@@ -1109,7 +1109,7 @@ struct AssetDetailView: View {
                 }
                 .accessibilityLabel("More")
             }
-            .glassCapsule()
+            .glassCapsule(tint: .viewerGlassTint)
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
@@ -1135,11 +1135,16 @@ struct AssetDetailView: View {
                     )
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.45), radius: 4, y: 1)
-                    .padding(.leading, 6)
+                    // On the same dark glass as the buttons under it. A shadow
+                    // was all this had, and over a bright photo that left white
+                    // type on white.
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .glassCapsule(tint: .viewerGlassTint, interactive: false)
                 }
             }
-            .frame(height: 20, alignment: .leading)
+            // The pill's height, reserved for photos and videos alike.
+            .frame(height: 26, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             GlassGroup(spacing: 20) {
@@ -1591,7 +1596,8 @@ private struct ViewerGlyph: View {
             .contentShape(Circle())
 
         if glass {
-            glyph.glassCircle()
+            // Dark whatever is behind it — see `Color.viewerGlassTint`.
+            glyph.glassCircle(tint: .viewerGlassTint)
         } else {
             glyph
         }
