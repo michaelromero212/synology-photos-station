@@ -1471,24 +1471,11 @@ private struct AssetPage: View {
         // prepares — see the `task` below — but rendering three video layers to
         // have two of them offscreen costs GPU for nothing.
         if isCurrent {
-            // The tap goes *in* rather than being wrapped around the outside:
-            // the player owns the double-tap skip zones, and a chrome toggle
-            // attached out here would win the race and fire on the first tap of
-            // every skip.
-            VideoPlayerView(
-                assetID: model.item.assetID,
-                client: session.client,
-                poster: model.image ?? model.placeholder,
-                showsControls: showsChrome,
-                onSingleTap: onSingleTap,
-                onFinished: onFinished,
-                isActive: true,
-                // Until the clip has finished growing out of its tile. See
-                // `holdsPlayback`.
-                holdsPlayback: stage.map { !$0.showsViewer } ?? false,
-                model: preloader.model(for: model.item.assetID)
-            )
-            .ignoresSafeArea()
+            clip
+                // Keyed on the model being there, so a clip let go of while it
+                // is on screen is claimed straight back rather than left on its
+                // poster.
+                .task(id: preloader.existing(model.item.assetID) == nil) { claimClip() }
         } else if let poster = model.image ?? model.placeholder {
             // Built ahead by the pager and not being watched. Show the poster,
             // but get the bytes moving: this is the page you are one swipe —
@@ -1512,14 +1499,62 @@ private struct AssetPage: View {
                 }
         }
         #else
-        VideoPlayerView(
-            assetID: model.item.assetID,
-            client: session.client,
-            poster: model.image ?? model.placeholder,
-            onFinished: onFinished,
-            model: preloader.model(for: model.item.assetID)
-        )
+        clip
+            .task(id: preloader.existing(model.item.assetID) == nil) { claimClip() }
         #endif
+    }
+
+    /// The clip, once its model is claimed, and its poster until then.
+    ///
+    /// Looked up, never claimed. Claiming reorders the preloader's cache and
+    /// can let another clip go, and done here, in the body, it redrew this
+    /// page without end: each pass's claim was a change the page itself was
+    /// watching, so it asked for another pass. At home, where a clip's page
+    /// also loads its full-size picture, that froze the viewer on opening
+    /// any video — the picture up, no controls, no swiping. The claim is
+    /// `claimClip`'s, run from a task.
+    @ViewBuilder
+    private var clip: some View {
+        if let playback = preloader.existing(model.item.assetID) {
+            #if os(iOS)
+            // The tap goes *in* rather than being wrapped around the outside:
+            // the player owns the double-tap skip zones, and a chrome toggle
+            // attached out here would win the race and fire on the first tap of
+            // every skip.
+            VideoPlayerView(
+                assetID: model.item.assetID,
+                client: session.client,
+                poster: model.image ?? model.placeholder,
+                showsControls: showsChrome,
+                onSingleTap: onSingleTap,
+                onFinished: onFinished,
+                isActive: true,
+                // Until the clip has finished growing out of its tile. See
+                // `holdsPlayback`.
+                holdsPlayback: stage.map { !$0.showsViewer } ?? false,
+                model: playback
+            )
+            .ignoresSafeArea()
+            #else
+            VideoPlayerView(
+                assetID: model.item.assetID,
+                client: session.client,
+                poster: model.image ?? model.placeholder,
+                onFinished: onFinished,
+                model: playback
+            )
+            #endif
+        } else if let poster = model.image ?? model.placeholder {
+            // For the moment before the claim lands. The player draws this
+            // same poster until its first frame, so the hand-over doesn't show.
+            Image(platformImage: poster).resizable().scaledToFit()
+        }
+    }
+
+    /// Claims this page's clip from the preloader — as the page becomes the
+    /// one on screen, and again if its model was let go of while it was.
+    private func claimClip() {
+        _ = preloader.model(for: model.item.assetID)
     }
 
     @ViewBuilder

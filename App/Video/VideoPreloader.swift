@@ -24,7 +24,11 @@ final class VideoPreloader {
 
     private var models: [UUID: VideoPlaybackModel] = [:]
     /// Most recently asked for last.
-    private var recency: [UUID] = []
+    ///
+    /// Not observed: nothing on screen depends on the order. Observed, every
+    /// claim was a change, and a view watching for one could set itself off
+    /// just by asking for its clip — see `AssetPage.clip`.
+    @ObservationIgnored private var recency: [UUID] = []
 
     /// Whether the clip on screen needs the connection to itself right now.
     ///
