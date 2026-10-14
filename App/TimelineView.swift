@@ -168,8 +168,9 @@ struct TimelineView: View {
     @State private var showPicker = false
     /// A shared library's settings, from Edit in its bar.
     @State private var showLibrarySettings = false
-    /// "Saved to Photos", once a share has put the originals on this iPhone.
-    @State private var savedToast: String?
+    /// "Saved to Photos", once a share has put the originals on this iPhone,
+    /// or why it couldn't.
+    @State private var savedToast: ToastMessage?
     #if os(iOS)
     /// The pending pull-the-grid, so a stream of landings coalesces into one.
     @State private var landingRefresh: Task<Void, Never>?
@@ -189,7 +190,7 @@ struct TimelineView: View {
     @State private var showTagEditor = false
     @State private var albumResult: String?
     @State private var selection = GridSelection()
-    @State private var shareFiles: [URL] = []
+    @State private var shareFiles: [DownloadedOriginal] = []
     @State private var showShare = false
     @State private var confirmDelete = false
     #endif
@@ -434,16 +435,13 @@ struct TimelineView: View {
         #if !os(tvOS)
         .sheet(isPresented: $showShare, onDismiss: { selection.clear() }) {
             #if os(iOS)
-            ShareSheet(items: shareFiles) { type, completed in
-                guard completed else { return }
-                savedToast = ShareSheet.savedMessage(for: type, count: shareFiles.count)
-            }
+            ShareSheet(originals: shareFiles) { savedToast = $0 }
             #else
-            ShareSheet(items: shareFiles)
+            ShareSheet(items: shareFiles.map(\.url))
             #endif
         }
         #if os(iOS)
-        // Saving back to this iPhone, said out loud. See `ShareSheet.savedMessage`.
+        // Saving back to this iPhone, said out loud. See `ShareSheet`.
         .modifier(GridToast(message: $savedToast))
         #endif
         .confirmationDialog(

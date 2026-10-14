@@ -144,39 +144,30 @@ final class GridSelection {
     }
 
     /// Downloads the originals so they can be handed to the share sheet —
-    /// which is how a photo gets back into the iPhone's own library, via
-    /// "Save Image".
+    /// which is how a photo gets back into the iPhone's own library, via its
+    /// Save. See `PhotoLibrarySaver`.
+    ///
+    /// Straight to disk, each as its own type. These were read whole into
+    /// memory, which a long video can be too big for, and every photo was
+    /// named `.jpg`, HEIC or not.
     func downloadOriginals(
         from space: SpaceDTO, client: FrameStationClient?
-    ) async -> [URL] {
+    ) async -> [DownloadedOriginal] {
         guard let client, !picked.isEmpty else { return [] }
         isWorking = true
         defer { isWorking = false; progress = "" }
 
-        var files: [URL] = []
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fs-share-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
-
+        var originals: [DownloadedOriginal] = []
+        let folder = DownloadedOriginal.freshFolder()
         for (index, item) in picked.enumerated() {
             progress = "Preparing \(index + 1) of \(picked.count)…"
             do {
-                let data = try await client.originalData(assetID: item.assetID)
-                // A real filename matters: it is what the share sheet shows and
-                // what lands in Files if the user saves it there.
-                let name = item.mediaType == .video
-                    ? "\(item.assetID.uuidString.prefix(8)).mov"
-                    : "\(item.assetID.uuidString.prefix(8)).jpg"
-                let file = directory.appendingPathComponent(name)
-                try data.write(to: file)
-                files.append(file)
+                originals.append(try await DownloadedOriginal.fetch(item, into: folder, client: client))
             } catch {
                 lastError = error.localizedDescription
             }
         }
-        return files
+        return originals
     }
 }
 
@@ -246,13 +237,39 @@ struct SelectionBar<MoreContent: View>: View {
 #if os(iOS)
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [URL]
-    /// Told which activity ran and whether it finished, once the sheet is done.
-    var onFinished: ((UIActivity.ActivityType?, Bool) -> Void)?
+    /// What `items` are on the NAS, when they're its originals. Save then goes
+    /// through `SaveToPhotosActivity`, which saves them so backup knows them,
+    /// and the system's own Save — which made every one a duplicate — is taken
+    /// out of the sheet.
+    var originals: [DownloadedOriginal] = []
+    /// Told what to say once the sheet is done: that something was saved to
+    /// this iPhone, or why it couldn't be. Not called for anything else.
+    var onResult: ((ToastMessage) -> Void)?
+
+    init(items: [URL], onResult: ((ToastMessage) -> Void)? = nil) {
+        self.items = items
+        self.onResult = onResult
+    }
+
+    init(originals: [DownloadedOriginal], onResult: ((ToastMessage) -> Void)? = nil) {
+        self.items = originals.map(\.url)
+        self.originals = originals
+        self.onResult = onResult
+    }
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let onResult = onResult
+        let save: [UIActivity] = originals.isEmpty ? [] : [
+            SaveToPhotosActivity(originals: originals) { reason in
+                onResult?(ToastMessage(text: reason, isFailure: true))
+            },
+        ]
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: save)
+        if !save.isEmpty { controller.excludedActivityTypes = [.saveToCameraRoll] }
+        let count = items.count
         controller.completionWithItemsHandler = { type, completed, _, _ in
-            onFinished?(type, completed)
+            guard completed, let saved = Self.savedMessage(for: type, count: count) else { return }
+            onResult?(ToastMessage(text: saved))
         }
         return controller
     }
@@ -266,9 +283,11 @@ struct ShareSheet: UIViewControllerRepresentable {
     /// that's that — so after a wait for the originals to come down there was
     /// no telling whether they had landed. Sending them to someone else needs
     /// no word from us: that app has its own.
-    static func savedMessage(for type: UIActivity.ActivityType?, count: Int) -> String? {
+    private static func savedMessage(for type: UIActivity.ActivityType?, count: Int) -> String? {
         let items = count == 1 ? "" : " \(count) items"
-        if type == .saveToCameraRoll { return "Saved\(items) to Photos" }
+        if type == SaveToPhotosActivity.type || type == .saveToCameraRoll {
+            return "Saved\(items) to Photos"
+        }
         // Files has no public constant; this is the identifier it reports.
         if type?.rawValue == "com.apple.DocumentManagerUICore.SaveToFiles" {
             return "Saved\(items) to Files"
@@ -277,29 +296,40 @@ struct ShareSheet: UIViewControllerRepresentable {
     }
 }
 
+/// A line for `GridToast` or the viewer's own: what happened, and whether it
+/// was something going wrong.
+struct ToastMessage: Equatable {
+    let text: String
+    var isFailure = false
+}
+
 /// A line of confirmation along the bottom of a grid that goes away by itself —
 /// for what leaves no trace on screen, like a photo saved back to this iPhone.
 struct GridToast: ViewModifier {
-    @Binding var message: String?
+    @Binding var message: ToastMessage?
 
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .bottom) {
                 if let message {
-                    Label(message, systemImage: "checkmark.circle.fill")
-                        .font(.footnote.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .glassCapsule(interactive: false, fallback: .regularMaterial)
-                        // Above the floating tab bar, as the connection banner is.
-                        .padding(.bottom, FloatingTabBarMetrics.contentInset)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .allowsHitTesting(false)
-                        .task(id: message) {
-                            try? await Task.sleep(for: .seconds(2.5))
-                            guard !Task.isCancelled else { return }
-                            self.message = nil
-                        }
+                    Label(
+                        message.text,
+                        systemImage: message.isFailure
+                            ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                    )
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .glassCapsule(interactive: false, fallback: .regularMaterial)
+                    // Above the floating tab bar, as the connection banner is.
+                    .padding(.bottom, FloatingTabBarMetrics.contentInset)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .task(id: message) {
+                        try? await Task.sleep(for: .seconds(2.5))
+                        guard !Task.isCancelled else { return }
+                        self.message = nil
+                    }
                 }
             }
             .animation(.spring(duration: 0.35), value: message)

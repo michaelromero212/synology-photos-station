@@ -1,5 +1,6 @@
 import FrameStationAPI
 import Foundation
+import UniformTypeIdentifiers
 
 extension CharacterSet {
     /// `.urlQueryAllowed` permits `&`, `=` and `+`, which are exactly the
@@ -202,9 +203,20 @@ extension FrameStationClient {
         URL(string: "v1/assets/\(assetID)/preview", relativeTo: baseURL)
     }
 
-    /// The original bytes, for handing to the share sheet so a photo can go
-    /// back into the iPhone's own library.
-    public func originalData(assetID: UUID) async throws -> Data {
+    public func originalURL(assetID: UUID) -> URL? {
+        URL(string: "v1/assets/\(assetID)/original", relativeTo: baseURL)
+    }
+
+    /// The original, written to a file in `directory` as it arrives rather
+    /// than held in memory — a video can run to gigabytes, and a phone ends an
+    /// app that holds one — named `name` with the extension its type calls
+    /// for, or `fallbackExtension` when the NAS doesn't say.
+    ///
+    /// The bytes are the NAS's own, untouched, which is what lets a copy saved
+    /// back to the phone be recognized as the photo it already has.
+    public func downloadOriginal(
+        assetID: UUID, to directory: URL, name: String, fallbackExtension: String
+    ) async throws -> URL {
         guard let url = originalURL(assetID: assetID) else {
             throw FrameStationClientError.invalidURL("original")
         }
@@ -212,17 +224,19 @@ extension FrameStationClient {
         if let header = authorizationHeader() {
             request.setValue(header, forHTTPHeaderField: "Authorization")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (downloaded, response) = try await URLSession.shared.download(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            try? FileManager.default.removeItem(at: downloaded)
             throw FrameStationClientError.http(
                 status: (response as? HTTPURLResponse)?.statusCode ?? -1, reason: nil
             )
         }
-        return data
-    }
-
-    public func originalURL(assetID: UUID) -> URL? {
-        URL(string: "v1/assets/\(assetID)/original", relativeTo: baseURL)
+        let ext = http.mimeType.flatMap { UTType(mimeType: $0)?.preferredFilenameExtension }
+            ?? fallbackExtension
+        let file = directory.appendingPathComponent(name).appendingPathExtension(ext)
+        try? FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: downloaded, to: file)
+        return file
     }
 
     /// Bearer header for media requests, which bypass `send` and go straight

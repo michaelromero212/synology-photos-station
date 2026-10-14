@@ -235,7 +235,7 @@ struct AssetDetailView: View {
     /// gets out of the way when it is.
     @State private var isZoomed = false
     @State private var confirmDelete = false
-    @State private var shareFiles: [URL] = []
+    @State private var shareFiles: [DownloadedOriginal] = []
     @State private var showShare = false
     @State private var showSlideshow = false
     @State private var showTagEditor = false
@@ -415,14 +415,11 @@ struct AssetDetailView: View {
             ) { showSlideshow = false }
         }
         .sheet(isPresented: $showShare) {
-            ShareSheet(items: shareFiles) { type, completed in
+            ShareSheet(originals: shareFiles) { message in
                 // Saving back to this iPhone, said out loud — the share sheet
-                // closes without a word. See `ShareSheet.savedMessage`.
-                guard completed,
-                      let saved = ShareSheet.savedMessage(for: type, count: shareFiles.count)
-                else { return }
+                // closes without a word. See `ShareSheet`.
                 let model = currentModel
-                Task { await model.flash(saved) }
+                Task { await model.flash(message.text) }
             }
         }
         .sheet(isPresented: $showInfo) {
@@ -1263,20 +1260,18 @@ struct AssetDetailView: View {
         }
     }
 
+    /// The original, fetched for the share sheet — to disk, as its own type.
+    /// See `GridSelection.downloadOriginals`.
     private func share() {
         Task { [asset = currentItem] in
             isWorking = true
             defer { isWorking = false }
-            guard let data = try? await session.client?.originalData(
-                assetID: asset.assetID
-            ) else { return }
-            let name = asset.mediaType == .video
-                ? "\(asset.assetID.uuidString.prefix(8)).mov"
-                : "\(asset.assetID.uuidString.prefix(8)).jpg"
-            let file = FileManager.default.temporaryDirectory
-                .appendingPathComponent(name)
-            try? data.write(to: file)
-            shareFiles = [file]
+            guard let client = session.client,
+                  let original = try? await DownloadedOriginal.fetch(
+                      asset, into: DownloadedOriginal.freshFolder(), client: client
+                  )
+            else { return }
+            shareFiles = [original]
             showShare = true
         }
     }
