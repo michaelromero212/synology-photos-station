@@ -216,11 +216,6 @@ struct AlbumsView: View {
     @State private var deleting: AlbumDTO?
     /// Which of the top row's cards is showing, for its page dots.
     @State private var featuredCard: String?
-    /// Edit mode: every album and shared library card wears a badge, and
-    /// tapping one opens its settings instead of its photos.
-    @State private var editing = false
-    @State private var editingAlbum: AlbumDTO?
-    @State private var managingLibrary: SpaceDTO?
     /// The card being named, if any. Held here rather than per-card so only one
     /// sheet can ever be up.
     ///
@@ -321,14 +316,14 @@ struct AlbumsView: View {
         .navigationTitle("Albums")
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
+        // No Edit here. An album's settings — its name, who sees it, deleting
+        // it — are in the album, behind the Edit button in its own grid, and a
+        // shared library's in the library: you change the thing you're looking
+        // at. This page had an Edit mode that badged every card and turned a
+        // tap into "settings" instead of "open", which put a second meaning on
+        // every card here for the sake of an occasional rename.
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if hasEditable {
-                    Button(editing ? "Done" : "Edit") {
-                        withAnimation(.snappy) { editing.toggle() }
-                    }
-                    .fontWeight(editing ? .semibold : .regular)
-                }
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showCreate = true
                 } label: {
@@ -340,22 +335,6 @@ struct AlbumsView: View {
             if let store {
                 NewAlbumSheet(session: session, store: store) { _ in showCreate = false }
             }
-        }
-        .sheet(item: $editingAlbum) { album in
-            if let store {
-                AlbumSettingsSheet(
-                    album: album, store: store, library: libraryName(of: album)
-                ) { editingAlbum = nil }
-            }
-        }
-        .sheet(item: $managingLibrary, onDismiss: {
-            // A rename shows on the card, and leaving takes the card away.
-            Task {
-                await session.refreshSpaces()
-                await store?.refresh()
-            }
-        }) { space in
-            LibrarySettingsSheet(session: session, space: space) { managingLibrary = nil }
         }
         #if !os(tvOS)
         .sheet(item: $naming) { collection in
@@ -444,11 +423,6 @@ struct AlbumsView: View {
         .onAppear {
             Task { await collections?.refreshIfStale() }
             Task { await store?.refreshIfStale() }
-        }
-        // With nothing left to edit the button goes, so Edit mode goes with it
-        // rather than staying on with no way out.
-        .onChange(of: hasEditable) { _, has in
-            if !has { editing = false }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -674,12 +648,7 @@ struct AlbumsView: View {
         let albums = store.personal
         if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader(
-                    "Albums",
-                    note: editing
-                        ? "Only you can see these. Tap one to rename or delete it."
-                        : "Only you can see these."
-                )
+                sectionHeader("Albums", note: "Only you can see these.")
                 albumGrid(albums, store: store, side: side)
             }
         }
@@ -698,20 +667,14 @@ struct AlbumsView: View {
         Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns)
     }
 
-    @ViewBuilder
     private func albumCell(_ album: AlbumDTO, store: AlbumStore, side: CGFloat) -> some View {
-        let card = AlbumCard(
-            album: album, side: side, loader: session.loader, library: libraryName(of: album)
+        browsableAlbumCell(
+            album,
+            card: AlbumCard(
+                album: album, side: side, loader: session.loader, library: libraryName(of: album)
+            ),
+            store: store
         )
-        if editing {
-            Button { editingAlbum = album } label: {
-                card.overlay(alignment: .topTrailing) { EditBadge() }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit \(album.name)")
-        } else {
-            browsableAlbumCell(album, card: card, store: store)
-        }
     }
 
     private func browsableAlbumCell(_ album: AlbumDTO, card: AlbumCard, store: AlbumStore) -> some View {
@@ -751,33 +714,14 @@ struct AlbumsView: View {
     /// A shared library as an album card, the same as the albums made in it:
     /// its most recently added photo for a cover, and who's in it and how
     /// much. Opens the whole library.
-    @ViewBuilder
     private func libraryCell(_ space: SpaceDTO, store: AlbumStore, side: CGFloat) -> some View {
-        let card = AlbumCard(
-            library: space, summary: store.libraries.first { $0.id == space.id },
-            side: side, loader: session.loader
-        )
-        if editing {
-            Button { managingLibrary = space } label: {
-                card.overlay(alignment: .topTrailing) { EditBadge() }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit \(space.name)")
-        } else {
-            NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) { card }
-                .buttonStyle(.plain)
+        NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
+            AlbumCard(
+                library: space, summary: store.libraries.first { $0.id == space.id },
+                side: side, loader: session.loader
+            )
         }
-    }
-
-    /// Whether Edit has anything to work on: an album, or a shared library's
-    /// card (which the Mac shows in its sidebar instead).
-    private var hasEditable: Bool {
-        guard let store else { return false }
-        #if os(macOS)
-        return !store.albums.isEmpty
-        #else
-        return !store.albums.isEmpty || !session.sharedSpaces.isEmpty
-        #endif
+        .buttonStyle(.plain)
     }
 
     /// The shared library a family album is in, by name.
@@ -815,9 +759,9 @@ struct AlbumsView: View {
         let cards = sharedCards(store)
         if !cards.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                sectionHeader(
-                    "Shared Albums", note: editing ? sharedNote + " Tap one to change it." : sharedNote
-                )
+                // No line saying who can see these. It said what "shared"
+                // already says, under the one heading on the page that says it.
+                sectionHeader("Shared Albums")
                 LazyVGrid(columns: gridColumns(side: side), spacing: spacing) {
                     ForEach(cards) { card in
                         switch card {
@@ -864,15 +808,6 @@ struct AlbumsView: View {
         cards += albums.filter { album in !libraries.contains { $0.id == album.spaceID } }
             .map(SharedCard.album)
         return cards
-    }
-
-    /// Who sees what's under Shared Albums.
-    private var sharedNote: String {
-        let names = session.sharedSpaces.map(\.name)
-        guard names.count == 1, let only = names.first else {
-            return "Everyone in a shared library can see its albums."
-        }
-        return "Everyone in \(only) can see these."
     }
 
     /// Set with a little more care than a list header usually gets: tighter
@@ -1188,27 +1123,17 @@ struct NewAlbumSheet: View {
     }
 }
 
-/// What a card wears in Edit mode: tapping it changes the album rather than
-/// opening it.
-private struct EditBadge: View {
-    var body: some View {
-        Image(systemName: "pencil.circle.fill")
-            .font(.title2)
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(.white, Color.accentColor)
-            .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
-            .padding(8)
-            .transition(.scale.combined(with: .opacity))
-    }
-}
-
-/// An album's settings from Edit mode: its name, who can see it, and deleting
-/// it, as far as you may change them. Someone who can't is told who can.
+/// An album's settings, from the Edit button in its own grid: its name, who can
+/// see it, and deleting it, as far as you may change them. Someone who can't is
+/// told who can.
 struct AlbumSettingsSheet: View {
     let album: AlbumDTO
     let store: AlbumStore
     /// The shared library a shared album is in, by name.
     let library: String?
+    /// Told when the album is gone, before `onDone`, so the screen that was
+    /// showing it can leave once these close.
+    let onDeleted: () -> Void
     let onDone: () -> Void
 
     @State private var name: String
@@ -1216,10 +1141,14 @@ struct AlbumSettingsSheet: View {
     @State private var confirmDelete = false
     @State private var failure: String?
 
-    init(album: AlbumDTO, store: AlbumStore, library: String?, onDone: @escaping () -> Void) {
+    init(
+        album: AlbumDTO, store: AlbumStore, library: String?,
+        onDeleted: @escaping () -> Void = {}, onDone: @escaping () -> Void
+    ) {
         self.album = album
         self.store = store
         self.library = library
+        self.onDeleted = onDeleted
         self.onDone = onDone
         _name = State(initialValue: album.name)
     }
@@ -1299,6 +1228,7 @@ struct AlbumSettingsSheet: View {
                 Button("Delete Album", role: .destructive) {
                     Task {
                         if await store.delete(album) {
+                            onDeleted()
                             onDone()
                         } else {
                             failure = store.lastError ?? "That didn't delete. Try again."
@@ -1312,9 +1242,10 @@ struct AlbumSettingsSheet: View {
     }
 }
 
-/// A shared library's settings from Edit mode: the same screen Shared
-/// Libraries opens, so renaming it (and its folder in everyone's File
-/// Station), its people, and leaving it work one way wherever they're reached.
+/// A shared library's settings, from the Edit button in its own grid: the same
+/// screen Shared Libraries opens, so renaming it (and its folder in everyone's
+/// File Station), its people, and leaving it work one way wherever they're
+/// reached.
 struct LibrarySettingsSheet: View {
     @Bindable var session: AppSession
     let space: SpaceDTO

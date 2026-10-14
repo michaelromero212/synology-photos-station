@@ -361,6 +361,7 @@ struct AssetDetailView: View {
                     if currentItem.mediaType == .video,
                        let player = preloader.existing(currentItem.assetID) {
                         VideoControls(model: player)
+                            .modifier(TransportYieldsToPhotos(focus: focus))
                             .transition(.opacity)
                     }
                 }
@@ -413,7 +414,17 @@ struct AssetDetailView: View {
                 startingAt: currentItem
             ) { showSlideshow = false }
         }
-        .sheet(isPresented: $showShare) { ShareSheet(items: shareFiles) }
+        .sheet(isPresented: $showShare) {
+            ShareSheet(items: shareFiles) { type, completed in
+                // Saving back to this iPhone, said out loud — the share sheet
+                // closes without a word. See `ShareSheet.savedMessage`.
+                guard completed,
+                      let saved = ShareSheet.savedMessage(for: type, count: shareFiles.count)
+                else { return }
+                let model = currentModel
+                Task { await model.flash(saved) }
+            }
+        }
         .sheet(isPresented: $showInfo) {
             InformationSheet(model: currentModel, session: session) { showInfo = false }
         }
@@ -1593,6 +1604,29 @@ extension View {
         environment(\.colorScheme, .dark)
     }
 }
+
+#if os(iOS)
+/// A clip's transport, gone the moment a swipe heads for a photo.
+///
+/// The transport floats over the whole viewer rather than riding on the clip's
+/// page (see the overlay in `body`), so the photo slid in underneath it and it
+/// stayed until the swipe had settled — a beat after the photo arrived, and
+/// sometimes a second. Swiping on to another clip keeps it, as before; a swipe
+/// that springs back brings it back.
+///
+/// A modifier of its own so a swipe starting redraws this and nothing else.
+private struct TransportYieldsToPhotos: ViewModifier {
+    let focus: PagerFocus
+
+    func body(content: Content) -> some View {
+        let leaving = focus.heading.map { $0.mediaType != .video } ?? false
+        content
+            .opacity(leaving ? 0 : 1)
+            .allowsHitTesting(!leaving)
+            .animation(.easeOut(duration: 0.15), value: leaving)
+    }
+}
+#endif
 
 /// One round glass button, the shape the viewer's controls take.
 private struct ViewerButton: View {

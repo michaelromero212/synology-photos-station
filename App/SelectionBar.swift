@@ -246,12 +246,64 @@ struct SelectionBar<MoreContent: View>: View {
 #if os(iOS)
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [URL]
+    /// Told which activity ran and whether it finished, once the sheet is done.
+    var onFinished: ((UIActivity.ActivityType?, Bool) -> Void)?
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.completionWithItemsHandler = { type, completed, _, _ in
+            onFinished?(type, completed)
+        }
+        return controller
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+
+    /// What to confirm after a share, if anything: only for the destinations
+    /// that put the files on this iPhone.
+    ///
+    /// Saving from a share sheet says nothing at all — the sheet closes and
+    /// that's that — so after a wait for the originals to come down there was
+    /// no telling whether they had landed. Sending them to someone else needs
+    /// no word from us: that app has its own.
+    static func savedMessage(for type: UIActivity.ActivityType?, count: Int) -> String? {
+        let items = count == 1 ? "" : " \(count) items"
+        if type == .saveToCameraRoll { return "Saved\(items) to Photos" }
+        // Files has no public constant; this is the identifier it reports.
+        if type?.rawValue == "com.apple.DocumentManagerUICore.SaveToFiles" {
+            return "Saved\(items) to Files"
+        }
+        return nil
+    }
+}
+
+/// A line of confirmation along the bottom of a grid that goes away by itself —
+/// for what leaves no trace on screen, like a photo saved back to this iPhone.
+struct GridToast: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let message {
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .glassCapsule(interactive: false, fallback: .regularMaterial)
+                        // Above the floating tab bar, as the connection banner is.
+                        .padding(.bottom, FloatingTabBarMetrics.contentInset)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .allowsHitTesting(false)
+                        .task(id: message) {
+                            try? await Task.sleep(for: .seconds(2.5))
+                            guard !Task.isCancelled else { return }
+                            self.message = nil
+                        }
+                }
+            }
+            .animation(.spring(duration: 0.35), value: message)
+    }
 }
 #else
 /// The same idea where there is no activity view controller.

@@ -166,6 +166,10 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var showFocusedBackup = false
     @State private var showPicker = false
+    /// A shared library's settings, from Edit in its bar.
+    @State private var showLibrarySettings = false
+    /// "Saved to Photos", once a share has put the originals on this iPhone.
+    @State private var savedToast: String?
     #if os(iOS)
     /// The pending pull-the-grid, so a stream of landings coalesces into one.
     @State private var landingRefresh: Task<Void, Never>?
@@ -429,8 +433,19 @@ struct TimelineView: View {
         #endif
         #if !os(tvOS)
         .sheet(isPresented: $showShare, onDismiss: { selection.clear() }) {
+            #if os(iOS)
+            ShareSheet(items: shareFiles) { type, completed in
+                guard completed else { return }
+                savedToast = ShareSheet.savedMessage(for: type, count: shareFiles.count)
+            }
+            #else
             ShareSheet(items: shareFiles)
+            #endif
         }
+        #if os(iOS)
+        // Saving back to this iPhone, said out loud. See `ShareSheet.savedMessage`.
+        .modifier(GridToast(message: $savedToast))
+        #endif
         .confirmationDialog(
             removalTitle,
             isPresented: $confirmDelete,
@@ -499,6 +514,7 @@ struct TimelineView: View {
         #if !os(tvOS)
         .modifier(AddToAlbumPresentation(
             session: session, selection: selection,
+            source: space, shareToLibrary: shareToLibrary,
             isPresented: $showAddToAlbum, result: $albumResult
         ))
         .modifier(MetadataPresentation(
@@ -1516,6 +1532,17 @@ struct TimelineView: View {
             apply(newZoom)
         }
         .padding(.bottom, 6)
+    }
+
+    /// How the Add to Album sheet puts the selection into a shared library:
+    /// the same share as Add to Shared Library, so it lands and is followed
+    /// the same way. Nil where the grid has no way to share.
+    private var shareToLibrary: ((SpaceDTO) -> Void)? {
+        #if os(iOS)
+        return { share(to: $0) }
+        #else
+        return nil
+        #endif
     }
 
     #if os(iOS)
@@ -2911,87 +2938,96 @@ struct TimelineView: View {
     @ViewBuilder
     private var floatingTopBar: some View {
         if !selection.isActive {
-            HStack(spacing: 8) {
-                // Leading, where the system would have put it, and on the same
-                // glass as its neighbours so it reads as part of the bar rather
-                // than as something left over from a navigation bar that isn't
-                // there.
-                if isPushed {
-                    Button { dismiss() } label: {
-                        Image(systemName: "chevron.backward")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 38, height: 38)
-                            .glassCircle(fallback: .regularMaterial)
-                            .contentShape(Circle())
+            TitledBarLayout {
+                HStack(spacing: 8) {
+                    // Leading, where the system would have put it, and on the same
+                    // glass as its neighbours so it reads as part of the bar rather
+                    // than as something left over from a navigation bar that isn't
+                    // there.
+                    if isPushed {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.backward")
+                                .font(.body.weight(.semibold))
+                                .frame(width: 38, height: 38)
+                                .glassCircle(fallback: .regularMaterial)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Back")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Back")
+
+                    // The personal library only, and once, which is the whole point
+                    // of it being here.
+                    //
+                    // Activity is one inbox for the whole account — everything
+                    // anyone has added to anything you can see. Repeating its door
+                    // on every shared album suggested otherwise: four albums, four
+                    // bells, each looking like it might hold that album's news, all
+                    // four opening the same list. It belongs on the one screen that
+                    // is unambiguously "your library, everything in it", which is
+                    // also the screen you land on.
+                    if space.kind == .personal {
+                        Button { showActivity = true } label: {
+                            Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
+                                .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                                .font(.body.weight(.medium))
+                                .frame(width: 38, height: 38)
+                                .glassCircle(fallback: .regularMaterial)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            (activity?.unreadCount ?? 0) > 0
+                                ? "Recent activity, \(activity?.unreadCount ?? 0) new"
+                                : "Recent activity"
+                        )
+                    }
                 }
 
-                // The personal library only, and once, which is the whole point
-                // of it being here.
+                // Which library this is, by name: "Personal Space" for your
+                // own, the library's name for a shared one. It used to be left
+                // off, on the argument that a caption was one more thing between
+                // you and the photographs — but a shared library and your own
+                // look alike from the inside, and without it nothing on screen
+                // said which one you were in.
                 //
-                // Activity is one inbox for the whole account — everything
-                // anyone has added to anything you can see. Repeating its door
-                // on every shared album suggested otherwise: four albums, four
-                // bells, each looking like it might hold that album's news, all
-                // four opening the same list. It belongs on the one screen that
-                // is unambiguously "your library, everything in it", which is
-                // also the screen you land on.
-                if space.kind == .personal {
-                    Button { showActivity = true } label: {
-                        Image(systemName: (activity?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "bell")
-                            .symbolRenderingMode((activity?.unreadCount ?? 0) > 0 ? .multicolor : .monochrome)
+                // On glass, like the buttons either side. The library passes
+                // behind this bar, and the first thing it passes behind is the
+                // pinned date — two pieces of white text at the same size in the
+                // same place read as one broken line, and a surface of its own
+                // is what separates them.
+                Group {
+                    if let spaceSwitcher {
+                        spaceSwitcher
+                    } else {
+                        Text(space.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 38)
+                .glassCapsule(interactive: spaceSwitcher != nil, fallback: .regularMaterial)
+                .contentShape(Capsule())
+
+                // No magnifier, on a shared album either. Search is the button in
+                // the corner of the tab bar, the way Photos has it, and it
+                // searches whichever library is on screen — see
+                // `RootTabView.spaceOnScreen`.
+                if space.kind == .shared {
+                    sharedLibraryActions
+                } else {
+                    Button { showPicker = true } label: {
+                        Image(systemName: "plus")
                             .font(.body.weight(.medium))
                             .frame(width: 38, height: 38)
                             .glassCircle(fallback: .regularMaterial)
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(
-                        (activity?.unreadCount ?? 0) > 0
-                            ? "Recent activity, \(activity?.unreadCount ?? 0) new"
-                            : "Recent activity"
-                    )
+                    .accessibilityLabel("Add Photos")
                 }
-
-                Spacer(minLength: 8)
-
-                // The switcher only, and nothing when there is nothing to switch
-                // between. A personal library does not need to be captioned
-                // "Personal Space" every time you look at it — the name earned
-                // its place when this was an opaque bar with room to spare, and
-                // now that photographs run behind the chrome it is one more
-                // thing between you and them.
-                //
-                // On glass where it does appear, like the buttons either side.
-                // The library passes behind this bar now, and the first thing it
-                // passes behind is the pinned date — two pieces of white text at
-                // the same size in the same place read as one broken line, and a
-                // surface of its own is what separates them.
-                if let spaceSwitcher {
-                    spaceSwitcher
-                        .padding(.horizontal, 14)
-                        .frame(height: 38)
-                        .glassCapsule(fallback: .regularMaterial)
-                        .contentShape(Capsule())
-
-                    Spacer(minLength: 8)
-                }
-
-                // No magnifier, on a shared album either. Search is the button in
-                // the corner of the tab bar, the way Photos has it, and it
-                // searches whichever library is on screen — see
-                // `RootTabView.spaceOnScreen`.
-                Button { showPicker = true } label: {
-                    Image(systemName: "plus")
-                        .font(.body.weight(.medium))
-                        .frame(width: 38, height: 38)
-                        .glassCircle(fallback: .regularMaterial)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(space.kind == .shared ? "Add to \(space.name)" : "Add Photos")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -3012,6 +3048,52 @@ struct TimelineView: View {
             .offset(y: barHidden ? -120 : 0)
             .opacity(barHidden ? 0 : 1)
             .animation(.easeOut(duration: 0.26), value: barHidden)
+        }
+    }
+
+    /// Edit and Add for a shared library, on one piece of glass the way an
+    /// album's grid pairs them in its bar.
+    ///
+    /// Edit is the library's settings — its name, its people, leaving it —
+    /// which lived behind an Edit mode on the Albums page. Here they belong to
+    /// the library you're looking at.
+    private var sharedLibraryActions: some View {
+        HStack(spacing: 0) {
+            Button { showLibrarySettings = true } label: {
+                Text("Edit")
+                    .font(.body.weight(.medium))
+                    .padding(.leading, 16)
+                    .padding(.trailing, 8)
+                    .frame(height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button { showPicker = true } label: {
+                Image(systemName: "plus")
+                    .font(.body.weight(.medium))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add to \(space.name)")
+        }
+        .padding(.trailing, 2)
+        .glassCapsule(fallback: .regularMaterial)
+        .sheet(isPresented: $showLibrarySettings, onDismiss: librarySettingsClosed) {
+            LibrarySettingsSheet(session: session, space: space) { showLibrarySettings = false }
+        }
+    }
+
+    /// A new name reaches the title and the Albums page; leaving the library
+    /// takes you back out of it, rather than leaving you in a library that is
+    /// no longer yours to look at.
+    private func librarySettingsClosed() {
+        let spaceID = space.id
+        Task {
+            await session.refreshSpaces()
+            if !session.spaces.contains(where: { $0.id == spaceID }) { dismiss() }
+            await session.albumStore().refresh()
         }
     }
     #endif
@@ -3252,6 +3334,74 @@ private struct TopEdgeClip: Shape {
 #endif
 
 #if os(iOS)
+/// The floating bar's arrangement: buttons at either end and the title
+/// between, centered on the bar, the way a navigation bar places its title.
+///
+/// Spacers either side of the title centered it between the buttons rather
+/// than on the screen, and the two ends aren't the same width — a shared
+/// library has one button on the left and Edit and Add on the right — so its
+/// name sat off to one side. A name too long to center without running into
+/// a button is centered in the room between them instead, and truncated there
+/// if it must be.
+///
+/// Expects three subviews: what goes on the left, the title, and what goes on
+/// the right.
+private struct TitledBarLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let natural = sizes.reduce(0) { $0 + $1.width }
+            + spacing * CGFloat(max(subviews.count - 1, 0))
+        return CGSize(
+            width: proposal.width ?? natural,
+            height: sizes.map(\.height).max() ?? 0
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        guard subviews.count == 3 else {
+            // Never the case; laid out in a row rather than not at all.
+            var x = bounds.minX
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                subview.place(
+                    at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: .unspecified
+                )
+                x += size.width + spacing
+            }
+            return
+        }
+        let (leading, title, trailing) = (subviews[0], subviews[1], subviews[2])
+        let leadingWidth = leading.sizeThatFits(.unspecified).width
+        let trailingWidth = trailing.sizeThatFits(.unspecified).width
+        leading.place(
+            at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: .unspecified
+        )
+        trailing.place(
+            at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: .unspecified
+        )
+
+        let left = bounds.minX + leadingWidth + (leadingWidth > 0 ? spacing : 0)
+        let right = bounds.maxX - trailingWidth - (trailingWidth > 0 ? spacing : 0)
+        let wanted = title.sizeThatFits(.unspecified).width
+        let centeredRoom = 2 * min(bounds.midX - left, right - bounds.midX)
+        if wanted <= centeredRoom {
+            title.place(
+                at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                proposal: ProposedViewSize(width: wanted, height: nil)
+            )
+        } else {
+            title.place(
+                at: CGPoint(x: (left + right) / 2, y: bounds.midY), anchor: .center,
+                proposal: ProposedViewSize(width: max(right - left, 0), height: nil)
+            )
+        }
+    }
+}
+
 /// The fade Photos runs across the top of the library.
 ///
 /// Blur rather than a tint: a flat color over a photograph reads as a panel

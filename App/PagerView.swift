@@ -17,6 +17,16 @@ import UIKit
 final class PagerFocus {
     var currentID: UUID
 
+    /// The page a swipe is on its way to, from the moment it starts moving
+    /// until it lands or springs back. Nil at rest.
+    ///
+    /// `currentID` only changes once a swipe has landed, which is the right
+    /// moment for most things and too late for some. A clip's transport is
+    /// drawn over the whole viewer rather than on its page, so it stayed up
+    /// over the photo coming in until the swipe had settled — up to a second
+    /// after the photo arrived. Read against this, it goes as the swipe begins.
+    fileprivate(set) var heading: TimelineItem?
+
     /// Whether the next move should cut straight to its page instead of
     /// sliding there. Consumed by the move it applies to.
     ///
@@ -312,6 +322,9 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
             willTransitionTo pendingViewControllers: [UIViewController]
         ) {
             isTransitioning = true
+            if let pending = pendingViewControllers.first, let index = index(of: pending) {
+                parent.focus.heading = parent.items[index]
+            }
         }
 
         func pageViewController(
@@ -321,6 +334,9 @@ struct PagerView<Page: View>: UIViewControllerRepresentable {
             transitionCompleted completed: Bool
         ) {
             isTransitioning = false
+            // After the page it landed on is current, in the same update, so
+            // nothing belonging to the page left behind shows again between.
+            defer { parent.focus.heading = nil }
             // Only when the swipe actually landed. A drag that springs back
             // must not renumber the viewer.
             guard completed, let showing = controller.viewControllers?.first,

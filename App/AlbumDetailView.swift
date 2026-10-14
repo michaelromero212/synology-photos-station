@@ -14,9 +14,10 @@ struct AlbumDetailView: View {
     @State private var isLoading = true
     @State private var lastError: String?
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showRename = false
-    @State private var newName = ""
-    @State private var confirmDelete = false
+    @State private var showSettings = false
+    /// Set by the settings when they delete the album, so this screen leaves
+    /// once they have closed rather than out from under them.
+    @State private var wasDeleted = false
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @State private var showPicker = false
@@ -64,49 +65,29 @@ struct AlbumDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
-            // Only what you may do here: a viewer of a shared library gets no
-            // menu at all, rather than one whose every item says no.
-            if album.mayAdd || album.mayManage {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        #if os(iOS)
-                        if album.mayAdd {
-                            Button {
-                                showPicker = true
-                            } label: {
-                                Label("Add Photos", systemImage: "plus")
-                            }
-                        }
-                        #endif
-                        if album.mayManage {
-                            Button {
-                                newName = album.name
-                                showRename = true
-                            } label: {
-                                Label("Rename", systemImage: "pencil")
-                            }
-                            Button(role: .destructive) {
-                                confirmDelete = true
-                            } label: {
-                                Label("Delete Album", systemImage: "trash")
-                            }
-                        }
+            // Edit and Add, side by side the way the Albums page pairs its own
+            // buttons. Edit is the album's settings — its name, who can see
+            // it, deleting it — which lived behind an Edit mode on the Albums
+            // page; here they belong to the album you're looking at. Always
+            // there: someone who may not change an album is told who can.
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button("Edit") { showSettings = true }
+                #if os(iOS)
+                if album.mayAdd {
+                    Button {
+                        showPicker = true
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Label("Add Photos", systemImage: "plus")
                     }
                 }
+                #endif
             }
         }
-        .confirmationDialog(
-            "Delete “\(album.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
-        ) {
-            Button("Delete Album", role: .destructive) {
-                Task {
-                    if await store.delete(album) { dismiss() }
-                }
-            }
-        } message: {
-            Text(album.deletionMessage(library: library))
+        .sheet(isPresented: $showSettings, onDismiss: settingsClosed) {
+            AlbumSettingsSheet(
+                album: album, store: store, library: library,
+                onDeleted: { wasDeleted = true }
+            ) { showSettings = false }
         }
         #if os(iOS)
         .sheet(isPresented: $showPicker) {
@@ -125,11 +106,6 @@ struct AlbumDetailView: View {
             }
         }
         #endif
-        .alert("Rename Album", isPresented: $showRename) {
-            TextField("Name", text: $newName)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") { Task { await rename() } }
-        }
         .overlay(alignment: .bottom) {
             if let lastError {
                 Text(lastError).font(.caption).foregroundStyle(.red).padding(8)
@@ -201,15 +177,13 @@ struct AlbumDetailView: View {
         }
     }
 
-    private func rename() async {
-        guard let client = session.client else { return }
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        do {
-            album = try await client.updateAlbum(album.id, UpdateAlbumRequest(name: trimmed))
-            await store.refresh()
-        } catch {
-            lastError = error.localizedDescription
+    /// After the settings close: back to the Albums page if they deleted the
+    /// album, otherwise the album as it now is, so a new name reaches the title.
+    private func settingsClosed() {
+        if wasDeleted {
+            dismiss()
+        } else if let fresh = store.albums.first(where: { $0.id == album.id }) {
+            album = fresh
         }
     }
 
