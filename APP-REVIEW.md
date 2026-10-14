@@ -84,11 +84,20 @@ try reporting and blocking: both need photos someone else added.
 ### Keeping it
 
 - **Update it with the family server**, so a reviewer sees the build that
-  ships. In its folder: `sudo docker compose pull && sudo docker compose up -d`.
+  ships:
+
+  ```bash
+  ssh -t nas 'cd /volume1/docker/framestation-demo && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose up -d'
+  ```
+
 - **A fresh code**: run the setup again. It keeps Sam, Demo Family and the
   photos, and prints a new code. Codes last ninety days.
-- **Between reviews** it can stay up or come down: `sudo docker compose down`
-  in its folder stops it, and the setup brings it back.
+- **Between reviews** it can stay up or come down. This stops it, and the
+  setup brings it back:
+
+  ```bash
+  ssh -t nas 'cd /volume1/docker/framestation-demo && sudo /usr/local/bin/docker compose down'
+  ```
 
 ## App Review Information
 

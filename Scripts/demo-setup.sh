@@ -17,6 +17,8 @@
 # KEEP_LOCATIONS=1 to keep them, for photos of public places you're happy to
 # have on a map.
 set -euo pipefail
+# DSM's sudo leaves /usr/local/bin off the PATH, and that's where docker is.
+export PATH="/usr/local/bin:$PATH"
 cd "$(dirname "$0")"
 DIR=$(pwd)
 API=http://127.0.0.1:8081
@@ -35,7 +37,7 @@ field(){ sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
 
 [ "$(id -u)" = 0 ] || die "Run with sudo: Docker on DSM needs root."
 [ -f docker-compose.yml ] || die "No docker-compose.yml here. Copy Demo/docker-compose.yml in first."
-grep -q '^POSTGRES_PASSWORD=.\+' .env 2>/dev/null \
+grep -q '^POSTGRES_PASSWORD=..*' .env 2>/dev/null \
   || die "No POSTGRES_PASSWORD in .env. Make a new one; never the family server's."
 ls seed/* >/dev/null 2>&1 || die "No sample photos in seed/."
 
