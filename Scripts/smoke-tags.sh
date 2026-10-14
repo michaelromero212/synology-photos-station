@@ -1,36 +1,56 @@
 #!/bin/bash
 # Ratings and tags: stars stick, tags are one name however you spell it, and
 # only someone who can contribute may change either.
+#
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-tags.sh
+#
+# Runs its own server against its own database and blob store.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
+
+DB=framestation_tags; PORT=8084; API="http://127.0.0.1:$PORT"
 # The `invite` command below is a second server process, and it reads both of
 # these. Without them it exits before printing a code, the redeem gets an empty
 # token, and every check fails as a 404 that looks like a permissions bug.
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/tags"; PASS=0; FAIL=0
-q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/tags"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
+c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$c\",\"displayName\":\"Michael\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
 T=$(echo "$R" | jq '["token"]'); SP=$(echo "$R" | jq '["personalSpace"]["id"]')
 UID1=$(echo "$R" | jq '["user"]["id"]')
 A="Authorization: Bearer $T"
 # Fail loudly here rather than reporting thirty confusing 404s downstream.
-[ -n "$SP" ] || { echo "setup failed: no space. Is the server up at $API?"; exit 1; }
+[ -n "$SP" ] || { echo "setup failed: no space"; tail -20 "$ROOT/server.log"; exit 1; }
 
-f="$SCRATCH/tags/IMG_6100.jpg"
-vips gaussnoise "$SCRATCH/tags/n.v" 400 300 >/dev/null 2>&1
-vips copy "$SCRATCH/tags/n.v" "$f" >/dev/null 2>&1
+f="$ROOT/files/IMG_6100.jpg"
+vips gaussnoise "$ROOT/files/n.v" 400 300 >/dev/null 2>&1
+vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
 SHA=$(shasum -a 256 "$f" | awk '{print $1}'); SZ=$(stat -f%z "$f")
 UP=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
   -d "{\"spaceID\":\"$SP\",\"sha256\":\"$SHA\",\"byteSize\":$SZ,\"filename\":\"IMG_6100.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
@@ -106,7 +126,7 @@ check "two more change_log rows" "$((BEFORE + 2))" \
 
 echo
 echo "=== 9. who may change them ==="
-c2=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+c2=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
 R2=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$c2\",\"displayName\":\"Morgan\",\"deviceName\":\"m\",\"platform\":\"ios\"}")
 T2=$(echo "$R2" | jq '["token"]'); UID2=$(echo "$R2" | jq '["user"]["id"]')

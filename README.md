@@ -332,8 +332,6 @@ docker compose exec server ./FrameStationServer repair-dimensions
 
 ### Smoke test
 
-With the server running against a **freshly migrated, empty** database:
-
 ```bash
 FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m1a.sh
 ```
@@ -342,9 +340,9 @@ FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m1a.sh
 FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m1b.sh
 ```
 
-Both need a **freshly migrated, empty** database and a server started with
-`FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot"` — they assert against
-files on disk. Run one, reset the database, run the other.
+Both start their own server on their own port, against their own database and
+blob store, and need only the dev stack's Postgres on 55432. No
+`Scripts/smoke-*.sh` touches the dev stack's library.
 
 `smoke-m1a.sh` — 32 assertions: resume-after-interruption, truncated-chunk
 rejection, hash-mismatch rejection, dedup, no legacy `browse/` tree, cross-user

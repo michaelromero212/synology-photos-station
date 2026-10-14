@@ -3,16 +3,21 @@
 # and the Albums page turns it into occasions, holidays that look like
 # themselves, and nothing at all when it's switched off.
 #
-# Runs against the dev stack (Scripts/devstack.sh), like the other smoke tests.
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-curation.sh
+#
+# Runs its own server against its own database and blob store.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-# The `invite` command below is a second server process and reads both of these.
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/curation" "$FRAMESTATION_BLOB_ROOT"; PASS=0; FAIL=0
+
+DB=framestation_curation; PORT=8079; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/curation"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -27,9 +32,21 @@ d = json.load(sys.stdin)
 cards = (d.get('allOccasions') or []) + (d.get('allTrips') or []) + d.get('days', [])
 print('|'.join(c['title'] for c in cards))"; }
 
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
 signin(){
   local c R
-  c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+  c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$c\",\"displayName\":\"$1\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
   echo "$(echo "$R" | jq '["token"]') $(echo "$R" | jq '["personalSpace"]["id"]')"
@@ -37,14 +54,14 @@ signin(){
 read -r T SP <<<"$(signin Curator)"; A="Authorization: Bearer $T"
 read -r T2 SP2 <<<"$(signin Neighbor)"; A2="Authorization: Bearer $T2"
 # Fail loudly here rather than reporting thirty confusing 404s downstream.
-[ -n "$SP" ] && [ -n "$SP2" ] || { echo "setup failed: no space. Is the server up at $API?"; exit 1; }
+[ -n "$SP" ] && [ -n "$SP2" ] || { echo "setup failed: no space"; tail -20 "$ROOT/server.log"; exit 1; }
 
 # upload <space> <auth> <name> <width> <capturedAt> → asset id. The width keeps
 # every file's bytes different, so nothing is deduplicated into another.
 upload(){
-  local f="$SCRATCH/curation/$3.jpg" SHA SZ UP
-  vips gaussnoise "$SCRATCH/curation/n.v" "$4" 240 >/dev/null 2>&1
-  vips copy "$SCRATCH/curation/n.v" "$f" >/dev/null 2>&1
+  local f="$ROOT/files/$3.jpg" SHA SZ UP
+  vips gaussnoise "$ROOT/files/n.v" "$4" 240 >/dev/null 2>&1
+  vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
   SHA=$(shasum -a 256 "$f" | awk '{print $1}'); SZ=$(stat -f%z "$f")
   UP=$(curl -s -X POST "$API/v1/uploads/probe" -H "$2" -H 'Content-Type: application/json' \
     -d "{\"spaceID\":\"$1\",\"sha256\":\"$SHA\",\"byteSize\":$SZ,\"filename\":\"$3.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')

@@ -1,11 +1,22 @@
 #!/bin/bash
 # Cross-user isolation: what one family member must not be able to reach.
+#
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-security.sh
+#
+# Runs its own server against its own database and blob store.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-mkdir -p "$SCRATCH/sec"; PASS=0; FAIL=0
+
+DB=framestation_security; PORT=8078; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/security"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -16,7 +27,19 @@ denied(){ case "$2" in 400|401|403|404) ok "$1";; *) bad "$1" "denied (4xx)" "$2
 jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-newuser(){ local c; c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
+newuser(){ local c; c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
    -d "{\"code\":\"$c\",\"displayName\":\"$1\",\"deviceName\":\"$1-phone\",\"platform\":\"ios\"}" \
    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["token"],d["personalSpace"]["id"],d["user"]["id"])'; }
@@ -25,9 +48,9 @@ read -r TB PB UB <<< "$(newuser Mallory)"
 read -r TC PC UC <<< "$(newuser Carol)"
 
 upload(){ # token space label -> assetID
-  local f="$SCRATCH/sec/$3.jpg"
-  vips gaussnoise "$SCRATCH/sec/$3.v" 400 300 >/dev/null 2>&1
-  vips copy "$SCRATCH/sec/$3.v" "$f" >/dev/null 2>&1
+  local f="$ROOT/files/$3.jpg"
+  vips gaussnoise "$ROOT/files/$3.v" 400 300 >/dev/null 2>&1
+  vips copy "$ROOT/files/$3.v" "$f" >/dev/null 2>&1
   local sha size up
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
   up=$(curl -s -X POST "$API/v1/uploads/probe" -H "Authorization: Bearer $1" -H 'Content-Type: application/json' \
@@ -38,8 +61,8 @@ upload(){ # token space label -> assetID
 }
 
 APRIV=$(upload "$TA" "$PA" alice-private)
-ASHA=$(shasum -a 256 "$SCRATCH/sec/alice-private.jpg" | awk '{print $1}')
-ASZ=$(stat -f%z "$SCRATCH/sec/alice-private.jpg")
+ASHA=$(shasum -a 256 "$ROOT/files/alice-private.jpg" | awk '{print $1}')
+ASZ=$(stat -f%z "$ROOT/files/alice-private.jpg")
 
 echo "=== 1. another user's personal photo is unreachable ==="
 check "original"  "404" "$(code -H "Authorization: Bearer $TB" "$API/v1/assets/$APRIV/original")"
@@ -105,8 +128,7 @@ echo "=== 7. tokens ==="
 check "a forged bearer token is rejected" "401" \
   "$(code -H "Authorization: Bearer notarealtoken" "$API/v1/me")"
 check "tokens are stored hashed, never in the clear" "0" \
-  "$(psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc \
-      "select count(*) from devices where token_hash = '$TA';")"
+  "$(q "select count(*) from devices where token_hash = '$TA';")"
 
 echo
 echo "════════════════════════════════════"

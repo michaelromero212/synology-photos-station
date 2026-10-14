@@ -18,22 +18,24 @@
 # status: a search that matches nothing and a search that is broken look
 # identical from the outside.
 #
-#   FRAMESTATION_API=http://127.0.0.1:8099 ./Scripts/smoke-items.sh
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-items.sh
+#
+# Runs its own server against its own database and blob store, with photos of
+# its own for every endpoint to find.
 set -uo pipefail
 
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
+SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-export PGPASSWORD="${PGPASSWORD:-x}"
-PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc"
 
-SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$FRAMESTATION_BLOB_ROOT"
+DB=framestation_items; PORT=8081; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/items"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc"
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 
-DEVICE_NAME="SmokeItems-$$"
-ALBUM_NAME="Smoke Items $$"
 PASS=0; FAIL=0
 
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
@@ -44,31 +46,57 @@ jq_get() { python3 -c "import sys,json; d=json.load(sys.stdin); print($1)" 2>/de
 get() { curl -s -H "Authorization: Bearer $TOKEN" "$API$1"; }
 status() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "$API$1"; }
 
-cleanup() {
-    [ -n "${ALBUM:-}" ] && $PSQL "DELETE FROM albums WHERE id='$ALBUM';" >/dev/null 2>&1
-    [ -n "${USER_ID:-}" ] && $PSQL "DELETE FROM space_members WHERE user_id='$USER_ID';" >/dev/null 2>&1
-    $PSQL "DELETE FROM devices WHERE name='$DEVICE_NAME';" >/dev/null 2>&1
-}
-trap cleanup EXIT
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
 
 # -------------------------------------------------------------------- setup ---
 echo "=== setup ==="
-# The busiest space in the database, so every check below has something to find.
-SPACE=$($PSQL "SELECT sa.space_id FROM space_assets sa
-               WHERE sa.deleted_at IS NULL
-               GROUP BY sa.space_id ORDER BY count(*) DESC LIMIT 1;")
-[ -n "$SPACE" ] || { echo "  ✗ no space with photographs — upload something first"; exit 1; }
-
-CODE=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null \
+CODE=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null \
     | grep "Invite code:" | awk '{print $3}')
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
-    -d "{\"code\":\"$CODE\",\"displayName\":\"Smoke Items\",\"deviceName\":\"$DEVICE_NAME\",\"platform\":\"ios\"}")
+    -d "{\"code\":\"$CODE\",\"displayName\":\"Smoke Items\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
 TOKEN=$(echo "$R" | jq_get 'd["token"]')
-[ -n "$TOKEN" ] || { echo "  ✗ could not redeem an invite — is the server up on $API?"; exit 1; }
+SPACE=$(echo "$R" | jq_get 'd["personalSpace"]["id"]')
+[ -n "$TOKEN" ] || { echo "  ✗ could not redeem an invite"; tail -20 "$ROOT/server.log"; exit 1; }
 
-USER_ID=$($PSQL "SELECT user_id FROM devices WHERE name='$DEVICE_NAME';")
-$PSQL "INSERT INTO space_members (space_id, user_id, role)
-       VALUES ('$SPACE','$USER_ID','viewer') ON CONFLICT DO NOTHING;" >/dev/null
+# upload <name> <width> <capturedAt> → asset id. The width keeps every file's
+# bytes different, so nothing is deduplicated into another.
+upload() {
+    local f="$ROOT/files/$1" sha size up
+    vips gaussnoise "$ROOT/files/n.v" "$2" 300 >/dev/null 2>&1
+    vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
+    sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
+    up=$(curl -s -X POST "$API/v1/uploads/probe" -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d "{\"spaceID\":\"$SPACE\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$1\",\"isAutomaticBackup\":false}" \
+        | jq_get 'd["uploadID"]')
+    curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "Authorization: Bearer $TOKEN" \
+        --data-binary "@$f" >/dev/null
+    curl -s -X POST "$API/v1/uploads/$up/commit" -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d "{\"spaceID\":\"$SPACE\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$2,\"height\":300,\"capturedAt\":\"$3\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" \
+        | jq_get 'd["assetID"]'
+}
+A1=$(upload a1.jpg 401 2026-07-18T16:00:00Z)
+A2=$(upload a2.jpg 402 2026-07-18T17:00:00Z)
+A3=$(upload a3.jpg 403 2026-07-17T12:00:00Z)
+A4=$(upload a4.jpg 404 2026-07-17T13:00:00Z)
+[ -n "$A1" ] && [ -n "$A4" ] || { echo "  ✗ uploads failed"; tail -20 "$ROOT/server.log"; exit 1; }
+# Named here rather than from GPS: the town dataset is smoke-geocode.sh's to
+# test, and search only needs a place on the photos to match.
+PLACE="Culpeper, Virginia"
+$PSQL "UPDATE assets SET place_name = '$PLACE' WHERE id IN ('$A1','$A2');" >/dev/null
+# One removed, so Recently Deleted has something in it.
+curl -s -o /dev/null -X DELETE "$API/v1/spaces/$SPACE/assets/$A4" -H "Authorization: Bearer $TOKEN"
 echo "  space $SPACE with $($PSQL "SELECT count(*) FROM space_assets WHERE space_id='$SPACE' AND deleted_at IS NULL;") items"
 
 # ------------------------------------------------------------ the timeline ---
@@ -81,43 +109,34 @@ COUNT=$(get "/v1/spaces/$SPACE/timeline/$BUCKET" | jq_get 'len(d["items"])')
 
 # --------------------------------------------------------------- an album ---
 echo "=== an album's contents, which answered 400 for every non-empty album ==="
-ASSET=$($PSQL "SELECT id FROM space_assets
-               WHERE space_id='$SPACE' AND deleted_at IS NULL LIMIT 1;")
+ASSET=$($PSQL "SELECT id FROM space_assets WHERE asset_id='$A1';")
 ALBUM=$(curl -s -X POST "$API/v1/albums" -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -H "X-FrameStation-Space: $SPACE" \
-    -d "{\"name\":\"$ALBUM_NAME\",\"spaceAssetIDs\":[\"$ASSET\"]}" | jq_get 'd["id"]')
+    -d "{\"name\":\"Smoke Items\",\"spaceAssetIDs\":[\"$ASSET\"]}" | jq_get 'd["id"]')
 [ -n "$ALBUM" ] || { echo "  ✗ could not create an album"; exit 1; }
 COUNT=$(get "/v1/albums/$ALBUM/items" | jq_get 'len(d["items"])')
 check "an album with one photo returns one" "1" "${COUNT:-none}"
 
 # ----------------------------------------------------------------- search ---
 echo "=== search, which answered 400 for every query that matched ==="
-# A place that genuinely exists in this library, so a zero here is a failure
-# rather than a library without geotags.
-PLACE=$($PSQL "SELECT a.place_name FROM space_assets sa
-               JOIN assets a ON a.id = sa.asset_id
-               WHERE sa.space_id='$SPACE' AND sa.deleted_at IS NULL
-                 AND a.place_name IS NOT NULL
-               GROUP BY a.place_name ORDER BY count(*) DESC LIMIT 1;")
-if [ -n "$PLACE" ]; then
-    NEEDLE=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PLACE")
-    TOTAL=$(get "/v1/spaces/$SPACE/search?place=$NEEDLE&limit=5" | jq_get 'd["total"]')
-    [ "${TOTAL:-0}" -gt 0 ] && ok "searching \"$PLACE\" finds $TOTAL" \
-        || bad "searching \"$PLACE\"" "> 0" "${TOTAL:-none}"
-    COUNT=$(get "/v1/spaces/$SPACE/search?place=$NEEDLE&limit=5" | jq_get 'len(d["items"])')
-    [ "${COUNT:-0}" -gt 0 ] && ok "and returns the items themselves ($COUNT)" \
-        || bad "and returns the items themselves" "> 0" "${COUNT:-none}"
-else
-    echo "  — no geotagged photos in this space, search unchecked"
-fi
+NEEDLE=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PLACE")
+TOTAL=$(get "/v1/spaces/$SPACE/search?place=$NEEDLE&limit=5" | jq_get 'd["total"]')
+[ "${TOTAL:-0}" -gt 0 ] && ok "searching \"$PLACE\" finds $TOTAL" \
+    || bad "searching \"$PLACE\"" "> 0" "${TOTAL:-none}"
+COUNT=$(get "/v1/spaces/$SPACE/search?place=$NEEDLE&limit=5" | jq_get 'len(d["items"])')
+[ "${COUNT:-0}" -gt 0 ] && ok "and returns the items themselves ($COUNT)" \
+    || bad "and returns the items themselves" "> 0" "${COUNT:-none}"
 check "the places list answers" "200" "$(status "/v1/spaces/$SPACE/places")"
 
 # ------------------------------------------------------------ collections ---
 echo "=== collections, fixed once before in place ==="
 check "the page answers" "200" "$(status "/v1/spaces/$SPACE/collections")"
-check "a collection's items answer" "200" \
-    "$(status "/v1/spaces/$SPACE/collections/items?kind=recentlyAdded&key=recentlyAdded&limit=5")"
-check "recently deleted answers" "200" "$(status "/v1/spaces/$SPACE/collections/deleted")"
+COUNT=$(get "/v1/spaces/$SPACE/collections/items?kind=recentlyAdded&key=recentlyAdded&limit=5" \
+    | jq_get 'len(d["items"])')
+[ "${COUNT:-0}" -gt 0 ] && ok "a collection's items come back ($COUNT)" \
+    || bad "a collection's items come back" "> 0" "${COUNT:-none}"
+COUNT=$(get "/v1/spaces/$SPACE/collections/deleted" | jq_get 'len(d["items"])')
+check "recently deleted returns the one removed" "1" "${COUNT:-none}"
 
 # ---------------------------------------------------------------- summary ---
 echo

@@ -8,42 +8,43 @@
 # apps that spend them on nothing, so every gate in `BackupNudger` is checked
 # here individually.
 #
-# APNs itself is out of reach: there is no key on a dev stack, and by design
+# APNs itself is out of reach: the server this starts has no key, and by design
 # `APNsClient` then logs the push it would have sent and reports success. That
 # log line is the observable — it proves the query selected the device *and*
 # that what it built was a silent push rather than a banner.
 #
-# The server must be started with short windows, or this waits fifteen minutes
-# to see anything:
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-nudge.sh
 #
-#   FRAMESTATION_BACKUP_QUIET_SECONDS=20 \
-#   FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS=3 \
-#   FRAMESTATION_BACKUP_NUDGE_LIMIT=3 \
-#   FRAMESTATION_BACKUP_NUDGE_SECONDS=1 \
-#     .build/debug/FrameStationServer serve --hostname 127.0.0.1 --port 8098
-#
-#   FRAMESTATION_API=http://127.0.0.1:8098 ./Scripts/smoke-nudge.sh
+# Runs its own server against its own database and blob store, with short
+# windows, or this would wait fifteen minutes to see anything.
 set -uo pipefail
 
-API="${FRAMESTATION_API:-http://127.0.0.1:8098}"
+SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-export PGPASSWORD="${PGPASSWORD:-x}"
-PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc"
 
-# The invite CLI is a second process and needs the same connection settings the
-# running server was started with. Nothing here touches a blob, but the boot
-# check refuses to start without a root that exists, so it gets one.
-SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$FRAMESTATION_BLOB_ROOT"
+DB=framestation_nudge; PORT=8082; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+# Nothing here touches a blob, but the boot check refuses to start without a
+# root that exists, so it gets one.
+ROOT="$SCRATCH/nudge"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc"
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 
-# Matches the env above. The waits below are derived from these rather than
-# written out, so changing one knob doesn't quietly turn a check into a coin toss.
-COOLDOWN="${FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS:-3}"
-LIMIT="${FRAMESTATION_BACKUP_NUDGE_LIMIT:-3}"
-TICK="${FRAMESTATION_BACKUP_NUDGE_SECONDS:-1}"
+export FRAMESTATION_BACKUP_QUIET_SECONDS="${FRAMESTATION_BACKUP_QUIET_SECONDS:-20}"
+export FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS="${FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS:-3}"
+export FRAMESTATION_BACKUP_NUDGE_LIMIT="${FRAMESTATION_BACKUP_NUDGE_LIMIT:-3}"
+export FRAMESTATION_BACKUP_NUDGE_SECONDS="${FRAMESTATION_BACKUP_NUDGE_SECONDS:-1}"
+# A fresh blob root has no key in it; these would bring one in from the shell.
+unset FRAMESTATION_APNS_KEY FRAMESTATION_APNS_KEY_PATH FRAMESTATION_APNS_KEY_ID
+
+# The server's own knobs, from above. The waits below are derived from these rather
+# than written out, so changing one doesn't quietly turn a check into a coin toss.
+COOLDOWN="$FRAMESTATION_BACKUP_NUDGE_COOLDOWN_SECONDS"
+LIMIT="$FRAMESTATION_BACKUP_NUDGE_LIMIT"
+TICK="$FRAMESTATION_BACKUP_NUDGE_SECONDS"
 # Two waits, and the difference between them is the point.
 #
 # ONE is long enough for the sweep to come round once and short enough that the
@@ -77,20 +78,26 @@ report() {
         -d "{\"pending\":$1}"
 }
 
-cleanup() {
-    [ -n "${DEV:-}" ] && $PSQL "DELETE FROM upload_sessions WHERE device_id='$DEV';" >/dev/null 2>&1
-    $PSQL "DELETE FROM devices WHERE name='$DEVICE_NAME';" >/dev/null 2>&1
-}
-trap cleanup EXIT
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
 
 # -------------------------------------------------------------------- auth ---
 echo "=== setup ==="
-CODE=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null \
+CODE=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null \
     | grep "Invite code:" | awk '{print $3}')
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$CODE\",\"displayName\":\"Smoke Nudge\",\"deviceName\":\"$DEVICE_NAME\",\"platform\":\"ios\"}")
 TOKEN=$(echo "$R" | jq_get '["token"]')
-[ -n "$TOKEN" ] || { echo "  ✗ could not redeem an invite — is the server up on $API?"; exit 1; }
+[ -n "$TOKEN" ] || { echo "  ✗ could not redeem an invite"; tail -20 "$ROOT/server.log"; exit 1; }
 DEV=$(device)
 echo "  device $DEV"
 

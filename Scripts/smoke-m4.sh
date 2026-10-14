@@ -1,23 +1,44 @@
 #!/bin/bash
 # M4 smoke test: shared spaces, membership, roles, and cross-space linking.
+#
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m4.sh
+#
+# Runs its own server against its own database and blob store, because the
+# household it lists is everyone in the database.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/m4"; PASS=0; FAIL=0
-q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+
+DB=framestation_m4; PORT=8073; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/m4"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
 newuser(){ # displayName -> "token spaceID userID"
   local c
-  c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+  c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$c\",\"displayName\":\"$1\",\"deviceName\":\"$1-phone\",\"platform\":\"ios\"}" \
     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["token"],d["personalSpace"]["id"],d["user"]["id"])'
@@ -77,8 +98,8 @@ check "personal can't be renamed" "403" \
 
 echo
 echo "=== 6. linking a photo into the shared space — a row, not a copy ==="
-f="$SCRATCH/m4/photo.jpg"
-vips gaussnoise "$SCRATCH/m4/n.v" 900 600 >/dev/null 2>&1; vips copy "$SCRATCH/m4/n.v" "$f" >/dev/null 2>&1
+f="$ROOT/files/photo.jpg"
+vips gaussnoise "$ROOT/files/n.v" 900 600 >/dev/null 2>&1; vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
 sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
 up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A1" -H 'Content-Type: application/json' \
   -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"photo.jpg\"}" | jq '["uploadID"]')
@@ -88,7 +109,7 @@ ASSET=$(curl -s -X POST "$API/v1/uploads/$up/commit" -H "$A1" -H 'Content-Type: 
 check "linked into shared" "True" \
   "$(curl -s -X POST "$API/v1/spaces/$FAM/assets/$ASSET" -H "$A1" -H 'Content-Type: application/json' -d '{}' | jq '["deduplicated"]')"
 check "2 placements, 1 asset" "2|1" "$(q "select (select count(*) from space_assets)||chr(124)||(select count(*) from assets);")"
-check "still one file on disk" "1" "$(find "$SCRATCH/blobroot/blobs" -type f | wc -l | tr -d ' ')"
+check "still one file on disk" "1" "$(find "$FRAMESTATION_BLOB_ROOT/blobs" -type f | wc -l | tr -d ' ')"
 check "member can now see it" "1" \
   "$(curl -s "$API/v1/spaces/$FAM/timeline/2026-07-20?zoom=day" -H "$A2" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["items"]))')"
 

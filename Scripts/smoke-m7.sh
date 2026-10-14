@@ -1,14 +1,22 @@
 #!/bin/bash
 # M7 smoke test: signed playback URLs and Range-served direct play.
+#
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m7.sh
+#
+# Runs its own server against its own database and blob store.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/m7"; PASS=0; FAIL=0
-q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+
+DB=framestation_m7; PORT=8075; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/m7"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -17,7 +25,19 @@ jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 hdr(){ curl -s -o /dev/null -D- "$@" | tr -d '\r'; }
 
-newuser(){ local c; c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
+newuser(){ local c; c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$c\",\"displayName\":\"$1\",\"deviceName\":\"$1-phone\",\"platform\":\"ios\"}" \
     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["token"],d["personalSpace"]["id"],d["user"]["id"])'; }
@@ -29,13 +49,13 @@ A1="Authorization: Bearer $T1"; A2="Authorization: Bearer $T2"
 put(){
   local label="$1" f
   if [ "$2" = video ]; then
-    f="$SCRATCH/m7/$label.mp4"
+    f="$ROOT/files/$label.mp4"
     ffmpeg -y -f lavfi -i "testsrc=size=$3x$4:rate=30:duration=$5" -c:v libx264 -pix_fmt yuv420p \
       -movflags +faststart "$f" >/dev/null 2>&1
   else
-    f="$SCRATCH/m7/$label.jpg"
-    vips gaussnoise "$SCRATCH/m7/$label.v" 640 480 >/dev/null 2>&1
-    vips copy "$SCRATCH/m7/$label.v" "$f" >/dev/null 2>&1
+    f="$ROOT/files/$label.jpg"
+    vips gaussnoise "$ROOT/files/$label.v" 640 480 >/dev/null 2>&1
+    vips copy "$ROOT/files/$label.v" "$f" >/dev/null 2>&1
   fi
   local sha size up mime kind
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
@@ -68,7 +88,7 @@ has "200 OK"            "200" "$(echo "$H" | head -1)"
 has "served as video"   "content-type: video/mp4" "$(echo "$H" | tr 'A-Z' 'a-z')"
 has "advertises ranges" "accept-ranges: bytes"    "$(echo "$H" | tr 'A-Z' 'a-z')"
 SIZE=$(echo "$H" | tr 'A-Z' 'a-z' | grep '^content-length:' | awk '{print $2}')
-check "streams the whole file" "$(stat -f%z "$SCRATCH/m7/hd.mp4")" "$SIZE"
+check "streams the whole file" "$(stat -f%z "$ROOT/files/hd.mp4")" "$SIZE"
 
 echo
 echo "=== 3. Range requests, which is what scrubbing is ==="
@@ -81,11 +101,11 @@ R2=$(hdr -H "Range: bytes=$MID-" "$URL" | tr 'A-Z' 'a-z')
 has "206 for a mid-file seek" "206" "$(echo "$R2" | head -1)"
 has "open-ended range resolves" "content-range: bytes $MID-$((SIZE-1))/$SIZE" "$R2"
 # The bytes actually have to match, or playback is silent corruption.
-curl -s -H "Range: bytes=0-4095" "$URL" -o "$SCRATCH/m7/head.bin"
-dd if="$SCRATCH/m7/hd.mp4" of="$SCRATCH/m7/head.ref" bs=1 count=4096 >/dev/null 2>&1
+curl -s -H "Range: bytes=0-4095" "$URL" -o "$ROOT/files/head.bin"
+dd if="$ROOT/files/hd.mp4" of="$ROOT/files/head.ref" bs=1 count=4096 >/dev/null 2>&1
 check "ranged bytes match the file" \
-  "$(shasum -a 256 "$SCRATCH/m7/head.ref" | awk '{print $1}')" \
-  "$(shasum -a 256 "$SCRATCH/m7/head.bin" | awk '{print $1}')"
+  "$(shasum -a 256 "$ROOT/files/head.ref" | awk '{print $1}')" \
+  "$(shasum -a 256 "$ROOT/files/head.bin" | awk '{print $1}')"
 
 echo
 echo "=== 4. the signature actually gates it ==="
@@ -107,7 +127,7 @@ has "4K streams too" "200" "$(echo "$H4" | head -1)"
 has "4K advertises ranges" "accept-ranges: bytes" "$H4"
 check "stored dimensions preserved" "3840x2160" "$(q "select width||'x'||height from assets where id='$V4K';")"
 check "no transcode — bytes are the original" \
-  "$(shasum -a 256 "$SCRATCH/m7/uhd.mp4" | awk '{print $1}')" "$(q "select sha256 from assets where id='$V4K';")"
+  "$(shasum -a 256 "$ROOT/files/uhd.mp4" | awk '{print $1}')" "$(q "select sha256 from assets where id='$V4K';")"
 
 echo
 echo "════════════════════════════════════"

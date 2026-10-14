@@ -6,31 +6,50 @@
 # endpoint puts a photograph in Recently Deleted with a purge date on it, that
 # restoring takes it back out, and that the sweeper's own query picks it up once
 # it is old enough — against the real schema rather than a hand-written one.
+#
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-retention.sh
+#
+# Runs its own server against its own database and blob store.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
 export PATH="/opt/homebrew/bin:$PATH"
-# The invite command needs the same environment the server runs with.
-ENVFILE="${FRAMESTATION_DEV_ENV:-$HOME/.framestation-dev/env}"
-[ -f "$ENVFILE" ] && { set -a; . "$ENVFILE"; set +a; }
-mkdir -p "$SCRATCH/retention"; PASS=0; FAIL=0
-q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+
+DB=framestation_retention; PORT=8083; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/retention"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 jq(){ python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null; }
 
-c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+
+c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$c\",\"displayName\":\"Michael\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
 T=$(echo "$R" | jq '["token"]'); SP=$(echo "$R" | jq '["personalSpace"]["id"]')
 A="Authorization: Bearer $T"
-[ -n "$T" ] || { echo "could not authenticate — is the dev server up?"; exit 1; }
+[ -n "$T" ] || { echo "could not authenticate"; tail -20 "$ROOT/server.log"; exit 1; }
 
-f="$SCRATCH/retention/IMG_9100.jpg"
-vips gaussnoise "$SCRATCH/retention/n.v" 400 300 >/dev/null 2>&1
-vips copy "$SCRATCH/retention/n.v" "$f" >/dev/null 2>&1
+f="$ROOT/files/IMG_9100.jpg"
+vips gaussnoise "$ROOT/files/n.v" 400 300 >/dev/null 2>&1
+vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
 SHA=$(shasum -a 256 "$f" | awk '{print $1}'); SZ=$(stat -f%z "$f")
 
 UP=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
@@ -65,8 +84,10 @@ P=$(echo "$D" | jq '["items"][0]["purgeAt"]')
 [ -n "$P" ] && [ "$P" != "None" ] && ok "carries a purge date ($P)" \
   || bad "carries a purge date" "an ISO date" "$P"
 
+# Rounded, not rounded up: 29 days that span a change of the clocks are an hour
+# more or less than 29 times 24 hours, and in October rounding up read 30.
 check "29 days out, to the day" "29" \
-  "$(q "select ceil(extract(epoch from (deleted_at + interval '29 days') - now())/86400.0)::int
+  "$(q "select round(extract(epoch from (deleted_at + interval '29 days') - now())/86400.0)::int
        from space_assets where asset_id='$AID';")"
 
 echo "== restoring =="
@@ -96,7 +117,6 @@ check "a purged row cannot be restored" "t" \
 check "and is hidden from Recently Deleted" "0" \
   "$(curl -s "$API/v1/spaces/$SP/collections/deleted" -H "$A" | jq '["total"]')"
 
-q "delete from space_assets where asset_id='$AID'; delete from assets where id='$AID';" >/dev/null
 echo
 echo "  $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

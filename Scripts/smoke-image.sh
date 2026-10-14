@@ -11,7 +11,7 @@
 #   Scripts/smoke-image.sh <image> [expected-revision]
 #
 # CI runs this between building the image and publishing it. Needs Docker,
-# curl and python3 on the host, and port 8099 free; psql runs inside the
+# curl and python3 on the host, and port 8085 free; psql runs inside the
 # database container.
 set -euo pipefail
 
@@ -23,6 +23,9 @@ NAME="framestation-smoke-$$"
 SCRATCH="$(mktemp -d)"
 mkdir -p "$SCRATCH/blobroot"
 PASSWORD=smoke
+# Not 8099, the dev stack's port: on a Mac running the dev stack, the container
+# couldn't start.
+PORT=8085
 
 cleanup() {
   local status=$?
@@ -82,11 +85,11 @@ docker run -d --name "$NAME-server" --network "$NAME" --user 0:0 \
   -e FRAMESTATION_DATABASE_URL="postgres://framestation:$PASSWORD@$NAME-db:5432/framestation?sslmode=disable" \
   -e FRAMESTATION_BLOB_ROOT=/data \
   -v "$SCRATCH/blobroot:/data" \
-  -p 127.0.0.1:8099:8080 "$IMAGE" >/dev/null
+  -p 127.0.0.1:$PORT:8080 "$IMAGE" >/dev/null
 
 HEALTH=""
 for _ in $(seq 1 90); do
-  HEALTH=$(curl -fsS http://127.0.0.1:8099/health 2>/dev/null) && break
+  HEALTH=$(curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null) && break
   [ "$(docker inspect -f '{{.State.Running}}' "$NAME-server")" = "true" ] \
     || fail "server still running (it exited during startup)"
   sleep 1
@@ -109,7 +112,7 @@ fi
 
 echo
 FRAMESTATION_TEST_DIR="$SCRATCH" \
-FRAMESTATION_API="http://127.0.0.1:8099" \
+FRAMESTATION_API="http://127.0.0.1:$PORT" \
 FRAMESTATION_CLI="docker exec $NAME-server ./FrameStationServer" \
 FRAMESTATION_PSQL="$DBPSQL -tAqc" \
   "$HERE/smoke-m1a.sh"

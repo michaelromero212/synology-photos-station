@@ -1,21 +1,31 @@
 #!/bin/bash
 # M6 smoke test: activity batching, message wording, and push fan-out.
 #
-# Runs against a server started with a short idle window
-# (FRAMESTATION_ACTIVITY_IDLE_SECONDS) so a burst closes in seconds rather than
-# five minutes. APNs itself is unconfigured, so the client logs what it would
-# have sent — which is exactly what proves the wording and the recipient list.
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m6.sh
+#
+# Runs its own server against its own database and blob store, with a short
+# idle window (FRAMESTATION_ACTIVITY_IDLE_SECONDS) so a burst closes in seconds
+# rather than five minutes. APNs itself is unconfigured, so the client logs what
+# it would have sent — which is exactly what proves the wording and the
+# recipient list.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
-LOG="${FRAMESTATION_SERVER_LOG:-$SCRATCH/srv.log}"
-IDLE="${FRAMESTATION_ACTIVITY_IDLE_SECONDS:-2}"
 export PATH="/opt/homebrew/bin:$PATH"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/m6"; PASS=0; FAIL=0
-q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc "$1"; }
+
+DB=framestation_m6; PORT=8074; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/m6"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+export FRAMESTATION_ACTIVITY_IDLE_SECONDS="${FRAMESTATION_ACTIVITY_IDLE_SECONDS:-2}"
+export FRAMESTATION_ACTIVITY_SWEEP_SECONDS=1
+# A fresh blob root has no key in it; these would bring one in from the shell.
+unset FRAMESTATION_APNS_KEY FRAMESTATION_APNS_KEY_PATH FRAMESTATION_APNS_KEY_ID
+LOG="$ROOT/server.log"
+PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
 check(){ [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
@@ -25,9 +35,21 @@ code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # wc -l pads with spaces on macOS; tail -n + refuses a padded offset.
 mark(){ wc -l < "$LOG" 2>/dev/null | tr -d " " || echo 0; }
 
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$LOG" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$LOG"; exit 1; }
+
 newuser(){
   local c
-  c=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+  c=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$c\",\"displayName\":\"$1\",\"deviceName\":\"$1-phone\",\"platform\":\"ios\"}" \
     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["token"],d["personalSpace"]["id"],d["user"]["id"])'
@@ -43,15 +65,15 @@ FAM=$(curl -s -X POST "$API/v1/spaces" -H "$A1" -H 'Content-Type: application/js
 # label spaceID auth mediaType -> uploads one file
 put(){
   local label="$1" space="$2" auth="$3" kind="$4"
-  local f="$SCRATCH/m6/$label"
+  local f="$ROOT/files/$label"
   if [ "$kind" = video ]; then
     f="$f.mp4"
     ffmpeg -y -f lavfi -i "testsrc=size=320x240:rate=15:duration=1" -c:v libx264 \
       -pix_fmt yuv420p -metadata comment="$label" "$f" >/dev/null 2>&1
   else
     f="$f.jpg"
-    vips gaussnoise "$SCRATCH/m6/$label.v" 320 240 >/dev/null 2>&1
-    vips copy "$SCRATCH/m6/$label.v" "$f" >/dev/null 2>&1
+    vips gaussnoise "$ROOT/files/$label.v" 320 240 >/dev/null 2>&1
+    vips copy "$ROOT/files/$label.v" "$f" >/dev/null 2>&1
   fi
   local sha size up
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")

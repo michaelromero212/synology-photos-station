@@ -3,19 +3,34 @@
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m3.sh
 #
-# Needs a freshly migrated, empty database and a server started with
-# FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot".
+# Runs its own server against its own database and blob store, because every
+# count here is a count of the whole database.
 set -uo pipefail
 
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
-PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc"
 export PATH="/opt/homebrew/bin:$PATH"
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/tl"
+
+DB=framestation_m3; PORT=8072; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/m3"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc"
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 PASS=0; FAIL=0
+
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
 
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
@@ -25,7 +40,7 @@ jq_get() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/d
 # --------------------------------------------------------------------- auth ---
 new_user() { # displayName deviceName -> token
   local code
-  code=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+  code=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
   curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
     -d "{\"code\":\"$code\",\"displayName\":\"$1\",\"deviceName\":\"$2\",\"platform\":\"ios\"}"
 }
@@ -48,9 +63,9 @@ $PSQL "INSERT INTO space_members (space_id,user_id,role) VALUES ('$FAMILY','$UID
 # args: index space token width height capturedAt tzOffset  -> echoes assetID
 put() {
   local i="$1" space="$2" tok="$3" w="$4" h="$5" cap="$6" tz="$7"
-  local f="$SCRATCH/tl/img$i.jpg"
-  vips gaussnoise "$SCRATCH/tl/n$i.v" "$w" "$h" >/dev/null 2>&1
-  vips copy "$SCRATCH/tl/n$i.v" "$f" >/dev/null 2>&1
+  local f="$ROOT/files/img$i.jpg"
+  vips gaussnoise "$ROOT/files/n$i.v" "$w" "$h" >/dev/null 2>&1
+  vips copy "$ROOT/files/n$i.v" "$f" >/dev/null 2>&1
   local sha size up
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
   up=$(curl -s -X POST "$API/v1/uploads/probe" -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
@@ -130,7 +145,14 @@ print(all(x["thumbHash"] and 20<=len(base64.b64decode(x["thumbHash"]))<=30 for x
 # ------------------------------------------------------------- delta sync ---
 echo
 echo "=== 6. delta sync ==="
-CUR=$(echo "$M" | jq_get '["cursor"]')
+# A cursor from now, not from the manifest above: each thumbnail made since
+# then was announced as an update, which is how a gray tile fills in. Once the
+# queue is empty, the new photo is all there is left to report.
+for _ in $(seq 1 30); do
+  [ "$($PSQL "select count(*) from derivation_jobs where state not in ('done','failed');")" = "0" ] && break
+  sleep 1
+done
+CUR=$(curl -s "$API/v1/spaces/$SPACE/timeline?zoom=day" -H "$AUTH" | jq_get '["cursor"]')
 A7=$(put 7 "$SPACE" "$TOKEN" 800 600 "2026-07-19T10:00:00Z" 0)
 D=$(curl -s "$API/v1/spaces/$SPACE/changes?since=$CUR" -H "$AUTH")
 check "one change since cursor" "1" "$(echo "$D" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["changes"]))')"

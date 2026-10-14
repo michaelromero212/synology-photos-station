@@ -1,45 +1,61 @@
 #!/bin/bash
 # M1a smoke test: chunked resumable upload, dedup, hash verification, access control.
 #
-# The server must already be running AND started with the same blob root this
-# script inspects, since it asserts against files on disk:
+#   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m1a.sh
 #
-#   export FRAMESTATION_TEST_DIR=/tmp/framestation-test
-#   mkdir -p "$FRAMESTATION_TEST_DIR/blobroot"
-#   cd Server && FRAMESTATION_DATABASE_URL=... \
-#     FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot" \
-#     swift run FrameStationServer serve --hostname 127.0.0.1 --port 8099
+# Runs its own server against its own database and blob store, because every
+# count here is a count of the whole database.
 #
-#   ./Scripts/smoke-m1a.sh
+# Scripts/smoke-image.sh runs this same script against a built container image,
+# which is how CI checks an image before publishing it. It hands over the
+# container's server, a CLI and a psql that reach the container's database, and
+# a blob root at "$FRAMESTATION_TEST_DIR/blobroot", since the checks below look
+# at files on disk:
 #
-# Expects a freshly migrated, empty database. Scripts/smoke-image.sh runs this
-# same script against a built container image, which is how CI checks an image
-# before publishing it.
+#   FRAMESTATION_API=http://127.0.0.1:8085 \
+#   FRAMESTATION_CLI="docker exec <server container> ./FrameStationServer" \
+#   FRAMESTATION_PSQL="docker exec <database container> psql … -tAqc" ./Scripts/smoke-m1a.sh
 set -uo pipefail
 
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
-# Overridable so a containerised run can use the database container's own psql.
-PSQL="${FRAMESTATION_PSQL:-psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc}"
-mkdir -p "$SCRATCH/chunks"
+export PATH="/opt/homebrew/bin:$PATH"
 PASS=0; FAIL=0
 
-# The invite CLI is a second process and needs the same connection settings the
-# running server was started with.
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
+if [ -n "${FRAMESTATION_API:-}" ]; then
+  # All three or none. A server given without the other two left the invite
+  # and the queries in whatever database this shell reaches by default, which
+  # on a Mac is the dev library.
+  [ -n "${FRAMESTATION_CLI:-}" ] && [ -n "${FRAMESTATION_PSQL:-}" ] || {
+    echo "FRAMESTATION_API needs FRAMESTATION_CLI and FRAMESTATION_PSQL beside it"; exit 1; }
+  API="$FRAMESTATION_API"; PSQL="$FRAMESTATION_PSQL"
+  BLOBS="$SCRATCH/blobroot"; FILES="$SCRATCH"
+  # Unquoted on purpose: it's a command line, `docker exec <container> ./FrameStationServer`.
+  invite(){ $FRAMESTATION_CLI invite 2>/dev/null | grep "Invite code:" | awk '{print $3}'; }
+else
+  SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
+  DB=framestation_m1a; PORT=8070; API="http://127.0.0.1:$PORT"
+  export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+  ROOT="$SCRATCH/m1a"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+  ROOT=$(cd "$ROOT" && pwd -P)
+  export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+  BLOBS="$FRAMESTATION_BLOB_ROOT"; FILES="$ROOT/files"
+  PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc"
+  admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 
-# Invites come from the server's own CLI: `swift run` against a source
-# checkout, or whatever FRAMESTATION_CLI names — a container's binary, say —
-#   FRAMESTATION_CLI="docker exec framestation-smoke ./FrameStationServer"
-invite() {
-  if [ -n "${FRAMESTATION_CLI:-}" ]; then
-    $FRAMESTATION_CLI invite 2>/dev/null
-  else
-    (cd "${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}" && \
-      swift run FrameStationServer invite 2>/dev/null)
-  fi | grep "Invite code:" | awk '{print $3}'
-}
+  (cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+  BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+  # Whatever already answers on this port would be tested in this server's place.
+  curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+  admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+  "$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+  SERVER=$!
+  # The log stays for a look after a failure; the files made for the run go.
+  trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+  for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+  curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+  invite(){ (cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null) | grep "Invite code:" | awk '{print $3}'; }
+fi
+mkdir -p "$FILES/chunks"
 
 # Size and hash the same way on macOS and Linux: `stat -f%z` and `shasum` are
 # BSD and Perl respectively, and CI runs this on Ubuntu.
@@ -74,14 +90,14 @@ echo "  family space:   $FAMILY"
 
 echo
 echo "=== build a 40 MB test file (3 chunks: 16+16+8) ==="
-SRC="$SCRATCH/testvideo.mov"
+SRC="$FILES/testvideo.mov"
 dd if=/dev/urandom of="$SRC" bs=1048576 count=40 2>/dev/null
 SHA=$(sha256_of "$SRC")
 SIZE=$(size_of "$SRC")
-rm -rf "$SCRATCH/chunks"; mkdir -p "$SCRATCH/chunks"
-dd if="$SRC" of="$SCRATCH/chunks/0" bs=1048576 skip=0  count=16 2>/dev/null
-dd if="$SRC" of="$SCRATCH/chunks/1" bs=1048576 skip=16 count=16 2>/dev/null
-dd if="$SRC" of="$SCRATCH/chunks/2" bs=1048576 skip=32 count=8  2>/dev/null
+rm -rf "$FILES/chunks"; mkdir -p "$FILES/chunks"
+dd if="$SRC" of="$FILES/chunks/0" bs=1048576 skip=0  count=16 2>/dev/null
+dd if="$SRC" of="$FILES/chunks/1" bs=1048576 skip=16 count=16 2>/dev/null
+dd if="$SRC" of="$FILES/chunks/2" bs=1048576 skip=32 count=8  2>/dev/null
 echo "  sha256: $SHA  size: $SIZE"
 
 echo
@@ -97,7 +113,7 @@ echo
 echo "=== 2. upload chunks 0 and 2, deliberately skipping 1 ==="
 for i in 0 2; do
   R=$(curl -s -X PUT "$API/v1/uploads/$UPLOAD/chunk/$i" -H "$AUTH" \
-      -H 'Content-Type: application/octet-stream' --data-binary "@$SCRATCH/chunks/$i")
+      -H 'Content-Type: application/octet-stream' --data-binary "@$FILES/chunks/$i")
   echo "  chunk $i -> received $(echo "$R" | jq_get '["receivedChunks"]')/3"
 done
 check "chunk 1 still outstanding" "[1]" "$(echo "$R" | jq_get '["missingChunks"]')"
@@ -119,14 +135,14 @@ check "HTTP 400 on incomplete commit" "400" "$C"
 
 echo
 echo "=== 5. wrong-size chunk is rejected ==="
-head -c 1000 "$SCRATCH/chunks/1" > "$SCRATCH/chunks/1.short"
+head -c 1000 "$FILES/chunks/1" > "$FILES/chunks/1.short"
 C=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$API/v1/uploads/$UPLOAD/chunk/1" -H "$AUTH" \
-  --data-binary "@$SCRATCH/chunks/1.short")
+  --data-binary "@$FILES/chunks/1.short")
 check "HTTP 400 on truncated chunk" "400" "$C"
 
 echo
 echo "=== 6. upload the real chunk 1, then commit ==="
-curl -s -X PUT "$API/v1/uploads/$UPLOAD/chunk/1" -H "$AUTH" --data-binary "@$SCRATCH/chunks/1" >/dev/null
+curl -s -X PUT "$API/v1/uploads/$UPLOAD/chunk/1" -H "$AUTH" --data-binary "@$FILES/chunks/1" >/dev/null
 COMMIT=$(curl -s -X POST "$API/v1/uploads/$UPLOAD/commit" -H "$AUTH" -H 'Content-Type: application/json' \
   -d "{\"spaceID\":\"$SPACE\",\"mediaType\":\"video\",\"mime\":\"video/quicktime\",\"width\":3840,\"height\":2160,\"durationMs\":12500,\"capturedAt\":\"2026-07-24T19:28:00Z\",\"isRaw\":false,\"burstPick\":false,\"sourceLocalID\":\"ABC-123/L0/001\"}")
 ASSET=$(echo "$COMMIT" | jq_get '["assetID"]')
@@ -136,11 +152,11 @@ echo "  assetID: $ASSET"
 
 echo
 echo "=== 7. bytes landed correctly on disk ==="
-SHARD="$SCRATCH/blobroot/blobs/${SHA:0:2}/${SHA:2:2}/$SHA.mov"
+SHARD="$BLOBS/blobs/${SHA:0:2}/${SHA:2:2}/$SHA.mov"
 [ -f "$SHARD" ] && ok "blob at sharded path blobs/${SHA:0:2}/${SHA:2:2}/" || bad "blob at sharded path" "exists" "missing"
 check "stored size matches"   "$SIZE" "$(size_of "$SHARD" 2>/dev/null)"
 check "stored hash matches"   "$SHA"  "$(sha256_of "$SHARD" 2>/dev/null)"
-check "staging cleaned up"    "0"     "$(ls "$SCRATCH/blobroot/incoming" 2>/dev/null | wc -l | tr -d ' ')"
+check "staging cleaned up"    "0"     "$(ls "$BLOBS/incoming" 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
 echo "=== 8. no legacy browse/ tree under the blob root ==="
@@ -148,7 +164,7 @@ echo "=== 8. no legacy browse/ tree under the blob root ==="
 # nothing ever removed those links — so purging a photo unlinked its blob while
 # the bytes stayed on disk under the old tree's name. The home tree replaced it
 # (BrowseTreeWorker); an upload must not write here at all.
-[ ! -e "$SCRATCH/blobroot/browse" ] && ok "no browse/ tree written" || bad "browse/ tree" "absent" "present"
+[ ! -e "$BLOBS/browse" ] && ok "no browse/ tree written" || bad "browse/ tree" "absent" "present"
 
 echo
 echo "=== 9. database state ==="
@@ -171,7 +187,7 @@ L=$(curl -s -X POST "$API/v1/spaces/$FAMILY/assets/$ASSET" -H "$AUTH" \
   -H 'Content-Type: application/json' -d '{}')
 check "flagged dedup"          "True" "$(echo "$L" | jq_get '["deduplicated"]')"
 check "2 placements, 1 asset"  "2|1"  "$($PSQL 'select (select count(*) from space_assets)||chr(124)||(select count(*) from assets);')"
-check "still one file on disk" "1"    "$(find "$SCRATCH/blobroot/blobs" -type f | wc -l | tr -d ' ')"
+check "still one file on disk" "1"    "$(find "$BLOBS/blobs" -type f | wc -l | tr -d ' ')"
 check "change_log has 2 rows"  "2"    "$($PSQL 'select count(*) from change_log;')"
 
 echo
@@ -197,17 +213,17 @@ check "a link with a forged signature is refused" "404" \
 echo
 echo "=== 12. hash mismatch is caught and rejected ==="
 LIE=$(python3 -c "print('a'*64)")
-dd if=/dev/urandom of="$SCRATCH/lie.bin" bs=1024 count=64 2>/dev/null
+dd if=/dev/urandom of="$FILES/lie.bin" bs=1024 count=64 2>/dev/null
 P4=$(curl -s -X POST "$API/v1/uploads/probe" -H "$AUTH" -H 'Content-Type: application/json' \
   -d "{\"spaceID\":\"$SPACE\",\"sha256\":\"$LIE\",\"byteSize\":65536,\"filename\":\"lie.bin\"}")
 U4=$(echo "$P4" | jq_get '["uploadID"]')
-curl -s -X PUT "$API/v1/uploads/$U4/chunk/0" -H "$AUTH" --data-binary "@$SCRATCH/lie.bin" >/dev/null
+curl -s -X PUT "$API/v1/uploads/$U4/chunk/0" -H "$AUTH" --data-binary "@$FILES/lie.bin" >/dev/null
 C4=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/v1/uploads/$U4/commit" -H "$AUTH" \
   -H 'Content-Type: application/json' \
   -d "{\"spaceID\":\"$SPACE\",\"mediaType\":\"photo\",\"mime\":\"image/heic\",\"isRaw\":false,\"burstPick\":false}")
 check "HTTP 422 on hash mismatch" "422" "$C4"
 check "no asset created"          "1"   "$($PSQL 'select count(*) from assets;')"
-check "staging discarded"         "0"   "$(ls "$SCRATCH/blobroot/incoming" 2>/dev/null | wc -l | tr -d ' ')"
+check "staging discarded"         "0"   "$(ls "$BLOBS/incoming" 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
 echo "=== 13. another user cannot touch this session ==="
@@ -215,7 +231,7 @@ CODE2=$(invite)
 T2=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE2\",\"displayName\":\"Morgan\",\"deviceName\":\"iPad\",\"platform\":\"ipados\"}" | jq_get '["token"]')
 C5=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$API/v1/uploads/$UPLOAD/chunk/0" \
-  -H "Authorization: Bearer $T2" --data-binary "@$SCRATCH/chunks/0")
+  -H "Authorization: Bearer $T2" --data-binary "@$FILES/chunks/0")
 check "HTTP 404 on foreign session" "404" "$C5"
 C6=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/v1/spaces/$SPACE/assets/$ASSET" \
   -H "Authorization: Bearer $T2" -H 'Content-Type: application/json' -d '{}')

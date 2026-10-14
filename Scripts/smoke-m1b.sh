@@ -1,25 +1,37 @@
 #!/bin/bash
 # M1b smoke test: EXIF extraction, thumbnails, ThumbHash, poster frames, serving.
 #
-# Same preconditions as smoke-m1a.sh — server running against a freshly
-# migrated, empty database, started with
-# FRAMESTATION_BLOB_ROOT="$FRAMESTATION_TEST_DIR/blobroot".
-#
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-m1b.sh
+#
+# Runs its own server against its own database and blob store, because every
+# count here is a count of the whole database.
 set -uo pipefail
 
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
-API="${FRAMESTATION_API:-http://127.0.0.1:8099}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
-PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d framestation -tAqc"
 export PATH="/opt/homebrew/bin:$PATH"
 
-# The invite CLI is a second process and needs the same connection settings the
-# running server was started with.
-export FRAMESTATION_DATABASE_URL="${FRAMESTATION_DATABASE_URL:-postgres://framestation:x@127.0.0.1:55432/framestation?sslmode=disable}"
-export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
-mkdir -p "$SCRATCH/media"
+DB=framestation_m1b; PORT=8071; API="http://127.0.0.1:$PORT"
+export FRAMESTATION_DATABASE_URL="postgres://framestation:x@127.0.0.1:55432/$DB?sslmode=disable"
+ROOT="$SCRATCH/m1b"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files"
+ROOT=$(cd "$ROOT" && pwd -P)
+export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
+PSQL="psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc"
+admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 PASS=0; FAIL=0
+
+(cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
+BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
+# Whatever already answers on this port would be tested in this server's place.
+curl -s -o /dev/null "$API/health" && { echo "port $PORT is already in use"; exit 1; }
+admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1; admin "CREATE DATABASE $DB" >/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT > "$ROOT/server.log" 2>&1 &
+SERVER=$!
+# The log stays for a look after a failure; the files made for the run go.
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$ROOT/files" "$ROOT/blobroot"' EXIT
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+curl -s -o /dev/null "$API/health" || { echo "server didn't start:"; tail -20 "$ROOT/server.log"; exit 1; }
+invite(){ (cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null) | grep "Invite code:" | awk '{print $3}'; }
 
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
@@ -32,7 +44,7 @@ jq_get() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/d
 
 # ---------------------------------------------------------------- fixtures ---
 echo "=== fixtures ==="
-cd "$SCRATCH/media"
+cd "$ROOT/files"
 vips gaussnoise g.v 1600 1200 >/dev/null 2>&1
 vips copy g.v photo.jpg >/dev/null 2>&1
 exiftool -q -overwrite_original \
@@ -53,7 +65,7 @@ ffmpeg -y -display_rotation 90 -i flat.mov -c copy clip.mov >/dev/null 2>&1
 echo "  photo.jpg $(stat -f%z photo.jpg) bytes, clip.mov $(stat -f%z clip.mov) bytes"
 
 # -------------------------------------------------------------------- auth ---
-CODE=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+CODE=$(invite)
 R=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE\",\"displayName\":\"Michael\",\"deviceName\":\"iPhone\",\"platform\":\"ios\"}")
 TOKEN=$(echo "$R" | jq_get '["token"]'); SPACE=$(echo "$R" | jq_get '["personalSpace"]["id"]')
@@ -110,12 +122,13 @@ check "portrait after 90° rotation" "480|640" "$($PSQL "select width||'|'||heig
 # ------------------------------------------------------------- derivations ---
 echo
 echo "=== 5. derivation queue drains ==="
+# Each upload queues metadata and playback jobs beside its thumbnails, so wait
+# for the whole queue rather than a count of finished jobs.
 for _ in $(seq 1 40); do
-  done_count=$($PSQL "select count(*) from derivation_jobs where state='done';")
-  [ "$done_count" = "2" ] && break
+  [ "$($PSQL "select count(*) from derivation_jobs where state not in ('done','failed');")" = "0" ] && break
   sleep 1
 done
-check "both thumbnail jobs done" "2" "$($PSQL "select count(*) from derivation_jobs where state='done';")"
+check "both thumbnail jobs done" "2" "$($PSQL "select count(*) from derivation_jobs where kind='thumbnails' and state='done';")"
 check "no failed jobs"           "0" "$($PSQL "select count(*) from derivation_jobs where state='failed';")"
 check "assets marked derived"    "2" "$($PSQL "select count(*) from assets where derived_at is not null;")"
 
@@ -123,37 +136,39 @@ echo
 echo "=== 6. thumbnails + ThumbHash on disk and in the database ==="
 PSHA=$($PSQL "select sha256 from assets where id='$PHOTO';")
 VSHA=$($PSQL "select sha256 from assets where id='$VIDEO';")
-PDIR="$SCRATCH/blobroot/derivatives/${PSHA:0:2}/${PSHA:2:2}/$PSHA"
-VDIR="$SCRATCH/blobroot/derivatives/${VSHA:0:2}/${VSHA:2:2}/$VSHA"
+PDIR="$FRAMESTATION_BLOB_ROOT/derivatives/${PSHA:0:2}/${PSHA:2:2}/$PSHA"
+VDIR="$FRAMESTATION_BLOB_ROOT/derivatives/${VSHA:0:2}/${VSHA:2:2}/$VSHA"
 [ -f "$PDIR/thumb-256.jpg" ] && ok "photo thumb-256.jpg" || bad "photo thumb-256.jpg" exists missing
 [ -f "$PDIR/thumb-512.jpg" ] && ok "photo thumb-512.jpg" || bad "photo thumb-512.jpg" exists missing
 [ -f "$VDIR/poster.jpg" ]    && ok "video poster.jpg"    || bad "video poster.jpg" exists missing
 [ -f "$VDIR/thumb-256.jpg" ] && ok "video thumb-256.jpg" || bad "video thumb-256.jpg" exists missing
-check "no leftover .ppm scratch" "0" "$(find "$SCRATCH/blobroot/derivatives" -name '*.ppm' | wc -l | tr -d ' ')"
+check "no leftover .ppm scratch" "0" "$(find "$FRAMESTATION_BLOB_ROOT/derivatives" -name '*.ppm' | wc -l | tr -d ' ')"
 check "thumbhash stored, ~25 bytes" "2" \
   "$($PSQL "select count(*) from assets where octet_length(thumbhash) between 20 and 30;")"
-check "thumb-256 is really 256 on its long edge" "256" \
-  "$(vipsheader -f width "$PDIR/thumb-256.jpg" 2>/dev/null)"
+# Sized by the short edge, so a square grid tile never upscales it: the 4:3
+# photo's thumb-256 is 341 x 256.
+check "thumb-256 is really 256 on its short edge" "341x256" \
+  "$(vipsheader -f width "$PDIR/thumb-256.jpg" 2>/dev/null)x$(vipsheader -f height "$PDIR/thumb-256.jpg" 2>/dev/null)"
 
 # ---------------------------------------------------------------- serving ---
 echo
 echo "=== 7. serving endpoints ==="
-ct=$(curl -s -o "$SCRATCH/media/dl-thumb.jpg" -w "%{content_type}" "$API/v1/assets/$PHOTO/thumb?size=256" -H "$AUTH")
+ct=$(curl -s -o "$ROOT/files/dl-thumb.jpg" -w "%{content_type}" "$API/v1/assets/$PHOTO/thumb?size=256" -H "$AUTH")
 check "thumb content-type" "image/jpeg" "$ct"
-check "thumb decodes"      "256" "$(vipsheader -f width "$SCRATCH/media/dl-thumb.jpg" 2>/dev/null)"
+check "thumb decodes"      "256" "$(vipsheader -f height "$ROOT/files/dl-thumb.jpg" 2>/dev/null)"
 check "bad size rejected"  "400" "$(curl -s -o /dev/null -w '%{http_code}' "$API/v1/assets/$PHOTO/thumb?size=999" -H "$AUTH")"
 
-curl -s -o "$SCRATCH/media/dl-preview.jpg" "$API/v1/assets/$PHOTO/preview" -H "$AUTH"
-check "preview generated lazily at 2048" "1600" "$(vipsheader -f width "$SCRATCH/media/dl-preview.jpg" 2>/dev/null)"
+curl -s -o "$ROOT/files/dl-preview.jpg" "$API/v1/assets/$PHOTO/preview" -H "$AUTH"
+check "preview generated lazily at 2048" "1600" "$(vipsheader -f width "$ROOT/files/dl-preview.jpg" 2>/dev/null)"
 [ -f "$PDIR/preview-2048.jpg" ] && ok "preview cached on disk" || bad "preview cached" exists missing
 
-curl -s -o "$SCRATCH/media/dl-original.jpg" "$API/v1/assets/$PHOTO/original" -H "$AUTH"
+curl -s -o "$ROOT/files/dl-original.jpg" "$API/v1/assets/$PHOTO/original" -H "$AUTH"
 check "original is byte-exact" "$(shasum -a 256 photo.jpg | awk '{print $1}')" \
-  "$(shasum -a 256 "$SCRATCH/media/dl-original.jpg" | awk '{print $1}')"
+  "$(shasum -a 256 "$ROOT/files/dl-original.jpg" | awk '{print $1}')"
 
 echo
 echo "=== 8. access control ==="
-CODE2=$(cd "$SERVER_DIR" && swift run FrameStationServer invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
+CODE2=$(invite)
 T2=$(curl -s -X POST "$API/v1/auth/redeem" -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE2\",\"displayName\":\"Morgan\",\"deviceName\":\"iPad\",\"platform\":\"ipados\"}" | jq_get '["token"]')
 check "non-member gets 404 on thumb"    "404" "$(curl -s -o /dev/null -w '%{http_code}' "$API/v1/assets/$PHOTO/thumb" -H "Authorization: Bearer $T2")"
