@@ -10,6 +10,8 @@ public enum PushPayloadKey {
     /// Nothing to show. The server believes this device has a backup it hasn't
     /// finished, and is asking iOS for a moment in which to finish it.
     public static let kindBackup = "backup"
+    /// Someone reported a photo in a library this person owns.
+    public static let kindReport = "report"
 }
 
 /// The wording of an upload notification.

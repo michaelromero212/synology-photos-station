@@ -126,10 +126,12 @@ struct AlbumController: RouteCollection {
                    (SELECT count(*) FROM space_members WHERE space_id = s.id)::int AS "memberCount",
                    (SELECT count(*) FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
                     WHERE sa.space_id = s.id AND sa.deleted_at IS NULL
-                      AND \(unsafeRaw: TimelineController.visible))::int AS "itemCount",
+                      AND \(unsafeRaw: TimelineController.visible)
+                      AND \(Hidden.excluded(for: userID)))::int AS "itemCount",
                    (SELECT sa.asset_id FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
                     WHERE sa.space_id = s.id AND sa.deleted_at IS NULL
                       AND \(unsafeRaw: TimelineController.visible)
+                      AND \(Hidden.excluded(for: userID))
                     ORDER BY (a.derived_at IS NOT NULL) DESC, (a.media_type = 'photo') DESC,
                              sa.uploaded_at DESC
                     LIMIT 1) AS "coverAssetID"
@@ -169,6 +171,7 @@ struct AlbumController: RouteCollection {
                                 AND m.user_id = \(bind: device.userID)
             WHERE aa.album_id = \(bind: albumID) AND sa.deleted_at IS NULL
               AND (al.space_id IS NULL OR sa.space_id = al.space_id)
+              AND \(Hidden.excluded(for: device.userID))
             ORDER BY aa.position, aa.added_at
             """).all(decoding: TimelineController.ItemRow.self)
 
@@ -447,12 +450,20 @@ struct AlbumController: RouteCollection {
     private static func albumSelect(caller: UUID) -> SQLQueryString {
         """
         SELECT a.id, a.name, a.space_id AS "spaceID", a.owner_user_id AS "ownerUserID",
-               a.cover_asset_id AS "coverAssetID",
+               -- No cover rather than one this person has reported, or one
+               -- added by someone they blocked. See `Hidden`.
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM album_assets ca
+                   JOIN space_assets sa ON sa.id = ca.space_asset_id
+                   WHERE ca.album_id = a.id AND sa.asset_id = a.cover_asset_id
+                     AND NOT (\(Hidden.excluded(for: caller)))
+               ) THEN NULL ELSE a.cover_asset_id END AS "coverAssetID",
                a.created_at AS "createdAt", a.updated_at AS "updatedAt",
                m.role,
                (SELECT count(*) FROM album_assets aa
                 JOIN space_assets sa ON sa.id = aa.space_asset_id
                 WHERE aa.album_id = a.id AND sa.deleted_at IS NULL
+                  AND \(Hidden.excluded(for: caller))
                   AND CASE WHEN a.space_id IS NULL
                            THEN EXISTS (SELECT 1 FROM space_members m2
                                         WHERE m2.space_id = sa.space_id

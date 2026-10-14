@@ -68,6 +68,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               AND t.term LIKE \(bind: pattern)
               AND NOT (t.term = ANY(\(bind: skipped)::text[]))
             GROUP BY t.term
@@ -86,6 +87,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               AND t.term LIKE \(bind: pattern)
               AND NOT (t.term = ANY(\(bind: skipped)::text[]))
             """).first(decoding: CountRow.self)?.total ?? 0
@@ -157,6 +159,7 @@ struct SearchController: RouteCollection {
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: place) IS NOT NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               AND \(unsafeRaw: place) ILIKE \(bind: pattern)
             GROUP BY 1
             ORDER BY \(unsafeRaw: ordering)
@@ -174,6 +177,7 @@ struct SearchController: RouteCollection {
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: place) IS NOT NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               AND \(unsafeRaw: place) ILIKE \(bind: pattern)
             """).first(decoding: CountRow.self)?.total ?? 0
 
@@ -243,6 +247,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               \(filters)
             """).first(decoding: CountRow.self)?.total ?? 0
 
@@ -259,6 +264,7 @@ struct SearchController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
               \(filters)
             ORDER BY \(unsafeRaw: TimelineController.localTime) DESC, sa.id
             LIMIT \(bind: limit) OFFSET \(bind: offset)

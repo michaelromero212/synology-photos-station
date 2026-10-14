@@ -235,6 +235,10 @@ struct AssetDetailView: View {
     /// gets out of the way when it is.
     @State private var isZoomed = false
     @State private var confirmDelete = false
+    /// The photo being reported, while its reasons are asked for.
+    @State private var reporting: TimelineItem?
+    /// Whoever added this photo, while blocking them is confirmed.
+    @State private var blocking: BlockTarget?
     @State private var shareFiles: [DownloadedOriginal] = []
     @State private var showShare = false
     @State private var showSlideshow = false
@@ -464,6 +468,11 @@ struct AssetDetailView: View {
         } message: {
             Text("It stays on this iPhone. On your NAS it goes to Recently Deleted for \(Retention.days) days, and backup won't add it again.")
         }
+        .modifier(ViewerSafetyDialogs(
+            reporting: $reporting, blocking: $blocking,
+            libraryName: reportableLibrary?.name ?? "the library",
+            onReport: report, onBlock: block
+        ))
     }
     #else
     /// The neighbouring video from the same day.
@@ -1036,7 +1045,10 @@ struct AssetDetailView: View {
     /// reassembling itself. Started together, the bar comes back with the grid.
     ///
     /// `velocity` is a drag's, as it was let go, for the photo to leave with.
-    private func leave(velocity: CGSize = .zero) {
+    /// - Parameter flyingBack: false for a photo that's leaving the grid as
+    ///   the viewer closes — reported, or its person blocked. The viewer fades
+    ///   instead, rather than landing the photo on a tile about to go.
+    private func leave(velocity: CGSize = .zero, flyingBack: Bool = true) {
         GridChrome.shared.viewerClosed(tabBarToken)
         focusReport?.cancel()
         // Over the grid: the photo flies back into its tile, which the stage
@@ -1046,7 +1058,7 @@ struct AssetDetailView: View {
             onFocus(currentItem)
             stage.close(
                 current: currentItem,
-                image: currentModel.image ?? currentModel.placeholder,
+                image: flyingBack ? currentModel.image ?? currentModel.placeholder : nil,
                 velocity: velocity
             )
             return
@@ -1242,6 +1254,81 @@ struct AssetDetailView: View {
                     }
                 }
             }
+        }
+
+        // Last, under a divider, as Photos keeps Report apart from what you
+        // do with your own pictures.
+        if reportableLibrary != nil {
+            Divider()
+            Button {
+                reporting = currentItem
+            } label: {
+                Label(
+                    currentItem.mediaType == .video ? "Report Video" : "Report Photo",
+                    systemImage: "exclamationmark.bubble"
+                )
+            }
+            Button(role: .destructive) {
+                blocking = BlockTarget(id: currentItem.uploadedBy, name: addedByName)
+            } label: {
+                Label(
+                    addedByName.map { "Block \($0)" } ?? "Block Who Added This",
+                    systemImage: "hand.raised"
+                )
+            }
+        }
+    }
+
+    /// The shared library this photo can be reported in, or nil: only one
+    /// somebody else added it to, and only on a NAS that takes reports.
+    private var reportableLibrary: SpaceDTO? {
+        guard session.supports(ServerCapability.reportAndBlock),
+              let me = session.user?.id, currentItem.uploadedBy != me,
+              let library = session.spaces.first(where: { $0.id == currentItem.spaceID }),
+              library.kind == .shared
+        else { return nil }
+        return library
+    }
+
+    /// The name on the Information panel's "Added by", once it has loaded.
+    private var addedByName: String? {
+        guard let detail = currentModel.detail,
+              detail.uploadedBy.id == currentItem.uploadedBy else { return nil }
+        return detail.uploadedBy.displayName
+    }
+
+    /// Hidden from this person at once, and the library's owner told. The
+    /// viewer closes on it: what you've said you don't want to see shouldn't
+    /// stay in front of you while you're thanked for saying so.
+    private func report(_ item: TimelineItem, _ reason: ReportReason) {
+        Task { [model = currentModel] in
+            guard let client = session.client else { return }
+            do {
+                try await client.reportPhoto(
+                    spaceID: item.spaceID, placementID: item.id, reason: reason
+                )
+            } catch {
+                await model.flash("Couldn't report this. \(error.localizedDescription)")
+                return
+            }
+            session.toast = ToastMessage(text: "Reported. You won't see it again.")
+            leave(flyingBack: false)
+            session.hiddenContentChanged()
+        }
+    }
+
+    private func block(_ target: BlockTarget) {
+        Task { [model = currentModel] in
+            guard let client = session.client else { return }
+            do {
+                try await client.block(userID: target.id)
+            } catch {
+                await model.flash("Couldn't block. \(error.localizedDescription)")
+                return
+            }
+            session.toast = ToastMessage(text: "Blocked \(target.name ?? "them").")
+            leave(flyingBack: false)
+            session.hiddenContentChanged()
         }
     }
 

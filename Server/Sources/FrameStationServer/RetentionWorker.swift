@@ -57,29 +57,48 @@ actor RetentionWorker {
         let blobExt: String
     }
 
+    /// Purges everything past the window, a batch at a time, until nothing due
+    /// is left.
+    ///
+    /// It used to take one batch of 200 an hour, which was plenty while things
+    /// left a library a few at a time. A deleted account takes its whole
+    /// library at once — tens of thousands of photos on this NAS — and 200 an
+    /// hour would have kept them for weeks past the window the person was told.
+    /// The cap only bounds a pass whose purges keep failing, so it can't spin.
     private func sweep() async {
         let sql = app.sql
+        let batch = 200
+        var purged = 0
         do {
-            let expired = try await sql.raw("""
-                SELECT sa.id, a.sha256, a.blob_ext AS "blobExt"
-                FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
-                WHERE sa.deleted_at IS NOT NULL
-                  AND sa.purged_at IS NULL
-                  AND sa.deleted_at < now() - \(unsafeRaw: Retention.interval)
-                ORDER BY sa.deleted_at
-                LIMIT 200
-                """).all(decoding: Expired.self)
+            for _ in 0..<1_000 {
+                let expired = try await sql.raw("""
+                    SELECT sa.id, a.sha256, a.blob_ext AS "blobExt"
+                    FROM space_assets sa
+                    JOIN assets a ON a.id = sa.asset_id
+                    WHERE sa.deleted_at IS NOT NULL
+                      AND sa.purged_at IS NULL
+                      AND sa.deleted_at < now() - \(unsafeRaw: Retention.interval)
+                    ORDER BY sa.deleted_at
+                    LIMIT \(bind: batch)
+                    """).all(decoding: Expired.self)
 
-            for row in expired {
-                await Self.purge(
-                    placementID: row.id, sha256: row.sha256, blobExt: row.blobExt,
-                    on: sql, blobStore: app.blobStore, logger: app.logger
-                )
+                var marked = 0
+                for row in expired {
+                    let done = await Self.purge(
+                        placementID: row.id, sha256: row.sha256, blobExt: row.blobExt,
+                        on: sql, blobStore: app.blobStore, logger: app.logger
+                    )
+                    if done { marked += 1 }
+                }
+                purged += marked
+                // Done, or stuck: rows the database won't mark come straight
+                // back in the next batch, and the next hourly pass is the
+                // place to try them again, not this loop.
+                if expired.count < batch || marked == 0 { break }
             }
 
-            if !expired.isEmpty {
-                app.logger.info("retention: purged \(expired.count) expired removals")
+            if purged > 0 {
+                app.logger.info("retention: purged \(purged) expired removals")
             }
         } catch {
             app.logger.error("retention sweep failed: \(String(reflecting: error))")
@@ -99,6 +118,10 @@ actor RetentionWorker {
     /// Deleted, offering a restore whose file may be half gone. Leaving bytes
     /// behind wastes space; leaving the row behind lies to the user, and of the
     /// two that is the one worth avoiding.
+    ///
+    /// Returns whether the row was marked, which is what counts as purged:
+    /// the bytes may rightly stay, for another library still holding them.
+    @discardableResult
     static func purge(
         placementID: UUID,
         sha256: String,
@@ -106,14 +129,14 @@ actor RetentionWorker {
         on sql: any SQLDatabase,
         blobStore: BlobStore,
         logger: Logger
-    ) async {
+    ) async -> Bool {
         do {
             try await sql.raw("""
                 UPDATE space_assets SET purged_at = now() WHERE id = \(bind: placementID)
                 """).run()
         } catch {
             logger.error("purge: could not mark \(placementID) purged: \(error)")
-            return
+            return false
         }
 
         // Blobs are content-addressed and `assets.sha256` is *not* unique —
@@ -131,12 +154,12 @@ actor RetentionWorker {
                   AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
                 """).first(decoding: Holder.self)
 
-            guard (holders?.count ?? 1) == 0 else { return }
+            guard (holders?.count ?? 1) == 0 else { return true }
         } catch {
             // Couldn't establish that the bytes are unwanted, so leave them.
             // A retained blob is recoverable; a wrongly deleted one is not.
             logger.error("purge: could not check holders for \(sha256): \(error)")
-            return
+            return true
         }
 
         let fm = FileManager.default
@@ -144,6 +167,7 @@ actor RetentionWorker {
         // Thumbnails, preview, poster and HLS all live under one directory per
         // blob, so the derivatives go with it rather than being enumerated.
         try? fm.removeItem(at: blobStore.derivativeDirectory(sha256: sha256))
+        return true
     }
 }
 

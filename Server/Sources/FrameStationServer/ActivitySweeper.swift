@@ -155,7 +155,8 @@ actor ActivitySweeper {
 
         do {
             // Everyone in the space except whoever did the uploading — being
-            // told about your own upload is noise.
+            // told about your own upload is noise — and anyone who has blocked
+            // them, who shouldn't hear about photos they've chosen not to see.
             let recipients = try await sql.raw("""
                 SELECT d.id AS "deviceID", d.apns_token AS "apnsToken", d.apns_env AS "apnsEnv"
                 FROM space_members m
@@ -163,6 +164,10 @@ actor ActivitySweeper {
                 WHERE m.space_id = \(bind: session.spaceID)
                   AND m.user_id <> \(bind: session.userID)
                   AND d.apns_token IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_blocks ub
+                      WHERE ub.blocker_id = m.user_id AND ub.blocked_id = \(bind: session.userID)
+                  )
                 """).all(decoding: Recipient.self)
 
             var failure: String?

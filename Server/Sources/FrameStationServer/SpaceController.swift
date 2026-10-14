@@ -45,7 +45,10 @@ struct SpaceController: RouteCollection {
     func household(req: Request) async throws -> HouseholdResponse {
         _ = try req.auth.require(AuthenticatedDevice.self)
         let rows = try await req.sql.raw("""
-            SELECT id, display_name AS "displayName" FROM users ORDER BY display_name
+            SELECT id, display_name AS "displayName" FROM users
+            -- Not a deleted account's leftover row. See `AccountController`.
+            WHERE deleted_at IS NULL
+            ORDER BY display_name
             """).all(decoding: UserRow.self)
         return HouseholdResponse(
             users: rows.map { UserDTO(id: $0.id, displayName: $0.displayName) }
@@ -87,7 +90,8 @@ struct SpaceController: RouteCollection {
                 for userID in others {
                     try await sql.raw("""
                         INSERT INTO space_members (space_id, user_id, role)
-                        VALUES (\(bind: space.id), \(bind: userID), 'contributor')
+                        SELECT \(bind: space.id), id, 'contributor' FROM users
+                        WHERE id = \(bind: userID) AND deleted_at IS NULL
                         ON CONFLICT DO NOTHING
                         """).run()
                 }
@@ -192,8 +196,9 @@ struct SpaceController: RouteCollection {
         }
         try await requireOwner(spaceID: spaceID, userID: device.userID, on: req.sql)
 
-        guard try await req.sql.raw("SELECT id FROM users WHERE id = \(bind: userID)")
-            .first(decoding: IDRow.self) != nil else {
+        guard try await req.sql.raw("""
+            SELECT id FROM users WHERE id = \(bind: userID) AND deleted_at IS NULL
+            """).first(decoding: IDRow.self) != nil else {
             throw Abort(.notFound, reason: "No such user.")
         }
         // Owners are never demoted by an add; that would be a way to lock

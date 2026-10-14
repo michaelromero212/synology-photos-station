@@ -126,6 +126,20 @@ struct RootTabView: View {
             )
             .modifier(TabBarStepsAside())
         }
+        // Over every tab, for what finished as its screen closed. See
+        // `AppSession.toast`.
+        .modifier(GridToast(message: $session.toast))
+        // A tapped notification's library, opened the way following a share
+        // opens one: the tab first, the library a turn later. See
+        // `followShare` for why not both at once.
+        .onChange(of: session.pendingLibrary, initial: true) { _, pending in
+            guard let pending else { return }
+            session.pendingLibrary = nil
+            if pending.reviewingReports { session.pendingReportReview = pending.spaceID }
+            let route = SharedAlbumRoute(spaceID: pending.spaceID)
+            tab = .albums
+            DispatchQueue.main.async { albumsPath = [route] }
+        }
         .sheet(item: $searchSpace) { space in
             NavigationStack {
                 search(in: space)
@@ -504,12 +518,19 @@ struct MoreView: View {
     let curation: CurationRunner?
     @State private var showBackup = false
     #endif
+    @State private var showDeleteAccount = false
 
     var body: some View {
         container
         .navigationTitle("More")
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
+        // Blocked People and Delete Account wait on the NAS saying it can do
+        // them. Asked again here in case launch couldn't reach it.
+        .task { await session.loadCapabilities() }
+        .sheet(isPresented: $showDeleteAccount) {
+            DeleteAccountSheet(session: session) { showDeleteAccount = false }
+        }
         #if os(iOS)
         .sheet(isPresented: $showBackup) {
             if let engine {
@@ -576,6 +597,13 @@ struct MoreView: View {
                 Label("Curated Albums", systemImage: "sparkles.rectangle.stack")
             }
             #endif
+            if session.supports(ServerCapability.reportAndBlock) {
+                NavigationLink {
+                    BlockedPeopleView(session: session)
+                } label: {
+                    Label("Blocked People", systemImage: "hand.raised")
+                }
+            }
         }
 
         Section {
@@ -631,6 +659,13 @@ struct MoreView: View {
                 session.signOut()
             } label: {
                 Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+            if session.supports(ServerCapability.accountDeletion) {
+                Button(role: .destructive) {
+                    showDeleteAccount = true
+                } label: {
+                    Label("Delete Account…", systemImage: "person.crop.circle.badge.xmark")
+                }
             }
         } footer: {
             Text("FrameStation \(Bundle.appVersion)")

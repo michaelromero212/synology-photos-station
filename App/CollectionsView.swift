@@ -80,6 +80,9 @@ final class CollectionsStore {
         await refresh()
     }
 
+    /// Asks again on the next visit. See `AppSession.hiddenContentChanged`.
+    func expire() { fetchedAt = nil }
+
     func refresh() async {
         guard let client = session?.client else { return }
         isRefreshing = true

@@ -137,6 +137,7 @@ struct TimelineController: RouteCollection {
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: Self.visible)
+              AND \(Hidden.excluded(for: device.userID))
             GROUP BY 1, 2
             ORDER BY 1 DESC
             """).all(decoding: BucketPlaceRow.self)
@@ -180,7 +181,9 @@ struct TimelineController: RouteCollection {
         // depends on who took it and when. Few days need it, so they're
         // fetched together rather than each.
         if !spread.isEmpty {
-            let photos = try await Self.dayPhotos(spaceID: spaceID, days: spread, on: req.sql)
+            let photos = try await Self.dayPhotos(
+                spaceID: spaceID, days: spread, for: device.userID, on: req.sql
+            )
             for (position, bucket) in buckets.enumerated() {
                 guard let dayPhotos = photos[bucket.key] else { continue }
                 let groups = HeaderPlaces.group(dayPhotos)
@@ -305,6 +308,7 @@ struct TimelineController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: Self.visible)
+              AND \(Hidden.excluded(for: device.userID))
               AND (
                   (a.local_captured_at >= \(unsafeRaw: span.start)
                    AND a.local_captured_at < \(unsafeRaw: span.end))
@@ -321,7 +325,9 @@ struct TimelineController: RouteCollection {
         // grouped under. The order stays by time: an app that predates areas
         // shows the day as it always did, and one that knows them regroups.
         if zoom == .day {
-            let photos = try await Self.dayPhotos(spaceID: spaceID, span: span, on: req.sql)
+            let photos = try await Self.dayPhotos(
+                spaceID: spaceID, span: span, for: device.userID, on: req.sql
+            )
             let groups = HeaderPlaces.group(photos)
             if groups.areas.count > 1 {
                 for position in items.indices {
@@ -354,7 +360,7 @@ struct TimelineController: RouteCollection {
 
     /// The photos of these days, as `HeaderPlaces.group` takes them, by day.
     private static func dayPhotos(
-        spaceID: UUID, days: [String], on sql: any SQLDatabase
+        spaceID: UUID, days: [String], for userID: UUID, on sql: any SQLDatabase
     ) async throws -> [String: [HeaderPlaces.DayPhoto]] {
         let rows = try await sql.raw("""
             SELECT \(unsafeRaw: dayPhotoColumns)
@@ -362,6 +368,7 @@ struct TimelineController: RouteCollection {
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: visible)
+              AND \(Hidden.excluded(for: userID))
               AND to_char(\(unsafeRaw: localTime), 'YYYY-MM-DD') = ANY(\(bind: days)::text[])
             """).all(decoding: DayPhotoRow.self)
         return Dictionary(grouping: rows.map(dayPhoto), by: \.key).mapValues { $0.map(\.photo) }
@@ -370,7 +377,8 @@ struct TimelineController: RouteCollection {
     /// One day's photos, found the way `bucket` finds them: by capture-time
     /// range, which the index answers.
     private static func dayPhotos(
-        spaceID: UUID, span: (start: String, end: String), on sql: any SQLDatabase
+        spaceID: UUID, span: (start: String, end: String), for userID: UUID,
+        on sql: any SQLDatabase
     ) async throws -> [HeaderPlaces.DayPhoto] {
         try await sql.raw("""
             SELECT \(unsafeRaw: dayPhotoColumns)
@@ -379,6 +387,7 @@ struct TimelineController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               AND \(unsafeRaw: visible)
+              AND \(Hidden.excluded(for: userID))
               AND (
                   (a.local_captured_at >= \(unsafeRaw: span.start)
                    AND a.local_captured_at < \(unsafeRaw: span.end))
@@ -491,6 +500,7 @@ struct TimelineController: RouteCollection {
                 JOIN assets a ON a.id = sa.asset_id
                 WHERE sa.id = ANY(\(bind: needsItem)) AND sa.deleted_at IS NULL
                   AND \(unsafeRaw: Self.visible)
+                  AND \(Hidden.excluded(for: device.userID))
                 """).all(decoding: ItemRow.self)
             for row in hydrated { itemsByID[row.id] = row.toItem() }
         }

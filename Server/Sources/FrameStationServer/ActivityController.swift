@@ -61,6 +61,11 @@ struct ActivityController: RouteCollection {
               AND s.kind = 'shared'
               AND a.closed_at IS NOT NULL
               AND a.photo_count + a.video_count > 0
+              -- Nothing from someone this person blocked. See `Hidden`.
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks ub
+                  WHERE ub.blocker_id = \(bind: device.userID) AND ub.blocked_id = a.user_id
+              )
             ORDER BY a.last_at DESC
             LIMIT \(bind: limit)
             """).all(decoding: Row.self)

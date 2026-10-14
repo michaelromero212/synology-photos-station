@@ -168,6 +168,9 @@ struct TimelineView: View {
     @State private var showPicker = false
     /// A shared library's settings, from Edit in its bar.
     @State private var showLibrarySettings = false
+    /// Photos members have reported here, for the owner's Edit. See
+    /// `SpaceMembersView.reportsSection`.
+    @State private var openReports = 0
     /// "Saved to Photos", once a share has put the originals on this iPhone,
     /// or why it couldn't.
     @State private var savedToast: ToastMessage?
@@ -3063,9 +3066,21 @@ struct TimelineView: View {
                     .padding(.leading, 16)
                     .padding(.trailing, 8)
                     .frame(height: 38)
+                    // Something reported, waiting on this owner. A dot, as the
+                    // bell's unread mark is, rather than a number in the bar.
+                    .overlay(alignment: .topTrailing) {
+                        if openReports > 0 {
+                            Circle()
+                                .fill(Color.accentColor)
+                                .frame(width: 8, height: 8)
+                                .offset(x: -2, y: 7)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityValue(openReports > 0 ? "Reported photos to review" : "")
 
             Button { showPicker = true } label: {
                 Image(systemName: "plus")
@@ -3081,6 +3096,26 @@ struct TimelineView: View {
         .sheet(isPresented: $showLibrarySettings, onDismiss: librarySettingsClosed) {
             LibrarySettingsSheet(session: session, space: space) { showLibrarySettings = false }
         }
+        .task(id: space.id) { await countReports() }
+        // A tapped "someone reported a photo" lands here, on the screen that
+        // reviews it. See `PushRegistrar.open`.
+        .onChange(of: session.pendingReportReview, initial: true) { _, spaceID in
+            guard spaceID == space.id else { return }
+            session.pendingReportReview = nil
+            showLibrarySettings = true
+        }
+    }
+
+    /// How many reported photos wait on this library's owner. Nothing is
+    /// asked of a NAS without reports, or for anyone but the owner, who alone
+    /// may read them.
+    private func countReports() async {
+        guard space.role == .owner, let client = session.client else { return }
+        await session.loadCapabilities()
+        guard session.supports(ServerCapability.reportAndBlock),
+              let reports = try? await client.openReports(spaceID: space.id)
+        else { return }
+        openReports = reports.count
     }
 
     /// A new name reaches the title and the Albums page; leaving the library
@@ -3091,6 +3126,7 @@ struct TimelineView: View {
         Task {
             await session.refreshSpaces()
             if !session.spaces.contains(where: { $0.id == spaceID }) { dismiss() }
+            await countReports()
             await session.albumStore().refresh()
         }
     }

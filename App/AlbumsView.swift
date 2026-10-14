@@ -85,6 +85,9 @@ final class AlbumStore {
         await refresh()
     }
 
+    /// Asks again on the next visit. See `AppSession.hiddenContentChanged`.
+    func expire() { fetchedAt = nil }
+
     func refresh() async {
         guard let client = session?.client else { return }
         isRefreshing = true
@@ -1258,7 +1261,7 @@ struct LibrarySettingsSheet: View {
             Group {
                 if let model {
                     SpaceMembersView(
-                        space: space, model: model, currentUserID: session.user?.id,
+                        space: space, model: model, session: session,
                         onMembershipChanged: { Task { await session.refreshSpaces() } },
                         underTabBar: false
                     )

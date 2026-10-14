@@ -78,6 +78,59 @@ final class SpacesModel {
         }
     }
 
+    /// The library's reported photos, for its owner. Empty for anyone else,
+    /// and on a NAS that doesn't take reports.
+    var reports: [ContentReportDTO] = []
+    /// Who this account has blocked. Nil until asked, and on a NAS that
+    /// doesn't do blocking — which is what keeps Block out of the menus there.
+    var blocked: Set<UUID>?
+
+    func loadReports(spaceID: UUID) async {
+        do { reports = try await client.openReports(spaceID: spaceID) }
+        catch let failure { error = failure.localizedDescription }
+    }
+
+    /// The owner's answer to a reported photo: removed from the library for
+    /// everyone — the ordinary remove, so Recently Deleted keeps it for the
+    /// usual window — or kept.
+    func resolve(_ report: ContentReportDTO, in spaceID: UUID, removing: Bool) async -> Bool {
+        do {
+            if removing {
+                try await client.removeAsset(spaceID: spaceID, assetID: report.assetID)
+            }
+            try await client.resolveReports(
+                spaceID: spaceID, placementID: report.id,
+                outcome: removing ? .removed : .kept
+            )
+            reports.removeAll { $0.id == report.id }
+            return true
+        } catch let failure {
+            error = failure.localizedDescription
+            return false
+        }
+    }
+
+    func loadBlocked() async {
+        do { blocked = Set(try await client.blockedUsers().map(\.id)) }
+        catch let failure { error = failure.localizedDescription }
+    }
+
+    func setBlocked(_ isBlocked: Bool, _ userID: UUID) async -> Bool {
+        do {
+            if isBlocked {
+                try await client.block(userID: userID)
+                blocked?.insert(userID)
+            } else {
+                try await client.unblock(userID: userID)
+                blocked?.remove(userID)
+            }
+            return true
+        } catch let failure {
+            error = failure.localizedDescription
+            return false
+        }
+    }
+
     func rename(_ spaceID: UUID, to name: String) async -> Bool {
         isBusy = true
         defer { isBusy = false }
@@ -127,7 +180,7 @@ struct SpacesView: View {
                                 SpaceMembersView(
                                     space: space,
                                     model: model,
-                                    currentUserID: session.user?.id,
+                                    session: session,
                                     onMembershipChanged: {
                                         Task { await session.refreshSpaces() }
                                     },
@@ -194,9 +247,9 @@ struct SpacesView: View {
 struct SpaceMembersView: View {
     let space: SpaceDTO
     let model: SpacesModel
-    /// So the caller can find itself in the roster — "Leave" is the same call as
-    /// "Remove", pointed at yourself, and the row has to know which one it is.
-    let currentUserID: UUID?
+    /// For who's looking, what their NAS can do, and the thumbnails of
+    /// reported photos.
+    let session: AppSession
     /// Leaving takes this screen's own space away, so the list behind it has to
     /// be told before this pops.
     let onMembershipChanged: () -> Void
@@ -218,10 +271,16 @@ struct SpaceMembersView: View {
     @State private var draftName = ""
     @State private var confirmingRemoval: SpaceMemberDTO?
     @State private var confirmingLeave = false
+    @State private var confirmingBlock: SpaceMemberDTO?
+
+    /// So the caller can find itself in the roster — "Leave" is the same call as
+    /// "Remove", pointed at yourself, and the row has to know which one it is.
+    private var currentUserID: UUID? { session.user?.id }
 
     var body: some View {
         List {
             if let members = model.members {
+                if members.callerIsOwner && !model.reports.isEmpty { reportsSection }
                 if members.callerIsOwner { nameSection }
                 membersSection(members)
                 if members.callerIsOwner { addSection(members) }
@@ -235,6 +294,7 @@ struct SpaceMembersView: View {
         .task {
             currentName = space.name
             draftName = space.name
+            model.reports = []
             await model.loadMembers(spaceID: space.id)
             // The response is authoritative and `space` may already be stale —
             // someone else can have renamed it since this list was drawn.
@@ -242,6 +302,34 @@ struct SpaceMembersView: View {
                 currentName = fresh
                 draftName = fresh
             }
+            await session.loadCapabilities()
+            if session.supports(ServerCapability.reportAndBlock) {
+                if model.members?.callerIsOwner == true {
+                    await model.loadReports(spaceID: space.id)
+                }
+                await model.loadBlocked()
+            }
+        }
+        .confirmationDialog(
+            "Block \(confirmingBlock?.user.displayName ?? "")?",
+            isPresented: .init(
+                get: { confirmingBlock != nil },
+                set: { if !$0 { confirmingBlock = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Block", role: .destructive) {
+                guard let target = confirmingBlock else { return }
+                confirmingBlock = nil
+                Task {
+                    if await model.setBlocked(true, target.user.id) {
+                        session.hiddenContentChanged()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { confirmingBlock = nil }
+        } message: {
+            Text(BlockWording.consequences)
         }
         // One source of truth, not two. The presented flag is *derived* from the
         // member being confirmed rather than stored beside it, so there is no
@@ -295,6 +383,39 @@ struct SpaceMembersView: View {
 
     // MARK: - Sections
 
+    /// Photos members have reported, waiting on the owner. First on the
+    /// screen, because the notification about one opens it.
+    @ViewBuilder
+    private var reportsSection: some View {
+        Section {
+            ForEach(model.reports) { report in
+                ReportedPhotoRow(
+                    report: report, loader: session.loader,
+                    onRemove: { resolve(report, removing: true) },
+                    onKeep: { resolve(report, removing: false) }
+                )
+            }
+        } header: {
+            Text("Reported")
+        } footer: {
+            Text(
+                "Remove takes it out of this library for everyone. Keep leaves it "
+                    + "here, still hidden from whoever reported it. Who reported it "
+                    + "isn't shown."
+            )
+        }
+    }
+
+    private func resolve(_ report: ContentReportDTO, removing: Bool) {
+        Task {
+            guard await model.resolve(report, in: space.id, removing: removing),
+                  removing else { return }
+            // Removed for everyone, which the library's change log carries to
+            // every grid; this one is asked now rather than on its next poll.
+            await session.timelineStore(for: space)?.refresh()
+        }
+    }
+
     /// Renaming was reachable from the server and the SDK and from nowhere a
     /// person could touch, so a space was stuck with whatever it was called at
     /// creation — and the field is pre-filled "Family Shared", which makes a
@@ -316,14 +437,27 @@ struct SpaceMembersView: View {
     private func membersSection(_ members: SpaceMembersResponse) -> some View {
         Section {
             ForEach(members.members) { member in
+                let isYou = member.user.id == currentUserID
                 MemberRow(
                     member: member,
-                    isYou: member.user.id == currentUserID,
+                    isYou: isYou,
                     canManage: members.callerIsOwner && member.role != .owner,
+                    isBlocked: isYou ? nil : model.blocked.map { $0.contains(member.user.id) },
                     onRole: { role in
                         Task { await model.setRole(role, for: member.user.id, in: space.id) }
                     },
-                    onRemove: { confirmingRemoval = member }
+                    onRemove: { confirmingRemoval = member },
+                    onBlock: { block in
+                        if block {
+                            confirmingBlock = member
+                        } else {
+                            Task {
+                                if await model.setBlocked(false, member.user.id) {
+                                    session.hiddenContentChanged()
+                                }
+                            }
+                        }
+                    }
                 )
             }
         } header: {
@@ -415,8 +549,12 @@ private struct MemberRow: View {
     let member: SpaceMemberDTO
     let isYou: Bool
     let canManage: Bool
+    /// Nil where blocking isn't offered: yourself, or a NAS without it.
+    let isBlocked: Bool?
     let onRole: (SpaceRole) -> Void
     let onRemove: () -> Void
+    /// True to block, false to unblock.
+    let onBlock: (Bool) -> Void
 
     var body: some View {
         HStack {
@@ -427,40 +565,52 @@ private struct MemberRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if canManage { menu }
+            if canManage || isBlocked != nil { menu }
         }
     }
 
     private var subtitle: String {
         let count = member.contributedCount
-        return "\(member.role.rawValue.capitalized) · \(count) added"
+        let line = "\(member.role.rawValue.capitalized) · \(count) added"
+        return isBlocked == true ? line + " · Blocked" : line
     }
 
     @ViewBuilder
     private var menu: some View {
         Menu {
-            // Both offered, with the current one ticked, so the menu says where
-            // this person stands as well as where they could be moved to.
-            Button {
-                onRole(.contributor)
-            } label: {
-                if member.role == .contributor {
-                    Label("Contributor", systemImage: "checkmark")
+            if canManage {
+                // Both offered, with the current one ticked, so the menu says
+                // where this person stands as well as where they could be
+                // moved to.
+                Button {
+                    onRole(.contributor)
+                } label: {
+                    if member.role == .contributor {
+                        Label("Contributor", systemImage: "checkmark")
+                    } else {
+                        Text("Contributor")
+                    }
+                }
+                Button {
+                    onRole(.viewer)
+                } label: {
+                    if member.role == .viewer {
+                        Label("Viewer", systemImage: "checkmark")
+                    } else {
+                        Text("Viewer")
+                    }
+                }
+                Divider()
+                Button("Remove", role: .destructive, action: onRemove)
+            }
+            if let isBlocked {
+                if canManage { Divider() }
+                if isBlocked {
+                    Button("Unblock") { onBlock(false) }
                 } else {
-                    Text("Contributor")
+                    Button("Block", role: .destructive) { onBlock(true) }
                 }
             }
-            Button {
-                onRole(.viewer)
-            } label: {
-                if member.role == .viewer {
-                    Label("Viewer", systemImage: "checkmark")
-                } else {
-                    Text("Viewer")
-                }
-            }
-            Divider()
-            Button("Remove", role: .destructive, action: onRemove)
         } label: {
             Image(systemName: "ellipsis.circle")
                 .foregroundStyle(Color.secondary)

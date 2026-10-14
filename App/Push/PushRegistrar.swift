@@ -161,15 +161,23 @@ extension PushRegistrar: UNUserNotificationCenterDelegate {
         guard let raw = info[PushPayloadKey.spaceID] as? String,
               let spaceID = UUID(uuidString: raw)
         else { return }
-        await open(spaceID)
+        let isReport = info[PushPayloadKey.kind] as? String == PushPayloadKey.kindReport
+        await open(spaceID, reviewingReports: isReport)
     }
 
-    private func open(_ spaceID: UUID) async {
+    private func open(_ spaceID: UUID, reviewingReports: Bool) async {
         // Tapping "Morgan added 3 photos" should land on that space, not
         // wherever you happened to be last.
+        //
+        // Choosing it used to be all this did, and since shared libraries
+        // moved into Albums nothing on screen follows the choice: the tap
+        // opened the app wherever it was. Asking `RootTabView` to open the
+        // library is what lands there.
         await session?.refreshSpaces()
-        if let match = session?.spaces.first(where: { $0.id == spaceID }) {
-            session?.selectedSpace = match
+        guard let match = session?.spaces.first(where: { $0.id == spaceID }) else { return }
+        session?.selectedSpace = match
+        if match.kind == .shared {
+            session?.pendingLibrary = .init(spaceID: spaceID, reviewingReports: reviewingReports)
         }
     }
 }

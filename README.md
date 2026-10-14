@@ -160,8 +160,9 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/health` | — | Status, version, DB reachability, migration count, and the git `revision` the image was built from |
-| POST | `/v1/auth/redeem` | — | Single-use invite → user + personal space + device token |
+| POST | `/v1/auth/redeem` | — | Invite code → user + personal space + device token, and the shared library the code was made for |
 | GET | `/v1/me` | Bearer | Current user, device, and space memberships |
+| DELETE | `/v1/me` | Bearer | Delete this account: its devices, personal library and albums. What it added to shared libraries stays |
 | PUT/DELETE | `/v1/devices/push-token` | Bearer | Register or drop the APNs token (`POST` still accepted) |
 | PUT | `/v1/devices/backup-state` | Bearer | Items still to back up, so the NAS can wake a stalled phone |
 | POST | `/v1/uploads/probe` | Bearer | Hash-first: `have` (skip transfer) / `need` / `partial` (resume) |
@@ -198,6 +199,11 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | GET | `/v1/stream/:assetID` | Signed | The bytes that signed URL points at |
 | GET | `/v1/activity` | Bearer | Recent shared-space contributions, with an unread watermark |
 | POST | `/v1/activity/read` | Bearer | Move the watermark |
+| POST | `/v1/spaces/:id/reports` | Bearer | Report a photo in a shared library: hidden from the reporter, the owner told |
+| GET | `/v1/spaces/:id/reports` | Bearer | The owner's reported photos, one entry each, without who reported them |
+| POST | `/v1/spaces/:id/reports/:placementID/resolve` | Bearer | The owner's answer: `removed` or `kept` |
+| GET | `/v1/blocks` | Bearer | Who this account has blocked |
+| PUT/DELETE | `/v1/blocks/:userID` | Bearer | Block or unblock someone: their photos in shared libraries leave the blocker's view |
 | GET/POST | `/v1/albums` | Bearer | List, create. Personal by default; with `spaceID`, a shared album in a shared library (`?shared=true` lists those, and each shared library as a card) |
 | GET/PATCH/DELETE | `/v1/albums/:id` | Bearer | Detail, rename, remove |
 | GET | `/v1/albums/:id/items` | Bearer | Contents |
@@ -559,6 +565,11 @@ not. Invites remain the fallback for someone with no DSM account at all:
 ```bash
 docker compose exec server ./FrameStationServer invite
 ```
+
+A code is single use and lasts a week. `--space <id>` puts whoever redeems it
+straight into that shared library (ids from `FrameStationServer spaces`), and
+`--uses` lets more than one person in, for the App Review server in
+APP-REVIEW.md, never for a family member's code.
 
 Signing in with DSM later adopts an existing row by username (matched
 case-insensitively), so an invite account can be upgraded — but only if the

@@ -71,6 +71,8 @@ struct ConnectionView: View {
             #endif
             .disabled(session.phase == .connecting || session.host.trimmingCharacters(in: .whitespaces).isEmpty)
 
+            termsNote
+
             status.frame(minHeight: 60)
         }
         .padding(40)
@@ -125,9 +127,32 @@ struct ConnectionView: View {
     }
     #endif
 
+    /// What signing in agrees to: no tolerance for what shouldn't be shared,
+    /// and owners who answer reports. Apple asks it of an app where people
+    /// share with each other. See docs/terms.html.
+    private var termsNote: some View {
+        #if os(tvOS)
+        // Nothing on a television opens a link.
+        Text("By signing in, you agree to the Terms of Use at michaelromero212.github.io/synology-photos-station/terms.html.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+        #else
+        Text("By signing in, you agree to the [Terms of Use](https://michaelromero212.github.io/synology-photos-station/terms.html).")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 420)
+        #endif
+    }
+
     @ViewBuilder
     private var status: some View {
         switch session.phase {
+        case .disconnected where session.signedOutNotice != nil:
+            Label(session.signedOutNotice ?? "", systemImage: "checkmark.circle.fill")
+                .font(.headline)
+                .foregroundStyle(.secondary)
         case .launching, .disconnected, .connected:
             EmptyView()
         case .connecting:

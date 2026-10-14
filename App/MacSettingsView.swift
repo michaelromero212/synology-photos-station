@@ -1,4 +1,5 @@
 #if os(macOS)
+import FrameStationAPI
 import SwiftUI
 
 /// Preferences, behind ⌘,.
@@ -12,6 +13,8 @@ import SwiftUI
 struct MacSettingsView: View {
     @Bindable var session: AppSession
     @State private var showCache = false
+    @State private var showBlocked = false
+    @State private var showDeleteAccount = false
 
     var body: some View {
         TabView {
@@ -73,11 +76,46 @@ struct MacSettingsView: View {
                 Text("Offline")
             }
 
+            if session.supports(ServerCapability.reportAndBlock) {
+                Section {
+                    Button {
+                        showBlocked = true
+                    } label: {
+                        Label("Blocked People", systemImage: "hand.raised")
+                    }
+                }
+            }
+
             Section {
                 Button("Sign Out", role: .destructive) { session.signOut() }
+                if session.supports(ServerCapability.accountDeletion) {
+                    Button("Delete Account…", role: .destructive) {
+                        showDeleteAccount = true
+                    }
+                }
             }
         }
         .formStyle(.grouped)
+        .task { await session.loadCapabilities() }
+        .sheet(isPresented: $showDeleteAccount) {
+            DeleteAccountSheet(session: session) { showDeleteAccount = false }
+        }
+        .sheet(isPresented: $showBlocked) {
+            VStack(spacing: 0) {
+                NavigationStack {
+                    BlockedPeopleView(session: session, underTabBar: false)
+                }
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Done") { showBlocked = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            }
+            .frame(width: 420, height: 380)
+        }
         .sheet(isPresented: $showCache) {
             VStack(spacing: 0) {
                 CacheManagementView(session: session)

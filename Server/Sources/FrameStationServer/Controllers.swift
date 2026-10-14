@@ -41,7 +41,11 @@ struct HealthController: RouteCollection {
             database: database,
             migrationsApplied: migrations,
             revision: Build.revision,
-            capabilities: [BackgroundUploadRequest.capability]
+            capabilities: [
+                BackgroundUploadRequest.capability,
+                ServerCapability.accountDeletion,
+                ServerCapability.reportAndBlock,
+            ]
         )
     }
 }
@@ -76,13 +80,18 @@ struct AuthController: RouteCollection {
             do {
                 // FOR UPDATE closes the race where two devices redeem the same
                 // code simultaneously.
+                struct InviteRow: Decodable {
+                    let code: String
+                    /// A shared library the code joins its person to.
+                    let spaceID: UUID?
+                }
                 let invite = try await sql.raw("""
-                    SELECT code AS id FROM invites
+                    SELECT code, space_id AS "spaceID" FROM invites
                     WHERE code = \(bind: code)
                       AND redeemed_at IS NULL
                       AND expires_at > now()
                     FOR UPDATE
-                    """).first()
+                    """).first(decoding: InviteRow.self)
 
                 guard invite != nil else {
                     try await sql.raw("ROLLBACK").run()
@@ -109,6 +118,18 @@ struct AuthController: RouteCollection {
                     VALUES (\(bind: space.id), \(bind: user.id), 'owner')
                     """).run()
 
+                // Into the shared library the code was made for, if it was, and
+                // if that library is still there. Joining as a contributor is
+                // what an owner adding them by hand would do.
+                if let shared = invite?.spaceID {
+                    try await sql.raw("""
+                        INSERT INTO space_members (space_id, user_id, role)
+                        SELECT id, \(bind: user.id), 'contributor'
+                        FROM spaces WHERE id = \(bind: shared) AND kind = 'shared'
+                        ON CONFLICT DO NOTHING
+                        """).run()
+                }
+
                 guard let device = try await sql.raw("""
                     INSERT INTO devices (user_id, name, platform, token_hash)
                     VALUES (\(bind: user.id), \(bind: deviceName),
@@ -118,9 +139,13 @@ struct AuthController: RouteCollection {
                     throw Abort(.internalServerError, reason: "Could not register device.")
                 }
 
+                // One use. The last one closes the code; a code made for
+                // several people stays open until they've all used it.
                 try await sql.raw("""
                     UPDATE invites
-                    SET redeemed_at = now(), redeemed_by = \(bind: user.id)
+                    SET uses_left = uses_left - 1,
+                        redeemed_at = CASE WHEN uses_left <= 1 THEN now() END,
+                        redeemed_by = \(bind: user.id)
                     WHERE code = \(bind: code)
                     """).run()
 

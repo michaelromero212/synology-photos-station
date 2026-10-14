@@ -88,6 +88,8 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: AlbumController())
     try app.grouped("v1").register(collection: CollectionsController())
     try app.grouped("v1").register(collection: CurationController())
+    try app.grouped("v1").register(collection: SafetyController())
+    try app.grouped("v1").register(collection: AccountController())
 
     // Only the long-running server drains the queue.
     //
@@ -144,6 +146,8 @@ func configure(_ app: Application) async throws {
         let apns = APNsClient(
             configuration: apnsConfiguration, client: app.client, logger: app.logger
         )
+        // For requests with someone to tell — a report, to a library's owner.
+        app.storage[APNsClientKey.self] = apns
         let browse = BrowseTreeWorker(
             app: app, configuration: BrowseTree.Configuration.fromEnvironment()
         )

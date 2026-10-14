@@ -86,6 +86,28 @@ final class AppSession {
     private(set) var spaces: [SpaceDTO] = []
     private(set) var client: FrameStationClient?
 
+    /// What the NAS can do, as its `/health` lists it. Nil until it has said.
+    ///
+    /// A phone updates before its NAS does, often by weeks. Anything that
+    /// needs a newer server asks here before showing itself, so an older NAS
+    /// gets no button that can only fail.
+    private(set) var serverCapabilities: Set<String>?
+
+    func supports(_ capability: String) -> Bool {
+        serverCapabilities?.contains(capability) == true
+    }
+
+    /// Asks the NAS what it can do, once per sign-in. Pages that need the
+    /// answer call it on appearing; a launch that couldn't reach the NAS gets
+    /// another try that way, rather than going without until the next launch.
+    func loadCapabilities() async {
+        guard let client, serverCapabilities == nil,
+              let health = try? await client.health() else { return }
+        // Signed out, or into another account, while it was asking.
+        guard self.client === client else { return }
+        serverCapabilities = Set(health.capabilities ?? [])
+    }
+
     /// The tab structure asks for these by name rather than digging through
     /// `spaces` at each call site.
     var personalSpace: SpaceDTO? { spaces.first { $0.kind == .personal } }
@@ -377,8 +399,25 @@ final class AppSession {
         user = nil
         spaces = []
         selectedSpace = nil
+        serverCapabilities = nil
         phase = .disconnected
     }
+
+    /// After the NAS has deleted this account. Everything `signOut` forgets,
+    /// and the name it signed in with too, which there is no longer an
+    /// account behind. The address stays: it's still the family's NAS.
+    func accountDeleted() {
+        signOut()
+        dsmUsername = ""
+        inviteCode = ""
+        displayName = Self.suggestedName
+        UserDefaults.standard.removeObject(forKey: Remembered.username)
+        signedOutNotice = "Your account has been deleted."
+    }
+
+    /// Said once on the sign-in screen, for a sign-out the person didn't do by
+    /// tapping Sign Out. Cleared by the next attempt to sign in.
+    var signedOutNotice: String?
 
     private func adopt(client: FrameStationClient, me: MeResponse) {
         // Tied to the client they were built with, so they go when it does.
@@ -389,6 +428,7 @@ final class AppSession {
         timelineStores.removeAll()
         albumStoreCache = nil
         collectionsStores.removeAll()
+        serverCapabilities = nil
         self.client = client
         self.loader = ThumbnailLoader(
             client: client, diskLimitBytes: CacheSettings.limit.bytes
@@ -404,6 +444,7 @@ final class AppSession {
         // Covers the invite path and re-confirms on every restore, so the
         // remembered address stays whatever last actually worked.
         rememberSignInFields()
+        Task { await loadCapabilities() }
     }
 
     /// Signs in with a DSM account. The password is sent once and then cleared
@@ -420,6 +461,7 @@ final class AppSession {
         }
 
         phase = .connecting
+        signedOutNotice = nil
         let client = FrameStationClient(
             configuration: .init(baseURL: url), session: InstrumentedSession.shared
         )
@@ -472,6 +514,7 @@ final class AppSession {
         }
 
         phase = .connecting
+        signedOutNotice = nil
         let client = FrameStationClient(
             configuration: .init(baseURL: url), session: InstrumentedSession.shared
         )
@@ -492,6 +535,11 @@ final class AppSession {
                         platform: currentPlatform
                     )
                 )
+                // How this account signs in, for the sign-in screen next time
+                // and for what Delete Account says. The form is already set
+                // this way unless the code came from somewhere else, like a
+                // launch argument.
+                useDSMLogin = false
             }
 
             let me = try await client.me()
@@ -590,6 +638,44 @@ final class AppSession {
         collectionsStores[spaceID] = store
         return store
     }
+
+    /// Something was put out of this person's sight or brought back: a photo
+    /// reported, someone blocked or unblocked.
+    ///
+    /// None of it is in a library's change log, because the library didn't
+    /// change; one person's view of it did. So the stores that follow that log
+    /// would never hear of it. Each grid asks for its days' counts again,
+    /// which refetches exactly the days that differ, and the Albums page asks
+    /// again on its next visit.
+    func hiddenContentChanged() {
+        for store in timelineStores.values {
+            Task { await store.load() }
+        }
+        albumStoreCache?.expire()
+        for store in collectionsStores.values { store.expire() }
+    }
+
+    /// A shared library a tapped notification asked to open. `RootTabView`
+    /// opens it, in Albums where shared libraries live, and clears this.
+    var pendingLibrary: PendingLibrary?
+
+    struct PendingLibrary: Equatable {
+        let spaceID: UUID
+        /// "Someone reported a photo here": open its Edit too, which is where
+        /// reported photos are reviewed.
+        let reviewingReports: Bool
+    }
+
+    /// A library whose reported photos should be on screen. That library's
+    /// grid opens its Edit and clears this.
+    var pendingReportReview: UUID?
+
+    #if os(iOS)
+    /// A line of confirmation that outlives the screen it came from: a photo
+    /// reported or a person blocked from the viewer, which closes as it's
+    /// done. Drawn over every tab by `RootTabView`.
+    var toast: ToastMessage?
+    #endif
 
     // MARK: - Device identity
 
