@@ -50,7 +50,7 @@ settings:
     # Bumped for every upload. App Store Connect will not take the same build
     # number twice against one version, and the error it gives arrives after
     # the upload rather than before it.
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2"
     DEVELOPMENT_TEAM: "47453G7Q89"
     CODE_SIGN_STYLE: Automatic
     STRING_CATALOG_GENERATE_SYMBOLS: "YES"
