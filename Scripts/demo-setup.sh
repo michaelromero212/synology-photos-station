@@ -47,6 +47,13 @@ mkdir -p data pgdata
 compose pull -q server db
 OWNER_IDS=$(compose run --rm --no-deps -T --entrypoint sh server -c 'echo "$(id -u):$(id -g)"' | tr -d '\r')
 chown -R "$OWNER_IDS" data
+# The chmod is what makes the chown count. A folder made inside a shared
+# folder inherits DSM's access list, which lets "everyone" read and nothing
+# more, whoever owns it; a chmod switches it to plain Linux permissions. Owned
+# and not chmodded, every import failed with "Permission denied" (10/14).
+# Postgres does the same to its own folder at startup, which is why pgdata
+# never had the problem.
+chmod -R u+rwX,go+rX data
 chmod -R a+rX seed
 echo "  data/ belongs to $OWNER_IDS; seed/ is readable"
 

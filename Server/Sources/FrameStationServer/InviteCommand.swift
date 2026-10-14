@@ -56,9 +56,12 @@ struct InviteCommand: AsyncCommand {
             VALUES (\(bind: code), \(bind: expiresAt), \(bind: spaceID), \(bind: uses))
             """).run()
 
+        // Spelled out rather than left to the locale: the container has none,
+        // and the default it falls back to printed "12 Jan 2027". The zone is
+        // the container's, usually UTC, so it's said.
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d, yyyy 'at' h:mm a zzz"
 
         context.console.info("")
         context.console.info("  Invite code:  \(code)")
