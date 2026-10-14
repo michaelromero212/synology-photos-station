@@ -86,10 +86,8 @@ kinder route: it needs no App Store Connect accounts for them, at the cost of
 one review on the first build.
 
 Beta App Review will want to reach the app's backend. FrameStation talks to
-*your* NAS, which a reviewer cannot reach, so the review notes have to say so
-plainly — that it is a client for a self-hosted server on the tester's own
-network, and give them a test host and invite code if one can be exposed, or
-explain that sign-in cannot be completed without one.
+*your* NAS, which a reviewer cannot reach, so they get the demo server and
+invite code in APP-REVIEW.md, with the same notes the App Store review gets.
 
 ## The other two platforms
 
@@ -122,7 +120,7 @@ writes every platform's catalog in one pass, which is the point of it.
 - **`LSApplicationCategoryType`** is required of every Mac App Store submission
   and the rejection for omitting it arrives after the upload. Set to
   photography.
-- **Hardened runtime** is on. It is what notarisation needs if this is ever
+- **Hardened runtime** is on. It is what notarization needs if this is ever
   distributed directly, and it costs nothing on the App Store path — where the
   sandbox is the requirement, and that was already set.
 - Distribution needs a **Mac App Distribution** certificate and a provisioning

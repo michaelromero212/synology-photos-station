@@ -1,0 +1,66 @@
+# A second FrameStation for App Review: sample photos only, its own database,
+# its own folder, its own address. Nothing in it can reach the family's.
+#
+# Lives in its own folder on the NAS, beside the real one rather than inside
+# it, with its own .env:
+#
+#   /volume1/docker/framestation-demo/
+#     docker-compose.yml   this file
+#     .env                 POSTGRES_PASSWORD=<a new one, not the family's>
+#     demo-setup.sh        Scripts/demo-setup.sh
+#     seed/                the sample photos
+#
+# APP-REVIEW.md walks through it.
+name: framestation-demo
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: framestation
+      POSTGRES_DB: framestation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U framestation -d framestation"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    # The same image the family's server runs, so a reviewer sees the build
+    # that ships. Pulled, never built here.
+    image: ${FRAMESTATION_IMAGE:-ghcr.io/michaelromero212/framestation-server:latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FRAMESTATION_DATABASE_URL: postgres://framestation:${POSTGRES_PASSWORD}@db:5432/framestation?sslmode=disable
+      FRAMESTATION_BLOB_ROOT: /data
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Deliberately absent, each one:
+      #
+      #   FRAMESTATION_DSM_URL  No DSM sign-in. The family's server checks DSM
+      #                         passwords; this one, open to whoever has the
+      #                         review code, must never be a way to try them.
+      #                         Unset, DSM sign-in answers that it isn't
+      #                         configured.
+      #   FRAMESTATION_BROWSE_TREE
+      #                         Off: photos stay in this server's own folder
+      #                         and never reach anyone's home or File Station.
+      #   FRAMESTATION_APNS_*   No push. The inbox still shows what was added.
+    # The image's own unprivileged user, and nothing mounted but this server's
+    # folders. The family's server runs as root because it writes into DSM
+    # homes; this one has no reason to.
+    user: vapor:vapor
+    volumes:
+      - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/data:/data
+      # The sample photos, for `import`. Read-only: setup copies them in.
+      - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/seed:/seed:ro
+    ports:
+      # Loopback only, beside the family's 8080. DSM's reverse proxy gives it
+      # its own name on 8443 — see APP-REVIEW.md.
+      - "127.0.0.1:8081:8080"

@@ -10,10 +10,15 @@ getting a build uploaded; this covers everything around it.
 - **Primary category:** Photo & Video. **Secondary:** Utilities.
 - **Content Rights:** "No, it does not contain, show, or access third-party
   content." Everything it shows is the user's own media on their own server.
-- **Age Rating:** answer None or No to every question. The result is 4+.
+- **Age Rating:** None or No to every question except user-generated content,
+  and let App Store Connect work out the rating from those.
   - Unrestricted web access: No. The app talks only to the user's server.
-  - User-generated content, messaging, or chat: No. Shared libraries are
-    private, invite-only, and on the user's own server. Nothing is public.
+  - Messaging or chat: No. There is none.
+  - User-generated content: Yes. People share photos with each other in shared
+    libraries. They're private and invite-only, on the user's own server, and
+    nothing is public, but App Review counts sharing between people as
+    user-generated content, and it's what reporting, blocking and the Terms of
+    Use are for. See APP-REVIEW.md.
 
 ## Pricing
 
@@ -75,11 +80,9 @@ Free, in all regions.
 
 ## App Review Information
 
-- **Sign-in required:** yes. App Review can't reach a server on a home network,
-  so they need a server they *can* reach plus an invite code or account,
-  otherwise the review stops at the sign-in screen (Guideline 2.1).
-- **Notes:** tell them it's a client for a self-hosted server, which server
-  address to type, and how to sign in.
+- **Sign-in and notes:** APP-REVIEW.md. App Review can't reach a server on a
+  home network, so they get a demo server of their own and an invite code for
+  it; that document sets it up and has the notes to paste.
 - **Contact Information:** your name, phone, and email. Apple uses these only to
   reach you; they aren't shown on the store.
 
