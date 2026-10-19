@@ -43,8 +43,9 @@ struct AccountController: RouteCollection {
         try await req.withPinnedConnection { sql in
             try await sql.raw("BEGIN").run()
             do {
-                // Shared libraries they own: handed on to the family, or — with
-                // no one else in them — gone with them, like their own library.
+                // Shared libraries and shared albums they own: handed on to the
+                // family, or — with no one else in them — gone with them, like
+                // their own library.
                 let owned = try await sql.raw("""
                     SELECT s.id AS "spaceID",
                            (SELECT other.user_id FROM space_members other
@@ -54,7 +55,7 @@ struct AccountController: RouteCollection {
                     FROM spaces s
                     JOIN space_members m ON m.space_id = s.id
                     WHERE m.user_id = \(bind: userID) AND m.role = 'owner'
-                      AND s.kind = 'shared'
+                      AND s.kind IN ('shared', 'album')
                     """).all(decoding: Owned.self)
 
                 var departing: [UUID] = []

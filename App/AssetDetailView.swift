@@ -1279,12 +1279,15 @@ struct AssetDetailView: View {
         }
     }
 
-    /// The shared library this photo can be reported in, or nil: only one
-    /// somebody else added it to, and only on a NAS that takes reports.
+    /// The shared library or album this photo can be reported in, or nil: only
+    /// one somebody else added it to, and only on a NAS that takes reports.
+    /// An album shared with people is never one of your libraries, so it's
+    /// the space this viewer was opened with.
     private var reportableLibrary: SpaceDTO? {
         guard session.supports(ServerCapability.reportAndBlock),
               let me = session.user?.id, currentItem.uploadedBy != me,
-              let library = session.spaces.first(where: { $0.id == currentItem.spaceID }),
+              let library = session.spaces.first(where: { $0.id == currentItem.spaceID })
+                ?? (space.id == currentItem.spaceID ? space : nil),
               library.kind == .shared
         else { return nil }
         return library

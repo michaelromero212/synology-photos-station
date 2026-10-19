@@ -45,6 +45,7 @@ struct HealthController: RouteCollection {
                 BackgroundUploadRequest.capability,
                 ServerCapability.accountDeletion,
                 ServerCapability.reportAndBlock,
+                ServerCapability.peopleAlbums,
             ]
         )
     }
@@ -206,6 +207,10 @@ struct SessionController: RouteCollection {
             FROM spaces s
             JOIN space_members m ON m.space_id = s.id
             WHERE m.user_id = \(bind: device.userID)
+              -- Libraries only. An album's own space is reached through its
+              -- album, and an app that predates them couldn't even read the
+              -- kind. See `AlbumController`.
+              AND s.kind <> 'album'
             ORDER BY s.kind, s.name
             """).all(decoding: SpaceRow.self)
 

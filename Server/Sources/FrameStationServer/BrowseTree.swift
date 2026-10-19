@@ -151,6 +151,11 @@ enum BrowseTree {
         let month = formatter.string(from: stamp)
         let file = fileName(for: placement)
 
+        // An album shared with people gets no folder. Its photos are copies of
+        // ones already in somebody's library, and filed as anything else they
+        // would have landed in each member's Personal folder.
+        guard placement.spaceKind != "album" else { return [] }
+
         return placement.recipients.compactMap { recipient in
             // An invite-only account has no DSM home to write into, so there is
             // nowhere to put their copy. The others still get theirs.
@@ -741,6 +746,9 @@ actor BrowseTreeWorker {
                 WHERE sa.browse_error IS NULL
                   AND sa.deleted_at IS NULL
                   AND a.derived_at IS NOT NULL
+                  -- Never placed (see `destinations`), so never waited on: left
+                  -- in, they'd come back first on every pass.
+                  AND s.kind <> 'album'
                   AND EXISTS (
                       -- Somebody who should have a copy and hasn't got one.
                       SELECT 1 FROM space_members m

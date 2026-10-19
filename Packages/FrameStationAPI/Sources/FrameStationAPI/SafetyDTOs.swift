@@ -1,11 +1,14 @@
 import Foundation
 
-/// What `/health` lists when the server can delete an account, and take reports
-/// and blocks. The app offers each only where the server says it can, so an
-/// app ahead of the NAS never shows a button that can only fail.
+/// What `/health` lists when the server can do something newer than the oldest
+/// app talking to it: delete an account, take reports and blocks, share an
+/// album with people. The app offers each only where the server says it can,
+/// so an app ahead of the NAS never shows a button that can only fail.
 public enum ServerCapability {
     public static let accountDeletion = "account-deletion"
     public static let reportAndBlock = "report-and-block"
+    /// Albums shared with the people you pick, rather than with a library.
+    public static let peopleAlbums = "people-albums"
 }
 
 // MARK: - Reports

@@ -655,9 +655,31 @@ final class AppSession {
         for store in collectionsStores.values { store.expire() }
     }
 
-    /// A shared library a tapped notification asked to open. `RootTabView`
-    /// opens it, in Albums where shared libraries live, and clears this.
+    /// A shared library, or an album shared with you, that a tapped
+    /// notification asked to open. `RootTabView` opens it, in Albums where
+    /// both live, and clears this.
     var pendingLibrary: PendingLibrary?
+
+    /// Where a tapped notification or inbox row points: a shared library, or
+    /// an album shared with you, opened in Albums. Your own library is the
+    /// Photos tab already, so it's only chosen.
+    func openShared(_ spaceID: UUID, reviewingReports: Bool = false) async {
+        await refreshSpaces()
+        if let match = spaces.first(where: { $0.id == spaceID }) {
+            selectedSpace = match
+            if match.kind == .shared {
+                pendingLibrary = .init(spaceID: spaceID, reviewingReports: reviewingReports)
+            }
+            return
+        }
+        // An album shared with you keeps its photos in a space of its own,
+        // which is never one of your libraries.
+        let albums = albumStore()
+        await albums.refresh()
+        if albums.sharedWithPeople.contains(where: { $0.spaceID == spaceID }) {
+            pendingLibrary = .init(spaceID: spaceID, reviewingReports: reviewingReports)
+        }
+    }
 
     struct PendingLibrary: Equatable {
         let spaceID: UUID
@@ -666,8 +688,8 @@ final class AppSession {
         let reviewingReports: Bool
     }
 
-    /// A library whose reported photos should be on screen. That library's
-    /// grid opens its Edit and clears this.
+    /// A library, or an album shared with people, whose reported photos should
+    /// be on screen. Its grid opens its Edit and clears this.
     var pendingReportReview: UUID?
 
     #if os(iOS)

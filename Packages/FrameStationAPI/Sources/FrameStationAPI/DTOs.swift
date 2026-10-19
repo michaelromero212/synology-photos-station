@@ -257,8 +257,8 @@ public struct PlaybackURLResponse: Codable, Sendable, Hashable {
 
 // MARK: - Albums
 
-/// An album somebody made by hand: yours alone, or a family album that
-/// belongs to a shared library.
+/// An album somebody made by hand: yours alone, shared with people you chose,
+/// or a family album that belongs to a shared library.
 public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let id: UUID
     public let name: String
@@ -276,11 +276,19 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let canManage: Bool?
     /// Whether you may add photos. False in a library you can only view.
     public let canAdd: Bool?
+    /// Everyone else an album shared with people is shared with. Nil for one
+    /// that isn't: yours alone, or a family album, which everyone in its
+    /// library sees.
+    public let people: [UserDTO]?
+    /// Who made an album shared with people: you, or whoever shared it with
+    /// you. Nil otherwise.
+    public let owner: UserDTO?
 
     public init(
         id: UUID, name: String, itemCount: Int,
         coverAssetID: UUID?, createdAt: Date, updatedAt: Date,
-        spaceID: UUID? = nil, canManage: Bool? = nil, canAdd: Bool? = nil
+        spaceID: UUID? = nil, canManage: Bool? = nil, canAdd: Bool? = nil,
+        people: [UserDTO]? = nil, owner: UserDTO? = nil
     ) {
         self.id = id
         self.name = name
@@ -291,9 +299,16 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
         self.spaceID = spaceID
         self.canManage = canManage
         self.canAdd = canAdd
+        self.people = people
+        self.owner = owner
     }
 
+    /// Seen by somebody other than you: shared with people, or in a library.
     public var isFamily: Bool { spaceID != nil }
+    /// Shared with people you chose, rather than with a whole library.
+    public var isSharedWithPeople: Bool { people != nil }
+    /// A family album: one belonging to a shared library.
+    public var isLibraryAlbum: Bool { spaceID != nil && people == nil }
     public var mayManage: Bool { canManage ?? true }
     public var mayAdd: Bool { canAdd ?? true }
 }
@@ -307,14 +322,19 @@ public struct AlbumListResponse: Codable, Sendable {
     /// Albums, alongside the family albums. Nil without `?shared=true`, and
     /// from an older server.
     public let libraries: [SharedLibrarySummary]?
+    /// True when the list includes albums shared with people, which a server
+    /// sends only when asked with `?people=true`. An app from before them
+    /// would have filed them under a library it couldn't find.
+    public let includesPeopleAlbums: Bool?
 
     public init(
         albums: [AlbumDTO], includesFamilyAlbums: Bool? = nil,
-        libraries: [SharedLibrarySummary]? = nil
+        libraries: [SharedLibrarySummary]? = nil, includesPeopleAlbums: Bool? = nil
     ) {
         self.albums = albums
         self.includesFamilyAlbums = includesFamilyAlbums
         self.libraries = libraries
+        self.includesPeopleAlbums = includesPeopleAlbums
     }
 }
 
@@ -345,11 +365,31 @@ public struct CreateAlbumRequest: Codable, Sendable {
     /// The shared library a family album belongs to. Nil for one that's yours
     /// alone.
     public let spaceID: UUID?
+    /// The people to share it with, from the household. Empty or nil, it's
+    /// yours alone. Not with `spaceID`: an album is shared with a library or
+    /// with people, never both. A server without `ServerCapability.peopleAlbums`
+    /// ignores it.
+    public let memberIDs: [UUID]?
 
-    public init(name: String, spaceAssetIDs: [UUID] = [], spaceID: UUID? = nil) {
+    public init(
+        name: String, spaceAssetIDs: [UUID] = [], spaceID: UUID? = nil,
+        memberIDs: [UUID]? = nil
+    ) {
         self.name = name
         self.spaceAssetIDs = spaceAssetIDs
         self.spaceID = spaceID
+        self.memberIDs = memberIDs
+    }
+}
+
+/// Who an album is shared with, replacing whoever it was. Its owner sends it.
+/// Somebody added sees the album and can add to it; somebody left out loses
+/// it. Nobody at all, and the album is its owner's alone again.
+public struct SetAlbumPeopleRequest: Codable, Sendable {
+    public let memberIDs: [UUID]
+
+    public init(memberIDs: [UUID]) {
+        self.memberIDs = memberIDs
     }
 }
 

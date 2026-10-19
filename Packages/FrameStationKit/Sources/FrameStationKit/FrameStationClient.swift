@@ -147,9 +147,15 @@ public actor FrameStationClient {
     /// Your albums, and with `includeFamily` the family albums of every shared
     /// library you're in. Asked for, so an app that predates them never sees
     /// them; a server that predates them ignores the question and says so by
-    /// leaving `includesFamilyAlbums` out.
-    public func albums(includeFamily: Bool = false) async throws -> AlbumListResponse {
-        try await send(.get, includeFamily ? "v1/albums?shared=true" : "v1/albums")
+    /// leaving `includesFamilyAlbums` out. `includePeople` adds the albums
+    /// shared with you by people, the same way: see `includesPeopleAlbums`.
+    public func albums(
+        includeFamily: Bool = false, includePeople: Bool = false
+    ) async throws -> AlbumListResponse {
+        guard includeFamily else { return try await send(.get, "v1/albums") }
+        return try await send(
+            .get, includePeople ? "v1/albums?shared=true&people=true" : "v1/albums?shared=true"
+        )
     }
 
     public func createAlbum(_ body: CreateAlbumRequest) async throws -> AlbumDTO {
@@ -176,6 +182,22 @@ public actor FrameStationClient {
         try await sendNoContent(
             .delete, "v1/albums/\(albumID.uuidString)/assets/\(placementID.uuidString)",
             body: EmptyAlbumBody()
+        )
+    }
+
+    /// Who an album is shared with, replacing whoever it was. Its owner's to
+    /// call. Nobody, and it's theirs alone again.
+    public func setAlbumPeople(_ albumID: UUID, memberIDs: [UUID]) async throws -> AlbumDTO {
+        try await send(
+            .put, "v1/albums/\(albumID.uuidString)/people",
+            body: SetAlbumPeopleRequest(memberIDs: memberIDs)
+        )
+    }
+
+    /// Leaves an album somebody shared with you.
+    public func leaveAlbum(_ albumID: UUID) async throws {
+        try await sendNoContent(
+            .delete, "v1/albums/\(albumID.uuidString)/people/me", body: EmptyAlbumBody()
         )
     }
 

@@ -58,7 +58,9 @@ struct ActivityController: RouteCollection {
             JOIN users me ON me.id = \(bind: device.userID)
             WHERE m.user_id = \(bind: device.userID)
               AND a.user_id <> \(bind: device.userID)
-              AND s.kind = 'shared'
+              -- A library, or an album shared with people: both are somebody
+              -- else adding where you'll see it.
+              AND s.kind IN ('shared', 'album')
               AND a.closed_at IS NOT NULL
               AND a.photo_count + a.video_count > 0
               -- Nothing from someone this person blocked. See `Hidden`.

@@ -79,8 +79,9 @@ struct AddToAlbumSheet: View {
                                 // Only where it applies: adding to an album in a
                                 // library shares the photos into the library
                                 // without asking, where adding to the library
-                                // itself asks first.
-                                if sharedRows.contains(where: \.isAlbum) {
+                                // itself asks first. An album shared with
+                                // people says who on its own row.
+                                if sharedRows.contains(where: \.isLibraryAlbum) {
                                     Text("Photos from your own library are shared with everyone in the album's library too.")
                                 }
                             }
@@ -151,7 +152,7 @@ struct AddToAlbumSheet: View {
 
     // MARK: - Shared
 
-    /// One row under Shared Albums: a whole shared library, or an album in one.
+    /// One row under Shared Albums: a whole shared library, or an album.
     private enum SharedRow: Identifiable {
         case library(SpaceDTO)
         case album(AlbumDTO)
@@ -163,8 +164,8 @@ struct AddToAlbumSheet: View {
             }
         }
 
-        var isAlbum: Bool {
-            if case .album = self { return true }
+        var isLibraryAlbum: Bool {
+            if case .album(let album) = self { return album.isLibraryAlbum }
             return false
         }
     }
@@ -176,12 +177,13 @@ struct AddToAlbumSheet: View {
         return session.sharedSpaces.filter { $0.id != source?.id && $0.role != .viewer }
     }
 
-    /// Each library, then the albums made in it that you may add to — the
-    /// order the Albums page draws them in. Albums of a library this device
-    /// hasn't heard of come last: shown, never dropped.
+    /// Albums shared with people, then each library and the albums made in
+    /// it, as far as you may add to them — the order the Albums page draws
+    /// them in. Albums of a library this device hasn't heard of come last:
+    /// shown, never dropped.
     private var sharedRows: [SharedRow] {
         let albums = store.family.filter(\.mayAdd)
-        var rows: [SharedRow] = []
+        var rows: [SharedRow] = store.sharedWithPeople.filter(\.mayAdd).map(SharedRow.album)
         for space in libraries {
             rows.append(.library(space))
             rows += albums.filter { $0.spaceID == space.id }.map(SharedRow.album)
@@ -194,12 +196,15 @@ struct AddToAlbumSheet: View {
     // MARK: - Rows
 
     private func albumRow(_ album: AlbumDTO) -> some View {
-        Button {
+        let count = "\(album.itemCount.formatted()) item\(album.itemCount == 1 ? "" : "s")"
+        return Button {
             Task { await add(to: album) }
         } label: {
             row(
                 title: album.name,
-                detail: "\(album.itemCount.formatted()) item\(album.itemCount == 1 ? "" : "s")",
+                // Who'll see them, for an album shared with people.
+                detail: album.isSharedWithPeople
+                    ? "\(ShareWording.card(for: album, me: session.user?.id)) · \(count)" : count,
                 cover: album.coverAssetID,
                 placeholder: album.isFamily ? "person.2.crop.square.stack" : "rectangle.stack"
             )

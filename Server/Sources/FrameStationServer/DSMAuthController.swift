@@ -123,6 +123,7 @@ struct DSMAuthController: RouteCollection {
                     FROM spaces s
                     JOIN space_members m ON m.space_id = s.id
                     WHERE m.user_id = \(bind: user.id)
+                      AND s.kind <> 'album'  -- libraries only, as `/me` lists them
                     ORDER BY s.kind, s.name
                     """).all(decoding: SpaceRow.self)
 

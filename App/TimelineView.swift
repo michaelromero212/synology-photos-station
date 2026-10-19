@@ -528,10 +528,8 @@ struct TimelineView: View {
             if let activity {
                 ActivityInboxView(session: session, store: activity) { item in
                     showActivity = false
-                    // Jump to where it happened.
-                    if let match = session.spaces.first(where: { $0.id == item.spaceID }) {
-                        session.selectedSpace = match
-                    }
+                    // Jump to where it happened: the library, or the album.
+                    Task { await session.openShared(item.spaceID) }
                 } onDone: {
                     showActivity = false
                 }

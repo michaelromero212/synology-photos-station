@@ -18,6 +18,9 @@ struct AlbumDetailView: View {
     /// Set by the settings when they delete the album, so this screen leaves
     /// once they have closed rather than out from under them.
     @State private var wasDeleted = false
+    /// Whether this screen has asked the NAS for your libraries again. See
+    /// `space(of:)`.
+    @State private var refreshedSpaces = false
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @State private var showPicker = false
@@ -85,9 +88,17 @@ struct AlbumDetailView: View {
         }
         .sheet(isPresented: $showSettings, onDismiss: settingsClosed) {
             AlbumSettingsSheet(
-                album: album, store: store, library: library,
+                session: session, album: album, store: store, library: library,
                 onDeleted: { wasDeleted = true }
             ) { showSettings = false }
+        }
+        // A tapped "someone reported a photo" in an album you shared lands
+        // here, and its Edit is where reported photos are reviewed. See
+        // `AppSession.openShared`.
+        .onChange(of: session.pendingReportReview, initial: true) { _, spaceID in
+            guard let spaceID, spaceID == album.spaceID else { return }
+            session.pendingReportReview = nil
+            showSettings = true
         }
         #if os(iOS)
         .sheet(isPresented: $showPicker) {
@@ -95,7 +106,8 @@ struct AlbumDetailView: View {
                 // Uploads land in your own library first, then join the album.
                 // An album is a view onto photos, never a place they live —
                 // otherwise a photo could exist only inside a collection. A
-                // family album then shares them into its library.
+                // family album then shares them into its library, and an
+                // album shared with people with its people.
                 LibraryPickerView(session: session, space: space) { _ in
                     showPicker = false
                 } onCancel: {
@@ -112,6 +124,14 @@ struct AlbumDetailView: View {
             }
         }
         .task { await load() }
+        // Photos added from the grid, a new name from another device, people
+        // added or gone: the Albums page's list hears of it first. Followed
+        // here, so the title and Edit never work from the album as it was when
+        // this screen opened — Edit offered to share "its 0 items" with photos
+        // in it.
+        .onChange(of: store.albums) { _, albums in
+            if let latest = albums.first(where: { $0.id == album.id }) { album = latest }
+        }
         // An album's contents live on the NAS against the account, so adding to
         // one on the phone changes what this album *is* on every device signed
         // in to it. Opening it here asks — `.task` above runs each time the
@@ -137,10 +157,9 @@ struct AlbumDetailView: View {
                     spacing: spacing,
                     columns: columns
                 ) { entry, size in
-                    if case .item(let item) = entry,
-                       let space = session.spaces.first(where: { $0.id == item.spaceID }) {
+                    if case .item(let item) = entry {
                         NavigationLink {
-                            AssetDetailView(item: item, space: space, session: session)
+                            AssetDetailView(item: item, space: space(of: item), session: session)
                         } label: {
                             PhotoCell(item: item, loader: session.loader, size: size)
                         }
@@ -170,20 +189,60 @@ struct AlbumDetailView: View {
         isLoading = true
         defer { isLoading = false }
         do {
-            items = try await client.albumItems(album.id).items
+            let fresh = try await client.albumItems(album.id).items
+            // A library you joined on another device since this one last
+            // asked would otherwise open as though it were the album's own.
+            if !refreshedSpaces, fresh.contains(where: { item in
+                item.spaceID != album.spaceID && !session.spaces.contains { $0.id == item.spaceID }
+            }) {
+                refreshedSpaces = true
+                await session.refreshSpaces()
+            }
+            items = fresh
             lastError = nil
         } catch {
             lastError = error.localizedDescription
         }
     }
 
+    /// The space a photo here is in, for the viewer: one of your libraries,
+    /// usually.
+    ///
+    /// A photo in an album shared with people is in the album's own space,
+    /// which the NAS never lists as a library, so that one is drawn from the
+    /// album: shared, so what somebody added is theirs to remove, and anything
+    /// yours to remove if you made the album. An album that was shared and
+    /// isn't anymore keeps its photos in that space, with nobody else in it.
+    /// Anything else opens to look at, not to change.
+    private func space(of item: TimelineItem) -> SpaceDTO {
+        if let known = session.spaces.first(where: { $0.id == item.spaceID }) { return known }
+        if item.spaceID == album.spaceID {
+            return SpaceDTO(
+                id: item.spaceID, kind: .shared, name: album.name,
+                role: album.mayManage ? .owner : album.mayAdd ? .contributor : .viewer,
+                memberCount: (album.people?.count ?? 0) + 1
+            )
+        }
+        let wasShared = album.spaceID == nil
+        return SpaceDTO(
+            id: item.spaceID, kind: wasShared ? .personal : .shared, name: album.name,
+            role: wasShared ? .owner : .viewer, memberCount: 1
+        )
+    }
+
     /// After the settings close: back to the Albums page if they deleted the
-    /// album, otherwise the album as it now is, so a new name reaches the title.
+    /// album or left it, otherwise the album as it now is, so a new name
+    /// reaches the title. Its photos are asked for again too: sharing an album
+    /// puts them in its own space, under new ids, and a reported photo can
+    /// have been taken out.
     private func settingsClosed() {
         if wasDeleted {
             dismiss()
-        } else if let fresh = store.albums.first(where: { $0.id == album.id }) {
-            album = fresh
+        } else {
+            if let fresh = store.albums.first(where: { $0.id == album.id }) {
+                album = fresh
+            }
+            Task { await load() }
         }
     }
 
@@ -198,7 +257,8 @@ struct AlbumDetailView: View {
         }
     }
 
-    /// The shared library a family album is in, by name.
+    /// The shared library a family album is in, by name. Nil for an album
+    /// shared with people, which isn't in one.
     private var library: String? {
         guard let spaceID = album.spaceID else { return nil }
         return session.sharedSpaces.first { $0.id == spaceID }?.name

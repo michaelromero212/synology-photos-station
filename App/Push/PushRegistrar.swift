@@ -172,13 +172,8 @@ extension PushRegistrar: UNUserNotificationCenterDelegate {
         // Choosing it used to be all this did, and since shared libraries
         // moved into Albums nothing on screen follows the choice: the tap
         // opened the app wherever it was. Asking `RootTabView` to open the
-        // library is what lands there.
-        await session?.refreshSpaces()
-        guard let match = session?.spaces.first(where: { $0.id == spaceID }) else { return }
-        session?.selectedSpace = match
-        if match.kind == .shared {
-            session?.pendingLibrary = .init(spaceID: spaceID, reviewingReports: reviewingReports)
-        }
+        // library, or the album, is what lands there.
+        await session?.openShared(spaceID, reviewingReports: reviewingReports)
     }
 }
 #endif

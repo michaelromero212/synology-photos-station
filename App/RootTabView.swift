@@ -392,7 +392,8 @@ struct RootTabView: View {
         #endif
     }
 
-    /// One shared album, opened from the Albums page.
+    /// One shared library, opened from the Albums page or a notification, or
+    /// an album shared with you, from a notification.
     ///
     /// Resolved from the session rather than carried in the route, so renaming
     /// it from inside updates the title you are looking at.
@@ -411,13 +412,18 @@ struct RootTabView: View {
             #else
             TimelineView(session: session, space: space, isPushed: true)
             #endif
+        } else if let album = session.albumStore().sharedWithPeople
+            .first(where: { $0.spaceID == spaceID }) {
+            // An album shared with you, from a notification: its space is the
+            // album's own, never a library.
+            AlbumDetailView(session: session, album: album, store: session.albumStore())
         } else {
             // Left rather than left behind: someone else can remove you from a
             // shared album while you are looking at the list it was on.
             ContentUnavailableView {
                 Label("Album unavailable", systemImage: "person.2.slash")
             } description: {
-                Text("This shared library isn't available to you anymore.")
+                Text("This isn't shared with you anymore.")
             }
         }
     }

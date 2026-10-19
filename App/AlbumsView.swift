@@ -18,7 +18,14 @@ final class AlbumStore {
     private(set) var supportsFamily = false
 
     var personal: [AlbumDTO] { albums.filter { !$0.isFamily } }
-    var family: [AlbumDTO] { albums.filter(\.isFamily) }
+    /// Albums that belong to a shared library: everyone in it sees them.
+    var family: [AlbumDTO] { albums.filter(\.isLibraryAlbum) }
+    /// Albums shared with the people somebody chose: yours, and ones shared
+    /// with you.
+    var sharedWithPeople: [AlbumDTO] { albums.filter(\.isSharedWithPeople) }
+    /// Whether the NAS shares albums with people, which it says by listing
+    /// them when asked. See `AlbumListResponse.includesPeopleAlbums`.
+    private(set) var supportsPeople = false
     /// The shared libraries' covers and counts, for their cards under Shared
     /// Albums. Empty from a server that doesn't send them; the cards are then
     /// drawn from the session's spaces, without a cover.
@@ -51,6 +58,8 @@ final class AlbumStore {
         // choice on every launch, for exactly the person about to make their
         // first one.
         supportsFamily = savedLibraries != nil || albums.contains(where: \.isFamily)
+        // Only a NAS that shares albums with people sends one.
+        supportsPeople = albums.contains(where: \.isSharedWithPeople)
     }
 
     /// Whether it is worth asking again.
@@ -103,12 +112,15 @@ final class AlbumStore {
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
-            let response = try await client.albums(includeFamily: true)
+            // Always asked for: a NAS that predates albums shared with people
+            // ignores the question.
+            let response = try await client.albums(includeFamily: true, includePeople: true)
             let fresh = response.albums
             let shelves = response.libraries
             albums = fresh
             libraries = shelves ?? []
             supportsFamily = response.includesFamilyAlbums == true
+            supportsPeople = response.includesPeopleAlbums == true
             hasLoaded = true
             Task.detached(priority: .utility) {
                 AlbumsSnapshotStore.saveAlbums(fresh)
@@ -123,14 +135,20 @@ final class AlbumStore {
         }
     }
 
-    /// A new album: yours alone, or with `spaceID` a family album in that
-    /// shared library, starting with `spaceAssetIDs` if there are any.
+    /// A new album: yours alone, shared with `memberIDs`, or with `spaceID` a
+    /// family album in that shared library, starting with `spaceAssetIDs` if
+    /// there are any.
     @discardableResult
-    func create(name: String, spaceID: UUID? = nil, spaceAssetIDs: [UUID] = []) async -> AlbumDTO? {
+    func create(
+        name: String, spaceID: UUID? = nil, memberIDs: [UUID] = [], spaceAssetIDs: [UUID] = []
+    ) async -> AlbumDTO? {
         guard let client = session?.client else { return nil }
         do {
             let album = try await client.createAlbum(
-                CreateAlbumRequest(name: name, spaceAssetIDs: spaceAssetIDs, spaceID: spaceID)
+                CreateAlbumRequest(
+                    name: name, spaceAssetIDs: spaceAssetIDs, spaceID: spaceID,
+                    memberIDs: memberIDs.isEmpty ? nil : memberIDs
+                )
             )
             await refresh()
             return album
@@ -148,6 +166,35 @@ final class AlbumStore {
         guard let client = session?.client else { return false }
         do {
             _ = try await client.updateAlbum(album.id, UpdateAlbumRequest(name: name))
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Whether it took. Nobody, and the album is yours alone again.
+    @discardableResult
+    func setPeople(_ album: AlbumDTO, to memberIDs: [UUID]) async -> Bool {
+        guard let client = session?.client else { return false }
+        do {
+            _ = try await client.setAlbumPeople(album.id, memberIDs: memberIDs)
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Whether it took: an album somebody shared with you, gone from your
+    /// list. What you added stays in it for them.
+    @discardableResult
+    func leave(_ album: AlbumDTO) async -> Bool {
+        guard let client = session?.client else { return false }
+        do {
+            try await client.leaveAlbum(album.id)
             await refresh()
             return true
         } catch {
@@ -175,6 +222,10 @@ extension AlbumDTO {
     /// What deleting it does, said before it's done: the album goes, and for a
     /// family album it goes for everyone; the photos never do.
     func deletionMessage(library: String?) -> String {
+        if isSharedWithPeople {
+            return "It's deleted for everyone it's shared with. Photos added to it stay in "
+                + "the libraries they came from."
+        }
         if isFamily {
             let library = library ?? "the shared library"
             return "It's deleted for everyone in \(library). The photos stay in \(library)."
@@ -674,7 +725,8 @@ struct AlbumsView: View {
         browsableAlbumCell(
             album,
             card: AlbumCard(
-                album: album, side: side, loader: session.loader, library: libraryName(of: album)
+                album: album, side: side, loader: session.loader,
+                library: libraryName(of: album), me: session.user?.id
             ),
             store: store
         )
@@ -733,8 +785,8 @@ struct AlbumsView: View {
         return session.sharedSpaces.first { $0.id == spaceID }?.name
     }
 
-    /// Everything shared, in one section: each shared library you're in, then
-    /// the shared albums made in it.
+    /// Everything shared, in one section: the albums shared with people, then
+    /// each shared library you're in and the shared albums made in it.
     ///
     /// These had a tab of their own. It was the wrong shape twice over: a whole
     /// tab that was empty for anyone who shares nothing, and — for anyone who
@@ -780,7 +832,7 @@ struct AlbumsView: View {
         }
     }
 
-    /// One card under Shared Albums: a whole shared library, or an album in one.
+    /// One card under Shared Albums: a whole shared library, or an album.
     private enum SharedCard: Identifiable {
         case library(SpaceDTO)
         case album(AlbumDTO)
@@ -793,9 +845,13 @@ struct AlbumsView: View {
         }
     }
 
-    /// Each shared library, then its albums. Albums of a library this device
-    /// hasn't heard of yet, and every one on a Mac, come last: shown, never
-    /// dropped.
+    /// Albums shared with people first, then each shared library and its
+    /// albums. Albums of a library this device hasn't heard of yet, and every
+    /// one on a Mac, come last: shown, never dropped.
+    ///
+    /// The ones shared with people lead because they're the ones somebody
+    /// made to share — the family album, the one with the cousins — where a
+    /// library is everyone's backup landing in one place.
     private func sharedCards(_ store: AlbumStore) -> [SharedCard] {
         let albums = store.family
         #if os(macOS)
@@ -803,7 +859,7 @@ struct AlbumsView: View {
         #else
         let libraries = session.sharedSpaces
         #endif
-        var cards: [SharedCard] = []
+        var cards: [SharedCard] = store.sharedWithPeople.map(SharedCard.album)
         for space in libraries {
             cards.append(.library(space))
             cards += albums.filter { $0.spaceID == space.id }.map(SharedCard.album)
@@ -984,12 +1040,18 @@ private struct AlbumCard: View {
 }
 
 extension AlbumCard {
-    /// An album: its count, after its library's name if it's shared.
-    init(album: AlbumDTO, side: CGFloat, loader: ThumbnailLoader?, library: String?) {
+    /// An album: its count, after who it's shared with if it is — its
+    /// library's name, or its people.
+    init(
+        album: AlbumDTO, side: CGFloat, loader: ThumbnailLoader?, library: String?, me: UUID?
+    ) {
         let count = Self.count(album.itemCount)
+        let with = album.isSharedWithPeople
+            ? ShareWording.card(for: album, me: me) : library
         self.init(
-            title: album.name, details: library.map { "\($0) · \(count)" } ?? count,
-            coverAssetID: album.coverAssetID, side: side, loader: loader
+            title: album.name, details: with.map { "\($0) · \(count)" } ?? count,
+            coverAssetID: album.coverAssetID, side: side, loader: loader,
+            placeholder: album.isSharedWithPeople ? "person.2" : "rectangle.stack"
         )
     }
 
@@ -1011,13 +1073,15 @@ extension AlbumCard {
     }
 }
 
-/// Making an album: a name, and Personal or Shared.
+/// Making an album: a name, and who to share it with.
 ///
-/// Personal unless you choose Shared, which puts it in a shared library where
-/// everyone sees it and can add to it. The footer says who can see it and
-/// which section of the Albums page it will be in, so nobody has to guess
-/// where it went. The choice is made here, once: an album doesn't move
-/// between the two.
+/// Nobody, and it's yours alone, under Albums. Anyone, and it's shared with
+/// them, under Shared Albums: only the people in it see it, and each of them
+/// can add to it. The note under the list says which as you pick, so nobody has
+/// to guess where it went. Who's in it can change later, from Edit.
+///
+/// A NAS from before albums were shared with people gets the choice it always
+/// had: Personal, or Shared into a library.
 struct NewAlbumSheet: View {
     @Bindable var session: AppSession
     let store: AlbumStore
@@ -1028,21 +1092,30 @@ struct NewAlbumSheet: View {
     enum Kind: Hashable { case personal, shared }
 
     @State private var name = ""
+    /// Everyone it could be shared with: the household, without you. Nil
+    /// until it's known.
+    @State private var household: [UserDTO]?
+    @State private var householdFailed = false
+    @State private var picked: Set<UUID> = []
     @State private var kind = Kind.personal
     /// Which shared library, when there's more than one to choose from.
     @State private var library: UUID?
     @State private var isCreating = false
 
-    /// The shared libraries a shared album can go in: the ones you can add
-    /// to, and only on a NAS that has shared albums.
+    private var sharesWithPeople: Bool {
+        session.supports(ServerCapability.peopleAlbums) || store.supportsPeople
+    }
+
+    /// The shared libraries a shared album can go in, on a NAS that only has
+    /// those: the ones you can add to.
     private var libraries: [SpaceDTO] {
-        guard store.supportsFamily else { return [] }
+        guard store.supportsFamily, !sharesWithPeople else { return [] }
         return session.sharedSpaces.filter { $0.role != .viewer }
     }
 
     /// The library a shared album would go in: the one picked, or the only one.
     private var chosen: SpaceDTO? {
-        guard kind == .shared else { return nil }
+        guard kind == .shared, !sharesWithPeople else { return nil }
         return libraries.first { $0.id == library } ?? libraries.first
     }
 
@@ -1058,31 +1131,17 @@ struct NewAlbumSheet: View {
                 } header: {
                     Text("Name")
                 }
-                if libraries.isEmpty {
+                if sharesWithPeople {
+                    SharePeopleSection(
+                        people: household, failed: householdFailed, picked: $picked
+                    )
+                } else if libraries.isEmpty {
                     Section {
                     } footer: {
-                        Text(Self.personalNote)
+                        Text(ShareWording.note(for: []))
                     }
                 } else {
-                    Section {
-                        Picker("Album type", selection: $kind) {
-                            Text("Personal").tag(Kind.personal)
-                            Text("Shared").tag(Kind.shared)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        if kind == .shared, libraries.count > 1 {
-                            Picker("Shared with", selection: Binding(
-                                get: { chosen?.id }, set: { library = $0 }
-                            )) {
-                                ForEach(libraries) { space in
-                                    Text(space.name).tag(UUID?.some(space.id))
-                                }
-                            }
-                        }
-                    } footer: {
-                        Text(chosen.map(Self.sharedNote) ?? Self.personalNote)
-                    }
+                    librarySection
                 }
             }
             .navigationTitle("New Album")
@@ -1091,9 +1150,11 @@ struct NewAlbumSheet: View {
             #endif
             // Opened before the app has heard from the NAS, the choice would
             // be missing and the album made personal by default. Asking here
-            // brings the Personal | Shared switch in as soon as it answers.
+            // brings it in as soon as the NAS answers.
             .task {
+                await session.loadCapabilities()
                 if !store.supportsFamily { await store.refresh() }
+                await loadHousehold()
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1104,7 +1165,9 @@ struct NewAlbumSheet: View {
                         isCreating = true
                         Task {
                             let album = await store.create(
-                                name: trimmed, spaceID: chosen?.id, spaceAssetIDs: spaceAssetIDs
+                                name: trimmed, spaceID: chosen?.id,
+                                memberIDs: sharesWithPeople ? Array(picked) : [],
+                                spaceAssetIDs: spaceAssetIDs
                             )
                             isCreating = false
                             onDone(album)
@@ -1116,61 +1179,221 @@ struct NewAlbumSheet: View {
         }
     }
 
-    static let personalNote = "Only you can see a personal album, even when it holds photos "
-        + "from a shared library. You'll find it under Albums."
+    /// Personal or a shared library, for a NAS without albums shared with
+    /// people.
+    private var librarySection: some View {
+        Section {
+            Picker("Album type", selection: $kind) {
+                Text("Personal").tag(Kind.personal)
+                Text("Shared").tag(Kind.shared)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            if kind == .shared, libraries.count > 1 {
+                Picker("Shared with", selection: Binding(
+                    get: { chosen?.id }, set: { library = $0 }
+                )) {
+                    ForEach(libraries) { space in
+                        Text(space.name).tag(UUID?.some(space.id))
+                    }
+                }
+            }
+        } footer: {
+            Text(chosen.map(Self.libraryNote) ?? ShareWording.note(for: []))
+        }
+    }
 
-    static func sharedNote(_ space: SpaceDTO) -> String {
+    private func loadHousehold() async {
+        guard sharesWithPeople, household == nil else { return }
+        if let people = await ShareWording.household(session) {
+            household = people
+        } else {
+            householdFailed = true
+        }
+    }
+
+    static func libraryNote(_ space: SpaceDTO) -> String {
         "Everyone in \(space.name) can see a shared album and add to it. You'll find it "
-            + "under Shared Albums. Photos you add from your own library are shared to "
-            + "\(space.name) too."
+            + "under Shared Albums."
     }
 }
 
-/// An album's settings, from the Edit button in its own grid: its name, who can
-/// see it, and deleting it, as far as you may change them. Someone who can't is
-/// told who can.
+/// Everyone on this NAS an album could be shared with, a checkmark against
+/// each one it is. Under it, who will see the album, and where it will be.
+struct SharePeopleSection: View {
+    /// Nil while it's being asked for.
+    let people: [UserDTO]?
+    var failed = false
+    @Binding var picked: Set<UUID>
+
+    var body: some View {
+        Section {
+            if let people {
+                if people.isEmpty {
+                    Text("No one else has an account on this NAS yet.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(people) { person in
+                    Button {
+                        if picked.contains(person.id) {
+                            picked.remove(person.id)
+                        } else {
+                            picked.insert(person.id)
+                        }
+                    } label: {
+                        HStack {
+                            // `Color`, not the hierarchical styles: inside a
+                            // button those resolve against the accent tint.
+                            Text(person.displayName)
+                                .foregroundStyle(Color.primary)
+                            Spacer()
+                            if picked.contains(person.id) {
+                                Image(systemName: "checkmark")
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .accessibilityAddTraits(picked.contains(person.id) ? .isSelected : [])
+                }
+            } else if failed {
+                Text("Couldn't load who's on this NAS. Try again in a moment.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            }
+        } header: {
+            Text("Share With")
+        } footer: {
+            Text(ShareWording.note(for: (people ?? []).filter { picked.contains($0.id) }))
+        }
+    }
+}
+
+/// How the app says who an album is shared with, the same everywhere it says it.
+enum ShareWording {
+    /// "Jane", "Jane and Mover", "Jane, Mover, and Sam", "Jane, Mover, and 3
+    /// others".
+    static func names(_ people: [UserDTO]) -> String {
+        let names = people.map(\.displayName)
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        case 3: return "\(names[0]), \(names[1]), and \(names[2])"
+        default: return "\(names[0]), \(names[1]), and \(names.count - 2) others"
+        }
+    }
+
+    /// What the people picker says under it.
+    static func note(for picked: [UserDTO]) -> String {
+        guard !picked.isEmpty else {
+            return "Only you can see this album. You'll find it under Albums."
+        }
+        return "\(names(picked)) can see this album and add to it. You'll find it "
+            + "under Shared Albums."
+    }
+
+    /// The line on an album's card: who it's with, or who it's from. First
+    /// names, so it fits a card with the count after it: "With Jane Roe and
+    /// Mover Test" left no room for one.
+    static func card(for album: AlbumDTO, me: UUID?) -> String {
+        if let owner = album.owner, owner.id != me {
+            return "From \(firstName(owner))"
+        }
+        let people = album.people ?? []
+        switch people.count {
+        case 0: return "Shared"
+        case 1: return "With \(firstName(people[0]))"
+        case 2: return "With \(firstName(people[0])) and \(firstName(people[1]))"
+        default: return "With \(firstName(people[0])) and \(people.count - 1) others"
+        }
+    }
+
+    /// "Jane" for Jane Roe: the name up to its first space.
+    static func firstName(_ person: UserDTO) -> String {
+        person.displayName.split(separator: " ").first.map(String.init) ?? person.displayName
+    }
+
+    /// Everyone an album could be shared with: the household, without you.
+    /// Nil when the NAS couldn't be asked.
+    @MainActor
+    static func household(_ session: AppSession) async -> [UserDTO]? {
+        guard let client = session.client,
+              let users = try? await client.household().users else { return nil }
+        return users.filter { $0.id != session.user?.id }
+    }
+}
+
+/// An album's settings, from the Edit button in its own grid: its name, who
+/// it's shared with, and deleting it — or, for one somebody shared with you,
+/// who's in it and leaving it. Someone who can't change it is told who can.
 struct AlbumSettingsSheet: View {
+    @Bindable var session: AppSession
     let album: AlbumDTO
     let store: AlbumStore
-    /// The shared library a shared album is in, by name.
+    /// The shared library a family album is in, by name.
     let library: String?
-    /// Told when the album is gone, before `onDone`, so the screen that was
-    /// showing it can leave once these close.
+    /// Told when the album is gone for you — deleted, or left — before
+    /// `onDone`, so the screen that was showing it can leave once these close.
     let onDeleted: () -> Void
     let onDone: () -> Void
 
     @State private var name: String
+    @State private var household: [UserDTO]?
+    @State private var householdFailed = false
+    @State private var picked: Set<UUID>
     @State private var isSaving = false
     @State private var confirmDelete = false
+    @State private var confirmLeave = false
+    @State private var confirmShare = false
+    @State private var confirmUnshare = false
+    /// Photos reported in an album you shared, waiting on you.
+    @State private var reports: [ContentReportDTO] = []
     @State private var failure: String?
 
     init(
-        album: AlbumDTO, store: AlbumStore, library: String?,
+        session: AppSession, album: AlbumDTO, store: AlbumStore, library: String?,
         onDeleted: @escaping () -> Void = {}, onDone: @escaping () -> Void
     ) {
+        self.session = session
         self.album = album
         self.store = store
         self.library = library
         self.onDeleted = onDeleted
         self.onDone = onDone
         _name = State(initialValue: album.name)
+        _picked = State(initialValue: Set((album.people ?? []).map(\.id)))
     }
 
     private var trimmed: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var whoSees: String {
-        guard album.isFamily else {
-            return "Only you can see this album. It's under Albums."
-        }
-        return "Everyone in \(library ?? "its shared library") can see this album. "
-            + "It's under Shared Albums."
+    /// Whether who it's shared with is yours to choose here: an album you
+    /// manage that isn't a library's, on a NAS that shares albums with people.
+    private var choosesPeople: Bool {
+        album.mayManage && !album.isLibraryAlbum
+            && (session.supports(ServerCapability.peopleAlbums) || store.supportsPeople)
+    }
+
+    private var nameChanged: Bool { !trimmed.isEmpty && trimmed != album.name }
+    private var peopleChanged: Bool { picked != Set((album.people ?? []).map(\.id)) }
+
+    /// Who the album is shared with now, by name.
+    private var current: [UserDTO] { album.people ?? [] }
+
+    /// Who's been picked, by name, in the household's order.
+    private var pickedPeople: [UserDTO] {
+        (household ?? current).filter { picked.contains($0.id) }
     }
 
     var body: some View {
         NavigationStack {
             Form {
+                if album.mayManage && !reports.isEmpty { reportsSection }
                 Section {
                     if album.mayManage {
                         TextField("Name", text: $name)
@@ -1180,11 +1403,22 @@ struct AlbumSettingsSheet: View {
                 } header: {
                     Text("Name")
                 } footer: {
-                    Text(whoSees)
+                    if let whoSees { Text(whoSees) }
+                }
+                if choosesPeople {
+                    SharePeopleSection(
+                        people: household, failed: householdFailed, picked: $picked
+                    )
+                } else if album.isSharedWithPeople {
+                    membersSection
                 }
                 if album.mayManage {
                     Section {
                         Button("Delete Album", role: .destructive) { confirmDelete = true }
+                    }
+                } else if album.isSharedWithPeople {
+                    Section {
+                        Button("Leave Album", role: .destructive) { confirmLeave = true }
                     }
                 } else {
                     Section {
@@ -1210,21 +1444,12 @@ struct AlbumSettingsSheet: View {
                 }
                 if album.mayManage {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Save") {
-                            isSaving = true
-                            Task {
-                                if await store.rename(album, to: trimmed) {
-                                    onDone()
-                                } else {
-                                    failure = store.lastError ?? "That didn't save. Try again."
-                                }
-                                isSaving = false
-                            }
-                        }
-                        .disabled(trimmed.isEmpty || trimmed == album.name || isSaving)
+                        Button("Save", action: save)
+                            .disabled(!(nameChanged || peopleChanged) || isSaving)
                     }
                 }
             }
+            .task { await load() }
             .confirmationDialog(
                 "Delete “\(album.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
             ) {
@@ -1240,6 +1465,152 @@ struct AlbumSettingsSheet: View {
                 }
             } message: {
                 Text(album.deletionMessage(library: library))
+            }
+            .confirmationDialog(
+                "Leave “\(album.name)”?", isPresented: $confirmLeave, titleVisibility: .visible
+            ) {
+                Button("Leave Album", role: .destructive) {
+                    Task {
+                        if await store.leave(album) {
+                            onDeleted()
+                            onDone()
+                        } else {
+                            failure = store.lastError ?? "That didn't work. Try again."
+                        }
+                    }
+                }
+            } message: {
+                Text("You won't see it anymore. Photos you added stay in it for the others.")
+            }
+            .confirmationDialog(
+                "Share “\(album.name)”?", isPresented: $confirmShare, titleVisibility: .visible
+            ) {
+                Button("Share") { commit() }
+            } message: {
+                Text("\(ShareWording.names(pickedPeople)) will see its "
+                    + "\(AlbumCard.count(album.itemCount)) and can add their own. "
+                    + "It moves to Shared Albums.")
+            }
+            .confirmationDialog(
+                "Stop sharing “\(album.name)”?", isPresented: $confirmUnshare,
+                titleVisibility: .visible
+            ) {
+                Button("Stop Sharing", role: .destructive) { commit() }
+            } message: {
+                Text("\(ShareWording.names(current)) won't see it anymore. It will be yours "
+                    + "alone, under Albums.")
+            }
+        }
+    }
+
+    /// Who sees it, under its name, where the people picker isn't saying so.
+    private var whoSees: String? {
+        if album.isLibraryAlbum {
+            return "Everyone in \(library ?? "its shared library") can see this album. "
+                + "It's under Shared Albums."
+        }
+        if album.isSharedWithPeople || choosesPeople { return nil }
+        return "Only you can see this album. It's under Albums."
+    }
+
+    /// Who's in an album somebody shared with you. Theirs to change.
+    private var membersSection: some View {
+        let owner = album.owner
+        let others = current.filter { $0.id != owner?.id }
+        return Section {
+            if let owner {
+                LabeledContent("Shared by", value: owner.displayName)
+            }
+            ForEach(others) { person in
+                Text(person.displayName)
+            }
+        } header: {
+            Text("Shared With")
+        } footer: {
+            Text("Everyone here can see this album and add to it. Only "
+                + "\(owner?.displayName ?? "the person who made it") can change who's in it.")
+        }
+    }
+
+    /// Photos reported in an album you shared. The same review a library's
+    /// owner gets, in the album's own settings.
+    private var reportsSection: some View {
+        Section {
+            ForEach(reports) { report in
+                ReportedPhotoRow(
+                    report: report, loader: session.loader,
+                    onRemove: { resolve(report, removing: true) },
+                    onKeep: { resolve(report, removing: false) }
+                )
+            }
+        } header: {
+            Text("Reported")
+        } footer: {
+            Text("Remove takes it out of this album for everyone. Keep leaves it here, "
+                + "still hidden from whoever reported it. Who reported it isn't shown.")
+        }
+    }
+
+    private func load() async {
+        await session.loadCapabilities()
+        if choosesPeople, household == nil {
+            if let people = await ShareWording.household(session) {
+                household = people
+            } else {
+                householdFailed = true
+            }
+        }
+        if album.mayManage, album.isSharedWithPeople, let spaceID = album.spaceID,
+           session.supports(ServerCapability.reportAndBlock),
+           let open = try? await session.client?.openReports(spaceID: spaceID) {
+            reports = open
+        }
+    }
+
+    /// Sharing what was yours alone, and sharing it with nobody, are said
+    /// first; anything else just saves.
+    private func save() {
+        if peopleChanged && !album.isSharedWithPeople && !picked.isEmpty {
+            confirmShare = true
+        } else if peopleChanged && album.isSharedWithPeople && picked.isEmpty {
+            confirmUnshare = true
+        } else {
+            commit()
+        }
+    }
+
+    private func commit() {
+        isSaving = true
+        Task {
+            defer { isSaving = false }
+            // The name first, so an album being shared is shared under it.
+            if nameChanged, !(await store.rename(album, to: trimmed)) {
+                failure = store.lastError ?? "That didn't save. Try again."
+                return
+            }
+            if peopleChanged, !(await store.setPeople(album, to: Array(picked))) {
+                failure = store.lastError ?? "That didn't save. Try again."
+                return
+            }
+            onDone()
+        }
+    }
+
+    private func resolve(_ report: ContentReportDTO, removing: Bool) {
+        guard let client = session.client, let spaceID = album.spaceID else { return }
+        Task {
+            do {
+                if removing {
+                    try await client.removeAsset(spaceID: spaceID, assetID: report.assetID)
+                }
+                try await client.resolveReports(
+                    spaceID: spaceID, placementID: report.id,
+                    outcome: removing ? .removed : .kept
+                )
+                reports.removeAll { $0.id == report.id }
+                if removing { await store.refresh() }
+            } catch {
+                failure = error.localizedDescription
             }
         }
     }

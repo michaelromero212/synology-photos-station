@@ -104,8 +104,8 @@ struct SafetyController: RouteCollection {
             """).first(decoding: PlacementRow.self) else {
             throw Abort(.notFound, reason: "No such photo in this library.")
         }
-        guard placement.kind == SpaceKind.shared.rawValue else {
-            throw Abort(.badRequest, reason: "Only photos in a shared library can be reported.")
+        guard placement.kind == SpaceKind.shared.rawValue || placement.kind == "album" else {
+            throw Abort(.badRequest, reason: "Only photos in a shared library or album can be reported.")
         }
         guard placement.addedBy != device.userID else {
             throw Abort(.badRequest, reason: "You added this one. Remove it instead.")
