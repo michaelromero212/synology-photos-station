@@ -1130,12 +1130,19 @@ struct VideoPlayerView: View {
     /// Nil on macOS and tvOS, which have no monitor wired up yet; the wording
     /// falls back to classifying the error on its own.
     @Environment(\.connectionMonitor) private var connection
+    #if os(iOS)
+    /// Whether the layer has put this clip's first frame on screen. The poster
+    /// is over it until then. See `body`.
+    @State private var showsFirstFrame = false
+    #endif
 
     var body: some View {
         ZStack {
+            #if !os(iOS)
             if let poster, model.player == nil {
                 Image(platformImage: poster).resizable().scaledToFit()
             }
+            #endif
             if let player = model.player {
                 #if os(iOS)
                 // A bare layer, so a tap anywhere reaches the viewer and
@@ -1153,8 +1160,10 @@ struct VideoPlayerView: View {
                 // swipe run along the axis the viewer actually sees. Rotating
                 // just this layer left the pager sliding the portrait way
                 // underneath a turned picture. See `AssetDetailView`.
-                PlayerLayerView(player: player)
-                    .overlay { skipZones }
+                PlayerLayerView(player: player) {
+                    withAnimation(.easeOut(duration: 0.2)) { showsFirstFrame = true }
+                }
+                .overlay { skipZones }
                 #else
                 // macOS and tvOS get AVKit's own transport, which is the right
                 // answer there: it is the control surface people already know,
@@ -1164,6 +1173,24 @@ struct VideoPlayerView: View {
                 VideoPlayer(player: player)
                 #endif
             }
+            #if os(iOS)
+            // Over the layer until the layer has a frame of its own to show, and
+            // then faded out. The poster used to go the moment there was a
+            // player, which is before AVPlayer has decoded anything, so the
+            // screen went black for as long as the first frame took: a third of
+            // a second opening a clip from the grid, measured on the simulator,
+            // and a frame or two swiping to one. That was the flicker at the
+            // start of a video, and only the first time it played, because a
+            // layer that has drawn keeps its picture. Faded rather than cut,
+            // because the poster is a frame from a second or so in (see
+            // `Derivatives.extractPoster` on the server) and playing starts at
+            // the first. Never in the way of a tap: the skip zones are under it.
+            if let poster, !showsFirstFrame {
+                Image(platformImage: poster).resizable().scaledToFit()
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+            #endif
             // Reconnecting is loading, as far as anyone watching can tell: a
             // spinner while the clip gets a fresh link, never an error for a
             // connection that is being put back. See `VideoPlaybackModel.reconnect`.
@@ -1269,22 +1296,50 @@ struct VideoPlayerView: View {
 /// does.
 struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    /// Told when the layer has a frame on screen. Until then it is clear, and
+    /// whatever is drawn with it — the poster — is all there is to see.
+    var onFirstFrame: () -> Void = {}
 
     func makeUIView(context: Context) -> PlayerHostView {
         let view = PlayerHostView()
         view.playerLayer.player = player
         view.playerLayer.videoGravity = .resizeAspect
         view.backgroundColor = .clear
+        view.onFirstFrame = onFirstFrame
         return view
     }
 
     func updateUIView(_ view: PlayerHostView, context: Context) {
         if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.onFirstFrame = onFirstFrame
     }
 
     final class PlayerHostView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        var onFirstFrame: () -> Void = {}
+        private var readiness: NSKeyValueObservation?
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            watchReadiness()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            watchReadiness()
+        }
+
+        /// `isReadyForDisplay` is the layer saying it has a frame to draw,
+        /// which a player existing — or even being ready to play — is not. It
+        /// can change off the main thread, so it is passed back to it.
+        private func watchReadiness() {
+            readiness = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) {
+                [weak self] layer, _ in
+                guard layer.isReadyForDisplay else { return }
+                DispatchQueue.main.async { self?.onFirstFrame() }
+            }
+        }
     }
 }
 
