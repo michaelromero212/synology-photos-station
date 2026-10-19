@@ -25,6 +25,16 @@ struct RetentionTests {
         #expect(item(purgeAt: purge).daysUntilPurge == Retention.days)
     }
 
+    /// Deleted in October, purged in November: 29 calendar days with the
+    /// clocks going back in between are 29 days and an hour, which used to
+    /// read 30.
+    @Test("A window that crosses the clock change still reads 29, not 30")
+    func clockChange() {
+        let deleted = Date().addingTimeInterval(-60)
+        let purge = deleted.addingTimeInterval(Double(Retention.days) * 86_400 + 3600)
+        #expect(item(purgeAt: purge).daysUntilPurge == Retention.days)
+    }
+
     @Test("The last day reads as one day, not zero")
     func lastDay() {
         let purge = Date().addingTimeInterval(20 * 3600)

@@ -193,7 +193,8 @@ struct AssetController: RouteCollection {
     @Sendable
     func playbackURL(req: Request) async throws -> PlaybackURLResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
-        let asset = try await requireReadableAsset(req)
+        // A clip in Recently Deleted plays too. See `requireReadableAsset`.
+        let asset = try await requireReadableAsset(req, includingRecoverable: true)
         guard asset.mediaType == "video" else {
             throw Abort(.badRequest, reason: "That asset isn't a video.")
         }
@@ -269,7 +270,9 @@ struct AssetController: RouteCollection {
         }
 
         // The signature proves the link was issued; membership is still checked
-        // now, so revoking someone mid-lifetime takes effect immediately.
+        // now, so revoking someone mid-lifetime takes effect immediately. A
+        // clip in Recently Deleted counts, as it did when the link was issued,
+        // until it's purged. See `requireReadableAsset`.
         guard let asset = try await req.sql.raw("""
             SELECT \(unsafeRaw: AssetRow.columns)
             FROM assets a
@@ -277,7 +280,8 @@ struct AssetController: RouteCollection {
               AND EXISTS (
                   SELECT 1 FROM space_assets sa
                   JOIN space_members m ON m.space_id = sa.space_id
-                  WHERE sa.asset_id = a.id AND sa.deleted_at IS NULL
+                  WHERE sa.asset_id = a.id
+                    AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
                     AND m.user_id = \(bind: userID)
               )
             """).first(decoding: AssetRow.self) else {
@@ -481,7 +485,9 @@ struct AssetController: RouteCollection {
     /// import into a multi-day job; most photos are never opened full screen.
     @Sendable
     func preview(req: Request) async throws -> Response {
-        let asset = try await requireReadableAsset(req)
+        // Recently Deleted opens its photos at this size. See
+        // `requireReadableAsset`.
+        let asset = try await requireReadableAsset(req, includingRecoverable: true)
         let blob = fileURL(for: asset, req)
         guard FileManager.default.fileExists(atPath: blob.path) else {
             throw Abort(.notFound, reason: "Original is missing from storage.")
@@ -527,12 +533,15 @@ struct AssetController: RouteCollection {
     ///
     /// `includingRecoverable` widens "placed in one of your spaces" to include
     /// placements removed but not yet purged — the contents of Recently
-    /// Deleted. Only the thumbnail asks for that. Every tile on that page used
-    /// to 404 here, because nothing in it has a live placement by definition,
-    /// so the page showed nothing but blurred placeholders. The same members
-    /// could see these photographs a moment before they were removed and can
-    /// put them back with one tap, so a thumbnail is no new exposure; the
-    /// original, the preview and the stream stay live-only.
+    /// Deleted. Every tile on that page used to 404 here, because nothing in
+    /// it has a live placement by definition, so the page showed nothing but
+    /// blurred placeholders. The same members could see these photographs a
+    /// moment before they were removed and can put them back with one tap, so
+    /// seeing one is no new exposure: the thumbnail asks for it, and so do the
+    /// preview and the stream, so a photo can be looked at and a video played
+    /// before deciding, the way Photos lets you. The original stays live-only:
+    /// nothing in Recently Deleted can be downloaded or shared until it's put
+    /// back.
     private func requireReadableAsset(
         _ req: Request, includingRecoverable: Bool = false
     ) async throws -> AssetRow {

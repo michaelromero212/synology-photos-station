@@ -46,6 +46,7 @@ struct HealthController: RouteCollection {
                 ServerCapability.accountDeletion,
                 ServerCapability.reportAndBlock,
                 ServerCapability.peopleAlbums,
+                ServerCapability.deletedPreview,
             ]
         )
     }

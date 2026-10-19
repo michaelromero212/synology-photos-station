@@ -453,7 +453,7 @@ struct AssetDetailView: View {
             }
         }
         .confirmationDialog(
-            "Remove this photo from \(space.name)?",
+            "Remove this \(currentItem.mediaType == .video ? "video" : "photo") from \(space.name)?",
             isPresented: $confirmDelete, titleVisibility: .visible
         ) {
             Button("Remove", role: .destructive) {

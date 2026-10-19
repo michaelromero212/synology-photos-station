@@ -196,11 +196,16 @@ public struct TimelineItem: Codable, Sendable, Hashable, Identifiable {
     /// Up rather than down: something deleted twenty minutes ago has 28 days
     /// and change left, and "28 days" reads as a day already lost. Rounding up
     /// says 29 on the day you delete it, which is the number the app promised.
+    ///
+    /// An hour comes off first. The server's window is 29 calendar days, and
+    /// one that crosses the November clock change is 29 days and an hour long,
+    /// so for an hour after deleting something in October this rounded up to
+    /// 30 — on the screen, and in the viewer, of a 29-day window.
     public var daysUntilPurge: Int? {
         guard let purgeAt else { return nil }
         let seconds = purgeAt.timeIntervalSinceNow
         guard seconds > 0 else { return 0 }
-        return Int((seconds / 86_400).rounded(.up))
+        return max(1, Int(((seconds - 3600) / 86_400).rounded(.up)))
     }
 
     public init(

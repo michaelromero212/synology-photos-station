@@ -144,7 +144,9 @@ struct CollectionsController: RouteCollection {
             ),
             limit: Self.allOccasionsLimit, seed: seed
         )
-        let deleted = try await recentlyDeleted(spaceID: spaceID, on: req.sql)
+        let deleted = try await recentlyDeleted(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
         let arrived = try await recentlyAdded(spaceID: spaceID, on: req.sql)
         let marked = try await favorites(
             spaceID: spaceID, userID: device.userID, on: req.sql
@@ -2005,7 +2007,7 @@ struct CollectionsController: RouteCollection {
     /// where nothing else reclaims them, so `purged_at` is now the whole
     /// answer — one column, no filesystem round trip per row.
     private func recentlyDeleted(
-        spaceID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
         struct CountRow: Decodable { let count: Int }
         let row = try await sql.raw("""
@@ -2016,6 +2018,7 @@ struct CollectionsController: RouteCollection {
               AND sa.deleted_at IS NOT NULL
               AND sa.purged_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: userID))
             """).first(decoding: CountRow.self)
 
         guard let count = row?.count, count > 0 else { return nil }
@@ -2239,6 +2242,10 @@ struct CollectionsController: RouteCollection {
     ///
     /// A Live Photo's video half is left out, as it is everywhere else: it is
     /// removed, restored and purged along with its still, never on its own.
+    /// So is what this person has put out of their own sight — a photo they
+    /// reported that its library's owner then removed, or anything from
+    /// someone they blocked: a page that can open its photos full size must
+    /// not be the way back to them. See `Hidden`.
     @Sendable
     func deletedItems(req: Request) async throws -> SearchResults {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -2260,6 +2267,7 @@ struct CollectionsController: RouteCollection {
               AND sa.deleted_at IS NOT NULL
               AND sa.purged_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
             ORDER BY sa.deleted_at DESC, sa.id
             LIMIT 500
             """).all(decoding: TimelineController.ItemRow.self)

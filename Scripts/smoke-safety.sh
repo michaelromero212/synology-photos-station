@@ -129,6 +129,9 @@ check "a member can't close one" "403" "$(report "$AT" "$SHARED" "$(pid "$SHARED
 check "the owner removes the next one" "204" "$(call "$OT" -X DELETE "$API/v1/spaces/$SHARED/assets/$B2")"
 check "and closes it as removed" "204" "$(resolve "$OT" "$SHARED" "$(pid "$SHARED" "$B2")" removed)"
 check "gone for everyone, Bob included" "3" "$(total "$BT" "$SHARED")"
+deleted(){ curl -s "$API/v1/spaces/$2/collections/deleted" -H "Authorization: Bearer $1" | jq '["total"]'; }
+check "it waits in the library's Recently Deleted for the owner" "1" "$(deleted "$OT" "$SHARED")"
+check "but not for Alice, who reported it" "0" "$(deleted "$AT" "$SHARED")"
 
 echo "Blocking"
 check "Alice blocks Bob" "204" "$(call "$AT" -X PUT "$API/v1/blocks/$BOB")"

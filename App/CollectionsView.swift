@@ -849,10 +849,11 @@ private struct DaysRemainingBadge: View {
 /// toggled it, every unpicked tile was drawn at half opacity, and the only hint
 /// was a footnote telling you to select with a button that wasn't there.
 ///
-/// Tapping an item starts a selection with it, since there is nothing to open —
-/// a removed photo's original and preview stay off limits until it is put
-/// back. On a television this is a place to look, not to act, like the rest of
-/// the app there: the countdowns without the controls.
+/// Tapping an item opens it, full size, with Delete and Recover under it, as in
+/// Photos; Select starts a selection. A NAS from before deleted items could be
+/// opened serves only their thumbnails, so there a tap starts a selection with
+/// the item, as it always did. On a television this is a place to look, not to
+/// act, like the rest of the app there: the countdowns without the controls.
 struct RecentlyDeletedView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
@@ -867,6 +868,8 @@ struct RecentlyDeletedView: View {
     @State private var picked: Set<UUID> = []
     @State private var working: Action?
     @State private var confirming: Action?
+    /// The item open full size. See `DeletedItemViewer`.
+    @State private var opened: TimelineItem?
     #endif
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
@@ -914,8 +917,19 @@ struct RecentlyDeletedView: View {
             } message: { action in
                 Text(confirmationMessage(action))
             }
+            #if os(iOS)
+            .fullScreenCover(item: $opened) { item in viewer(opening: item) }
+            #else
+            .sheet(item: $opened) { item in
+                viewer(opening: item).frame(minWidth: 760, minHeight: 560)
+            }
             #endif
-            .task { await load() }
+            #endif
+            .task {
+                // Whether a tap can open an item. Asked once per sign-in.
+                await session.loadCapabilities()
+                await load()
+            }
     }
 
     @ViewBuilder
@@ -1039,7 +1053,12 @@ struct RecentlyDeletedView: View {
     private var canEdit: Bool { space.role != .viewer }
 
     private func tap(_ item: TimelineItem) {
-        guard canEdit, !isWorking else { return }
+        guard !isWorking else { return }
+        if !isSelecting, session.supports(ServerCapability.deletedPreview) {
+            opened = item
+            return
+        }
+        guard canEdit else { return }
         notice = nil
         isSelecting = true
         if picked.contains(item.assetID) {
@@ -1047,6 +1066,30 @@ struct RecentlyDeletedView: View {
         } else {
             picked.insert(item.assetID)
         }
+    }
+
+    private func viewer(opening item: TimelineItem) -> some View {
+        DeletedItemViewer(
+            session: session, items: items, opening: item, canEdit: canEdit,
+            onRecover: { try await act(.recover(all: false), on: $0) },
+            onDelete: { try await act(.delete(all: false), on: $0) },
+            onDone: { opened = nil }
+        )
+    }
+
+    /// One item recovered or deleted from the viewer. Said on this page too,
+    /// for when the viewer closes.
+    private func act(_ action: Action, on item: TimelineItem) async throws {
+        guard let client = session.client else { return }
+        switch action {
+        case .recover:
+            _ = try await client.restore(spaceID: space.id, assetIDs: [item.assetID])
+            notice = "1 item recovered."
+        case .delete:
+            _ = try await client.purge(spaceID: space.id, assetIDs: [item.assetID])
+            notice = "1 item deleted permanently."
+        }
+        await load()
     }
 
     private func endSelection() {
