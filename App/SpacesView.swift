@@ -272,6 +272,11 @@ struct SpaceMembersView: View {
     @State private var confirmingRemoval: SpaceMemberDTO?
     @State private var confirmingLeave = false
     @State private var confirmingBlock: SpaceMemberDTO?
+    /// Someone about to be added, while that's confirmed.
+    @State private var confirmingAdd: UserDTO?
+    /// Whether the household is being asked for, so the list of people to add
+    /// shows it's coming rather than that there's no one.
+    @State private var loadingHousehold = false
 
     /// So the caller can find itself in the roster — "Leave" is the same call as
     /// "Remove", pointed at yourself, and the row has to know which one it is.
@@ -301,6 +306,14 @@ struct SpaceMembersView: View {
             if let fresh = model.members?.name, fresh != currentName {
                 currentName = fresh
                 draftName = fresh
+            }
+            // Who could be added. Only More › Shared Libraries ever asked, so
+            // from a library's own Edit the list was empty and the section that
+            // adds people never showed.
+            if model.members?.callerIsOwner == true, model.household.isEmpty {
+                loadingHousehold = true
+                await model.loadHousehold()
+                loadingHousehold = false
             }
             await session.loadCapabilities()
             if session.supports(ServerCapability.reportAndBlock) {
@@ -354,6 +367,29 @@ struct SpaceMembersView: View {
             Button("Cancel", role: .cancel) { confirmingRemoval = nil }
         } message: {
             Text(Self.removalWarning(for: confirmingRemoval))
+        }
+        // Asked, because it opens the whole library to them, everything already
+        // in it as well as what comes next — not a tap to make by accident.
+        .confirmationDialog(
+            "Add \(confirmingAdd?.displayName ?? "") to \(currentName)?",
+            isPresented: .init(
+                get: { confirmingAdd != nil },
+                set: { if !$0 { confirmingAdd = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Add") {
+                guard let person = confirmingAdd else { return }
+                confirmingAdd = nil
+                Task {
+                    await model.add(person.id, to: space.id)
+                    onMembershipChanged()
+                }
+            }
+            Button("Cancel", role: .cancel) { confirmingAdd = nil }
+        } message: {
+            Text("They'll see everything in \(currentName), including what's already here, "
+                + "and can add their own.")
         }
         .confirmationDialog(
             "Leave \(currentName)?", isPresented: $confirmingLeave, titleVisibility: .visible
@@ -474,22 +510,54 @@ struct SpaceMembersView: View {
         }
     }
 
+    /// Everyone else on the NAS, to bring in: the same people an album's Share
+    /// With lists. Added as contributors, and moved to viewer from the ⋯ beside
+    /// their name once they're in.
+    ///
+    /// Always there for the owner, saying why when there's no one to add,
+    /// rather than missing — a section that only sometimes exists reads as a
+    /// feature that doesn't.
     @ViewBuilder
     private func addSection(_ members: SpaceMembersResponse) -> some View {
         let current = Set(members.members.map(\.user.id))
         let candidates = model.household.filter { !current.contains($0.id) }
-        if !candidates.isEmpty {
-            Section("Add from household") {
-                ForEach(candidates) { user in
-                    Button {
-                        Task {
-                            await model.add(user.id, to: space.id)
-                            onMembershipChanged()
-                        }
-                    } label: {
-                        Label(user.displayName, systemImage: "plus.circle")
+        Section {
+            if loadingHousehold {
+                ProgressView().frame(maxWidth: .infinity)
+            } else if model.household.isEmpty {
+                Text("Couldn't load who's on this NAS. Try again in a moment.")
+                    .foregroundStyle(.secondary)
+            } else if candidates.isEmpty {
+                Text(model.household.count > 1
+                    ? "Everyone with an account on this NAS is already here."
+                    : "No one else has an account on this NAS yet. Once someone signs in "
+                        + "to FrameStation on their own device, they'll be here to add.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(candidates) { user in
+                Button {
+                    confirmingAdd = user
+                } label: {
+                    HStack {
+                        // `Color`, not the hierarchical styles: inside a button
+                        // those resolve against the accent tint.
+                        Text(user.displayName)
+                            .foregroundStyle(Color.primary)
+                        Spacer()
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(Color.accentColor)
                     }
+                    .contentShape(Rectangle())
                 }
+                .accessibilityLabel("Add \(user.displayName)")
+            }
+        } header: {
+            Text("Add People")
+        } footer: {
+            if !candidates.isEmpty {
+                Text("They'll see everything here and can add their own. Make someone a "
+                    + "viewer from the ⋯ beside their name.")
             }
         }
     }
