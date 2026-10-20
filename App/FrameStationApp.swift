@@ -254,6 +254,10 @@ struct FrameStationApp: App {
                 // view would leave the parts presented over it on the system
                 // scheme, which is exactly where a half-done dark mode shows.
                 .preferredColorScheme(appearance.colorScheme)
+            #if os(iOS)
+                // Menus and dialogs readable over any photo. See `PopupContrast`.
+                .popupContrast()
+            #endif
         }
         #if os(macOS)
         .defaultSize(width: 1100, height: 800)

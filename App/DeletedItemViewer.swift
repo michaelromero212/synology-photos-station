@@ -67,6 +67,9 @@ struct DeletedItemViewer: View {
         .viewerChromeScheme()
         #if os(iOS)
         .statusBarHidden(!showsChrome)
+        // Full screen over the app, so it would take the popups' solid style;
+        // its glass matches the viewer's instead. See `PopupContrast`.
+        .standardContrast()
         #endif
         // The clip on screen claims the connection and the rest pause, as in
         // the library's viewer.

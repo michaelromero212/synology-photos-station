@@ -149,6 +149,11 @@ struct RootTabView: View {
                         }
                     }
             }
+            #if os(iOS)
+            // A result opens the viewer in here, whose glass would otherwise
+            // come out solid. See `PopupContrast`.
+            .standardContrast()
+            #endif
         }
         // The same screen as More → Photo Backup → Settings, not a lighter
         // version of it: everything a first backup needs to decide — photo
