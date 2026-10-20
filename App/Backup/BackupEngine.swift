@@ -516,7 +516,7 @@ final class BackupEngine {
         // First, what iOS sent while the app was closed, so those photos are
         // known before the history below names them. See
         // `BackgroundUploads.absorb`.
-        BackgroundUploads.absorb(into: ModelContext(container))
+        await BackgroundUploads.absorb(into: ModelContext(container))
         // Off the main actor. A long absence can be a long history.
         let changes = await Task.detached(priority: .userInitiated) {
             LibraryChangeHistory.changesSinceMark()
@@ -998,7 +998,7 @@ final class BackupEngine {
             endBackgroundTime()
         }
         reclaimInterrupted(context)
-        BackgroundUploads.absorb(into: context)
+        await BackgroundUploads.absorb(into: context)
         reconcileHolds(context)
         refreshProgress(context)
 

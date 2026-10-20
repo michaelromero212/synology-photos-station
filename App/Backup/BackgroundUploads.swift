@@ -123,18 +123,37 @@ enum BackgroundUploads {
     /// under that id, so it still pairs with the half already on the NAS.
     /// Without its row it would never go at all: the backup sets aside any
     /// photo it already has a row for.
-    static func absorb(into context: ModelContext) {
+    static func absorb(into context: ModelContext) async {
         guard let results = BackgroundUploadShared.updateProgress({ progress -> [BackgroundUploadShared.Result] in
             defer { progress.results = [] }
             return progress.results
         }), !results.isEmpty else { return }
 
         let byPhoto = Dictionary(grouping: results) { BackupKey.photo($0.key) }
+        // Off the main actor, as the backup's own queueing is. Describing reads
+        // each photo's files, and Photos loads their details on demand: on the
+        // main thread that's its "Missing prefetched properties … on the main
+        // queue" warning and a stall, once per photo — seen in Xcode's console
+        // on 2026-10-19 for a screenshot iOS had sent while the app was away.
+        let photos = Array(byPhoto.keys)
+        let described = await Task.detached(priority: .userInitiated) {
+            () -> [String: PhotoLibraryScanner.Candidate] in
+            var found: [String: PhotoLibraryScanner.Candidate] = [:]
+            for photo in photos {
+                autoreleasepool {
+                    if let asset = PhotoLibraryScanner.asset(for: photo),
+                       let candidate = PhotoLibraryScanner.describe(asset) {
+                        found[photo] = candidate
+                    }
+                }
+            }
+            return found
+        }.value
+
         var taken = 0
         for (photo, finished) in byPhoto {
-            guard let asset = PhotoLibraryScanner.asset(for: photo),
-                  let candidate = PhotoLibraryScanner.describe(asset)
-            else { continue }
+            guard let candidate = described[photo] else { continue }
+            let asset = candidate.asset
             let liveGroupID = finished.lazy.compactMap(\.liveGroupID).first
             let keys = [photo] + (candidate.pairedVideo != nil && liveGroupID != nil
                 ? [BackupKey.pairedVideo(of: photo)] : [])
