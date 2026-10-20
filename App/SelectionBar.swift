@@ -214,7 +214,6 @@ struct SelectionBar<MoreContent: View>: View {
             fallback: .regularMaterial
         )
         .padding(.horizontal, 12)
-        .padding(.bottom, 4)
         .disabled(selection.count == 0 || selection.isWorking)
     }
 

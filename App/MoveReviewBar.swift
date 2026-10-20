@@ -156,7 +156,6 @@ struct MoveReviewBar: View {
         .glassCapsule(interactive: false, fallback: .regularMaterial)
         .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
         .padding(.horizontal, 10)
-        .padding(.bottom, 6)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .confirmationDialog(
             "Remove \(counted) from \(sourceName)?",

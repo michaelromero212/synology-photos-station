@@ -2183,12 +2183,19 @@ struct TimelineView: View {
                 libraryHeaderHeight: store.total > 0 ? libraryHeight : 0,
                 // The same two margins the SwiftUI grid sets as content margins,
                 // for the same reasons: clear of the floating bar at the top,
-                // clear of the tab bar at the bottom — plus whichever bar is
-                // standing in for the tab bar, which the SwiftUI grid got for
-                // free from `safeAreaInset` and this one measures.
+                // clear of the tab bar at the bottom — or of whichever bar is
+                // standing in for the tab bar, in its slot, if that one is
+                // taller. Which it measures, where the SwiftUI grid got it for
+                // free from `safeAreaInset`.
+                //
+                // The larger of the two, not both. Added together, starting a
+                // selection put a band of black, 57 points of it, between the
+                // newest row and the selection bar — the tab bar's clearance
+                // kept for a tab bar that had gone — and ending it took the
+                // band away again, so the library jumped twice.
                 topInset: windowTopInset + TopEdgeFade.barHeight,
-                bottomInset: WindowMetrics.bottomInset + FloatingTabBarMetrics.contentInset
-                    + bottomBarHeight,
+                bottomInset: WindowMetrics.bottomInset
+                    + max(FloatingTabBarMetrics.contentInset, bottomBarHeight),
                 progress: scrollProgress,
                 controller: gridController,
                 selection: selection,
@@ -2225,9 +2232,21 @@ struct TimelineView: View {
         }
         // Where the SwiftUI grid puts the same bar. The grid runs on beneath it;
         // its height comes back through `bottomBarHeight` as an inset.
+        //
+        // In the tab bar's own slot, measured from the bottom of the display
+        // the way the tab bar is (see `FloatingTabBar`): the same place offering
+        // something else, as in Photos. It sat seventeen points higher, on the
+        // safe area, and that height is what it asked the grid to clear.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) { bottomBar(store) }
                 .frame(maxWidth: .infinity)
+                // Only under a bar: an empty inset given a negative margin is
+                // an inset of negative height.
+                .padding(
+                    .bottom,
+                    selection.isActive || review != nil
+                        ? FloatingTabBarMetrics.bottomInset - WindowMetrics.bottomInset : 0
+                )
                 .background { HeightReader(height: $bottomBarHeight) }
         }
         .overlay(alignment: .trailing) {
