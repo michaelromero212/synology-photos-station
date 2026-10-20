@@ -4,29 +4,22 @@ import SwiftUI
 
 /// Search, scoped to one space.
 ///
-/// The screen is useful before anything is typed: it opens on the places this
-/// library actually has photos from, commonest first, with counts. That is the
-/// difference between a search box — which asks you to guess what the app
-/// knows — and a way in.
+/// Before anything is typed, the screen says how search works in a sentence and
+/// offers a few searches to start from: your recent ones, and a handful the
+/// library will answer — its two most photographed places, a few subjects of
+/// different kinds, a year (see `SearchSuggestionsResponse`). Each one fills
+/// in the field as it runs, so it teaches by example what typing can do.
 ///
-/// It shows a *handful*, not all of them, and that is the whole design. A
-/// library accumulates one entry per town anyone ever drove through, so the
-/// full list is a dozen genuinely useful rows followed by several hundred with
-/// a count of one. Ordering by count makes the top good and does nothing about
-/// the tail, which is most of the list. So the landing screen is bounded and
-/// the rest lives behind "All Places" — the shape Apple uses everywhere it has
-/// more content than screen.
+/// It used to open on two lists, a dozen things and a dozen places, and the
+/// things were Vision's labels in order of how often they appear: in a
+/// family's photos that's "Conveyance" (a vehicle), "Portal" (a door),
+/// furniture, windows and curtains. Twenty-five rows that read as noise, where
+/// Photos opens on recent searches and two suggestions.
 ///
-/// Typing searches the server rather than filtering what happens to be loaded.
-/// Filtering locally would have quietly meant search only worked on the twelve
-/// places already on screen.
-///
-/// Two lists. Places, filled in at import for every photo carrying GPS. And
-/// things: what this person's own iPhone recognized in their photos ("beach",
-/// "birthday cake", "dog"). Things are listed first because they're what
-/// people usually mean when they go looking for a moment. Submitting what was
-/// typed searches both, plus years and months, every word of which has to
-/// match: "beach 2024", "dog Culpeper", "july fireworks".
+/// Typing searches the server rather than filtering what happens to be loaded,
+/// and lists the places and things that match. Submitting what was typed
+/// searches places, things, years and months together, every word of which has
+/// to match: "beach 2024", "dog Culpeper", "july fireworks".
 @MainActor
 struct SearchView: View {
     @Bindable var session: AppSession
@@ -35,7 +28,8 @@ struct SearchView: View {
     /// What the results are for. A place picked from its list is matched as
     /// a place, exactly as before. Anything typed, or a thing picked, is read
     /// by the server word by word.
-    private enum Search: Hashable {
+    fileprivate typealias RecentSearch = Search
+    fileprivate enum Search: Hashable {
         case place(String)
         case text(String)
 
@@ -46,11 +40,18 @@ struct SearchView: View {
         }
     }
 
+    /// What matches what's being typed.
     @State private var things: [ThingSummary] = []
     @State private var places: [PlaceSummary] = []
-    /// How many distinct places exist, which is usually far more than `places`
-    /// holds. What the "All Places" row counts.
+    /// How many distinct places the library has. What the "All Places" row
+    /// counts.
     @State private var placeTotal = 0
+    /// What the landing screen offers to search. See `SearchSuggestion`.
+    @State private var suggestions: [SearchSuggestion] = []
+    /// Whether what's in a photo can be searched for. It can't for someone who
+    /// turned recognizing it off, and the how-to line shouldn't say it can.
+    @State private var recognizesContent = true
+    @State private var recents: [RecentSearches.Entry] = []
     /// On a Mac the window owns the query, because the field lives in the
     /// window's toolbar and is there whether or not you are looking at search
     /// results — so the text has to outlive this view. Everywhere else this
@@ -102,7 +103,7 @@ struct SearchView: View {
         // Not on macOS: the window put the field in its toolbar already, and a
         // second `.searchable` inside the detail pane would draw a second one.
         #if !os(macOS)
-        .searchable(text: $query, placement: Self.searchPlacement, prompt: "Places, things, years")
+        .searchable(text: $query, placement: Self.searchPlacement, prompt: "Search your photos")
         .onSubmit(of: .search) { choose(.text(query)) }
         #endif
         .onChange(of: query) { _, new in
@@ -115,11 +116,13 @@ struct SearchView: View {
         // screen happened to fetch.
         .task(id: query) {
             guard selected == nil else { return }
-            if !query.isEmpty {
+            if query.isEmpty {
+                await loadLanding()
+            } else {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
+                await loadMatches(for: query)
             }
-            await loadSuggestions(matching: query)
         }
         .navigationDestination(isPresented: $showAllPlaces) {
             AllPlacesView(session: session, space: space, total: placeTotal) { name in
@@ -129,7 +132,7 @@ struct SearchView: View {
         }
     }
 
-    // MARK: - Things and places
+    // MARK: - Before and while typing
 
     @ViewBuilder
     private var suggestionsList: some View {
@@ -140,12 +143,22 @@ struct SearchView: View {
             ContentUnavailableView(
                 "Can't Search Right Now", systemImage: "wifi.slash", description: Text(failure)
             )
-        } else if places.isEmpty, things.isEmpty, !query.isEmpty {
-            ContentUnavailableView.search(text: query)
+        } else if query.isEmpty {
+            landing
         } else if places.isEmpty, things.isEmpty {
+            ContentUnavailableView.search(text: query)
+        } else {
+            matches
+        }
+    }
+
+    /// How it works, recent searches, a few to try, and every place.
+    @ViewBuilder
+    private var landing: some View {
+        if suggestions.isEmpty, recents.isEmpty, placeTotal == 0 {
             // Not an error. A library of scans and screenshots has no
-            // coordinates in it, and a library not analyzed yet has no things,
-            // and saying so is more use than an empty list.
+            // coordinates or dates worth suggesting, and saying so is more use
+            // than an empty screen.
             ContentUnavailableView(
                 "Nothing to Search Yet",
                 systemImage: "magnifyingglass",
@@ -157,32 +170,53 @@ struct SearchView: View {
             )
         } else {
             List {
-                if !things.isEmpty {
-                    Section("Things") {
-                        ForEach(things) { thing in
-                            ThingRow(thing: thing) { choose(.text(thing.name)) }
-                        }
-                    }
+                Section {
+                    // Lined up with the headings under it.
+                    Text(hint)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                 }
 
-                if !places.isEmpty {
+                if !recents.isEmpty {
                     Section {
-                        ForEach(places) { place in
-                            PlaceRow(place: place) { choose(.place(place.name)) }
+                        ForEach(recents) { entry in
+                            RecentRow(entry: entry) { choose(entry.search) }
                         }
                     } header: {
-                        // "Most Photographed" only when it is a selection rather
-                        // than the lot; over twelve places it explains why the
-                        // list stops, and under it the heading would be a lie.
-                        Text(query.isEmpty && placeTotal > places.count
-                             ? "Most Photographed Places" : "Places")
+                        HStack {
+                            Text("Recent")
+                            Spacer()
+                            Button("Clear") {
+                                RecentSearches.clear(for: session.user?.id)
+                                recents = []
+                            }
+                            .font(.subheadline)
+                            #if !os(tvOS)
+                            .buttonStyle(.borderless)
+                            #endif
+                        }
                     }
                 }
 
-                // The way to everything the landing screen left out, and it
-                // says how much that is — a bare "All Places" gives no sense of
-                // whether the next screen holds twenty rows or eight hundred.
-                if query.isEmpty, placeTotal > places.count {
+                if !suggestions.isEmpty {
+                    Section("Try") {
+                        FlowLayout(spacing: 8) {
+                            ForEach(suggestions) { suggestion in
+                                SuggestionChip(suggestion: suggestion) {
+                                    choose(suggestion.kind == .place
+                                        ? .place(suggestion.query) : .text(suggestion.query))
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
+                    }
+                }
+
+                // Every place, A to Z, for anyone who'd rather browse than type.
+                if placeTotal > 0 {
                     Section {
                         Button {
                             showAllPlaces = true
@@ -207,7 +241,42 @@ struct SearchView: View {
                 }
             }
             .placesListStyle()
+            #if os(iOS)
+            // A sentence, a few chips and one row: grouped list spacing made
+            // them read as four separate screens, the sentence a long way
+            // under the field it explains.
+            .listSectionSpacing(.compact)
+            .contentMargins(.top, 8, for: .scrollContent)
+            #endif
         }
+    }
+
+    /// What search understands, in one line, with an example that mixes kinds.
+    private var hint: String {
+        recognizesContent
+            ? "Search by place, what's in a photo, or a year. Mix them, like “beach 2024”."
+            : "Search by place or by year. Mix them, like “Florida 2024”."
+    }
+
+    /// The places and things that match what's typed.
+    private var matches: some View {
+        List {
+            if !things.isEmpty {
+                Section("Things") {
+                    ForEach(things) { thing in
+                        ThingRow(thing: thing) { choose(.text(thing.name)) }
+                    }
+                }
+            }
+            if !places.isEmpty {
+                Section("Places") {
+                    ForEach(places) { place in
+                        PlaceRow(place: place) { choose(.place(place.name)) }
+                    }
+                }
+            }
+        }
+        .placesListStyle()
     }
 
     // MARK: - Results
@@ -266,27 +335,57 @@ struct SearchView: View {
 
     // MARK: - Loading
 
-    /// Fetches the landing screen's handfuls, or the matches for what's typed.
-    private func loadSuggestions(matching query: String = "") async {
+    /// What the screen offers before anything is typed.
+    private func loadLanding() async {
         guard let client = session.client else { return }
-        // Only the very first load gets a spinner. Re-running this on every
-        // keystroke would otherwise blank the list under the cursor.
-        if places.isEmpty, things.isEmpty { isLoadingPlaces = true }
+        recents = RecentSearches.load(for: session.user?.id)
+        // Only the very first load gets a spinner. Coming back to the empty
+        // field shouldn't blank what's there.
+        if suggestions.isEmpty, placeTotal == 0 { isLoadingPlaces = true }
         defer { isLoadingPlaces = false }
-        // More rows while searching: a match list that stops at twelve looks
-        // like the answer isn't there.
-        async let placesAnswer = client.places(
-            spaceID: space.id, matching: query, limit: query.isEmpty ? 12 : 60
-        )
+        await session.loadCapabilities()
+        do {
+            if session.supports(ServerCapability.searchSuggestions) {
+                async let offered = client.searchSuggestions(spaceID: space.id)
+                // Only the count, for the All Places row.
+                async let counted = client.places(spaceID: space.id, limit: 1)
+                let response = try await offered
+                suggestions = response.suggestions
+                recognizesContent = response.recognizesContent
+                placeTotal = try await counted.total
+            } else {
+                // A NAS from before suggestions: its most photographed places,
+                // which every NAS can list. Its things are Vision's raw labels,
+                // which is what this screen stopped offering.
+                let response = try await client.places(spaceID: space.id, limit: 3)
+                suggestions = response.places.map { place in
+                    SearchSuggestion(
+                        kind: .place,
+                        title: place.name.split(separator: ",").first.map(String.init) ?? place.name,
+                        query: place.name
+                    )
+                }
+                placeTotal = response.total
+                let things = try? await client.things(spaceID: space.id, limit: 1)
+                recognizesContent = (things?.total ?? 0) > 0
+            }
+            failure = nil
+        } catch {
+            failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
+        }
+    }
+
+    /// The places and things matching what's typed.
+    private func loadMatches(for query: String) async {
+        guard let client = session.client else { return }
+        // More rows than a landing list would show: a match list that stops at
+        // twelve looks like the answer isn't there.
+        async let placesAnswer = client.places(spaceID: space.id, matching: query, limit: 60)
         // Quietly empty when it fails. A NAS that predates things, or a
         // library not analyzed yet, still searches by place.
-        let thingsAnswer = try? await client.things(
-            spaceID: space.id, matching: query, limit: query.isEmpty ? 12 : 30
-        )
+        let thingsAnswer = try? await client.things(spaceID: space.id, matching: query, limit: 30)
         do {
-            let response = try await placesAnswer
-            places = response.places
-            placeTotal = response.total
+            places = try await placesAnswer.places
             things = thingsAnswer?.things ?? []
             failure = nil
         } catch {
@@ -306,6 +405,19 @@ struct SearchView: View {
         case .place: .place(trimmed)
         case .text: .text(trimmed)
         }
+        if case .place = chosen {
+            RecentSearches.record(.init(text: trimmed, isPlace: true), for: session.user?.id)
+        } else {
+            RecentSearches.record(.init(text: trimmed, isPlace: false), for: session.user?.id)
+        }
+        #if os(iOS)
+        // The keyboard down, so the photos have the screen. Picked from a list
+        // or a chip with the field still focused, it stayed up over half of
+        // them. The field keeps what was searched for.
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil
+        )
+        #endif
         selected = chosen
         results = []
         total = 0
@@ -342,6 +454,173 @@ struct SearchView: View {
             nextOffset = nil
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
         }
+    }
+}
+
+/// Searches made on this device, newest first, for the landing screen.
+///
+/// Kept on the device rather than the NAS: they're a convenience for whoever
+/// holds this phone, not part of the library. Per account, and forgotten on
+/// signing out (see `AppSession.signOut`), because a search says what someone
+/// went looking for.
+@MainActor
+enum RecentSearches {
+    struct Entry: Codable, Hashable, Identifiable {
+        let text: String
+        /// A place picked from a list, rather than words typed or a chip
+        /// tapped. Searched as a place again.
+        let isPlace: Bool
+
+        var id: String { (isPlace ? "place:" : "text:") + text.lowercased() }
+    }
+
+    static let limit = 5
+    private static let prefix = "search.recent."
+
+    static func load(for userID: UUID?) -> [Entry] {
+        guard let userID,
+              let data = UserDefaults.standard.data(forKey: prefix + userID.uuidString)
+        else { return [] }
+        return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+    }
+
+    /// First, and only once: searching for the same thing again moves it up.
+    static func record(_ entry: Entry, for userID: UUID?) {
+        guard let userID else { return }
+        var entries = load(for: userID).filter { $0.id != entry.id }
+        entries.insert(entry, at: 0)
+        save(Array(entries.prefix(limit)), for: userID)
+    }
+
+    static func clear(for userID: UUID?) {
+        guard let userID else { return }
+        UserDefaults.standard.removeObject(forKey: prefix + userID.uuidString)
+    }
+
+    /// Every account's, for signing out.
+    static func forgetAll() {
+        for key in UserDefaults.standard.dictionaryRepresentation().keys
+        where key.hasPrefix(prefix) {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private static func save(_ entries: [Entry], for userID: UUID) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: prefix + userID.uuidString)
+    }
+}
+
+private extension RecentSearches.Entry {
+    var search: SearchView.RecentSearch {
+        isPlace ? .place(text) : .text(text)
+    }
+}
+
+/// A search made before, to make again.
+private struct RecentRow: View {
+    let entry: RecentSearches.Entry
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22)
+                Text(entry.text).foregroundStyle(.primary)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Search \(entry.text) again")
+    }
+}
+
+/// One search to try, as a capsule: a pin, a sparkle or a calendar for what
+/// kind it is, and what it searches for.
+private struct SuggestionChip: View {
+    let suggestion: SearchSuggestion
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .foregroundStyle(.tint)
+                Text(suggestion.title)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(.quaternary))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Search \(suggestion.title)")
+    }
+
+    private var symbol: String {
+        switch suggestion.kind {
+        case .place: "mappin.and.ellipse"
+        case .thing: "sparkles"
+        case .year: "calendar"
+        }
+    }
+}
+
+/// Lays its views out in rows, starting a new one when the next won't fit.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rows = arrange(subviews, in: width)
+        let height = rows.last.map { $0.y + $0.height } ?? 0
+        let widest = rows.map(\.width).max() ?? 0
+        return CGSize(width: proposal.width ?? widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for row in arrange(subviews, in: bounds.width) {
+            for item in row.items {
+                subviews[item.index].place(
+                    at: CGPoint(x: bounds.minX + item.x, y: bounds.minY + row.y),
+                    proposal: ProposedViewSize(item.size)
+                )
+            }
+        }
+    }
+
+    private struct Row {
+        var items: [(index: Int, x: CGFloat, size: CGSize)] = []
+        var y: CGFloat = 0
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func arrange(_ subviews: Subviews, in width: CGFloat) -> [Row] {
+        var rows: [Row] = [Row()]
+        for index in subviews.indices {
+            // Never wider than the row, so a long name truncates rather than
+            // running off the edge.
+            let size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            var row = rows.removeLast()
+            if !row.items.isEmpty, row.width + spacing + size.width > width {
+                let next = Row(y: row.y + row.height + spacing)
+                rows.append(row)
+                row = next
+            }
+            let x = row.items.isEmpty ? 0 : row.width + spacing
+            row.items.append((index, x, size))
+            row.width = x + size.width
+            row.height = max(row.height, size.height)
+            rows.append(row)
+        }
+        return rows.filter { !$0.items.isEmpty }
     }
 }
 

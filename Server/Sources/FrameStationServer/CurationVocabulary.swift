@@ -196,14 +196,69 @@ enum CurationVocabulary {
         return words.sorted()
     }
 
-    /// Labels true of nearly every photo, so not worth offering as a
-    /// suggestion. Typing one still searches for it.
-    static let tooGeneral: Set<String> = [
-        "outdoor", "sky", "structure", "material", "textile", "people", "adult",
-        "clothing", "land", "plant", "machine", "liquid", "water", "wood_processed",
-        "interior_room", "building", "cloudy", "blue_sky", "vegetation", "grass",
-        "foliage", "tree",
+    /// What search offers before anything is typed: things people look for in
+    /// a family's photos, in groups so the offer can be varied — a pet, a
+    /// trip, an occasion, rather than three kinds of dessert.
+    ///
+    /// A list of what to offer rather than of what not to. Ordered by how
+    /// often they appear, Vision's labels for a family's photographs open on
+    /// what's in every room: "conveyance" (its word for a vehicle), "portal"
+    /// (a door), furniture, windows, curtains and cabinets, which is what the
+    /// search screen used to list. Of 1,303 labels, these are the ones worth
+    /// suggesting. Typing any label still finds it.
+    ///
+    /// Tags where a tag exists ("birthday", "beach"), since one takes more
+    /// than a single label to earn. People are left out: they're in nearly
+    /// every photo, and who someone is isn't what Vision says.
+    static let suggestionGroups: [[String]] = [
+        // Occasions.
+        ["birthday", "christmas", "halloween", "easter", "wedding", "graduation",
+         "fireworks", "concert", "parade"],
+        // Days out.
+        ["beach", "pool", "snow", "hiking", "camping", "boating", "amusement_park",
+         "zoo", "aquarium", "museum", "playground", "park", "farm", "fishing",
+         "skiing", "sledding"],
+        // Sports and the like.
+        ["sports", "soccer", "baseball", "softball", "basketball", "football",
+         "volleyball", "hockey", "tennis", "golf", "gymnastics", "dancing", "ballet",
+         "swimming", "cycling", "surfing", "skateboarding", "martial_arts"],
+        // Animals.
+        ["dog", "cat", "horse", "bird", "fish", "cow", "sheep", "goat", "pig", "deer",
+         "rabbit", "squirrel", "butterfly", "turtle", "dolphin", "whale", "elephant",
+         "giraffe", "zebra", "lion", "tiger", "bear", "penguin", "flamingo", "owl",
+         "eagle", "frog", "snake", "lizard", "llama"],
+        // Outdoors.
+        ["sunset_sunrise", "mountain", "ocean", "lake", "river", "waterfall", "forest",
+         "flower", "garden", "rainbow", "night_sky", "moon", "desert", "canyon",
+         "island", "volcano", "glacier", "cliff", "cave", "aurora"],
+        // Food and drink.
+        ["meal", "food", "cake", "pizza", "ice_cream", "dessert", "cookie", "cupcake",
+         "pancake", "sushi", "hamburger", "pasta", "salad", "fruit", "bread",
+         "seafood", "taco", "donut", "pie", "coffee", "wine", "cocktail", "beer"],
+        // Getting around.
+        ["car", "boat", "airplane", "train", "bicycle", "motorcycle", "sailboat",
+         "cruise_ship", "helicopter", "tractor", "firetruck", "bus"],
+        // Sights.
+        ["castle", "lighthouse", "bridge", "monument", "statue", "fountain",
+         "ferris_wheel", "rollercoaster", "carousel", "stadium", "cityscape",
+         "skyscraper", "pier", "ruins"],
     ]
+
+    static let suggestable: Set<String> = Set(suggestionGroups.joined())
+
+    /// The commonest suggestable term of each group, the commonest groups
+    /// first, at most `limit` of them. `counts` is photos per term.
+    static func suggestions(from counts: [String: Int], limit: Int) -> [String] {
+        let best = suggestionGroups.compactMap { group in
+            group.compactMap { term in counts[term].map { (term: term, count: $0) } }
+                // Fewest photos is least; on a tie, the later name.
+                .max { $0.count != $1.count ? $0.count < $1.count : $0.term > $1.term }
+        }
+        return best
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.term < $1.term }
+            .prefix(limit)
+            .map(\.term)
+    }
 
     /// Words people type for a term that Vision or the vocabulary spells
     /// another way.
@@ -213,8 +268,14 @@ enum CurationVocabulary {
         "sunrise": "sunset_sunrise", "ski": "skiing",
     ]
 
+    /// Names that Vision's own spelling of a term doesn't give.
+    static let displayNames: [String: String] = [
+        "sunset_sunrise": "Sunset",
+    ]
+
     /// `birthday_cake` → "Birthday cake".
     static func spoken(_ term: String) -> String {
+        if let name = displayNames[term] { return name }
         let words = term.replacingOccurrences(of: "_", with: " ")
         return words.prefix(1).uppercased() + words.dropFirst()
     }

@@ -47,6 +47,7 @@ struct HealthController: RouteCollection {
                 ServerCapability.reportAndBlock,
                 ServerCapability.peopleAlbums,
                 ServerCapability.deletedPreview,
+                ServerCapability.searchSuggestions,
             ]
         )
     }

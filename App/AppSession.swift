@@ -379,6 +379,8 @@ final class AppSession {
         TimelineSnapshotStore.clearAll()
         AlbumsSnapshotStore.clearAll()
         SessionSnapshotStore.clear()
+        // What this account went looking for. Not for whoever signs in next.
+        RecentSearches.forgetAll()
         if let loader { Task { await loader.clearDiskCache() } }
         dsmPassword = ""
         dsmOTPCode = ""

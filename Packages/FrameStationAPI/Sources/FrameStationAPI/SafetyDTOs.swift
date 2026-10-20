@@ -14,6 +14,9 @@ public enum ServerCapability {
     /// preview and its stream are served until it's purged, not only its
     /// thumbnail.
     public static let deletedPreview = "recently-deleted-preview"
+    /// Search suggests a few searches before anything is typed. See
+    /// `SearchSuggestionsResponse`.
+    public static let searchSuggestions = "search-suggestions"
 }
 
 // MARK: - Reports

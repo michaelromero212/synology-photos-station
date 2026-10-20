@@ -85,3 +85,45 @@ public struct SearchResults: Codable, Sendable, Hashable {
         self.nextOffset = nextOffset
     }
 }
+
+/// One search the search screen offers before anything is typed.
+public struct SearchSuggestion: Codable, Sendable, Hashable, Identifiable {
+    public enum Kind: String, Codable, Sendable {
+        case place, thing, year
+
+        /// A kind this app doesn't know yet searches as text, which every
+        /// kind can.
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Kind(rawValue: raw) ?? .thing
+        }
+    }
+
+    public let kind: Kind
+    /// What the chip says: "Linton Hall".
+    public let title: String
+    /// What it searches for: "Linton Hall, Virginia". A place's is a place
+    /// name; everything else's is searched as typed text.
+    public let query: String
+
+    public var id: String { "\(kind.rawValue)|\(query)" }
+
+    public init(kind: Kind, title: String, query: String) {
+        self.kind = kind
+        self.title = title
+        self.query = query
+    }
+}
+
+public struct SearchSuggestionsResponse: Codable, Sendable, Hashable {
+    /// Places first, then things, then a year.
+    public let suggestions: [SearchSuggestion]
+    /// Whether what's in a photo can be searched for, which it can't for
+    /// someone who has turned off recognizing it.
+    public let recognizesContent: Bool
+
+    public init(suggestions: [SearchSuggestion], recognizesContent: Bool) {
+        self.suggestions = suggestions
+        self.recognizesContent = recognizesContent
+    }
+}

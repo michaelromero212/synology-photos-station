@@ -241,6 +241,23 @@ has "Places lists Walt Disney World" "Walt Disney World, Florida:$DISNEY" "$PLAC
 has "and the Outer Banks" "Outer Banks, North Carolina:$OBX" "$PLACES"
 lacks "not the suburbs its photos are nearest" "Horizon West" "$PLACES"
 
+echo "Suggestions"
+SG=$(curl -s "$API/v1/spaces/$SPACE/search/suggestions" -H "$AUTH")
+TOP=$(curl -s "$API/v1/spaces/$SPACE/places?limit=1" -H "$AUTH" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['places'][0]['name'])")
+# suggested <python test on s> → how many suggestions pass it
+suggested(){ echo "$SG" | python3 -c "import sys,json; print(sum(1 for s in json.load(sys.stdin)['suggestions'] if $1))"; }
+check "the first is the most photographed place" "1" "$(suggested "s['kind'] == 'place' and s['query'] == '$TOP'")"
+check "shown by the short form of its name" "1" "$(suggested "s['title'] == '${TOP%%,*}'")"
+check "two places at most" "2" "$(suggested "s['kind'] == 'place'")"
+PICK=$([ "$OBX" -gt 21 ] && echo Beach || echo "Amusement park")
+check "the commonest day out is suggested" "1" "$(suggested "s['title'] == '$PICK'")"
+check "and only one, so the rest can be something else" "1" \
+  "$(suggested "s['title'] in ('Beach', 'Amusement park')")"
+check "a suggested place finds its photos" "$(curl -s "$API/v1/spaces/$SPACE/places?limit=1" -H "$AUTH" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['places'][0]['count'])")" \
+  "$(search "place=$TOP")"
+
 echo "Moving a photo"
 locate(){ curl -s -X PUT "$API/v1/spaces/$SPACE/assets/$1/location" -H "$AUTH" -H 'Content-Type: application/json' \
   -d "{\"latitude\":$2,\"longitude\":$3}" | jq '["placeName"]'; }

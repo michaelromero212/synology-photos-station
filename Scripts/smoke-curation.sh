@@ -155,11 +155,22 @@ echo "Search by what's in a photo"
 # total for a typed search
 found(){ curl -s -G "$API/v1/spaces/$SP/search" -H "$A" --data-urlencode "q=$1" | jq '["total"]'; }
 TH=$(curl -s "$API/v1/spaces/$SP/things" -H "$A")
-has "Things lists what the photos show" "birthday_cake" "$TH"
-has "with a name to show" "Birthday cake" "$TH"
+has "Things lists what the photos show" '"term":"birthday"' "$TH"
+has "with a name to show" '"name":"Birthday"' "$TH"
 lacks "Things leaves out what nearly every photo shows" '"outdoor"' "$TH"
+lacks "and what nobody looks for" '"candle"' "$TH"
 has "but typing it still finds it" "outdoor" "$(curl -s "$API/v1/spaces/$SP/things?q=out" -H "$A")"
+has "typing finds any label" '"birthday_cake"' "$(curl -s "$API/v1/spaces/$SP/things?q=cake" -H "$A")"
 lacks "typing filters the list" "christmas" "$(curl -s "$API/v1/spaces/$SP/things?q=cake" -H "$A")"
+SG=$(curl -s "$API/v1/spaces/$SP/search/suggestions" -H "$A")
+check "suggestions are a capability" "True" \
+  "$(curl -s "$API/health" | jq '["capabilities"].__contains__("search-suggestions")')"
+has "suggestions offer what the photos show" '"title":"Birthday"' "$SG"
+has "and a year, the latest before this one" '"query":"2023"' "$SG"
+lacks "never what nobody looks for" "Candle" "$SG"
+check "and say what's in a photo can be searched" "True" "$(echo "$SG" | jq '["recognizesContent"]')"
+check "someone else can't ask for them" "404" "$(code "$API/v1/spaces/$SP/search/suggestions" -H "$A2")"
+check "each one finds photos" "4" "$(found Birthday)"
 check "a tag finds its photos" "4" "$(found birthday)"
 check "two words that are one label" "4" "$(found 'birthday cake')"
 check "a plural finds the singular" "4" "$(found candles)"
@@ -175,6 +186,10 @@ check "their own Things is empty" "0" \
   "$(curl -s "$API/v1/spaces/$SP2/things" -H "$A2" | jq '["total"]')"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
 check "curation off: Things is empty" "0" "$(curl -s "$API/v1/spaces/$SP/things" -H "$A" | jq '["total"]')"
+SG=$(curl -s "$API/v1/spaces/$SP/search/suggestions" -H "$A")
+lacks "curation off: no subjects suggested" "Birthday" "$SG"
+check "curation off: and it says so" "False" "$(echo "$SG" | jq '["recognizesContent"]')"
+has "curation off: a year still is" '"kind":"year"' "$SG"
 check "curation off: a word means only a place" "0" "$(found birthday)"
 check "curation off: a year still works" "4" "$(found 2023)"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null

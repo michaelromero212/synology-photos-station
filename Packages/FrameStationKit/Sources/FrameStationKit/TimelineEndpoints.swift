@@ -108,6 +108,12 @@ extension FrameStationClient {
         return try await get(path)
     }
 
+    /// A few searches the library will answer, for the search screen to offer
+    /// before anything is typed. Needs `ServerCapability.searchSuggestions`.
+    public func searchSuggestions(spaceID: UUID) async throws -> SearchSuggestionsResponse {
+        try await get("v1/spaces/\(spaceID)/search/suggestions")
+    }
+
     // MARK: - Collections
 
     /// The whole Albums page in one request.

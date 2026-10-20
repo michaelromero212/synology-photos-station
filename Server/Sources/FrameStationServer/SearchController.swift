@@ -6,6 +6,7 @@ import Vapor
 extension PlacesResponse: @retroactive Content {}
 extension ThingsResponse: @retroactive Content {}
 extension SearchResults: @retroactive Content {}
+extension SearchSuggestionsResponse: @retroactive Content {}
 
 /// Search: where a photo was taken, when, and what's in it.
 ///
@@ -24,6 +25,7 @@ struct SearchController: RouteCollection {
         protected.get("spaces", ":spaceID", "places", use: places)
         protected.get("spaces", ":spaceID", "things", use: things)
         protected.get("spaces", ":spaceID", "search", use: search)
+        protected.get("spaces", ":spaceID", "search", "suggestions", use: suggestions)
     }
 
     // MARK: - Things
@@ -33,9 +35,10 @@ struct SearchController: RouteCollection {
     ///
     /// Only what the caller's own devices recognized, so a photo someone else
     /// shared into a library shows up here once one of the caller's devices
-    /// has analyzed a copy. Labels true of nearly everything ("outdoor", "sky")
-    /// are left out of the landing list, since offering them helps nobody, but
-    /// typing one still finds it.
+    /// has analyzed a copy. With nothing typed, only what someone might look
+    /// for (see `CurationVocabulary.suggestionGroups`): an app from before the
+    /// search screen's suggestions lists these, and it used to open on
+    /// "Conveyance", "Portal" and "Furniture". Typing still finds any label.
     @Sendable
     func things(req: Request) async throws -> ThingsResponse {
         let device = try req.auth.require(AuthenticatedDevice.self)
@@ -55,7 +58,9 @@ struct SearchController: RouteCollection {
         // "birthday cake" is stored as birthday_cake.
         let normalized = typed.replacingOccurrences(of: " ", with: "_")
         let pattern = normalized.isEmpty ? "%" : "%\(escapeForLike(normalized))%"
-        let skipped = typed.isEmpty ? CurationVocabulary.tooGeneral.sorted() : []
+        let offered: SQLQueryString = typed.isEmpty
+            ? "AND t.term = ANY(\(bind: CurationVocabulary.suggestable.sorted())::text[])"
+            : ""
 
         struct ThingRow: Decodable { let term: String; let count: Int }
         let rows = try await req.sql.raw("""
@@ -70,7 +75,7 @@ struct SearchController: RouteCollection {
               AND \(unsafeRaw: TimelineController.visible)
               AND \(Hidden.excluded(for: device.userID))
               AND t.term LIKE \(bind: pattern)
-              AND NOT (t.term = ANY(\(bind: skipped)::text[]))
+              \(offered)
             GROUP BY t.term
             ORDER BY count DESC, t.term
             LIMIT \(bind: limit)
@@ -89,7 +94,7 @@ struct SearchController: RouteCollection {
               AND \(unsafeRaw: TimelineController.visible)
               AND \(Hidden.excluded(for: device.userID))
               AND t.term LIKE \(bind: pattern)
-              AND NOT (t.term = ANY(\(bind: skipped)::text[]))
+              \(offered)
             """).first(decoding: CountRow.self)?.total ?? 0
 
         return ThingsResponse(
@@ -98,6 +103,103 @@ struct SearchController: RouteCollection {
             },
             total: total
         )
+    }
+
+    // MARK: - Suggestions
+
+    /// What the search screen offers before anything is typed: a few searches
+    /// this library will answer, each a different kind, so they show what can
+    /// be searched for as well as being somewhere to start.
+    ///
+    /// The most photographed places, the commonest subjects from different
+    /// groups (see `CurationVocabulary.suggestions`), and a recent year. Every
+    /// one finds photos, because each comes from counting them.
+    @Sendable
+    func suggestions(req: Request) async throws -> SearchSuggestionsResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        try await SpaceAccess.requireMembership(
+            spaceID: spaceID, userID: device.userID, on: req.sql
+        )
+        var suggestions: [SearchSuggestion] = []
+
+        let place = TimelineController.placeName
+        let places = try await req.sql.raw("""
+            SELECT \(unsafeRaw: place) AS name, count(*)::int AS count
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: place) IS NOT NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
+            GROUP BY 1
+            ORDER BY count DESC, name ASC
+            LIMIT \(bind: Self.suggestedPlaces)
+            """).all(decoding: PlaceRow.self)
+        suggestions += places.map {
+            SearchSuggestion(kind: .place, title: Self.shortName(of: $0.name), query: $0.name)
+        }
+
+        // What's in the photos, for someone whose devices look.
+        let recognizes = try await CurationController.isEnabled(userID: device.userID, on: req.sql)
+        if recognizes {
+            struct ThingRow: Decodable { let term: String; let count: Int }
+            let counted = try await req.sql.raw("""
+                SELECT t.term, count(*)::int AS count
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                JOIN media_observations o
+                  ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
+                CROSS JOIN LATERAL unnest(o.terms) AS t(term)
+                WHERE sa.space_id = \(bind: spaceID)
+                  AND sa.deleted_at IS NULL
+                  AND \(unsafeRaw: TimelineController.visible)
+                  AND \(Hidden.excluded(for: device.userID))
+                  AND t.term = ANY(\(bind: CurationVocabulary.suggestable.sorted())::text[])
+                GROUP BY t.term
+                HAVING count(*) >= \(bind: Self.suggestedThingMinimum)
+                """).all(decoding: ThingRow.self)
+            let counts = Dictionary(counted.map { ($0.term, $0.count) }, uniquingKeysWith: max)
+            suggestions += CurationVocabulary.suggestions(from: counts, limit: Self.suggestedThings)
+                .map { term in
+                    let name = CurationVocabulary.spoken(term)
+                    return SearchSuggestion(kind: .thing, title: name, query: name)
+                }
+        }
+
+        // Last year, or the latest before it with photos. A year shows that
+        // years can be searched; this one is recent enough to remember.
+        struct YearRow: Decodable { let year: Int }
+        let years = try await req.sql.raw("""
+            SELECT DISTINCT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID)
+              AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND \(Hidden.excluded(for: device.userID))
+            ORDER BY 1 DESC
+            """).all(decoding: YearRow.self)
+        let thisYear = Calendar(identifier: .gregorian).component(.year, from: Date())
+        if let year = years.first(where: { $0.year < thisYear }) ?? years.first {
+            let text = String(year.year)
+            suggestions.append(SearchSuggestion(kind: .year, title: text, query: text))
+        }
+
+        return SearchSuggestionsResponse(suggestions: suggestions, recognizesContent: recognizes)
+    }
+
+    static let suggestedPlaces = 2
+    static let suggestedThings = 3
+    /// Fewer than this and a subject may be one photo Vision misread.
+    static let suggestedThingMinimum = 3
+
+    /// "Linton Hall, Virginia" → "Linton Hall": short enough for a chip. The
+    /// search itself is for the whole name.
+    static func shortName(of place: String) -> String {
+        place.split(separator: ",", maxSplits: 1).first
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? place
     }
 
     // MARK: - Places
