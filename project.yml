@@ -213,6 +213,15 @@ targets:
       - package: FrameStationKit
         product: FrameStationKit
       - target: FrameStation-BackgroundUpload
+        # Copied into the app itself rather than through the products folder,
+        # where XcodeGen puts ExtensionKit extensions. An archive builds the
+        # app elsewhere and leaves only a link to it there, and Xcode's check
+        # that the extension sits in the app's Extensions folder doesn't follow
+        # the link: it warned on every archive, though the extension was in
+        # place.
+        copy:
+          destination: wrapper
+          subpath: Extensions
 
   # ---------------------------------------------------------------------------
   # iOS background upload extension: backs up new photos while the app is
