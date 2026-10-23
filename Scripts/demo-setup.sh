@@ -37,6 +37,9 @@ field(){ sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
 
 [ "$(id -u)" = 0 ] || die "Run with sudo: Docker on DSM needs root."
 [ -f docker-compose.yml ] || die "No docker-compose.yml here. Copy Demo/docker-compose.yml in first."
+# Without it Docker mounts an empty folder in its place, and nothing answers.
+[ -f edge.conf ] || die "No edge.conf here. Copy Demo/edge.conf in first."
+[ -f demo-isolation-check.sh ] || die "No demo-isolation-check.sh here. Copy Scripts/demo-isolation-check.sh in first."
 grep -q '^POSTGRES_PASSWORD=..*' .env 2>/dev/null \
   || die "No POSTGRES_PASSWORD in .env. Make a new one; never the family server's."
 ls seed/* >/dev/null 2>&1 || die "No sample photos in seed/."
@@ -44,7 +47,7 @@ ls seed/* >/dev/null 2>&1 || die "No sample photos in seed/."
 say "Folders"
 mkdir -p data pgdata
 # The server runs as the image's own user, which has to be able to write here.
-compose pull -q server db
+compose pull -q
 OWNER_IDS=$(compose run --rm --no-deps -T --entrypoint sh server -c 'echo "$(id -u):$(id -g)"' | tr -d '\r')
 chown -R "$OWNER_IDS" data
 # The chmod is what makes the chown count. A folder made inside a shared
@@ -73,6 +76,11 @@ compose up -d
 for _ in $(seq 1 120); do curl -sf "$API/health" >/dev/null && break; sleep 1; done
 curl -sf "$API/health" >/dev/null || die "The server didn't answer on $API. See: sudo docker compose logs server"
 echo "  $(curl -s "$API/health")"
+
+say "Checking it can't reach anything else"
+# A reviewer gets a code to this server and nothing more: no DSM, no other
+# folder, no LAN, no internet, even from inside it. Proven, not assumed.
+bash "$DIR/demo-isolation-check.sh" || die "The demo server isn't isolated. Fix that before anyone gets a code."
 
 OWNER_ID=""; OWNER_TOKEN=""; LIBRARY_ID=""
 # shellcheck disable=SC1090

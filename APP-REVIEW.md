@@ -16,6 +16,14 @@ its own folders mounted, has no DSM sign-in and no File Station tree, and can't
 reach the family's library. `Demo/docker-compose.yml` says what it is and isn't
 given, and why.
 
+It can't reach anything else either. The server and its database sit on a
+Docker network with no way out: no route to DSM, SSH, file sharing, the
+family's server, the LAN or the internet, so even someone who broke into the
+server itself would find nothing beyond its own database. Its one way in is a
+small pass-through (`Demo/edge.conf`) that DSM's reverse proxy talks to.
+`Scripts/demo-isolation-check.sh` proves it from inside the running server, and
+the setup won't finish without it passing.
+
 Reviewers sign in with an invite code that joins them to a shared library,
 **Demo Family**, whose photos were added by **Sam (Demo)**. That's what lets them
 try reporting and blocking: both need photos someone else added.
@@ -34,12 +42,15 @@ try reporting and blocking: both need photos someone else added.
    ssh nas 'mkdir -p /volume1/docker/framestation-demo/seed'
    ```
 
+   `scp` gets "Connection closed" from this NAS, so the files go through `tar`
+   over `ssh` instead:
+
    ```bash
-   scp Demo/docker-compose.yml Scripts/demo-setup.sh nas:/volume1/docker/framestation-demo/
+   COPYFILE_DISABLE=1 tar -cf - -C Demo docker-compose.yml edge.conf -C ../Scripts demo-setup.sh demo-isolation-check.sh | ssh nas 'tar -xf - -C /volume1/docker/framestation-demo'
    ```
 
    ```bash
-   scp ~/Desktop/Demo\ Photos/* nas:/volume1/docker/framestation-demo/seed/
+   COPYFILE_DISABLE=1 tar -cf - -C ~/Desktop/Demo\ Photos . | ssh nas 'tar -xf - -C /volume1/docker/framestation-demo/seed'
    ```
 
 3. **Give it its own database password**, never the family server's:
@@ -48,9 +59,10 @@ try reporting and blocking: both need photos someone else added.
    ssh nas 'cd /volume1/docker/framestation-demo && umask 077 && echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > .env'
    ```
 
-4. **Run the setup.** It pulls the image, starts the server, makes Sam and Demo
-   Family, imports the photos, and ends by printing the reviewer code. That code
-   goes in APP-REVIEW.local.md and in App Store Connect.
+4. **Run the setup.** It pulls the images, starts the server, checks it can't
+   reach anything else, makes Sam and Demo Family, imports the photos, and
+   ends by printing the reviewer code. That code goes in APP-REVIEW.local.md
+   and in App Store Connect.
 
    ```bash
    ssh -t nas 'cd /volume1/docker/framestation-demo && sudo bash demo-setup.sh'
@@ -89,6 +101,14 @@ try reporting and blocking: both need photos someone else added.
   ```bash
   ssh -t nas 'cd /volume1/docker/framestation-demo && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose up -d'
   ```
+
+- **Check it's still sealed off**, after any change to it or to Docker:
+
+  ```bash
+  ssh -t nas 'cd /volume1/docker/framestation-demo && sudo bash demo-isolation-check.sh'
+  ```
+
+  Every line should say "blocked" except the two that say it answers.
 
 - **A fresh code**: run the setup again. It keeps Sam, Demo Family and the
   photos, and prints a new code. Codes last ninety days.

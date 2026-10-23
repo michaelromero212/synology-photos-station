@@ -1,14 +1,18 @@
 # A second FrameStation for App Review: sample photos only, its own database,
-# its own folder, its own address. Nothing in it can reach the family's.
+# its own folder, its own address. Nothing in it can reach the family's server,
+# and nothing in it can reach anything else either: not DSM, not another folder
+# on the NAS, not the LAN, not the internet.
 #
 # Lives in its own folder on the NAS, beside the real one rather than inside
 # it, with its own .env:
 #
 #   /volume1/docker/framestation-demo/
-#     docker-compose.yml   this file
-#     .env                 POSTGRES_PASSWORD=<a new one, not the family's>
-#     demo-setup.sh        Scripts/demo-setup.sh
-#     seed/                the sample photos
+#     docker-compose.yml        this file
+#     edge.conf                 Demo/edge.conf, the one way in
+#     .env                      POSTGRES_PASSWORD=<a new one, not the family's>
+#     demo-setup.sh             Scripts/demo-setup.sh
+#     demo-isolation-check.sh   Scripts/demo-isolation-check.sh
+#     seed/                     the sample photos
 #
 # APP-REVIEW.md walks through it.
 name: framestation-demo
@@ -28,6 +32,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks: [demo]
+    security_opt: ["no-new-privileges:true"]
 
   server:
     # The same image the family's server runs, so a reviewer sees the build
@@ -60,7 +66,32 @@ services:
       - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/data:/data
       # The sample photos, for `import`. Read-only: setup copies them in.
       - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/seed:/seed:ro
+    # No ports: `edge` is the only way in. And on the `demo` network alone,
+    # it has no way out, so even a reviewer who broke into the server itself
+    # would find nothing to reach but its own database.
+    networks: [demo]
+    security_opt: ["no-new-privileges:true"]
+
+  edge:
+    # Passes the server's one port through to DSM's reverse proxy, byte for
+    # byte, and does nothing else. It exists because Docker won't publish a
+    # port from a network with no way out; edge.conf says more.
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on: [server]
+    volumes:
+      - ${FRAMESTATION_DEMO_DATA:-/volume1/docker/framestation-demo}/edge.conf:/etc/nginx/nginx.conf:ro
     ports:
       # Loopback only, beside the family's 8080. DSM's reverse proxy gives it
       # its own name on 8443 — see APP-REVIEW.md.
       - "127.0.0.1:8081:8080"
+    networks: [demo, outside]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # Internal: no route to the NAS, its other containers, the LAN or the
+  # internet. Only the database, the server and edge are on it.
+  demo:
+    internal: true
+  # Only for edge, so Docker can publish its port on the NAS's loopback.
+  outside: {}
