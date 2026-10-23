@@ -97,6 +97,10 @@ else
   umask 077
   printf 'OWNER_ID=%s\nOWNER_TOKEN=%s\nLIBRARY_ID=%s\n' "$OWNER_ID" "$OWNER_TOKEN" "$LIBRARY_ID" > "$STATE"
 fi
+# The umask isn't enough on DSM: the new file took the docker share's access
+# list, which lets everyone read, and any NAS account could read the owner's
+# token (10/23). As with data/ above, a chmod switches it to plain permissions.
+chmod 600 "$STATE"
 
 say "Importing the sample photos into $LIBRARY_NAME"
 server import --path /seed --space "$LIBRARY_ID" --user "$OWNER_ID" --mode copy

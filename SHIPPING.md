@@ -13,7 +13,11 @@ will take it. The server has its own document — see DEPLOY.md.
 3. Xcode → **Product → Archive**, with the scheme set to `FrameStation-iOS` and
    the destination to **Any iOS Device**. A simulator destination grays Archive
    out, which is the usual reason it looks broken.
-4. Organizer → **Distribute App → TestFlight & App Store**.
+4. Organizer → **Distribute App → TestFlight & App Store**. If Xcode offers to
+   manage the version and build number, it renumbers the upload when the build
+   number is taken, and `project.yml` falls behind without a word: an archive
+   of build 2 went up as build 3 that way on October 23. Bumping first keeps the
+   two the same.
 5. Answer the export-compliance question **No**. `ITSAppUsesNonExemptEncryption`
    is already `false` in the plist, so this should not be asked at all; if it
    is, the answer is still no. HTTPS and hashing are both exempt.
