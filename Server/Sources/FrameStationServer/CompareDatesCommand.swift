@@ -39,11 +39,21 @@ struct CompareDatesCommand: AsyncCommand {
         let item: String
     }
 
+    /// One file's local time here. Before an import, also the two dates it
+    /// could have gone by, to say which one Synology went by where they differ.
+    private struct Ours {
+        let local: Date
+        var how: String?
+        var own: ImportDating?
+        var modified: Date?
+    }
+
     private struct Difference {
         let path: String
         let ours: Date
         let theirs: Date
-        let how: String
+        /// The kind of file, and the date each side went by where known.
+        let kind: String
     }
 
     func run(using context: CommandContext, signature: Signature) async throws {
@@ -57,7 +67,7 @@ struct CompareDatesCommand: AsyncCommand {
             throw Abort(.badRequest, reason: "\(file) has no dates for files under \(root).")
         }
 
-        let ours: [String: (local: Date, how: String)]
+        let ours: [String: Ours]
         if let space = signature.space {
             guard let spaceID = UUID(uuidString: space) else {
                 throw Abort(.badRequest, reason: "--space must be a library's id.")
@@ -78,6 +88,21 @@ struct CompareDatesCommand: AsyncCommand {
         // To the second: Synology keeps no fraction, and a burst's fraction
         // is what orders it within one.
         func second(_ date: Date) -> Int { Int(date.timeIntervalSince1970.rounded(.down)) }
+        func kind(_ file: String, _ value: Ours, theirs: Date) -> String {
+            var kind = "." + URL(fileURLWithPath: file).pathExtension.lowercased()
+            if let how = value.how { kind += "  here: \(how)" }
+            if let modified = value.modified {
+                let went = if let own = value.own, second(own.local) == second(theirs) {
+                    own.source.rawValue
+                } else if second(modified) == second(theirs) {
+                    ImportDating.Source.modified.rawValue
+                } else {
+                    "some other date"
+                }
+                kind += "  Synology: \(went)"
+            }
+            return kind
+        }
         var same = 0
         var differences: [Difference] = []
         var notInSynology = 0
@@ -86,7 +111,8 @@ struct CompareDatesCommand: AsyncCommand {
             if second(value.local) == second(theirs.clock) {
                 same += 1
             } else {
-                differences.append(Difference(path: file, ours: value.local, theirs: theirs.clock, how: value.how))
+                differences.append(Difference(path: file, ours: value.local, theirs: theirs.clock,
+                                              kind: kind(file, value, theirs: theirs.clock)))
             }
         }
         let notHere = synology.keys.filter { ours[$0] == nil }.count
@@ -104,19 +130,21 @@ struct CompareDatesCommand: AsyncCommand {
             console.info("  Grid items in Synology:  \(theirTiles)")
         }
         if !differences.isEmpty {
-            let byHow = Dictionary(grouping: differences, by: \.how)
+            // By kind, so a rule that's still wrong for one kind of file shows
+            // as one line, with the date Synology went by instead.
+            let byKind = Dictionary(grouping: differences, by: \.kind)
+                .sorted { ($0.value.count, $1.key) > ($1.value.count, $0.key) }
             console.info("")
-            console.info("  Different, by what dated them here:")
-            for (how, group) in byHow.sorted(by: { $0.value.count > $1.value.count }) {
-                console.info("    \(group.count)  \(how)")
-            }
-            console.info("")
-            console.info("  The first 25 (here | Synology | difference):")
-            for difference in differences.sorted(by: { $0.path < $1.path }).prefix(25) {
-                let gap = Int(difference.ours.timeIntervalSince(difference.theirs))
-                console.info("    \(difference.path.dropFirst(root.count))  "
-                    + "\(Self.text(difference.ours)) | \(Self.text(difference.theirs)) | "
-                    + "\(gap < 0 ? "-" : "+")\(Self.duration(abs(gap)))")
+            console.info("  Different, by kind of file and the date each side went by,")
+            console.info("  with up to 10 of each (here | Synology | difference):")
+            for (kind, group) in byKind {
+                console.info("    \(group.count)  \(kind)")
+                for difference in group.sorted(by: { $0.path < $1.path }).prefix(10) {
+                    let gap = Int(difference.ours.timeIntervalSince(difference.theirs))
+                    console.info("      \(difference.path.dropFirst(root.count))  "
+                        + "\(Self.text(difference.ours)) | \(Self.text(difference.theirs)) | "
+                        + "\(gap < 0 ? "-" : "+")\(Self.duration(abs(gap)))")
+                }
             }
         }
         console.info("")
@@ -145,10 +173,10 @@ struct CompareDatesCommand: AsyncCommand {
     /// What the import would make of each file, without importing it.
     private static func read(
         root: String, household: TimeZone?, console: any Console, logger: Logger
-    ) async throws -> [String: (local: Date, how: String)] {
+    ) async throws -> [String: Ours] {
         let candidates = try LibraryScanner.scan(root: URL(fileURLWithPath: root, isDirectory: true),
                                                  logger: logger)
-        var result: [String: (local: Date, how: String)] = [:]
+        var result: [String: Ours] = [:]
         let batch = 64
         for start in stride(from: 0, to: candidates.count, by: batch) {
             let chunk = Array(candidates[start..<min(start + batch, candidates.count)])
@@ -174,9 +202,14 @@ struct CompareDatesCommand: AsyncCommand {
                 let probe = (candidate.mediaType == .photo ? photoMetadata : videoMetadata)[candidate.url.path]
                     ?? MediaProbe.Metadata()
                 let dating = ImportDating.resolve(
-                    probe: probe, modifiedAt: candidate.modifiedAt, household: household
+                    probe: probe, filename: candidate.url.lastPathComponent,
+                    modifiedAt: candidate.modifiedAt, household: household
                 )
-                result[candidate.url.path] = (dating.local, dating.source.rawValue)
+                result[candidate.url.path] = Ours(
+                    local: dating.local, how: dating.source.rawValue,
+                    own: ImportDating.fileDate(probe, household: household),
+                    modified: ImportDating.modified(candidate.modifiedAt, household: household).local
+                )
             }
             if (start / batch) % 25 == 0 || start + batch >= candidates.count {
                 console.info("  \(min(start + batch, candidates.count))/\(candidates.count)")
@@ -193,7 +226,7 @@ struct CompareDatesCommand: AsyncCommand {
     /// The times an import stored, by the path it was imported from.
     private static func stored(
         under root: String, in space: UUID, on sql: any SQLDatabase
-    ) async throws -> [String: (local: Date, how: String)] {
+    ) async throws -> [String: Ours] {
         let rows = try await sql.raw("""
             SELECT r.source_path AS "path",
                    to_char(a.local_captured_at, 'YYYY-MM-DD HH24:MI:SS.US') AS "local"
@@ -202,10 +235,10 @@ struct CompareDatesCommand: AsyncCommand {
             JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
             WHERE r.source_path LIKE \(bind: root + "%") AND sa.deleted_at IS NULL
             """).all(decoding: StoredRow.self)
-        var result: [String: (local: Date, how: String)] = [:]
+        var result: [String: Ours] = [:]
         for row in rows {
             guard let local = row.local, let parsed = MediaProbe.parseDateAndZone(local) else { continue }
-            result[row.path] = (parsed.clock, "stored")
+            result[row.path] = Ours(local: parsed.clock)
         }
         return result
     }

@@ -276,7 +276,8 @@ struct ImportCommand: AsyncCommand {
                         : try await MediaProbe.probe(url: candidate.url, mediaType: .video)
 
                     let dating = ImportDating.resolve(
-                        probe: metadata, modifiedAt: candidate.modifiedAt, household: household
+                        probe: metadata, filename: candidate.url.lastPathComponent,
+                        modifiedAt: candidate.modifiedAt, household: household
                     )
 
                     // Named now, from the file's own position. An upload is

@@ -136,16 +136,20 @@ Photos goes by, so a library lands where it shows there:
 | An EXIF date and zone (the zone may be in `OffsetTimeOriginal`, `OffsetTimeDigitized` or `OffsetTime`) | that date, in that zone |
 | An EXIF date and no zone | that clock reading, as it is |
 | An iPhone video's `com.apple.quicktime.creationdate` | that local time and zone |
-| Anything else: only a video's UTC stamp, only an XMP `DateCreated`, or no date | its modification time, in the household's zone (`--time-zone`) |
+| Only a UTC stamp, in a QuickTime movie (`.mov`) | that moment, in the household's zone (`--time-zone`) |
+| Anything else: only an MP4's UTC stamp, only an XMP `DateCreated`, or no date | its modification time, in the household's zone |
 
-The last row is Synology's own rule. Its backup app sets each file's
-modification time from the phone's library, and Synology dates a file with no
-camera date by it, passing over a video's UTC stamp and an XMP date. The two
-usually agree, but not always: a clip trimmed after it was filmed carries the
-trim time, a video re-saved years later keeps the year it was made, and a
-screenshot's XMP date can be written in the zone it was taken in. The first
-comparison, with the UTC stamp and XMP read instead, found 19,802 of 19,806
-files matching and those 4 apart (2026-10-24).
+The last two rows are Synology's own rule, worked out by comparing every file
+of one library with it (2026-10-24). Its backup app sets each file's
+modification time from the phone's library. Synology dates a `.mov` with no
+local date by its UTC stamp, and anything else with no camera date by the
+modification time, passing over an MP4's UTC stamp and an XMP date. The two
+usually agree, but not always: a trim or an edit's original saved as `.mov`
+carries the time it was saved, sometimes years after it was filmed; an MP4
+re-saved years later keeps the year it was made; and a screenshot's XMP date
+can be written in the zone it was taken in. Reading every UTC stamp and XMP
+date left 4 of 19,806 files apart, three MP4s and the screenshot, and reading
+none of them left 230 apart, `.mov` trims and edit originals among them.
 
 Synology Photos shows a time with no zone in the NAS's own zone, so with
 `--time-zone` set to the NAS's (Control Panel → Regional Options), the two
@@ -169,7 +173,10 @@ and again after:
    ```
 
    It should end "Every file matches Synology Photos to the second." Anything
-   else lists the first 25 that differ, with both times, and what dated them.
+   else groups the files that differ by kind (`.mov`, `.png`…), with the date
+   each side went by and up to 10 of each with both times. A group where
+   Synology went by one of the file's own dates is a rule to change here;
+   "some other date" means Synology knows something the file doesn't say.
 
 3. **After importing,** the same with `--space <space-id>` compares the times
    the library holds, and the number of grid items with Synology's (a Live

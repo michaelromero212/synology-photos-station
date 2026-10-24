@@ -14,15 +14,15 @@ import Foundation
 /// and an evening one on the next day.
 ///
 /// The dates read are the ones Synology Photos goes by, so a library comes
-/// over in the order it shows there: a camera's date (EXIF), or an iPhone
-/// video's own local time, and for a file with neither, its modification time,
-/// which Synology's backup sets from the phone's library. Synology passes over
-/// a video's UTC stamp and an XMP date, and so does this: comparing every file
-/// of that library with Synology found 4 of 19,806 where those disagreed, a
-/// clip trimmed after it was filmed, a video re-saved years after it was made,
-/// and a screenshot whose XMP date had been written in another zone. A time
-/// with no zone is shown in the household's (`--time-zone`), as Synology shows
-/// it in the NAS's.
+/// over in the order it shows there: a camera's date (EXIF), an iPhone video's
+/// own local time, a QuickTime movie's (`.mov`) UTC stamp, and for anything
+/// else, its modification time, which Synology's backup sets from the phone's
+/// library. So an MP4's UTC stamp and an XMP date are passed over, as
+/// Synology passes them over. Comparing every file of one library with
+/// Synology (2026-10-24) settled each: reading every UTC stamp left three MP4s
+/// and a screenshot's XMP date apart, and reading none left `.mov` trims and
+/// edit originals apart, whose stamps Synology keeps. A time with no zone is
+/// shown in the household's (`--time-zone`), as Synology shows it in the NAS's.
 struct ImportDating {
     var capturedAt: Date
     /// The zone stored with it: the file's own, or the household's when the
@@ -39,16 +39,24 @@ struct ImportDating {
     enum Source: String, CaseIterable {
         case fileZone = "its date and zone"
         case fileClock = "its date, with no zone"
+        case fileUTC = "its date, in UTC"
         case modified = "its modification time"
     }
 
     static func resolve(
-        probe: MediaProbe.Metadata, modifiedAt: Date, household: TimeZone?
+        probe: MediaProbe.Metadata, filename: String, modifiedAt: Date, household: TimeZone?
     ) -> ImportDating {
-        let passedOver: [MediaProbe.Metadata.DateSource?] = [.quickTimeUTC, .xmpCreated]
-        guard let captured = probe.capturedAt, !passedOver.contains(probe.capturedAtSource) else {
-            return fromMoment(modifiedAt, household: household)
+        if !passesOver(probe.capturedAtSource, filename: filename),
+           let own = fileDate(probe, household: household) {
+            return own
         }
+        return modified(modifiedAt, household: household)
+    }
+
+    /// The file's own date, whether or not Synology Photos goes by it; nil
+    /// when the file records none.
+    static func fileDate(_ probe: MediaProbe.Metadata, household: TimeZone?) -> ImportDating? {
+        guard let captured = probe.capturedAt else { return nil }
         if let zone = probe.capturedTZOffset {
             return ImportDating(
                 capturedAt: captured, zone: zone, fallbackZone: nil,
@@ -58,7 +66,23 @@ struct ImportDating {
         if probe.capturedAtIsClock {
             return fromClock(captured, household: household)
         }
-        return fromMoment(captured, household: household)
+        return fromMoment(captured, household: household, source: .fileUTC)
+    }
+
+    /// The modification time, which Synology's backup sets from the phone's
+    /// library.
+    static func modified(_ modifiedAt: Date, household: TimeZone?) -> ImportDating {
+        fromMoment(modifiedAt, household: household, source: .modified)
+    }
+
+    /// Whether Synology Photos goes by the modification time rather than this
+    /// date: an XMP date always, and a UTC stamp in anything but a `.mov`.
+    static func passesOver(_ source: MediaProbe.Metadata.DateSource?, filename: String) -> Bool {
+        switch source {
+        case .xmpCreated: return true
+        case .quickTimeUTC: return !filename.lowercased().hasSuffix(".mov")
+        default: return false
+        }
     }
 
     /// A local clock reading with no zone. It's already the local time; the
@@ -79,13 +103,13 @@ struct ImportDating {
         )
     }
 
-    /// A real moment with no zone, the modification time: local time is the
-    /// household's at that moment.
-    private static func fromMoment(_ moment: Date, household: TimeZone?) -> ImportDating {
+    /// A real moment with no zone, a UTC stamp or the modification time:
+    /// local time is the household's at that moment.
+    private static func fromMoment(_ moment: Date, household: TimeZone?, source: Source) -> ImportDating {
         let offset = household?.secondsFromGMT(for: moment)
         return ImportDating(
             capturedAt: moment, zone: offset, fallbackZone: offset,
-            local: moment.addingTimeInterval(TimeInterval(offset ?? 0)), source: .modified
+            local: moment.addingTimeInterval(TimeInterval(offset ?? 0)), source: source
         )
     }
 }
