@@ -71,6 +71,9 @@ struct ImportCommand: AsyncCommand {
         @Option(name: "batch", short: "b", help: "Files per exiftool invocation (default 64)")
         var batch: Int?
 
+        @Option(name: "time-zone", help: "The household's zone, e.g. America/New_York, for files that don't record one (default $FRAMESTATION_TIME_ZONE)")
+        var timeZone: String?
+
         @Flag(name: "dry-run", help: "Report what would be imported without writing anything")
         var dryRun: Bool
     }
@@ -116,6 +119,15 @@ struct ImportCommand: AsyncCommand {
         }
         let concurrency = max(1, signature.concurrency ?? 4)
         let batchSize = max(1, signature.batch ?? 64)
+
+        // The zone for a time a file records without one: see `ImportDating`.
+        // Read before anything is walked, so a typo stops the import rather
+        // than dating 20,000 files wrong.
+        var household: TimeZone?
+        if let name = signature.timeZone ?? Environment.get("FRAMESTATION_TIME_ZONE") {
+            guard let zone = TimeZone(identifier: name) else { throw ImportError.unknownTimeZone(name) }
+            household = zone
+        }
 
         let missing = Derivatives.missingTools()
         guard missing.isEmpty else {
@@ -173,6 +185,7 @@ struct ImportCommand: AsyncCommand {
         console.info("  Already:   \(candidates.count - pending.count) imported")
         console.info("  To import: \(pending.count) (\(Self.humanBytes(totalBytes)))")
         console.info("  Mode:      \(mode.rawValue)")
+        console.info("  Time zone: \(household?.identifier ?? "none, so a file that records none stays on UTC")")
         console.info("")
 
         if signature.dryRun {
@@ -207,6 +220,7 @@ struct ImportCommand: AsyncCommand {
         let started = Date()
         var imported = 0, reused = 0, present = 0, failed = 0
         var bytesDone: Int64 = 0
+        var datedBy: [ImportDating.Source: Int] = [:]
 
         for chunk in stride(from: 0, to: pending.count, by: batchSize).map({
             Array(pending[$0..<min($0 + batchSize, pending.count)])
@@ -257,11 +271,13 @@ struct ImportCommand: AsyncCommand {
                         continue
                     }
 
-                    var metadata = candidate.mediaType == .photo
+                    let metadata = candidate.mediaType == .photo
                         ? (photoMetadata[candidate.url.path] ?? MediaProbe.Metadata())
                         : try await MediaProbe.probe(url: candidate.url, mediaType: .video)
 
-                    if metadata.capturedAt == nil { metadata.capturedAt = candidate.modifiedAt }
+                    let dating = ImportDating.resolve(
+                        probe: metadata, modifiedAt: candidate.modifiedAt, household: household
+                    )
 
                     // Named now, from the file's own position. An upload is
                     // named by its metadata job, but an import is queued for
@@ -295,6 +311,7 @@ struct ImportCommand: AsyncCommand {
                         sha: sha,
                         blobExtension: blobExtension,
                         metadata: metadata,
+                        dating: dating,
                         placeName: placeName,
                         liveGroupID: liveGroups[candidate.url.path],
                         spaceID: spaceID,
@@ -304,6 +321,7 @@ struct ImportCommand: AsyncCommand {
                     )
 
                     if original == nil { imported += 1 } else { reused += 1 }
+                    datedBy[dating.source, default: 0] += 1
                     bytesDone += candidate.byteSize
                     try? await record(candidate, sha: sha, assetID: assetID,
                                       outcome: original == nil ? "imported" : "deduplicated",
@@ -335,6 +353,11 @@ struct ImportCommand: AsyncCommand {
         console.info("  Already in library:  \(present)  (skipped)")
         console.info("  Failed:              \(failed)")
         console.info("  Elapsed:      \(Self.humanDuration(elapsed))")
+        console.info("")
+        console.info("  Dated by:")
+        for source in ImportDating.Source.allCases {
+            if let count = datedBy[source] { console.info("    \(source.rawValue): \(count)") }
+        }
         console.info("")
         console.info("Thumbnails are queued; the derivation worker drains them in the background.")
         if failed > 0 {
@@ -421,6 +444,7 @@ struct ImportCommand: AsyncCommand {
         sha: String,
         blobExtension: String,
         metadata: MediaProbe.Metadata,
+        dating: ImportDating,
         placeName: String?,
         liveGroupID: UUID?,
         spaceID: UUID,
@@ -467,12 +491,24 @@ struct ImportCommand: AsyncCommand {
                         """).first(decoding: IDRow.self) else {
                         throw Abort(.internalServerError, reason: "asset copy returned nothing")
                     }
+                    // The copied row's dates, unless it had no zone at all, the
+                    // way the Shared Space's videos came in: then the dates
+                    // this file's own reading gives.
+                    try await sql.raw("""
+                        UPDATE assets SET
+                            captured_at = \(bind: dating.capturedAt),
+                            captured_tz_off = \(bind: dating.zone),
+                            tz_off_fallback = \(bind: dating.fallbackZone),
+                            local_captured_at = \(bind: dating.local) AT TIME ZONE 'UTC'
+                        WHERE id = \(bind: copied.id)
+                          AND captured_tz_off IS NULL AND tz_off_fallback IS NULL
+                        """).run()
                     asset = copied
                 } else {
                 guard let inserted = try await sql.raw("""
                     INSERT INTO assets
                         (sha256, byte_size, media_type, mime, blob_ext, width, height,
-                         duration_ms, captured_at, captured_tz_off, local_captured_at,
+                         duration_ms, captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
                          lat, lon, place_name, place_version, destination, destination_version,
                          camera_make, camera_model, lens, iso, aperture, shutter,
                          focal_len, exposure_bias, dynamic_range, orientation, is_raw,
@@ -481,10 +517,8 @@ struct ImportCommand: AsyncCommand {
                         (\(bind: sha), \(bind: candidate.byteSize), \(bind: candidate.mediaType.rawValue),
                          \(bind: metadata.mime ?? candidate.mime), \(bind: blobExtension),
                          \(bind: metadata.width), \(bind: metadata.height), \(bind: metadata.durationMs),
-                         \(bind: metadata.capturedAt), \(bind: metadata.capturedTZOffset),
-                         (\(bind: metadata.capturedAt)
-                            + COALESCE(\(bind: metadata.capturedTZOffset), 0) * interval '1 second')
-                            AT TIME ZONE 'UTC',
+                         \(bind: dating.capturedAt), \(bind: dating.zone), \(bind: dating.fallbackZone),
+                         \(bind: dating.local) AT TIME ZONE 'UTC',
                          \(bind: metadata.latitude), \(bind: metadata.longitude), \(bind: placeName),
                          \(bind: app.geocoder?.isLoaded == true ? Geocoder.version : 0),
                          \(bind: Destinations.label(latitude: metadata.latitude, longitude: metadata.longitude)),

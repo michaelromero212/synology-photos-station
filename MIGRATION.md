@@ -76,8 +76,12 @@ it holds, a `space:` id and its owner. The `space:` id is what `--space` takes.
 Dry run first, then the same command without `--dry-run`:
 
 ```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path /volume1/photo --space <space-id> --dry-run'
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path /volume1/photo --space <space-id> --time-zone America/New_York --dry-run'
 ```
+
+`--time-zone` is the household's zone, for a time a file records without one
+([dates](#same-order-as-synology-photos)). Without it those stay on UTC and
+show four or five hours late.
 
 **Why it reads `/volume1/...` directly.** DSM's kernel won't clone a file
 between two separately mounted folders, even two on the same volume. The first
@@ -116,9 +120,63 @@ fingerprint it. The clones themselves are instant and take no space.
   members get a single summary push. Personal libraries never push.
 - **Credit** goes to the destination's owner, since files don't record who added
   them. `--user <id>` credits another member instead.
-- **Names and dates.** Original filenames are kept. A file whose metadata has no
-  capture date is dated by its modification time. Live Photos pair by name
+- **Names and dates.** Original filenames are kept, and the files are copied
+  byte for byte: nothing in them is changed. Each is dated by what it records
+  itself ([below](#same-order-as-synology-photos)). Live Photos pair by name
   within a folder: `IMG_1234.HEIC` with `IMG_1234.MOV`.
+
+## Same order as Synology Photos
+
+The grid orders by local time: the clock reading where and when the photo was
+taken. The import reads it from each file the way the file meant it:
+
+| The file records | Read as |
+|---|---|
+| An EXIF date and zone (the zone may be in `OffsetTimeOriginal`, `OffsetTimeDigitized` or `OffsetTime`) | that date, in that zone |
+| An EXIF date and no zone | that clock reading, as it is |
+| Only an XMP `DateCreated` | that date, in its zone if it has one |
+| An iPhone video's `com.apple.quicktime.creationdate` | that local time and zone |
+| Only a video's UTC stamp | that moment, in the household's zone (`--time-zone`) |
+| No date at all | its modification time, in the household's zone |
+
+Synology Photos shows a time with no zone in the NAS's own zone, so with
+`--time-zone` set to the NAS's (Control Panel → Regional Options), the two
+should agree to the second. Check rather than assume, before writing anything
+and again after:
+
+1. **Export Synology's dates.** Read from its database, nothing changed there.
+   The file names every photo, so it's written readable by root alone. Copy
+   `Scripts/export-synology-dates.sh` to the NAS's `/tmp` first:
+
+   ```bash
+   ssh -t nas 'sudo bash /tmp/export-synology-dates.sh "<user>" /volume1/docker/framestation/synology-dates.tsv'
+   ```
+
+2. **Before importing,** `compare-dates` reads every file's dates the way the
+   import would and writes nothing. It takes as long as reading every file's
+   metadata, most of an hour for 20,000 files on this NAS:
+
+   ```bash
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server compare-dates --path "/volume1/homes/<user>/Photos/MobileBackup" --synology /volume1/docker/framestation/synology-dates.tsv --time-zone America/New_York'
+   ```
+
+   It should end "Every file matches Synology Photos to the second." Anything
+   else lists the first 25 that differ, with both times, and what dated them.
+
+3. **After importing,** the same with `--space <space-id>` compares the times
+   the library holds, and the number of grid items with Synology's (a Live
+   Photo is one of each).
+
+Then delete `synology-dates.tsv`.
+
+`Scripts/audit-synology-library.sh "<user>"` is a read-only look first: what a
+library holds, which dates its files carry, and what Synology records apart
+from the files (albums, tags, people). It prints counts, never names.
+
+**The Shared Space came in before this.** Its import kept every video's UTC
+stamp as if it were local time, so 1,118 of its 1,120 videos show four or five
+hours late, the evening ones on the next day (2026-10-24 audit). Nothing has
+changed them since.
 
 ## When it goes wrong
 
@@ -241,9 +299,16 @@ library root.
 
 ## Next: everyone's personal library
 
-Not started. It waits until the family is ready to switch. Counted in August
-2026: about 67,000 files and 662 GB in three people's `MobileBackup` folders,
-plus about 2,500 files under `PhotoLibrary`. There will be more by now.
+Started 2026-10-24 with one library: about 19,800 files and 140 GB, every one
+indexed by Synology Photos (its count agreed with the disk's to within one),
+and no albums. Counted in August 2026: about 67,000 files and 662 GB in three
+people's `MobileBackup` folders, plus about 2,500 files under `PhotoLibrary`.
+There will be more by now.
+
+The bar for each: their grid here looks exactly as it does in Synology Photos,
+every item on the same day in the same order, with the files copied untouched.
+That's what [the date check](#same-order-as-synology-photos) proves, before the
+import and after it.
 
 **Use `import`, not `rebuild`.** `rebuild` is disaster recovery: it rebuilds the
 whole database from the folders after losing `pgdata`, and favorites, albums
@@ -264,25 +329,34 @@ For each person:
 
    Expect Synology's `MobileBackup` and `PhotoLibrary` beside the app's
    `Personal` and `Shared`. Anything else is a folder they made, so ask them.
-3. **Try one month first.** Their phone has probably been backing up to the app
-   already. That overlap is skipped only where the bytes are identical, and
-   Synology's backup may have kept a different version of the same picture,
-   such as an edited or Portrait photo. Import a month they know well and look
-   at it in the app:
+3. **Check the dates first:** export Synology's, then `compare-dates` on each
+   folder ([above](#same-order-as-synology-photos)). Go on only when it says
+   every file matches.
+4. **If their phone has backed up to the app already, try one month first.**
+   That overlap is skipped only where the bytes are identical, and Synology's
+   backup may have kept a different version of the same picture, such as an
+   edited or Portrait photo. Import a month they know well and look at it in the
+   app:
 
    ```bash
-   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id>'
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id> --time-zone America/New_York'
    ```
 
    If it shows doubles, stop and work out why before the rest. The full run
-   skips that month by itself.
-4. **Then each folder whole,** dry run first: `--path
-   "/volume1/homes/<user>/Photos/MobileBackup"`, then `.../PhotoLibrary`. At the
-   Shared Space's pace, 662 GB is about 2¾ hours of reading for all three, but
-   these files are a tenth the size on average, so per-file work counts for
-   more. Allow an evening for the biggest library, with the Mac awake and on the
-   home network.
-5. **Afterward,** thumbnails fill in over the following hours. The videos'
+   skips that month by itself. Someone who has never used the app has nothing
+   to overlap, so this step is theirs to skip.
+5. **Then each folder whole,** dry run first: `--path
+   "/volume1/homes/<user>/Photos/MobileBackup"`, then `.../PhotoLibrary`, each
+   with `--time-zone`. At the Shared Space's pace, 662 GB is about 2¾ hours of
+   reading for all three, but these files are a tenth the size on average, so
+   per-file work counts for more. Allow an evening for the biggest library, with
+   the Mac awake and on the home network.
+6. **Check the dates again,** `compare-dates` with `--space`, and add a row to
+   the [log](#log).
+7. **When they first sign in,** the app opens its Backup settings: choose "Back
+   up future photos" under Backup Rule, so their phone doesn't send everything
+   the import already brought in.
+8. **Afterward,** thumbnails fill in over the following hours. The videos'
    cellular copies take longer, since only one is made at a time: a few
    thousand 4K clips can take days. Until a clip has one, it plays from the
    original, which is fine at home and may stutter on cellular. Their iPhone then

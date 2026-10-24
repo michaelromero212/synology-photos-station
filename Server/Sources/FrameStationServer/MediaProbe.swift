@@ -17,6 +17,11 @@ struct MediaProbe {
         var durationMs: Int?
         var capturedAt: Date?
         var capturedTZOffset: Int?
+        /// True when `capturedAt` is a clock reading with no zone: EXIF's local
+        /// time, kept as if it were UTC so that the timeline's local time is
+        /// that reading. False when it's a real moment: a zone came with it, or
+        /// it's a video's UTC stamp.
+        var capturedAtIsClock = false
         var latitude: Double?
         var longitude: Double?
         var cameraMake: String?
@@ -65,6 +70,10 @@ struct MediaProbe {
         "-ISO#", "-FNumber#", "-ExposureTime", "-FocalLength#", "-ExposureCompensation#",
         "-ImageWidth#", "-ImageHeight#",
         "-DateTimeOriginal", "-CreateDate", "-OffsetTimeOriginal", "-SubSecTimeOriginal",
+        // The zone when OffsetTimeOriginal is missing: an app may have written
+        // it beside the other two dates instead. And XMP's DateCreated, the
+        // only date some saved and edited pictures carry.
+        "-OffsetTimeDigitized", "-OffsetTime", "-XMP:DateCreated",
         "-GPSLatitude#", "-GPSLongitude#", "-GPSLatitudeRef", "-GPSLongitudeRef",
         "-Orientation#", "-MIMEType", "-FileType",
         // Presence of a gain map is what distinguishes Apple Adaptive HDR from
@@ -156,10 +165,24 @@ struct MediaProbe {
         metadata.dynamicRange = fields["HDRGainMapVersion"] != nil ? "hdr" : "standard"
 
         let original = fields.string("DateTimeOriginal")
-        let stamp = original ?? fields.string("CreateDate")
+        // A phone writes the same zone into all three offsets, so the others
+        // stand in for OffsetTimeOriginal when it's the one left out.
         let offset = fields.string("OffsetTimeOriginal")
-        if let stamp {
+            ?? fields.string("OffsetTimeDigitized") ?? fields.string("OffsetTime")
+        if original == nil, fields.string("CreateDate") == nil,
+           let created = fields.string("DateCreated"),
+           let parsed = parseDateAndZone(created) {
+            // XMP writes its zone into the date itself, when it writes one.
+            if let zone = parsed.zone {
+                metadata.capturedAt = parsed.clock.addingTimeInterval(-TimeInterval(zone))
+                metadata.capturedTZOffset = zone
+            } else {
+                metadata.capturedAt = parsed.clock
+                metadata.capturedAtIsClock = true
+            }
+        } else if let stamp = original ?? fields.string("CreateDate") {
             (metadata.capturedAt, metadata.capturedTZOffset) = parseEXIFDate(stamp, offset: offset)
+            metadata.capturedAtIsClock = metadata.capturedAt != nil && metadata.capturedTZOffset == nil
             // EXIF keeps the fraction of a second in a tag of its own, and
             // without it every photo of a burst is taken at the same instant
             // and the grid can put them in any order. Only with the stamp it
@@ -223,6 +246,80 @@ struct MediaProbe {
         return (formatter.date(from: stamp), offsetSeconds)
     }
 
+    /// A date written the ISO way or exiftool's: `2023-06-13T22:00:00-0400`,
+    /// `2023:06:13 22:00:00.25-04:00`, `…Z`, with no zone, no seconds, or no
+    /// time at all. The clock reading, kept as if it were UTC, and the zone in
+    /// seconds east of UTC when one is written.
+    static func parseDateAndZone(_ value: String) -> (clock: Date, zone: Int?)? {
+        let text = value.trimmingCharacters(in: .whitespaces)
+        let split = text.firstIndex(where: { $0 == "T" || $0 == " " })
+        let datePart = split.map { text[..<$0] } ?? Substring(text)
+        let ymd = datePart.split(whereSeparator: { $0 == "-" || $0 == ":" }).map { Int($0) }
+        guard ymd.count == 3, let year = ymd[0], let month = ymd[1], let day = ymd[2] else {
+            return nil
+        }
+
+        var hour = 0, minute = 0, second = 0
+        var fraction: TimeInterval = 0
+        var zone: Int?
+        if let split {
+            var time = text[text.index(after: split)...]
+            if time.hasSuffix("Z") {
+                zone = 0
+                time = time.dropLast()
+            } else if let sign = time.lastIndex(where: { $0 == "+" || $0 == "-" }) {
+                guard let parsed = zoneSeconds(time[sign...]) else { return nil }
+                zone = parsed
+                time = time[..<sign]
+            }
+            let parts = time.split(separator: ".", maxSplits: 1)
+            let hms = (parts.first ?? "").split(separator: ":").map { Int($0) }
+            guard (2...3).contains(hms.count), let h = hms[0], let m = hms[1] else { return nil }
+            hour = h
+            minute = m
+            if hms.count == 3 {
+                guard let s = hms[2] else { return nil }
+                second = s
+            }
+            if parts.count == 2 { fraction = subsecond(String(parts[1])) ?? 0 }
+        }
+        guard let seconds = utcSeconds(
+            year: year, month: month, day: day, hour: hour, minute: minute, second: second
+        ) else { return nil }
+        return (Date(timeIntervalSince1970: TimeInterval(seconds) + fraction), zone)
+    }
+
+    /// A zone written `-0400`, `-04:00` or `-04`: seconds east of UTC.
+    static func zoneSeconds(_ text: Substring) -> Int? {
+        guard let sign = text.first, sign == "+" || sign == "-" else { return nil }
+        let digits = text.dropFirst().filter(\.isNumber)
+        guard digits.count == 4 || digits.count == 2,
+              let hours = Int(digits.prefix(2)),
+              let minutes = Int(digits.count == 4 ? String(digits.suffix(2)) : "0"),
+              hours <= 14, minutes < 60
+        else { return nil }
+        return (hours * 3_600 + minutes * 60) * (sign == "-" ? -1 : 1)
+    }
+
+    /// A calendar date and clock time as seconds since 1970, read as UTC. By
+    /// arithmetic (Howard Hinnant's days_from_civil) rather than a formatter,
+    /// which costs about 85 µs to make and isn't safe to share between the
+    /// import's workers.
+    static func utcSeconds(
+        year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int
+    ) -> Int? {
+        guard (1...12).contains(month), (1...31).contains(day), (0...23).contains(hour),
+              (0...59).contains(minute), (0...60).contains(second)
+        else { return nil }
+        let y = year - (month <= 2 ? 1 : 0)
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yearOfEra = y - era * 400
+        let dayOfYear = (153 * ((month + 9) % 12) + 2) / 5 + day - 1
+        let dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
+        let days = era * 146_097 + dayOfEra - 719_468
+        return days * 86_400 + hour * 3_600 + minute * 60 + second
+    }
+
     // MARK: - Videos
 
     private static func probeVideo(_ url: URL, dumpExif: Bool) async throws -> Metadata {
@@ -255,7 +352,17 @@ struct MediaProbe {
 
         let tags = (format["tags"] as? [String: Any]) ?? [:]
         let normalized = Dictionary(uniqueKeysWithValues: tags.map { ($0.key.lowercased(), $0.value) })
-        if let stamp = normalized["creation_time"] as? String {
+        // An iPhone writes the moment twice: in UTC (creation_time) and as the
+        // local time with its zone (com.apple.quicktime.creationdate). The zone
+        // is what puts a video in its own hour and on its own day: the UTC
+        // stamp alone, kept as local time, put every imported video four or
+        // five hours late, and an evening one on the next day. And for a
+        // trimmed or exported clip, creation_time is when that happened.
+        if let local = normalized["com.apple.quicktime.creationdate"] as? String,
+           let parsed = parseDateAndZone(local), let zone = parsed.zone {
+            metadata.capturedAt = parsed.clock.addingTimeInterval(-TimeInterval(zone))
+            metadata.capturedTZOffset = zone
+        } else if let stamp = normalized["creation_time"] as? String {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             metadata.capturedAt = formatter.date(from: stamp)

@@ -64,6 +64,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(InviteCommand(), as: "invite")
     app.asyncCommands.use(SpacesCommand(), as: "spaces")
     app.asyncCommands.use(ImportCommand(), as: "import")
+    app.asyncCommands.use(CompareDatesCommand(), as: "compare-dates")
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
     app.asyncCommands.use(CreditUploadersCommand(), as: "credit-uploaders")
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")

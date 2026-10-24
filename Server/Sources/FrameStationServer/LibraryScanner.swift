@@ -168,9 +168,12 @@ enum ImportError: Error, CustomStringConvertible {
     /// A copy-on-write clone failed, so the library and the blob store aren't
     /// on one Btrfs volume, or the filesystem can't clone between them.
     case cannotReflink(String)
+    case unknownTimeZone(String)
 
     var description: String {
         switch self {
+        case .unknownTimeZone(let name):
+            return "Unknown --time-zone \(name). Use a name like America/New_York."
         case .unknownMode(let mode):
             return "Unknown --mode \(mode). Use reflink (the default), copy or hardlink."
         case .cannotReflink(let path):
