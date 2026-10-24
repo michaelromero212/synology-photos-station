@@ -22,6 +22,12 @@ struct MediaProbe {
         /// that reading. False when it's a real moment: a zone came with it, or
         /// it's a video's UTC stamp.
         var capturedAtIsClock = false
+        /// Which of the file's dates `capturedAt` came from.
+        var capturedAtSource: DateSource?
+
+        enum DateSource {
+            case exifOriginal, exifCreate, xmpCreated, appleLocal, quickTimeUTC
+        }
         var latitude: Double?
         var longitude: Double?
         var cameraMake: String?
@@ -172,6 +178,7 @@ struct MediaProbe {
         if original == nil, fields.string("CreateDate") == nil,
            let created = fields.string("DateCreated"),
            let parsed = parseDateAndZone(created) {
+            metadata.capturedAtSource = .xmpCreated
             // XMP writes its zone into the date itself, when it writes one.
             if let zone = parsed.zone {
                 metadata.capturedAt = parsed.clock.addingTimeInterval(-TimeInterval(zone))
@@ -183,6 +190,7 @@ struct MediaProbe {
         } else if let stamp = original ?? fields.string("CreateDate") {
             (metadata.capturedAt, metadata.capturedTZOffset) = parseEXIFDate(stamp, offset: offset)
             metadata.capturedAtIsClock = metadata.capturedAt != nil && metadata.capturedTZOffset == nil
+            metadata.capturedAtSource = original != nil ? .exifOriginal : .exifCreate
             // EXIF keeps the fraction of a second in a tag of its own, and
             // without it every photo of a burst is taken at the same instant
             // and the grid can put them in any order. Only with the stamp it
@@ -362,7 +370,9 @@ struct MediaProbe {
            let parsed = parseDateAndZone(local), let zone = parsed.zone {
             metadata.capturedAt = parsed.clock.addingTimeInterval(-TimeInterval(zone))
             metadata.capturedTZOffset = zone
+            metadata.capturedAtSource = .appleLocal
         } else if let stamp = normalized["creation_time"] as? String {
+            metadata.capturedAtSource = .quickTimeUTC
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             metadata.capturedAt = formatter.date(from: stamp)

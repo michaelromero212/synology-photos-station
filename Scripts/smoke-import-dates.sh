@@ -1,11 +1,12 @@
 #!/bin/bash
-# The import reads each file's own date the way the file meant it, so an
-# imported library lands in the same hours and on the same days as in the
-# library it came from. An iPhone video by the local time and zone it records,
-# not its UTC stamp (or, for a trimmed clip, the time it was trimmed). A photo
-# by its EXIF date and zone, the zone also taken from the other two offset
-# tags, or from XMP when that's the only date. And a time recorded with no
-# zone, or a file with none, shown in the household's zone (--time-zone). The
+# The import reads each file's dates the way Synology Photos does, so a
+# library lands in the same hours and on the same days as it shows there. An
+# iPhone video by the local time and zone it records, not its UTC stamp. A
+# photo by its EXIF date and zone, the zone also taken from the other two
+# offset tags. A file with neither by its modification time, which Synology's
+# backup sets from the phone's library: a video's UTC stamp (a trimmed clip's
+# is when it was trimmed) and an XMP date are passed over, as Synology passes
+# them over. A time with no zone shows in the household's (--time-zone). The
 # background metadata pass leaves all of it alone. A copy of bytes already in
 # the store, from a row that came in with no zone, gets the file's reading.
 #
@@ -53,13 +54,18 @@ stamp(){ exiftool -q -q -overwrite_original "$@"; }
 # An iPhone clip trimmed later: creation_time is the trim, minutes after.
 video -metadata creation_time=2023-06-14T02:39:26Z \
       -metadata "com.apple.quicktime.creationdate=2023-06-13T22:31:13-0400" "$L/iphone.mov"
-# A clip from another app, with only the UTC stamp.
-video -metadata creation_time=2023-06-14T01:00:00Z "$L/other.mp4"
+# A clip saved from another app: only a UTC stamp, 31 seconds after the time
+# the phone's library gave it (the file's modification time, set below).
+video -metadata creation_time=2023-06-14T01:00:31Z "$L/other.mp4"
 image "$L/zone.jpg";   stamp -DateTimeOriginal="2023:06:13 20:00:00" -OffsetTimeOriginal="-04:00" "$L/zone.jpg"
 image "$L/clock.jpg";  stamp -DateTimeOriginal="2023:06:13 19:00:00" "$L/clock.jpg"
 image "$L/offset.jpg"; stamp -DateTimeOriginal="2023:06:13 18:00:00" -OffsetTime="-04:00" "$L/offset.jpg"
-image "$L/saved.png";  stamp -XMP:DateCreated="2023:06:13 17:00:00-04:00" "$L/saved.png"
-image "$L/plain.png";  touch -t 202306140030.00 "$L/plain.png"
+# A screenshot whose only date is XMP's, written in Central time. And one
+# whose XMP date carries that zone, which the metadata pass would otherwise
+# apply to the modification time and move it an hour.
+image "$L/saved.png";  stamp -XMP:DateCreated="2023:06:13 16:44:06" "$L/saved.png"
+image "$L/zoned.png";  stamp -XMP:DateCreated="2023:06:13 16:44:06-05:00" "$L/zoned.png"
+image "$L/plain.png"
 # The same bytes at another path, for the copy below.
 cp -p "$L/iphone.mov" "$ROOT/again/iphone.mov"
 
@@ -76,16 +82,18 @@ SYNOLOGY="$ROOT/synology.tsv"
 printf '%s\t%s\t%s\n' \
   "$L/iphone.mov" "2023-06-13 22:31:13" 1  "$L/other.mp4"  "2023-06-13 21:00:00" 2 \
   "$L/zone.jpg"   "2023-06-13 20:00:00" 3  "$L/clock.jpg"  "2023-06-13 19:00:00" 4 \
-  "$L/offset.jpg" "2023-06-13 18:00:00" 5  "$L/saved.png"  "2023-06-13 17:00:00" 6 \
-  "$L/plain.png"  "2023-06-13 20:30:00" 7 > "$SYNOLOGY"
+  "$L/offset.jpg" "2023-06-13 18:00:00" 5  "$L/saved.png"  "2023-06-13 17:44:06" 6 \
+  "$L/plain.png"  "2023-06-13 20:30:00" 7  "$L/zoned.png"  "2023-06-13 17:44:06" 8 > "$SYNOLOGY"
 # The same, but one file at the UTC time the old import kept for it.
 sed 's/2023-06-13 20:30:00/2023-06-14 00:30:00/' "$SYNOLOGY" > "$ROOT/synology-off.tsv"
 compare(){ (cd "$SERVER_DIR" && "$BIN" compare-dates --path "$L" --time-zone America/New_York "$@" 2>&1); }
 
-# `plain.png`'s modification time is a moment: 00:30 UTC, 20:30 the evening
-# before in New York. touch read it as this Mac's local time, so it's set
-# again in UTC here.
+# Modification times are moments, set in UTC: 00:30 UTC is 20:30 the evening
+# before in New York. Set last, since writing a file's tags changes it.
 TZ=UTC touch -t 202306140030.00 "$L/plain.png"
+TZ=UTC touch -t 202306140100.00 "$L/other.mp4"
+TZ=UTC touch -t 202306132144.06 "$L/saved.png"
+TZ=UTC touch -t 202306132144.06 "$L/zoned.png"
 
 echo "Before importing, compare-dates reads the files and writes nothing:"
 BEFORE=$(compare --synology "$SYNOLOGY")
@@ -111,14 +119,15 @@ expect(){
   check "$2: $1" "$3 $4 $5 $6" "$(row "$FIRST" "$2")"
 }
 
-echo "As imported (local time, file's zone, household zone, UTC moment):"
+echo "As imported (local time, zone stored, of which the household's, UTC moment):"
 expect "an iPhone video keeps the evening and zone it was filmed in" iphone.mov "2023-06-13 22:31:13" -14400 - 02:31:13
-expect "a UTC-only video shows in the household's zone"             other.mp4  "2023-06-13 21:00:00" - -14400 01:00:00
+expect "a video's UTC stamp is passed over for its modified time"   other.mp4  "2023-06-13 21:00:00" -14400 -14400 01:00:00
 expect "a photo with a zone keeps it"                                zone.jpg   "2023-06-13 20:00:00" -14400 - 00:00:00
-expect "a photo with no zone keeps its clock"                        clock.jpg  "2023-06-13 19:00:00" - -14400 23:00:00
+expect "a photo with no zone keeps its clock"                        clock.jpg  "2023-06-13 19:00:00" -14400 -14400 23:00:00
 expect "a zone in OffsetTime counts"                                 offset.jpg "2023-06-13 18:00:00" -14400 - 22:00:00
-expect "an XMP-only date and zone are read"                          saved.png  "2023-06-13 17:00:00" -14400 - 21:00:00
-expect "a file with no date shows its modified time in the household's zone" plain.png "2023-06-13 20:30:00" - -14400 00:30:00
+expect "an XMP date is passed over for the modified time"            saved.png  "2023-06-13 17:44:06" -14400 -14400 21:44:06
+expect "and so is one with its own zone"                             zoned.png  "2023-06-13 17:44:06" -14400 -14400 21:44:06
+expect "a file with no date shows its modified time in the household's zone" plain.png "2023-06-13 20:30:00" -14400 -14400 00:30:00
 
 # The background metadata pass runs the same probe and must agree.
 for _ in $(seq 1 120); do
@@ -126,14 +135,14 @@ for _ in $(seq 1 120); do
 done
 echo "After the metadata pass:"
 check "every local time is unchanged" \
-  "2023-06-13 22:31:13|2023-06-13 21:00:00|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:00:00|2023-06-13 20:30:00" \
-  "$(for f in iphone.mov other.mp4 zone.jpg clock.jpg offset.jpg saved.png plain.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
+  "2023-06-13 22:31:13|2023-06-13 21:00:00|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:44:06|2023-06-13 17:44:06|2023-06-13 20:30:00" \
+  "$(for f in iphone.mov other.mp4 zone.jpg clock.jpg offset.jpg saved.png zoned.png plain.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
 
 echo "After importing, compare-dates checks what the library holds:"
 AFTER=$(compare --synology "$SYNOLOGY" --space "$FIRST")
 check "every stored time matches Synology Photos" "1" \
   "$(echo "$AFTER" | grep -c 'Every file matches Synology Photos to the second.')"
-check "the grid has as many items as Synology's" "7 7" \
+check "the grid has as many items as Synology's" "8 8" \
   "$(echo "$AFTER" | awk '/Grid items here:/ {h=$NF} /Grid items in Synology:/ {s=$NF} END {print h, s}')"
 
 # A row from before this fix: same bytes, no zone, its UTC stamp kept as local.

@@ -128,16 +128,24 @@ fingerprint it. The clones themselves are instant and take no space.
 ## Same order as Synology Photos
 
 The grid orders by local time: the clock reading where and when the photo was
-taken. The import reads it from each file the way the file meant it:
+taken. The import reads it from the same dates in each file that Synology
+Photos goes by, so a library lands where it shows there:
 
 | The file records | Read as |
 |---|---|
 | An EXIF date and zone (the zone may be in `OffsetTimeOriginal`, `OffsetTimeDigitized` or `OffsetTime`) | that date, in that zone |
 | An EXIF date and no zone | that clock reading, as it is |
-| Only an XMP `DateCreated` | that date, in its zone if it has one |
 | An iPhone video's `com.apple.quicktime.creationdate` | that local time and zone |
-| Only a video's UTC stamp | that moment, in the household's zone (`--time-zone`) |
-| No date at all | its modification time, in the household's zone |
+| Anything else: only a video's UTC stamp, only an XMP `DateCreated`, or no date | its modification time, in the household's zone (`--time-zone`) |
+
+The last row is Synology's own rule. Its backup app sets each file's
+modification time from the phone's library, and Synology dates a file with no
+camera date by it, passing over a video's UTC stamp and an XMP date. The two
+usually agree, but not always: a clip trimmed after it was filmed carries the
+trim time, a video re-saved years later keeps the year it was made, and a
+screenshot's XMP date can be written in the zone it was taken in. The first
+comparison, with the UTC stamp and XMP read instead, found 19,802 of 19,806
+files matching and those 4 apart (2026-10-24).
 
 Synology Photos shows a time with no zone in the NAS's own zone, so with
 `--time-zone` set to the NAS's (Control Panel → Regional Options), the two
