@@ -76,6 +76,9 @@ struct ImportCommand: AsyncCommand {
 
         @Flag(name: "dry-run", help: "Report what would be imported without writing anything")
         var dryRun: Bool
+
+        @Flag(name: "keep-copies", help: "A file whose bytes another imported file of this library brought in becomes an item of its own, as Synology Photos shows it twice")
+        var keepCopies: Bool
     }
 
     enum Mode: String {
@@ -186,6 +189,7 @@ struct ImportCommand: AsyncCommand {
         console.info("  To import: \(pending.count) (\(Self.humanBytes(totalBytes)))")
         console.info("  Mode:      \(mode.rawValue)")
         console.info("  Time zone: \(household?.identifier ?? "none, so a file that records none stays on UTC")")
+        console.info("  Copies:    \(signature.keepCopies ? "each an item of its own" : "one of each")")
         console.info("")
 
         if signature.dryRun {
@@ -262,8 +266,12 @@ struct ImportCommand: AsyncCommand {
                     // Already in this library, put there by an upload, a share
                     // or an earlier import, or deliberately removed from it. A
                     // second copy is never what anyone wants, and a removal is
-                    // a decision the import doesn't get to reverse.
-                    if try await alreadyInSpace(sha: sha, spaceID: spaceID, on: app.sql) {
+                    // a decision the import doesn't get to reverse. Unless the
+                    // source library holds the file twice and the grid should
+                    // look the same (`--keep-copies`).
+                    if try await alreadyInSpace(
+                        sha: sha, spaceID: spaceID, keepingCopies: signature.keepCopies, on: app.sql
+                    ) {
                         present += 1
                         bytesDone += candidate.byteSize
                         try? await record(candidate, sha: sha, assetID: nil,
@@ -368,12 +376,18 @@ struct ImportCommand: AsyncCommand {
     // MARK: - Steps
 
     /// Whether the library already holds these bytes in any state: live, in
-    /// Recently Deleted, or purged.
-    private func alreadyInSpace(sha: String, spaceID: UUID, on sql: any SQLDatabase) async throws -> Bool {
+    /// Recently Deleted, or purged. Keeping copies, a live one that another
+    /// imported file brought in doesn't count: Synology Photos shows a file a
+    /// library holds twice as two items (74 in one library, 2026-10-24).
+    private func alreadyInSpace(
+        sha: String, spaceID: UUID, keepingCopies: Bool, on sql: any SQLDatabase
+    ) async throws -> Bool {
         try await sql.raw("""
             SELECT sa.id FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND a.sha256 = \(bind: sha)
+              AND (NOT \(bind: keepingCopies) OR sa.deleted_at IS NOT NULL
+                   OR NOT EXISTS (SELECT 1 FROM import_records r WHERE r.asset_id = a.id))
             LIMIT 1
             """).first(decoding: IDRow.self) != nil
     }

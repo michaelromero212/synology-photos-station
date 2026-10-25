@@ -364,7 +364,7 @@ For each person:
    app:
 
    ```bash
-   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id> --time-zone America/New_York'
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import --path "/volume1/homes/<user>/Photos/MobileBackup/<device>/2025/06" --space <space-id> --time-zone America/New_York --keep-copies'
    ```
 
    If it shows doubles, stop and work out why before the rest. The full run
@@ -372,10 +372,14 @@ For each person:
    to overlap, so this step is theirs to skip.
 5. **Then each folder whole,** dry run first: `--path
    "/volume1/homes/<user>/Photos/MobileBackup"`, then `.../PhotoLibrary`, each
-   with `--time-zone`. At the Shared Space's pace, 662 GB is about 2¾ hours of
-   reading for all three, but these files are a tenth the size on average, so
-   per-file work counts for more. Allow an evening for the biggest library, with
-   the Mac awake and on the home network.
+   with `--time-zone` and `--keep-copies`. The last brings a file the library
+   holds twice in twice, as Synology Photos shows it (74 in the first library,
+   mostly videos re-imported to the phone years later). Use it on every run of
+   a library, the trial month too: a copy left out once is recorded as done,
+   and a later run won't bring it in. At the Shared Space's pace, 662 GB is
+   about 2¾ hours of reading for all three, but these files are a tenth the
+   size on average, so per-file work counts for more. Allow an evening for the
+   biggest library, with the Mac awake and on the home network.
 6. **Check the dates again,** `compare-dates` with `--space`, and add a row to
    the [log](#log).
 7. **When they first sign in,** the app opens its Backup settings: choose "Back
