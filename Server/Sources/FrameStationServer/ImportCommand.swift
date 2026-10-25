@@ -164,7 +164,6 @@ struct ImportCommand: AsyncCommand {
             console.warning("No importable media found under \(path).")
             return
         }
-        let liveGroups = LibraryScanner.liveGroups(candidates)
 
         // Resume: skip anything already recorded whose size and mtime match.
         let previous = try await app.sql.raw("""
@@ -321,7 +320,6 @@ struct ImportCommand: AsyncCommand {
                         metadata: metadata,
                         dating: dating,
                         placeName: placeName,
-                        liveGroupID: liveGroups[candidate.url.path],
                         spaceID: spaceID,
                         userID: userID,
                         copying: original,
@@ -333,7 +331,8 @@ struct ImportCommand: AsyncCommand {
                     bytesDone += candidate.byteSize
                     try? await record(candidate, sha: sha, assetID: assetID,
                                       outcome: original == nil ? "imported" : "deduplicated",
-                                      error: nil, on: app.sql)
+                                      error: nil, liveIdentifier: metadata.liveIdentifier ?? "",
+                                      on: app.sql)
                 } catch {
                     failed += 1
                     app.logger.error("import failed for \(candidate.url.path): \(error)")
@@ -366,6 +365,15 @@ struct ImportCommand: AsyncCommand {
         for source in ImportDating.Source.allCases {
             if let count = datedBy[source] { console.info("    \(source.rawValue): \(count)") }
         }
+
+        // Into items the way Synology Photos makes them, now that every file
+        // of this walk, and any from an earlier run, is in.
+        let grouping = try await ImportGrouping.regroup(space: spaceID, root: path, app: app)
+        console.info("")
+        console.info("  Grouped as Synology Photos groups them:")
+        console.info("    items of more than one file: \(grouping.items)")
+        console.info("    of them Live Photos:         \(grouping.livePhotos)")
+        console.info("    files kept with another:     \(grouping.stacked)")
         console.info("")
         console.info("Thumbnails are queued; the derivation worker drains them in the background.")
         if failed > 0 {
@@ -460,7 +468,6 @@ struct ImportCommand: AsyncCommand {
         metadata: MediaProbe.Metadata,
         dating: ImportDating,
         placeName: String?,
-        liveGroupID: UUID?,
         spaceID: UUID,
         userID: UUID,
         copying original: UUID?,
@@ -479,10 +486,9 @@ struct ImportCommand: AsyncCommand {
                 if let original {
                     // Copied from the row that already has these bytes, so
                     // nothing is probed or rendered twice: derivatives are kept
-                    // under the content hash, and derived_at comes along. The
-                    // Live Photo pairing found in this walk wins over the old
-                    // row's, so a still and its motion half imported together
-                    // stay together.
+                    // under the content hash, and derived_at comes along. Not
+                    // its Live Photo pairing: this library's own files are
+                    // grouped once they're all in (`ImportGrouping`).
                     guard let copied = try await sql.raw("""
                         INSERT INTO assets
                             (sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
@@ -490,7 +496,7 @@ struct ImportCommand: AsyncCommand {
                              lat, lon, place_name, place_version, destination, destination_version,
                              camera_make, camera_model, lens, iso, aperture,
                              shutter, focal_len, exposure_bias, dynamic_range, orientation,
-                             is_raw, live_group_id, burst_id, burst_pick, media_subtypes, thumbhash, exif,
+                             is_raw, burst_id, burst_pick, media_subtypes, thumbhash, exif,
                              thumb_version, derived_at, storage_path)
                         SELECT sha256, byte_size, media_type, mime, blob_ext, width, height, duration_ms,
                                captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
@@ -498,7 +504,7 @@ struct ImportCommand: AsyncCommand {
                                place_version, destination, destination_version,
                                camera_make, camera_model, lens, iso, aperture,
                                shutter, focal_len, exposure_bias, dynamic_range, orientation,
-                               is_raw, COALESCE(\(bind: liveGroupID), live_group_id), burst_id, burst_pick,
+                               is_raw, burst_id, burst_pick,
                                media_subtypes, thumbhash, exif, thumb_version, derived_at, NULL
                         FROM assets WHERE id = \(bind: original)
                         RETURNING id
@@ -526,8 +532,7 @@ struct ImportCommand: AsyncCommand {
                          duration_ms, captured_at, captured_tz_off, tz_off_fallback, local_captured_at,
                          lat, lon, place_name, place_version, destination, destination_version,
                          camera_make, camera_model, lens, iso, aperture, shutter,
-                         focal_len, exposure_bias, dynamic_range, orientation, is_raw,
-                         live_group_id)
+                         focal_len, exposure_bias, dynamic_range, orientation, is_raw)
                     VALUES
                         (\(bind: sha), \(bind: candidate.byteSize), \(bind: candidate.mediaType.rawValue),
                          \(bind: metadata.mime ?? candidate.mime), \(bind: blobExtension),
@@ -542,7 +547,7 @@ struct ImportCommand: AsyncCommand {
                          \(bind: metadata.iso), \(bind: metadata.aperture), \(bind: metadata.shutter),
                          \(bind: metadata.focalLength), \(bind: metadata.exposureBias),
                          \(bind: metadata.dynamicRange), \(bind: metadata.orientation),
-                         \(bind: metadata.isRaw), \(bind: liveGroupID))
+                         \(bind: metadata.isRaw))
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "asset insert returned nothing")
@@ -615,19 +620,20 @@ struct ImportCommand: AsyncCommand {
         assetID: UUID?,
         outcome: String,
         error: String?,
+        liveIdentifier: String? = nil,
         on sql: any SQLDatabase
     ) async throws {
         try await sql.raw("""
             INSERT INTO import_records
-                (source_path, sha256, asset_id, byte_size, modified_at, outcome, error)
+                (source_path, sha256, asset_id, byte_size, modified_at, outcome, error, live_identifier)
             VALUES (\(bind: candidate.url.path), \(bind: sha), \(bind: assetID),
                     \(bind: candidate.byteSize), \(bind: candidate.modifiedAt),
-                    \(bind: outcome), \(bind: error))
+                    \(bind: outcome), \(bind: error), \(bind: liveIdentifier))
             ON CONFLICT (source_path) DO UPDATE SET
                 sha256 = EXCLUDED.sha256, asset_id = EXCLUDED.asset_id,
                 byte_size = EXCLUDED.byte_size, modified_at = EXCLUDED.modified_at,
                 outcome = EXCLUDED.outcome, error = EXCLUDED.error,
-                imported_at = now()
+                live_identifier = EXCLUDED.live_identifier, imported_at = now()
             """).run()
     }
 

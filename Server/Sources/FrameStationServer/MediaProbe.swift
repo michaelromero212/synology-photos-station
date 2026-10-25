@@ -27,6 +27,11 @@ struct MediaProbe {
         /// For a video dated by its UTC stamp, its movie header's version: 1
         /// is the 64-bit form, whose date Synology Photos doesn't read.
         var movieHeaderVersion: Int?
+        /// The identifier an iPhone gives a Live Photo's photo and video, and
+        /// that a copy saved from either keeps. Read as Synology Photos reads
+        /// it: from a photo only while it still says an Apple camera made it.
+        /// See `ImportGrouping`.
+        var liveIdentifier: String?
 
         enum DateSource {
             case exifOriginal, exifCreate, xmpCreated, appleLocal, quickTimeUTC
@@ -88,6 +93,9 @@ struct MediaProbe {
         // Presence of a gain map is what distinguishes Apple Adaptive HDR from
         // an ordinary SDR capture.
         "-HDRGainMapVersion", "-MPImageType", "-ProfileDescription",
+        // A Live Photo's identifier, in Apple's maker notes. Older exiftools
+        // name it MediaGroupUUID.
+        "-ContentIdentifier", "-MediaGroupUUID",
     ]
 
     private static func probePhoto(_ url: URL, dumpExif: Bool) async throws -> Metadata {
@@ -172,6 +180,7 @@ struct MediaProbe {
 
         // A gain map means the file carries Adaptive HDR.
         metadata.dynamicRange = fields["HDRGainMapVersion"] != nil ? "hdr" : "standard"
+        metadata.liveIdentifier = photoLiveIdentifier(fields)
 
         let original = fields.string("DateTimeOriginal")
         // A phone writes the same zone into all three offsets, so the others
@@ -223,6 +232,42 @@ struct MediaProbe {
         }
 
         return metadata
+    }
+
+    /// A photo's Live Photo identifier, only while its Make is still Apple's:
+    /// Synology Photos kept an edit that had dropped it (`FullSizeRender.jpeg`)
+    /// apart from the video carrying the same identifier.
+    private static func photoLiveIdentifier(_ fields: [String: Any]) -> String? {
+        guard fields.string("Make")?.lowercased().hasPrefix("apple") == true,
+              let identifier = fields.string("ContentIdentifier") ?? fields.string("MediaGroupUUID"),
+              !identifier.isEmpty
+        else { return nil }
+        return identifier
+    }
+
+    /// The Live Photo identifier of each file, photo or video, in one exiftool
+    /// run per batch, for files imported before it was read. A file that
+    /// carries none maps to "".
+    static func liveIdentifiers(_ urls: [URL]) async throws -> [String: String] {
+        guard !urls.isEmpty else { return [:] }
+        let result = try await Shell.runChecked(
+            "exiftool",
+            ["-json", "-q", "-Make", "-ContentIdentifier", "-MediaGroupUUID", "-MIMEType"] + urls.map(\.path),
+            timeout: 300
+        )
+        guard let array = try JSONSerialization.jsonObject(with: result.stdout) as? [[String: Any]] else {
+            return [:]
+        }
+        var byPath: [String: String] = [:]
+        for fields in array {
+            guard let source = fields["SourceFile"] as? String else { continue }
+            if fields.string("MIMEType")?.hasPrefix("video/") == true {
+                byPath[source] = fields.string("ContentIdentifier") ?? ""
+            } else {
+                byPath[source] = photoLiveIdentifier(fields) ?? ""
+            }
+        }
+        return byPath
     }
 
     /// `SubSecTimeOriginal` as a fraction of a second: the digits are the ones
@@ -391,6 +436,9 @@ struct MediaProbe {
         }
         metadata.cameraMake = normalized["com.apple.quicktime.make"] as? String
         metadata.cameraModel = normalized["com.apple.quicktime.model"] as? String
+        if let identifier = normalized["com.apple.quicktime.content.identifier"] as? String, !identifier.isEmpty {
+            metadata.liveIdentifier = identifier
+        }
 
         // exiftool reads a video's container the way it reads a photo's EXIF —
         // the QuickTime atoms Synology shows (handler, track dates, graphics

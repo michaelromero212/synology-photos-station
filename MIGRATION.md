@@ -122,8 +122,17 @@ fingerprint it. The clones themselves are instant and take no space.
   them. `--user <id>` credits another member instead.
 - **Names and dates.** Original filenames are kept, and the files are copied
   byte for byte: nothing in them is changed. Each is dated by what it records
-  itself ([below](#same-order-as-synology-photos)). Live Photos pair by name
-  within a folder: `IMG_1234.HEIC` with `IMG_1234.MOV`.
+  itself ([below](#same-order-as-synology-photos)).
+- **Items, as Synology Photos makes them.** Every file in a folder that carries
+  the same Apple Live Photo identifier is one grid item: a Live Photo's photo
+  and video, and a JPEG exported or an Instagram copy saved from it. The photo
+  is the tile and the video its motion; the rest are kept with it, off the grid,
+  and removed, restored and purged with it. Names don't pair anything: a photo
+  and video that only share a name are two items, as in Synology, and so is a
+  photo whose edit dropped its Apple make. In the first library, pairing by name
+  had shown 144 items as 366 tiles and hidden 5 videos. `regroup --path …
+  --space …` does the same for a library imported before this (2026-10-25),
+  reading each file's identifier once and changing nothing but the grouping.
 
 ## Same order as Synology Photos
 
@@ -189,8 +198,9 @@ and again after:
    "some other date" means Synology knows something the file doesn't say.
 
 3. **After importing,** the same with `--space <space-id>` compares the times
-   the library holds, and the number of grid items with Synology's (a Live
-   Photo is one of each).
+   the library holds, the number of grid items with Synology's (a Live Photo is
+   one of each), and which files each shows together: an item Synology shows as
+   one tile and here as more, or the reverse, is listed with its files.
 
 Then delete `synology-dates.tsv`.
 

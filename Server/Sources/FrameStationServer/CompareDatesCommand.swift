@@ -123,11 +123,17 @@ struct CompareDatesCommand: AsyncCommand {
         console.info("  Different:               \(differences.count)")
         console.info("  Here, not in Synology:   \(notInSynology)")
         console.info("  In Synology, not here:   \(notHere)")
+        var grouping: (split: [[String]], joined: [[String]]) = ([], [])
         if signature.space != nil, let spaceID = signature.space.flatMap(UUID.init(uuidString:)) {
             let tiles = try await Self.tiles(in: spaceID, on: context.application.sql)
             let theirTiles = Set(synology.values.map(\.item)).count
             console.info("  Grid items here:         \(tiles)")
             console.info("  Grid items in Synology:  \(theirTiles)")
+            grouping = try await Self.grouping(
+                under: root, in: spaceID, synology: synology, on: context.application.sql
+            )
+            console.info("  Items split here:        \(grouping.split.count)")
+            console.info("  Items joined here:       \(grouping.joined.count)")
         }
         if !differences.isEmpty {
             // By kind, so a rule that's still wrong for one kind of file shows
@@ -147,8 +153,18 @@ struct CompareDatesCommand: AsyncCommand {
                 }
             }
         }
+        for (title, items) in [("One item in Synology, more than one here", grouping.split),
+                               ("More than one item in Synology, one here", grouping.joined)]
+        where !items.isEmpty {
+            console.info("")
+            console.info("  \(title), up to 10:")
+            for files in items.prefix(10) {
+                console.info("    " + files.map { String($0.dropFirst(root.count)) }.joined(separator: "  +  "))
+            }
+        }
         console.info("")
         console.info(differences.isEmpty && notInSynology == 0 && notHere == 0
+                     && grouping.split.isEmpty && grouping.joined.isEmpty
             ? "Every file matches Synology Photos to the second."
             : "Not identical yet: see above.")
     }
@@ -232,7 +248,7 @@ struct CompareDatesCommand: AsyncCommand {
             FROM import_records r
             JOIN assets a ON a.id = r.asset_id
             JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
-            WHERE r.source_path LIKE \(bind: root + "%") AND sa.deleted_at IS NULL
+            WHERE starts_with(r.source_path, \(bind: root)) AND sa.deleted_at IS NULL
             """).all(decoding: StoredRow.self)
         var result: [String: Ours] = [:]
         for row in rows {
@@ -240,6 +256,50 @@ struct CompareDatesCommand: AsyncCommand {
             result[row.path] = Ours(local: parsed.clock)
         }
         return result
+    }
+
+    private struct TileRow: Decodable {
+        let path: String
+        let tile: String
+    }
+
+    /// Where the library here shows Synology's items otherwise: one item as
+    /// more than one tile, or more than one item as one tile, each as its files.
+    private static func grouping(
+        under root: String, in space: UUID, synology: [String: Synology], on sql: any SQLDatabase
+    ) async throws -> (split: [[String]], joined: [[String]]) {
+        // Each imported file's tile: the file it's stacked under, the photo a
+        // Live Photo's video plays from, or its own.
+        let rows = try await sql.raw("""
+            SELECT r.source_path AS "path",
+                   COALESCE(a.stacked_under,
+                            CASE WHEN a.media_type = 'video' AND a.live_group_id IS NOT NULL THEN
+                                (SELECT p.id FROM assets p
+                                 JOIN space_assets ps ON ps.asset_id = p.id
+                                  AND ps.space_id = \(bind: space) AND ps.deleted_at IS NULL
+                                 WHERE p.live_group_id = a.live_group_id AND p.media_type = 'photo'
+                                 LIMIT 1)
+                            END,
+                            a.id)::text AS "tile"
+            FROM import_records r
+            JOIN assets a ON a.id = r.asset_id
+            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
+            WHERE starts_with(r.source_path, \(bind: root)) AND sa.deleted_at IS NULL
+            """).all(decoding: TileRow.self)
+        var tilesByItem: [String: Set<String>] = [:], itemsByTile: [String: Set<String>] = [:]
+        var filesByItem: [String: [String]] = [:], filesByTile: [String: [String]] = [:]
+        for row in rows {
+            guard let item = synology[row.path]?.item else { continue }
+            tilesByItem[item, default: []].insert(row.tile)
+            itemsByTile[row.tile, default: []].insert(item)
+            filesByItem[item, default: []].append(row.path)
+            filesByTile[row.tile, default: []].append(row.path)
+        }
+        let split = tilesByItem.filter { $0.value.count > 1 }.keys
+            .map { filesByItem[$0, default: []].sorted() }.sorted { $0.first ?? "" < $1.first ?? "" }
+        let joined = itemsByTile.filter { $0.value.count > 1 }.keys
+            .map { filesByTile[$0, default: []].sorted() }.sorted { $0.first ?? "" < $1.first ?? "" }
+        return (split, joined)
     }
 
     private struct CountRow: Decodable { let count: Int }

@@ -31,8 +31,10 @@ struct TimelineController: RouteCollection {
     /// needs it: without it a Live Photo is two tiles in the grid, two in the
     /// bucket count, two in a collection's total, and two in the rail's
     /// density — one thing, counted twice, in four places that then disagree
-    /// with each other.
-    static let visible = "NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)"
+    /// with each other. A file stacked under another, such as a JPEG exported
+    /// from an imported Live Photo (`ImportGrouping`), is part of that one the
+    /// same way.
+    static let visible = "(NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL) AND a.stacked_under IS NULL)"
 
     /// The name a photo's place goes by: Walt Disney World where it was taken
     /// there, and its town everywhere else. Every query that shows a place, or

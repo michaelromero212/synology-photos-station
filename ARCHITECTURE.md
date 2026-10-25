@@ -651,6 +651,7 @@ CREATE TABLE assets (
   orientation     int,
   is_raw          boolean NOT NULL DEFAULT false,
   live_group_id   uuid,                   -- shared by the still + paired video
+  stacked_under   uuid REFERENCES assets, -- shown through that one, off the grid (0034)
   burst_id        text,                   -- PHAsset.burstIdentifier; drives stacks
   burst_pick      boolean NOT NULL DEFAULT false,  -- user/auto-selected representative
   thumbhash       bytea,                  -- ~25 bytes
@@ -1537,7 +1538,10 @@ back. Who may undo whose deletion has the answer who may delete does: any
 contributor.
 
 A Live Photo is removed, restored and purged as one thing — the video half goes
-with its still (migration 0025 caught up the ones deleted before it did).
+with its still (migration 0025 caught up the ones deleted before it did). So is
+anything an import stacked under a photo (`stacked_under`, migration 0034): the
+JPEG exports and Instagram copies Synology Photos showed as part of the same
+item, which no grid shows on their own (`ImportGrouping`).
 
 ---
 

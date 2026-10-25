@@ -2334,6 +2334,18 @@ struct CollectionsController: RouteCollection {
                       AND pv.purged_at IS NULL
                     """).run()
 
+                // And whatever was stacked under it, removed with it too.
+                try await sql.raw("""
+                    UPDATE space_assets pm
+                    SET deleted_at = NULL, deleted_by = NULL
+                    FROM assets member
+                    WHERE member.stacked_under = ANY(\(bind: chosen))
+                      AND pm.asset_id = member.id
+                      AND pm.space_id = \(bind: spaceID)
+                      AND pm.deleted_at IS NOT NULL
+                      AND pm.purged_at IS NULL
+                    """).run()
+
                 for row in rows {
                     _ = try await ChangeLog.append(
                         spaceID: spaceID, entity: "space_asset", entityID: row.id,
@@ -2379,7 +2391,8 @@ struct CollectionsController: RouteCollection {
         guard !chosen.isEmpty else { return MediaEditResponse(updated: 0) }
 
         // The chosen removals, and the video half of any Live Photo among them —
-        // it was removed with its still and goes for good with it too.
+        // it was removed with its still and goes for good with it too — and
+        // whatever was stacked under one.
         let rows = try await req.sql.raw("""
             SELECT sa.id, a.sha256, a.blob_ext AS "blobExt",
                    (a.id = ANY(\(bind: chosen))) AS requested
@@ -2389,6 +2402,7 @@ struct CollectionsController: RouteCollection {
               AND sa.deleted_at IS NOT NULL
               AND sa.purged_at IS NULL
               AND (a.id = ANY(\(bind: chosen))
+                   OR a.stacked_under = ANY(\(bind: chosen))
                    OR (a.media_type = 'video' AND a.live_group_id IN (
                        SELECT still.live_group_id FROM assets still
                        WHERE still.id = ANY(\(bind: chosen))

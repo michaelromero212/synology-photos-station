@@ -175,6 +175,19 @@ struct AssetController: RouteCollection {
                       )
                     """).run()
 
+                // And whatever is stacked under it, such as a JPEG exported
+                // from an imported Live Photo: no grid shows it either, so it
+                // goes the way the motion does. See `ImportGrouping`.
+                try await sql.raw("""
+                    UPDATE space_assets pm
+                    SET deleted_at = now(), deleted_by = \(bind: userID)
+                    FROM assets member
+                    WHERE member.stacked_under = \(bind: assetID)
+                      AND pm.asset_id = member.id
+                      AND pm.space_id = \(bind: spaceID)
+                      AND pm.deleted_at IS NULL
+                    """).run()
+
                 _ = try await ChangeLog.append(
                     spaceID: spaceID, entity: "space_asset", entityID: placement.id,
                     op: "delete", on: sql

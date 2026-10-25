@@ -55,10 +55,23 @@ exiftool -q -overwrite_original -Make=Apple -Model="iPhone 15" \
   -GPSLatitude=38.9586 -GPSLatitudeRef=N -GPSLongitude=77.3570 -GPSLongitudeRef=W \
   "$LIB/2024/IMG_001.jpg" >/dev/null 2>&1
 
-# Live Photo pair: same stem, one still and one movie, same folder.
+# Live Photo pair: one still and one movie in a folder, carrying the identifier
+# an iPhone gives both (in the still's Apple maker notes and the movie's
+# QuickTime keys). That, not the shared name, pairs them, as Synology Photos
+# pairs them. The maker notes are written by hand: exiftool won't start them.
+LIVE=6B1F0E2A-4A55-4C51-9E0D-2C5E8A3B1D10
 mkimg "$LIB/Trip/IMG_100.jpg" 1000 1000
+python3 - "$SCRATCH/notes.bin" "$LIVE" <<'PY'
+import struct, sys
+ident = sys.argv[2].encode() + b"\0"
+header = b"Apple iOS\0" + struct.pack(">H", 1) + b"MM"
+ifd = struct.pack(">H", 1) + struct.pack(">HHII", 0x0011, 2, len(ident), 14 + 2 + 12 + 4) + struct.pack(">I", 0)
+open(sys.argv[1], "wb").write(header + ifd + ident)
+PY
+exiftool -q -overwrite_original "-MakerNotes<=$SCRATCH/notes.bin" -Make=Apple "$LIB/Trip/IMG_100.jpg" >/dev/null 2>&1
 ffmpeg -y -f lavfi -i testsrc=duration=2:size=480x480:rate=30 \
-  -c:v libx264 -pix_fmt yuv420p "$LIB/Trip/IMG_100.mov" >/dev/null 2>&1
+  -c:v libx264 -pix_fmt yuv420p -movflags use_metadata_tags \
+  -metadata "com.apple.quicktime.content.identifier=$LIVE" "$LIB/Trip/IMG_100.mov" >/dev/null 2>&1
 
 # Byte-identical copy of IMG_001 in another folder — must dedup to one asset.
 cp "$LIB/2024/IMG_001.jpg" "$LIB/Dupes/copy_of_001.jpg"
