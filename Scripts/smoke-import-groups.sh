@@ -6,7 +6,8 @@
 # under it, off the grid, and removed, restored and purged with it. A photo
 # whose edit dropped its Apple make, and a photo and video that share only a
 # name, stay apart, as Synology keeps them. A copy in another folder is an item
-# of its own. `regroup` does the same to a library imported before this, and
+# of its own. Given Synology's own items, a group is split where Synology
+# split it. `regroup` does the same to a library imported before this, and
 # compare-dates says when the grid's items match Synology's.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-import-groups.sh
@@ -149,6 +150,17 @@ check "and shows each as Synology does" "$EXPECTED" "$(layout)"
 (cd "$SERVER_DIR" && "$BIN" regroup --path "$L" --space "$FIRST" > "$ROOT/regroup-again.log" 2>&1)
 check "a second run reads nothing and changes nothing" "0 0" \
   "$(awk '/Identifiers read from files:/ {r=$NF} /grouping changed:/ {c=$NF} END {print r, c}' "$ROOT/regroup-again.log")"
+
+echo "Given Synology's items, a copy it kept apart (it reached the NAS first) is apart:"
+(cd "$SERVER_DIR" && "$BIN" regroup --path "$L" --space "$FIRST" --synology "$ROOT/synology-apart.tsv" \
+  > "$ROOT/regroup-apart.log" 2>&1)
+check "the copy is a tile of its own, the rest as before" \
+  "tile motion kept tile tile tile tile tile tile kept tile motion" "$(layout)"
+APART=$(compare --synology "$ROOT/synology-apart.tsv")
+check "and the grid has Synology's items again" "8 8 0 0" \
+  "$(echo "$APART" | awk '/Grid items here:/ {h=$NF} /Grid items in Synology:/ {s=$NF} /Items split here:/ {p=$NF} /Items joined here:/ {j=$NF} END {print h, s, p, j}')"
+(cd "$SERVER_DIR" && "$BIN" regroup --path "$L" --space "$FIRST" > /dev/null 2>&1)
+check "without them, it's grouped by the files alone again" "$EXPECTED" "$(layout)"
 
 echo "Removing the Live Photo takes what's kept with it, and so does restoring:"
 HEIC=$(asset "$D/IMG_8492.HEIC")

@@ -79,6 +79,9 @@ struct ImportCommand: AsyncCommand {
 
         @Flag(name: "keep-copies", help: "A file whose bytes another imported file of this library brought in becomes an item of its own, as Synology Photos shows it twice")
         var keepCopies: Bool
+
+        @Option(name: "synology", help: "Synology Photos' items, from Scripts/export-synology-dates.sh: group split where it split")
+        var synology: String?
     }
 
     enum Mode: String {
@@ -131,6 +134,8 @@ struct ImportCommand: AsyncCommand {
             guard let zone = TimeZone(identifier: name) else { throw ImportError.unknownTimeZone(name) }
             household = zone
         }
+        // And Synology's items, the same way: read now, not after hours of it.
+        let synologyItems = try signature.synology.map(ImportGrouping.synologyItems(from:))
 
         let missing = Derivatives.missingTools()
         guard missing.isEmpty else {
@@ -368,7 +373,9 @@ struct ImportCommand: AsyncCommand {
 
         // Into items the way Synology Photos makes them, now that every file
         // of this walk, and any from an earlier run, is in.
-        let grouping = try await ImportGrouping.regroup(space: spaceID, root: path, app: app)
+        let grouping = try await ImportGrouping.regroup(
+            space: spaceID, root: path, app: app, synologyItems: synologyItems
+        )
         console.info("")
         console.info("  Grouped as Synology Photos groups them:")
         console.info("    items of more than one file: \(grouping.items)")

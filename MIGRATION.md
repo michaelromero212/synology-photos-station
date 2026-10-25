@@ -130,9 +130,13 @@ fingerprint it. The clones themselves are instant and take no space.
   and removed, restored and purged with it. Names don't pair anything: a photo
   and video that only share a name are two items, as in Synology, and so is a
   photo whose edit dropped its Apple make. In the first library, pairing by name
-  had shown 144 items as 366 tiles and hidden 5 videos. `regroup --path …
-  --space …` does the same for a library imported before this (2026-10-25),
-  reading each file's identifier once and changing nothing but the grouping.
+  had shown 144 items as 366 tiles and hidden 5 videos. The one thing the files
+  can't say is which arrived first: Synology starts an item from that file, and
+  a camera's original doesn't join an item an app's copy started (8 Instagram
+  copies there). So pass `--synology <export>` too, the same export as the date
+  check: a group is then split where Synology split it, never joined. `regroup
+  --path … --space … [--synology …]` does the same for a library imported
+  before this (2026-10-25), changing nothing but the grouping.
 
 ## Same order as Synology Photos
 
@@ -382,14 +386,15 @@ For each person:
    to overlap, so this step is theirs to skip.
 5. **Then each folder whole,** dry run first: `--path
    "/volume1/homes/<user>/Photos/MobileBackup"`, then `.../PhotoLibrary`, each
-   with `--time-zone` and `--keep-copies`. The last brings a file the library
-   holds twice in twice, as Synology Photos shows it (74 in the first library,
-   mostly videos re-imported to the phone years later). Use it on every run of
-   a library, the trial month too: a copy left out once is recorded as done,
-   and a later run won't bring it in. At the Shared Space's pace, 662 GB is
-   about 2¾ hours of reading for all three, but these files are a tenth the
-   size on average, so per-file work counts for more. Allow an evening for the
-   biggest library, with the Mac awake and on the home network.
+   with `--time-zone`, `--synology /volume1/docker/framestation/synology-dates.tsv`
+   (see [the import](#the-import)) and `--keep-copies`. The last brings a file
+   the library holds twice in twice, as Synology Photos shows it (74 in the
+   first library, mostly videos re-imported to the phone years later). Use it
+   on every run of a library, the trial month too: a copy left out once is
+   recorded as done, and a later run won't bring it in. The first library's
+   19,800 files took 4 hours, held back by the thumbnails the server makes
+   alongside; allow an evening for the biggest, with the Mac awake and on the
+   home network.
 6. **Check the dates again,** `compare-dates` with `--space`, and add a row to
    the [log](#log).
 7. **When they first sign in,** the app opens its Backup settings: choose "Back

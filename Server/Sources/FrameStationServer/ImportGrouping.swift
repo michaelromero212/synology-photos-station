@@ -22,6 +22,13 @@ import Darwin
 /// (`live_group_id`, as an upload's does), and the rest are stacked under it
 /// (`stacked_under`): off the grid, and removed, restored and purged with it.
 /// An item with no photo shows its first video.
+///
+/// One thing the files can't say: Synology starts an item from whichever of
+/// its files reached the NAS first, and a camera's original doesn't join an
+/// item an app's copy started, so in that library 8 Instagram copies that
+/// arrived before their Live Photos were items of their own. Given Synology's
+/// own items (`synologyItems`, from `Scripts/export-synology-dates.sh`), a
+/// group is split where Synology split it. Only split: never joined.
 enum ImportGrouping {
     struct Summary {
         /// Items of more than one file.
@@ -50,7 +57,7 @@ enum ImportGrouping {
     /// files. Whole folders at a time: an item never spans two, and Synology
     /// kept a Live Photo's copy in another folder apart from it.
     static func regroup(
-        space: UUID, root: String, app: Application,
+        space: UUID, root: String, app: Application, synologyItems: [String: String]? = nil,
         progress: (Int, Int) -> Void = { _, _ in }
     ) async throws -> Summary {
         var summary = Summary()
@@ -80,7 +87,7 @@ enum ImportGrouping {
 
         var liveGroup: [UUID: UUID] = [:]
         var stackedUnder: [UUID: UUID] = [:]
-        for group in groups.values where group.count > 1 {
+        for group in groups.values.flatMap({ split($0, as: synologyItems) }) where group.count > 1 {
             summary.items += 1
             let photos = group.filter { $0.mediaType == "photo" }
             let videos = group.filter { $0.mediaType == "video" }
@@ -155,6 +162,33 @@ enum ImportGrouping {
             }
         }
         return summary
+    }
+
+    /// A group as Synology's items divide it, when they're known. A file
+    /// Synology doesn't have goes with the largest part.
+    private static func split(_ group: [Member], as synologyItems: [String: String]?) -> [[Member]] {
+        guard let synologyItems else { return [group] }
+        var parts: [String: [Member]] = [:]
+        var unknown: [Member] = []
+        for member in group {
+            if let item = synologyItems[member.path] { parts[item, default: []].append(member) }
+            else { unknown.append(member) }
+        }
+        var divided = parts.values.sorted { $0.count > $1.count }
+        if divided.isEmpty { return [unknown] }
+        divided[0] += unknown
+        return divided
+    }
+
+    /// Synology's item for each file, from `Scripts/export-synology-dates.sh`:
+    /// `path<TAB>taken<TAB>item` per line.
+    static func synologyItems(from file: String) throws -> [String: String] {
+        var items: [String: String] = [:]
+        for line in try String(contentsOfFile: file, encoding: .utf8).split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            if fields.count >= 3 { items[String(fields[0])] = String(fields[2]) }
+        }
+        return items
     }
 
     /// Reads the identifier of every file imported before it was recorded, and

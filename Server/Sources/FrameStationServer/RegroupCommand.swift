@@ -13,6 +13,9 @@ struct RegroupCommand: AsyncCommand {
 
         @Option(name: "space", short: "s", help: "The library it was imported into")
         var space: String?
+
+        @Option(name: "synology", help: "Synology Photos' items, from Scripts/export-synology-dates.sh: split where it split")
+        var synology: String?
     }
 
     var help: String { "Group an imported library's files into items as Synology Photos does." }
@@ -24,9 +27,10 @@ struct RegroupCommand: AsyncCommand {
             throw Abort(.badRequest, reason: "--path and --space (a library's id) are both required.")
         }
         let console = context.console
+        let synologyItems = try signature.synology.map(ImportGrouping.synologyItems(from:))
         console.info("Grouping what was imported from \(path)…")
         let summary = try await ImportGrouping.regroup(
-            space: space, root: path, app: context.application
+            space: space, root: path, app: context.application, synologyItems: synologyItems
         ) { done, total in
             if done % 1600 == 0 || done == total { console.info("  identifiers read: \(done)/\(total)") }
         }
