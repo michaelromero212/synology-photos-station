@@ -216,10 +216,18 @@ struct RebuildCommand: AsyncCommand {
             }
         }
 
-        // Both halves of a Live Photo sit in the same folder, but a batch
-        // boundary could still fall between them — paired over everything
-        // pending, once.
-        let liveGroups = LibraryScanner.liveGroups(pending.map(\.candidate))
+        // Into items the way an import's files are (`ImportGrouping`): by the
+        // Live Photo identifier each file's probe reads, a folder at a time
+        // once the last of its files is in. A batch boundary can fall between
+        // a Live Photo's photo and its video, and a run stopped halfway leaves
+        // its folder to the next, which groups it with what it adds.
+        var unfinished = Dictionary(pending.map { (Self.folder(of: $0), 1) }, uniquingKeysWith: +)
+        let folders = Dictionary(
+            grouping: found.filter { unfinished[Self.folder(of: $0)] != nil }, by: Self.folder(of:)
+        )
+        var identifiers: [String: String] = [:]
+        var grouping = ImportGrouping.Summary()
+        var ungrouped = 0
 
         // --------------------------------------------------------------- index
         let started = Date()
@@ -262,14 +270,34 @@ struct RebuildCommand: AsyncCommand {
 
                     try await index(
                         item, sha: sha, metadata: metadata,
-                        liveGroupID: liveGroups[path],
                         spaceID: spaceID, userID: userID, app: app
                     )
+                    identifiers[path] = metadata.liveIdentifier ?? ""
                     indexedCount += 1
                     bytesDone += item.candidate.byteSize
                 } catch {
                     failed += 1
                     app.logger.error("rebuild failed for \(path): \(String(reflecting: error))")
+                }
+            }
+
+            // Each folder this batch finished, grouped as a whole. One that
+            // can't be is left as the batch left it, rather than costing the
+            // rest of the library its rebuild.
+            for item in chunk {
+                let folder = Self.folder(of: item)
+                unfinished[folder, default: 0] -= 1
+                guard unfinished[folder] == 0, let files = folders[folder] else { continue }
+                do {
+                    let summary = try await group(
+                        files, identifiers: identifiers, spaces: spaces, batchSize: batchSize, app: app
+                    )
+                    grouping.items += summary.items
+                    grouping.livePhotos += summary.livePhotos
+                    grouping.stacked += summary.stacked
+                } catch {
+                    ungrouped += 1
+                    app.logger.error("rebuild: could not group \(folder): \(String(reflecting: error))")
                 }
             }
 
@@ -288,6 +316,14 @@ struct RebuildCommand: AsyncCommand {
         console.info("  Indexed: \(indexedCount)")
         console.info("  Failed:  \(failed)")
         console.info("  Elapsed: \(ImportCommand.humanDuration(Date().timeIntervalSince(started)))")
+        console.info("")
+        console.info("  Grouped as Synology Photos groups them:")
+        console.info("    items of more than one file: \(grouping.items)")
+        console.info("    of them Live Photos:         \(grouping.livePhotos)")
+        console.info("    files kept with another:     \(grouping.stacked)")
+        if ungrouped > 0 {
+            console.warning("  \(ungrouped) folders couldn't be grouped (see above): a Live Photo in one may show as more than one tile.")
+        }
         console.info("")
         console.info("Thumbnails are queued; the derivation worker draws them down in the background.")
         console.info("")
@@ -523,11 +559,11 @@ struct RebuildCommand: AsyncCommand {
 
     // MARK: - Indexing one file
 
+    /// An item of its own until its folder is grouped (`group`).
     private func index(
         _ item: Found,
         sha: String,
         metadata: MediaProbe.Metadata,
-        liveGroupID: UUID?,
         spaceID: UUID,
         userID: UUID,
         app: Application
@@ -544,14 +580,13 @@ struct RebuildCommand: AsyncCommand {
                 // put one person's copy in the other person's library.
                 guard let asset = try await sql.raw("""
                     INSERT INTO assets
-                        (sha256, byte_size, media_type, mime, blob_ext, is_raw,
-                         live_group_id, storage_path)
+                        (sha256, byte_size, media_type, mime, blob_ext, is_raw, storage_path)
                     VALUES
                         (\(bind: sha), \(bind: candidate.byteSize),
                          \(bind: candidate.mediaType.rawValue),
                          \(bind: metadata.mime ?? candidate.mime),
                          \(bind: BlobStore.fileExtension(for: filename)),
-                         \(bind: metadata.isRaw), \(bind: liveGroupID), \(bind: path))
+                         \(bind: metadata.isRaw), \(bind: path))
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "asset insert returned nothing")
@@ -592,5 +627,63 @@ struct RebuildCommand: AsyncCommand {
                 throw error
             }
         }
+    }
+
+    // MARK: - Grouping
+
+    private static func folder(of item: Found) -> String {
+        item.candidate.url.deletingLastPathComponent().path
+    }
+
+    /// Groups one folder's files into items as an import's are, those an
+    /// earlier run indexed there with them: nothing kept their identifiers,
+    /// so they're read off the files again, one exiftool run per batch.
+    private func group(
+        _ files: [Found], identifiers: [String: String], spaces: [Home: UUID],
+        batchSize: Int, app: Application
+    ) async throws -> ImportGrouping.Summary {
+        struct Row: Decodable {
+            let assetID: UUID
+            let placementID: UUID
+            let spaceID: UUID
+            let path: String
+            let mediaType: String
+            let liveGroupID: UUID?
+            let stackedUnder: UUID?
+        }
+        // Each file's row, in the library its folder belongs to.
+        let placed = files.compactMap { file in
+            spaces[Self.spaceKey(file.home)].map { (file.candidate.url.path, $0) }
+        }
+        let rows = try await app.sql.raw("""
+            SELECT a.id AS "assetID", sa.id AS "placementID", sa.space_id AS "spaceID",
+                   a.storage_path AS "path", a.media_type AS "mediaType",
+                   a.live_group_id AS "liveGroupID", a.stacked_under AS "stackedUnder"
+            FROM unnest(\(bind: placed.map(\.0))::text[], \(bind: placed.map(\.1))::uuid[]) AS f(path, space)
+            JOIN assets a ON a.storage_path = f.path
+            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = f.space
+            """).all(decoding: Row.self)
+
+        let unread = rows.map(\.path).filter { identifiers[$0] == nil }
+        var read: [String: String] = [:]
+        for start in stride(from: 0, to: unread.count, by: batchSize) {
+            let batch = unread[start..<min(start + batchSize, unread.count)]
+            let identified = try await MediaProbe.liveIdentifiers(batch.map { URL(fileURLWithPath: $0) })
+            read.merge(identified) { $1 }
+        }
+
+        let modified = Dictionary(
+            files.map { ($0.candidate.url.path, $0.candidate.modifiedAt) }, uniquingKeysWith: { first, _ in first }
+        )
+        let members = rows.compactMap { row -> ImportGrouping.Member? in
+            guard let modifiedAt = modified[row.path] else { return nil }
+            return ImportGrouping.Member(
+                assetID: row.assetID, placementID: row.placementID, spaceID: row.spaceID,
+                path: row.path, identifier: identifiers[row.path] ?? read[row.path],
+                mediaType: row.mediaType, modifiedAt: modifiedAt,
+                liveGroupID: row.liveGroupID, stackedUnder: row.stackedUnder
+            )
+        }
+        return try await ImportGrouping.group(members, app: app)
     }
 }

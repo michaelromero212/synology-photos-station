@@ -194,12 +194,17 @@ already lies. Accounts are recreated from the home directory names and keyed on
 `dsm_username`, so DSM sign-in adopts them rather than making a second account
 for the same person. Re-running skips what it already indexed, which makes it
 both resumable and a way to pick up files dropped into the library by hand.
+Files come back in the grid items an import makes of them (`ImportGrouping`):
+every file in a folder carrying the same Live Photo identifier is one, grouped
+once the last of the folder is in, and a folder a stopped run left is grouped
+by the next.
 
 `Scripts/smoke-rebuild.sh` is the proof, against its own database: drop the
 schema entirely, run the command, and check that the library comes back —
 right photos in the right libraries, EXIF dates and dimensions read off the
-files, SHA-256 matching the bytes on disk, and `@eaDir`, `#recycle` and
-everything outside `Photos` correctly left out.
+files, SHA-256 matching the bytes on disk, Live Photos and their exports in
+one item each, and `@eaDir`, `#recycle` and everything outside `Photos`
+correctly left out.
 
 **What does not come back.** Favorites, ratings, tags, captions and albums are
 in the database and nowhere else; a folder has no place to keep them. Shared

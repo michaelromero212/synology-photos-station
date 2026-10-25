@@ -1,6 +1,7 @@
 #!/bin/bash
 # The claim in ARCHITECTURE.md §3a, tested: wipe the database and rebuild the
-# whole library from the folders alone.
+# whole library from the folders alone. Its files come back in the items an
+# import makes of them: by the Live Photo identifier each carries, not by name.
 #
 # Runs against its own database rather than the development one, so proving the
 # claim doesn't sign every device out of the library you were just using.
@@ -12,6 +13,8 @@ export PATH="/opt/homebrew/bin:$PATH"
 PGHOST=127.0.0.1; PGPORT=55432; PGUSER=framestation; DB=framestation_rebuild
 LIB="$SCRATCH/rebuild"
 export FRAMESTATION_BLOB_ROOT="${FRAMESTATION_BLOB_ROOT:-$SCRATCH/blobroot}"
+# The command won't start without one, though a rebuild puts nothing in it.
+mkdir -p "$FRAMESTATION_BLOB_ROOT"
 export FRAMESTATION_DATABASE_URL="postgres://$PGUSER:x@$PGHOST:$PGPORT/$DB?sslmode=disable"
 
 PASS=0; FAIL=0
@@ -157,6 +160,80 @@ OUT4=$(rebuild)
 check "it's indexed" "1" "$(echo "$OUT4" | grep -c 'Indexed: 1')"
 check "as michael's own" "6" "$(mine michael)"
 check "from where it lies" "1" "$(q "select count(*) from assets where storage_path like '%/Photos/Personal/2026/10/IMG_7010.jpg';")"
+
+echo
+echo "=== 12. Live Photos come back as the items an import makes ==="
+# Every file in a folder carrying the same Live Photo identifier is one item,
+# as Synology Photos and the import make them (`ImportGrouping`): the photo is
+# the tile, its video the motion, and a JPEG exported from it is kept with it,
+# off the grid. A photo and a video that only share a name are two items. In
+# batches of two, so the folder comes in over several and is grouped once all
+# of it is in.
+LP="$MB/iPhone/2026/10"; mkdir -p "$LP"
+video(){ ffmpeg -v error -y -f lavfi -i testsrc=duration=1:size=64x48:rate=5 \
+  -c:v libx264 -pix_fmt yuv420p -movflags use_metadata_tags "$@"; }
+# Apple's maker notes holding a Live Photo identifier, as an iPhone writes
+# them, under the Make that says an Apple camera took it. Written by hand:
+# exiftool won't start them.
+apple(){  # file identifier
+  python3 - "$SCRATCH/rebuild-notes.bin" "$2" <<'PY'
+import struct, sys
+ident = sys.argv[2].encode() + b"\0"
+header = b"Apple iOS\0" + struct.pack(">H", 1) + b"MM"
+ifd = struct.pack(">H", 1) + struct.pack(">HHII", 0x0011, 2, len(ident), 14 + 2 + 12 + 4) + struct.pack(">I", 0)
+open(sys.argv[1], "wb").write(header + ifd + ident)
+PY
+  exiftool -q -q -overwrite_original "-MakerNotes<=$SCRATCH/rebuild-notes.bin" -Make=Apple "$1"
+}
+A=0C3E6B94-1F6A-4C38-9D2B-6E1A4F0B7C21; B=9A7D2E15-3B4C-4E8F-A1D6-5C2B8E9F0A34
+photo "$LP/IMG_7101.HEIC"; apple "$LP/IMG_7101.HEIC" $A
+video -metadata "com.apple.quicktime.content.identifier=$A" "$LP/IMG_7101.MOV"
+photo "$LP/IMG_7101.JPEG"; apple "$LP/IMG_7101.JPEG" $A
+photo "$LP/IMG_7102.JPG"; video "$LP/IMG_7102.mov"
+# A Live Photo whose video comes in later (13).
+photo "$LP/IMG_7104.HEIC"; apple "$LP/IMG_7104.HEIC" $B
+for f in "$LP"/*; do TZ=UTC touch -t 202610121530.00 "$f"; done
+TZ=UTC touch -t 202610121530.01 "$LP/IMG_7101.JPEG"
+
+# how a file is shown: tile, motion (of a Live Photo) or kept (stacked)
+shown(){ q "select case when stacked_under is not null then 'kept'
+                        when media_type = 'video' and live_group_id is not null then 'motion' else 'tile' end
+            from assets where storage_path = '$LP/$1';"; }
+layout(){ for f in "$@"; do shown "$f"; done | paste -sd' ' -; }
+# both files play as one Live Photo
+paired(){ q "select count(*) from assets where storage_path in ('$LP/$1', '$LP/$2')
+             and live_group_id = (select live_group_id from assets where storage_path = '$LP/$1');"; }
+grouped(){ echo "$1" | awk '/items of more than one file:/ {i=$NF} /of them Live Photos:/ {l=$NF}
+                            /files kept with another:/ {k=$NF} END {print i, l, k}'; }
+
+OUT5=$(rebuild --batch 2)
+check "six files indexed" "1" "$(echo "$OUT5" | grep -c 'Indexed: 6')"
+check "each shown as an import shows it" "tile motion kept tile tile tile" \
+  "$(layout IMG_7101.HEIC IMG_7101.MOV IMG_7101.JPEG IMG_7102.JPG IMG_7102.mov IMG_7104.HEIC)"
+check "the motion is the Live Photo's own video" "2" "$(paired IMG_7101.HEIC IMG_7101.MOV)"
+check "the export is kept with its photo" "$(q "select id from assets where storage_path = '$LP/IMG_7101.HEIC';")" \
+  "$(q "select stacked_under from assets where storage_path = '$LP/IMG_7101.JPEG';")"
+check "the rebuild says what it grouped" "1 1 1" "$(grouped "$OUT5")"
+check "and devices hear of each file it grouped" "3" "$(q "select count(*) from change_log where op='update';")"
+
+echo
+echo "=== 13. the next run groups a folder a stopped one left ==="
+# A rebuild stopped partway through a folder leaves each file it indexed there
+# an item of its own, and the rest to the next run, which reads those files'
+# identifiers off them again, since nothing kept them, and groups the folder as
+# a whole: here with a Live Photo's video that came in late.
+q "update assets set live_group_id = null, stacked_under = null where storage_path like '$LP/%';" >/dev/null
+video -metadata "com.apple.quicktime.content.identifier=$B" "$LP/IMG_7104.MOV"
+TZ=UTC touch -t 202610121530.00 "$LP/IMG_7104.MOV"
+UPDATES=$(q "select count(*) from change_log where op='update';")
+OUT6=$(rebuild)
+check "the video is indexed" "1" "$(echo "$OUT6" | grep -c 'Indexed: 1')"
+check "and the folder grouped as a whole" "tile motion kept tile tile tile motion" \
+  "$(layout IMG_7101.HEIC IMG_7101.MOV IMG_7101.JPEG IMG_7102.JPG IMG_7102.mov IMG_7104.HEIC IMG_7104.MOV)"
+check "the late video plays as its photo's motion" "2" "$(paired IMG_7104.HEIC IMG_7104.MOV)"
+check "it says what it grouped" "2 2 1" "$(grouped "$OUT6")"
+check "and devices hear of each file grouped anew" "5" \
+  "$(( $(q "select count(*) from change_log where op='update';") - UPDATES ))"
 
 admin "DROP DATABASE IF EXISTS $DB;" >/dev/null
 
