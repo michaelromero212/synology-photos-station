@@ -136,20 +136,30 @@ Photos goes by, so a library lands where it shows there:
 | An EXIF date and zone (the zone may be in `OffsetTimeOriginal`, `OffsetTimeDigitized` or `OffsetTime`) | that date, in that zone |
 | An EXIF date and no zone | that clock reading, as it is |
 | An iPhone video's `com.apple.quicktime.creationdate` | that local time and zone |
-| Only a UTC stamp, in a QuickTime movie (`.mov`) | that moment, in the household's zone (`--time-zone`) |
-| Anything else: only an MP4's UTC stamp, only an XMP `DateCreated`, or no date | its modification time, in the household's zone |
+| Only a video's UTC stamp (`.mov` or `.mp4`) | that moment, in the household's zone (`--time-zone`) |
+| Anything else: a stamp in a 64-bit (version 1) movie header, only an XMP `DateCreated`, or no date | its modification time, in the household's zone |
 
 The last two rows are Synology's own rule, worked out by comparing every file
 of one library with it (2026-10-24). Its backup app sets each file's
-modification time from the phone's library. Synology dates a `.mov` with no
+modification time from the phone's library. Synology dates a video with no
 local date by its UTC stamp, and anything else with no camera date by the
-modification time, passing over an MP4's UTC stamp and an XMP date. The two
-usually agree, but not always: a trim or an edit's original saved as `.mov`
-carries the time it was saved, sometimes years after it was filmed; an MP4
-re-saved years later keeps the year it was made; and a screenshot's XMP date
-can be written in the zone it was taken in. Reading every UTC stamp and XMP
-date left 4 of 19,806 files apart, three MP4s and the screenshot, and reading
-none of them left 230 apart, `.mov` trims and edit originals among them.
+modification time. It passes over an XMP date, and a stamp in a movie header
+written in the 64-bit form, which it doesn't read; Vimeo writes that form,
+and nothing else in that library did. The stamp and the modification time
+usually agree, but not always: a trim, an edit's original or a screen
+recording carries the time it was saved, sometimes years after it was
+filmed, and a screenshot's XMP date can be written in the zone it was taken
+in. Tested on every one of that library's 1,372 videos with a stamp and no
+local date, the rule matched all but a second copy of one of them, which
+Synology dated by its modification time instead.
+
+A file whose bytes the server already holds, in the Shared Space or anyone's
+library, comes in as a row of its own but stores them once. Its time is still
+read from the file, never copied from the row already there, since that row
+may be dated otherwise (the Shared Space's videos are) and a file dated by
+its modification time has its own. Nor does the server's startup pass that
+dates uploads from names like `20260704_183215.mp4` touch an imported file:
+Synology doesn't read the name, so neither does anything after the import.
 
 Synology Photos shows a time with no zone in the NAS's own zone, so with
 `--time-zone` set to the NAS's (Control Panel → Regional Options), the two

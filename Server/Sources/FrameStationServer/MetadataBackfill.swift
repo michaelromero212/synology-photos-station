@@ -10,7 +10,9 @@ import Vapor
 /// still gain something: undated, or dated by an earlier version that kept a
 /// stale offset, and with a name that could carry a date or says screenshot.
 /// New uploads get their date from the file's own creation date at commit and
-/// never need it.
+/// never need it. Nor does an imported file: the import dated it by the dates
+/// Synology Photos goes by (`ImportDating`), and a name isn't one of them, so a
+/// clip named `20260704_183215.mp4` keeps the time Synology shows for it.
 enum MetadataBackfill {
     private struct Row: Decodable {
         let id: UUID
@@ -45,8 +47,9 @@ enum MetadataBackfill {
                 let rows = try await app.sql.raw("""
                     SELECT DISTINCT ON (a.id)
                            a.id, sa.filename, a.media_subtypes AS "mediaSubtypes",
-                           (a.captured_at IS NULL
-                            OR (a.captured_tz_off IS DISTINCT FROM 0 AND a.camera_make IS NULL))
+                           ((a.captured_at IS NULL
+                             OR (a.captured_tz_off IS DISTINCT FROM 0 AND a.camera_make IS NULL))
+                            AND NOT EXISTS (SELECT 1 FROM import_records r WHERE r.asset_id = a.id))
                                AS "needsDate"
                     FROM space_assets sa
                     JOIN assets a ON a.id = sa.asset_id
@@ -55,10 +58,12 @@ enum MetadataBackfill {
                       AND (
                           -- A date the name could supply: eight digits, dashed
                           -- or not, which every shape FilenameMetadata reads
-                          -- contains and `IMG_4821` does not.
+                          -- contains and `IMG_4821` does not. Not to a file the
+                          -- import dated.
                           ((a.captured_at IS NULL
                             OR (a.captured_tz_off IS DISTINCT FROM 0 AND a.camera_make IS NULL))
-                           AND sa.filename ~ '[0-9]{4}-?[0-9]{2}-?[0-9]{2}')
+                           AND sa.filename ~ '[0-9]{4}-?[0-9]{2}-?[0-9]{2}'
+                           AND NOT EXISTS (SELECT 1 FROM import_records r WHERE r.asset_id = a.id))
                           -- Or a screenshot not yet marked as one.
                           OR (lower(sa.filename) ~ '^(simulator )?screenshot'
                               AND NOT ('screenshot' = ANY(a.media_subtypes)))

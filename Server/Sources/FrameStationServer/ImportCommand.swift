@@ -276,8 +276,7 @@ struct ImportCommand: AsyncCommand {
                         : try await MediaProbe.probe(url: candidate.url, mediaType: .video)
 
                     let dating = ImportDating.resolve(
-                        probe: metadata, filename: candidate.url.lastPathComponent,
-                        modifiedAt: candidate.modifiedAt, household: household
+                        probe: metadata, modifiedAt: candidate.modifiedAt, household: household
                     )
 
                     // Named now, from the file's own position. An upload is
@@ -492,9 +491,11 @@ struct ImportCommand: AsyncCommand {
                         """).first(decoding: IDRow.self) else {
                         throw Abort(.internalServerError, reason: "asset copy returned nothing")
                     }
-                    // The copied row's dates, unless it had no zone at all, the
-                    // way the Shared Space's videos came in: then the dates
-                    // this file's own reading gives.
+                    // The dates this file's own reading gives, never the copied
+                    // row's: Synology dates each file of a library by itself,
+                    // and the row may be dated otherwise. The Shared Space's
+                    // videos came in four or five hours late, and a file dated
+                    // by its modification time has its own.
                     try await sql.raw("""
                         UPDATE assets SET
                             captured_at = \(bind: dating.capturedAt),
@@ -502,7 +503,6 @@ struct ImportCommand: AsyncCommand {
                             tz_off_fallback = \(bind: dating.fallbackZone),
                             local_captured_at = \(bind: dating.local) AT TIME ZONE 'UTC'
                         WHERE id = \(bind: copied.id)
-                          AND captured_tz_off IS NULL AND tz_off_fallback IS NULL
                         """).run()
                     asset = copied
                 } else {

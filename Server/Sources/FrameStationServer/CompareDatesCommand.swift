@@ -202,8 +202,7 @@ struct CompareDatesCommand: AsyncCommand {
                 let probe = (candidate.mediaType == .photo ? photoMetadata : videoMetadata)[candidate.url.path]
                     ?? MediaProbe.Metadata()
                 let dating = ImportDating.resolve(
-                    probe: probe, filename: candidate.url.lastPathComponent,
-                    modifiedAt: candidate.modifiedAt, household: household
+                    probe: probe, modifiedAt: candidate.modifiedAt, household: household
                 )
                 result[candidate.url.path] = Ours(
                     local: dating.local, how: dating.source.rawValue,

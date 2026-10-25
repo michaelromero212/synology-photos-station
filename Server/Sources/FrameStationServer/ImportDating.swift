@@ -15,14 +15,15 @@ import Foundation
 ///
 /// The dates read are the ones Synology Photos goes by, so a library comes
 /// over in the order it shows there: a camera's date (EXIF), an iPhone video's
-/// own local time, a QuickTime movie's (`.mov`) UTC stamp, and for anything
-/// else, its modification time, which Synology's backup sets from the phone's
-/// library. So an MP4's UTC stamp and an XMP date are passed over, as
-/// Synology passes them over. Comparing every file of one library with
-/// Synology (2026-10-24) settled each: reading every UTC stamp left three MP4s
-/// and a screenshot's XMP date apart, and reading none left `.mov` trims and
-/// edit originals apart, whose stamps Synology keeps. A time with no zone is
-/// shown in the household's (`--time-zone`), as Synology shows it in the NAS's.
+/// own local time, a video's UTC stamp, and for anything else, its
+/// modification time, which Synology's backup sets from the phone's library.
+/// Synology passes over an XMP date, and a UTC stamp in the 64-bit form of a
+/// movie header, which it doesn't read, so this does too. Comparing every file
+/// of one library with Synology (2026-10-24) settled each: of the 1,372 videos
+/// with a stamp and no local time, every one matched but a second copy of one
+/// of them (see `ImportCommand`), and the two whose stamp Synology passed over
+/// were the only ones with a 64-bit header. A time with no zone is shown in
+/// the household's (`--time-zone`), as Synology shows it in the NAS's.
 struct ImportDating {
     var capturedAt: Date
     /// The zone stored with it: the file's own, or the household's when the
@@ -44,10 +45,9 @@ struct ImportDating {
     }
 
     static func resolve(
-        probe: MediaProbe.Metadata, filename: String, modifiedAt: Date, household: TimeZone?
+        probe: MediaProbe.Metadata, modifiedAt: Date, household: TimeZone?
     ) -> ImportDating {
-        if !passesOver(probe.capturedAtSource, filename: filename),
-           let own = fileDate(probe, household: household) {
+        if !passesOver(probe), let own = fileDate(probe, household: household) {
             return own
         }
         return modified(modifiedAt, household: household)
@@ -75,12 +75,13 @@ struct ImportDating {
         fromMoment(modifiedAt, household: household, source: .modified)
     }
 
-    /// Whether Synology Photos goes by the modification time rather than this
-    /// date: an XMP date always, and a UTC stamp in anything but a `.mov`.
-    static func passesOver(_ source: MediaProbe.Metadata.DateSource?, filename: String) -> Bool {
-        switch source {
+    /// Whether Synology Photos goes by the modification time rather than the
+    /// file's date: an XMP date always, and a UTC stamp in a version 1 movie
+    /// header.
+    static func passesOver(_ probe: MediaProbe.Metadata) -> Bool {
+        switch probe.capturedAtSource {
         case .xmpCreated: return true
-        case .quickTimeUTC: return !filename.lowercased().hasSuffix(".mov")
+        case .quickTimeUTC: return probe.movieHeaderVersion == 1
         default: return false
         }
     }

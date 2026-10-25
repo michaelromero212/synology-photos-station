@@ -24,6 +24,9 @@ struct MediaProbe {
         var capturedAtIsClock = false
         /// Which of the file's dates `capturedAt` came from.
         var capturedAtSource: DateSource?
+        /// For a video dated by its UTC stamp, its movie header's version: 1
+        /// is the 64-bit form, whose date Synology Photos doesn't read.
+        var movieHeaderVersion: Int?
 
         enum DateSource {
             case exifOriginal, exifCreate, xmpCreated, appleLocal, quickTimeUTC
@@ -377,6 +380,7 @@ struct MediaProbe {
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             metadata.capturedAt = formatter.date(from: stamp)
                 ?? ISO8601DateFormatter().date(from: stamp)
+            metadata.movieHeaderVersion = movieHeaderVersion(url)
         }
         // Apple writes GPS as an ISO-6709 string, e.g. "+38.3487-077.9797+019.694/".
         if let location = (normalized["com.apple.quicktime.location.iso6709"] as? String)
@@ -397,6 +401,54 @@ struct MediaProbe {
         if dumpExif { metadata.raw = try? await fullDump(url) }
 
         return metadata
+    }
+
+    /// The version byte of a QuickTime or MP4 file's movie header (`moov` →
+    /// `mvhd`), nil when there's none to read. ffprobe reads both versions'
+    /// dates and doesn't say which it read. Only box headers are read, so a
+    /// header after the media costs a seek, not the file.
+    static func movieHeaderVersion(_ url: URL) -> Int? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let end = try? handle.seekToEnd() else { return nil }
+
+        /// The box at `offset`: its type, header length and size.
+        func box(at offset: UInt64, before limit: UInt64) -> (type: String, header: UInt64, size: UInt64)? {
+            guard offset + 8 <= limit, (try? handle.seek(toOffset: offset)) != nil,
+                  let read = try? handle.read(upToCount: 16), read.count >= 8
+            else { return nil }
+            let bytes = [UInt8](read)
+            func number(_ range: Range<Int>) -> UInt64 { bytes[range].reduce(0) { $0 << 8 | UInt64($1) } }
+            var size = number(0..<4)
+            var header: UInt64 = 8
+            if size == 1 {
+                guard bytes.count >= 16 else { return nil }
+                size = number(8..<16)
+                header = 16
+            } else if size == 0 {
+                size = limit - offset
+            }
+            guard size >= header, size <= limit - offset else { return nil }
+            return (String(decoding: bytes[4..<8], as: UTF8.self), header, size)
+        }
+
+        var offset: UInt64 = 0
+        while let top = box(at: offset, before: end) {
+            if top.type == "moov" {
+                let moovEnd = offset + top.size
+                var child = offset + top.header
+                while let inner = box(at: child, before: moovEnd) {
+                    if inner.type == "mvhd" {
+                        guard (try? handle.seek(toOffset: child + inner.header)) != nil else { return nil }
+                        return (try? handle.read(upToCount: 1))?.first.map(Int.init)
+                    }
+                    child += inner.size
+                }
+                return nil
+            }
+            offset += top.size
+        }
+        return nil
     }
 
     private static func videoRotation(_ stream: [String: Any]) -> Int? {

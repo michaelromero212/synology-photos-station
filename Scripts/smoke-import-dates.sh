@@ -3,13 +3,13 @@
 # library lands in the same hours and on the same days as it shows there. An
 # iPhone video by the local time and zone it records, not its UTC stamp. A
 # photo by its EXIF date and zone, the zone also taken from the other two
-# offset tags. A QuickTime movie (.mov) with only a UTC stamp by that stamp.
-# Anything else by its modification time, which Synology's backup sets from
-# the phone's library: an MP4's UTC stamp and an XMP date are passed over, as
-# Synology passes them over. A time with no zone shows in the household's
-# (--time-zone). The background metadata pass leaves all of it alone. A copy
-# of bytes already in the store, from a row that came in with no zone, gets
-# the file's reading. Where a file and Synology differ, compare-dates says
+# offset tags. Another video by its UTC stamp. Anything else by its
+# modification time, which Synology's backup sets from the phone's library:
+# an XMP date, and a stamp in a 64-bit (version 1) movie header, are passed
+# over, as Synology passes them over. A time with no zone shows in the
+# household's (--time-zone). The background metadata pass leaves all of it
+# alone. A copy of bytes already in the store gets the file's reading, not
+# the stored row's. Where a file and Synology differ, compare-dates says
 # which date Synology went by.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-import-dates.sh
@@ -62,6 +62,29 @@ video -metadata creation_time=2023-06-14T01:00:31Z "$L/other.mp4"
 # A trim saved as a QuickTime movie, with only a UTC stamp: Synology goes by
 # it, an hour and 17 minutes after the modification time.
 video -metadata creation_time=2023-06-14T03:07:13Z "$L/trimmed.MOV"
+# A clip Vimeo made: its movie header in the 64-bit form, whose stamp
+# Synology doesn't read. ffmpeg writes the 32-bit one, so it's widened here;
+# the header comes after the media, so nothing else moves.
+video -metadata creation_time=2023-06-14T01:10:31Z "$L/vimeo.mp4"
+python3 - "$L/vimeo.mp4" <<'PY'
+import struct, sys
+path = sys.argv[1]
+data = bytearray(open(path, "rb").read())
+def boxes(start, end):
+    while start + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[start:start + 8])
+        yield start, kind, size
+        start += size
+moov, _, moov_size = next(b for b in boxes(0, len(data)) if b[1] == b"moov")
+mvhd, _, size = next(b for b in boxes(moov + 8, moov + moov_size) if b[1] == b"mvhd")
+body = data[mvhd + 8:mvhd + size]
+assert body[0] == 0
+created, modified, scale, duration = struct.unpack(">IIII", body[4:20])
+wide = bytes([1]) + body[1:4] + struct.pack(">QQIQ", created, modified, scale, duration) + body[20:]
+data[mvhd:mvhd + size] = struct.pack(">I4s", 8 + len(wide), b"mvhd") + wide
+struct.pack_into(">I", data, moov, moov_size + 8 + len(wide) - size)
+open(path, "wb").write(data)
+PY
 image "$L/zone.jpg";   stamp -DateTimeOriginal="2023:06:13 20:00:00" -OffsetTimeOriginal="-04:00" "$L/zone.jpg"
 image "$L/clock.jpg";  stamp -DateTimeOriginal="2023:06:13 19:00:00" "$L/clock.jpg"
 image "$L/offset.jpg"; stamp -DateTimeOriginal="2023:06:13 18:00:00" -OffsetTime="-04:00" "$L/offset.jpg"
@@ -71,8 +94,14 @@ image "$L/offset.jpg"; stamp -DateTimeOriginal="2023:06:13 18:00:00" -OffsetTime
 image "$L/saved.png";  stamp -XMP:DateCreated="2023:06:13 16:44:06" "$L/saved.png"
 image "$L/zoned.png";  stamp -XMP:DateCreated="2023:06:13 16:44:06-05:00" "$L/zoned.png"
 image "$L/plain.png"
-# The same bytes at another path, for the copy below.
+# A screenshot whose name says 4:45 PM, half an hour before its modification
+# time: Synology shows the modification time, and the startup backfill, which
+# dates an upload from a name like it, must leave it there.
+SHOT="Screenshot 2023-06-13 at 4.45.00 PM.png"
+image "$L/$SHOT"
+# The same bytes at other paths, for the copies below.
 cp -p "$L/iphone.mov" "$ROOT/again/iphone.mov"
+cp -p "$L/zone.jpg" "$ROOT/again/zone.jpg"
 
 redeem(){
   CODE=$(cd "$SERVER_DIR" && "$BIN" invite 2>/dev/null | grep "Invite code:" | awk '{print $3}')
@@ -85,14 +114,15 @@ FIRST=$(redeem "First"); SECOND=$(redeem "Second")
 # What Synology Photos shows for each, as export-synology-dates.sh writes it.
 SYNOLOGY="$ROOT/synology.tsv"
 printf '%s\t%s\t%s\n' \
-  "$L/iphone.mov" "2023-06-13 22:31:13" 1  "$L/other.mp4"  "2023-06-13 21:00:00" 2 \
+  "$L/iphone.mov" "2023-06-13 22:31:13" 1  "$L/other.mp4"  "2023-06-13 21:00:31" 2 \
   "$L/zone.jpg"   "2023-06-13 20:00:00" 3  "$L/clock.jpg"  "2023-06-13 19:00:00" 4 \
   "$L/offset.jpg" "2023-06-13 18:00:00" 5  "$L/saved.png"  "2023-06-13 17:44:06" 6 \
   "$L/plain.png"  "2023-06-13 20:30:00" 7  "$L/zoned.png"  "2023-06-13 17:44:06" 8 \
-  "$L/trimmed.MOV" "2023-06-13 23:07:13" 9 > "$SYNOLOGY"
+  "$L/trimmed.MOV" "2023-06-13 23:07:13" 9 "$L/vimeo.mp4" "2023-06-13 21:10:00" 10 \
+  "$L/$SHOT"      "2023-06-13 17:15:30" 11 > "$SYNOLOGY"
 # The same, but one file at the UTC time the old import kept for it, and the
-# MP4 at its own UTC stamp.
-sed -e 's/2023-06-13 20:30:00/2023-06-14 00:30:00/' -e 's/2023-06-13 21:00:00/2023-06-13 21:00:31/' \
+# Vimeo clip at the stamp it carries.
+sed -e 's/2023-06-13 20:30:00/2023-06-14 00:30:00/' -e 's/2023-06-13 21:10:00/2023-06-13 21:10:31/' \
   "$SYNOLOGY" > "$ROOT/synology-off.tsv"
 compare(){ (cd "$SERVER_DIR" && "$BIN" compare-dates --path "$L" --time-zone America/New_York "$@" 2>&1); }
 
@@ -101,6 +131,8 @@ compare(){ (cd "$SERVER_DIR" && "$BIN" compare-dates --path "$L" --time-zone Ame
 TZ=UTC touch -t 202306140030.00 "$L/plain.png"
 TZ=UTC touch -t 202306140100.00 "$L/other.mp4"
 TZ=UTC touch -t 202306140150.07 "$L/trimmed.MOV"
+TZ=UTC touch -t 202306140110.00 "$L/vimeo.mp4"
+TZ=UTC touch -t 202306132115.30 "$L/$SHOT"
 TZ=UTC touch -t 202306132144.06 "$L/saved.png"
 TZ=UTC touch -t 202306132144.06 "$L/zoned.png"
 
@@ -115,6 +147,7 @@ check "and named, with both times" "1" \
   "$(echo "$OFF" | grep -c 'plain.png  2023-06-13 20:30:00 | 2023-06-14 00:30:00 | -4:00:00')"
 check "with the date Synology went by instead" "1" \
   "$(echo "$OFF" | grep -c '1  .mp4  here: its modification time  Synology: its date, in UTC')"
+check "and that file's own" "1" "$(echo "$OFF" | grep -c 'vimeo.mp4  2023-06-13 21:10:00 | 2023-06-13 21:10:31')"
 check "or that it went by neither" "1" \
   "$(echo "$OFF" | grep -c '1  .png  here: its modification time  Synology: some other date')"
 
@@ -134,14 +167,16 @@ expect(){
 
 echo "As imported (local time, zone stored, of which the household's, UTC moment):"
 expect "an iPhone video keeps the evening and zone it was filmed in" iphone.mov "2023-06-13 22:31:13" -14400 - 02:31:13
-expect "an MP4's UTC stamp is passed over for its modified time"    other.mp4  "2023-06-13 21:00:00" -14400 -14400 01:00:00
-expect "a .mov's UTC stamp is kept, in the household's zone"       trimmed.MOV "2023-06-13 23:07:13" -14400 -14400 03:07:13
+expect "a video's UTC stamp shows in the household's zone"          other.mp4  "2023-06-13 21:00:31" -14400 -14400 01:00:31
+expect "and a .mov's, minutes from its modified time"               trimmed.MOV "2023-06-13 23:07:13" -14400 -14400 03:07:13
+expect "a stamp in a 64-bit header is passed over for the modified time" vimeo.mp4 "2023-06-13 21:10:00" -14400 -14400 01:10:00
 expect "a photo with a zone keeps it"                                zone.jpg   "2023-06-13 20:00:00" -14400 - 00:00:00
 expect "a photo with no zone keeps its clock"                        clock.jpg  "2023-06-13 19:00:00" -14400 -14400 23:00:00
 expect "a zone in OffsetTime counts"                                 offset.jpg "2023-06-13 18:00:00" -14400 - 22:00:00
 expect "an XMP date is passed over for the modified time"            saved.png  "2023-06-13 17:44:06" -14400 -14400 21:44:06
 expect "and so is one with its own zone"                             zoned.png  "2023-06-13 17:44:06" -14400 -14400 21:44:06
 expect "a file with no date shows its modified time in the household's zone" plain.png "2023-06-13 20:30:00" -14400 -14400 00:30:00
+expect "and a screenshot its modified time, not its name's"         "$SHOT"    "2023-06-13 17:15:30" -14400 -14400 21:15:30
 
 # The background metadata pass runs the same probe and must agree.
 for _ in $(seq 1 120); do
@@ -149,27 +184,58 @@ for _ in $(seq 1 120); do
 done
 echo "After the metadata pass:"
 check "every local time is unchanged" \
-  "2023-06-13 22:31:13|2023-06-13 21:00:00|2023-06-13 23:07:13|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:44:06|2023-06-13 17:44:06|2023-06-13 20:30:00" \
-  "$(for f in iphone.mov other.mp4 trimmed.MOV zone.jpg clock.jpg offset.jpg saved.png zoned.png plain.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
+  "2023-06-13 22:31:13|2023-06-13 21:00:31|2023-06-13 23:07:13|2023-06-13 21:10:00|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:44:06|2023-06-13 17:44:06|2023-06-13 20:30:00" \
+  "$(for f in iphone.mov other.mp4 trimmed.MOV vimeo.mp4 zone.jpg clock.jpg offset.jpg saved.png zoned.png plain.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
 
 echo "After importing, compare-dates checks what the library holds:"
 AFTER=$(compare --synology "$SYNOLOGY" --space "$FIRST")
 check "every stored time matches Synology Photos" "1" \
   "$(echo "$AFTER" | grep -c 'Every file matches Synology Photos to the second.')"
-check "the grid has as many items as Synology's" "9 9" \
+check "the grid has as many items as Synology's" "11 11" \
   "$(echo "$AFTER" | awk '/Grid items here:/ {h=$NF} /Grid items in Synology:/ {s=$NF} END {print h, s}')"
 
 # A row from before this fix: same bytes, no zone, its UTC stamp kept as local.
 q "UPDATE assets SET captured_tz_off = NULL, tz_off_fallback = NULL,
      captured_at = '2023-06-14T02:39:26Z', local_captured_at = '2023-06-14 02:39:26'
    WHERE id = (SELECT asset_id FROM space_assets WHERE space_id = '$FIRST' AND filename = 'iphone.mov')" >/dev/null
+# And one dated otherwise, zone and all, the way another library may hold it.
+q "UPDATE assets SET captured_tz_off = -18000, tz_off_fallback = NULL,
+     captured_at = '2023-06-14T02:00:00Z', local_captured_at = '2023-06-13 21:00:00'
+   WHERE id = (SELECT asset_id FROM space_assets WHERE space_id = '$FIRST' AND filename = 'zone.jpg')" >/dev/null
 (cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/again" --space "$SECOND" --time-zone America/New_York > "$ROOT/again.log" 2>&1)
-echo "A copy of bytes the store already had:"
-check "it's stored once already" "1" "$(grep -c 'Stored once already: 1' "$ROOT/again.log")"
-check "it takes the file's own date, not the zone-less row's" \
+echo "Copies of bytes the store already had:"
+check "they're stored once already" "1" "$(grep -c 'Stored once already: 2' "$ROOT/again.log")"
+check "each takes the file's own date, not a zone-less row's" \
   "2023-06-13 22:31:13 -14400 - 02:31:13" "$(row "$SECOND" iphone.mov)"
-check "the row it copied is left as it was" \
-  "2023-06-14 02:39:26 - - 02:39:26" "$(row "$FIRST" iphone.mov)"
+check "nor a row dated otherwise" \
+  "2023-06-13 20:00:00 -14400 - 00:00:00" "$(row "$SECOND" zone.jpg)"
+check "the rows they copied are left as they were" \
+  "2023-06-14 02:39:26 - - 02:39:26|2023-06-13 21:00:00 -18000 - 02:00:00" \
+  "$(row "$FIRST" iphone.mov)|$(row "$FIRST" zone.jpg)"
+
+# The startup backfill dates files from names like 20230613_163000. One
+# placement made to look like an upload, so that its new time shows the pass
+# has run past the imported files it must leave alone.
+q "UPDATE space_assets SET filename = '20230613_163000.jpg' WHERE space_id = '$SECOND' AND filename = 'zone.jpg'" >/dev/null
+q "DELETE FROM import_records WHERE asset_id =
+     (SELECT asset_id FROM space_assets WHERE space_id = '$SECOND' AND filename = '20230613_163000.jpg')" >/dev/null
+kill $SERVER; wait $SERVER 2>/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT >> "$ROOT/server.log" 2>&1 &
+SERVER=$!
+for _ in $(seq 1 120); do
+  [ "$(row "$SECOND" 20230613_163000.jpg | cut -c1-19)" = "2023-06-13 16:30:00" ] && break; sleep 0.5
+done
+echo "After a restart, when the backfill dates files from their names:"
+check "an upload named for a time takes it" "2023-06-13 16:30:00 0 - 16:30:00" "$(row "$SECOND" 20230613_163000.jpg)"
+check "an imported screenshot keeps the time Synology shows" \
+  "2023-06-13 17:15:30 -14400 -14400 21:15:30" "$(row "$FIRST" "$SHOT")"
+check "and is marked a screenshot all the same" "t" \
+  "$(q "SELECT 'screenshot' = ANY(a.media_subtypes) FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+        WHERE sa.space_id = '$FIRST' AND sa.filename = '$SHOT'")"
+# Every stored time but the two rows changed by hand above.
+AGAIN=$(compare --synology "$SYNOLOGY" --space "$FIRST")
+check "and nothing else moved" "9 2" \
+  "$(echo "$AGAIN" | awk '/Same local time:/ {s=$NF} /Different:/ {d=$NF} END {print s, d}')"
 
 echo
 echo "$PASS passed, $FAIL failed"
