@@ -235,7 +235,7 @@ enum ImportGrouping {
 
     /// `realpath`, not `resolvingSymlinksInPath`, which takes `/private` back
     /// off a path the walk recorded with it.
-    private static func realPath(_ path: String) -> String {
+    static func realPath(_ path: String) -> String {
         guard let resolved = realpath(path, nil) else { return path }
         defer { free(resolved) }
         return String(cString: resolved)

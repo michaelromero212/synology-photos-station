@@ -2,6 +2,7 @@
 # The claim in ARCHITECTURE.md §3a, tested: wipe the database and rebuild the
 # whole library from the folders alone. Its files come back in the items an
 # import makes of them: by the Live Photo identifier each carries, not by name.
+# A shared library, filed in every member's home, comes back as the one library.
 #
 # Runs against its own database rather than the development one, so proving the
 # claim doesn't sign every device out of the library you were just using.
@@ -106,8 +107,8 @@ check "greg, who only ever used the browser" "1" "$(mine greg)"
 check "the PhotoLibrary half came too" "2" "$(q "select count(*) from assets where storage_path like '%/PhotoLibrary/%';")"
 check "and the flattened tree" "1" "$(q "select count(*) from assets where storage_path like '%/Photos/2026/09/%';")"
 check "the shared library has one" "1" "$(q "select count(*) from space_assets sa join spaces s on s.id=sa.space_id where s.kind='shared' and s.name='Family Shared';")"
-check "shared membership is not guessed" "1" "$(q "select count(*) from space_members m join spaces s on s.id=m.space_id where s.kind='shared';")"
-check "and it says so" "1" "$(echo "$OUT" | grep -c 'came back with one member')"
+check "membership under the shared root is not guessed" "1" "$(q "select count(*) from space_members m join spaces s on s.id=m.space_id where s.kind='shared';")"
+check "and it says so" "1" "$(echo "$OUT" | grep -c '  Family Shared: greg (owner)$')"
 
 echo
 echo "=== 5. the file is the photo ==="
@@ -234,6 +235,60 @@ check "the late video plays as its photo's motion" "2" "$(paired IMG_7104.HEIC I
 check "it says what it grouped" "2 2 1" "$(grouped "$OUT6")"
 check "and devices hear of each file grouped anew" "5" \
   "$(( $(q "select count(*) from change_log where op='update';") - UPDATES ))"
+
+echo
+echo "=== 14. a shared library comes back from its members' homes ==="
+# The tree files a shared library's photos in each member's home, the same
+# file in each, at Photos/Shared/<Space>/YYYY/MM. That's the one library, not a
+# photo in each member's own: each photo indexed once, the other homes' copies
+# recorded as theirs, and its members whoever's home holds it. Here one photo
+# is in the shared root an older version wrote too, and one only in one home.
+SS="Shared Space"; STAGE="$SCRATCH/rebuild-stage"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+C=5E0B7A2C-8D41-4F6A-B3E9-1C7D2A6F4B80
+photo "$STAGE/IMG_9101.jpg"
+photo "$STAGE/IMG_9102.HEIC"; apple "$STAGE/IMG_9102.HEIC" $C
+video -metadata "com.apple.quicktime.content.identifier=$C" "$STAGE/IMG_9102.MOV"
+photo "$STAGE/IMG_9103.jpg"
+for who in michael morgan; do
+  mkdir -p "$LIB/homes/$who/Photos/Shared/$SS/2026/07"
+  cp -p "$STAGE/IMG_9101.jpg" "$STAGE/IMG_9102.HEIC" "$STAGE/IMG_9102.MOV" \
+    "$LIB/homes/$who/Photos/Shared/$SS/2026/07/"
+done
+cp -p "$STAGE/IMG_9103.jpg" "$LIB/homes/morgan/Photos/Shared/$SS/2026/07/"
+mkdir -p "$LIB/shared/$SS/2026/07"; cp -p "$STAGE/IMG_9101.jpg" "$LIB/shared/$SS/2026/07/"
+
+# where the one indexed copy of a photo is, below the library root
+indexed(){ q "select substring(a.storage_path from length('$LIB') + 2) from assets a
+              join space_assets sa on sa.asset_id = a.id join spaces s on s.id = sa.space_id
+              where s.name = '$SS' and a.storage_path like '%/$1';"; }
+
+OUT7=$(rebuild)
+check "four photos indexed, once each" "1" "$(echo "$OUT7" | grep -c 'Indexed: 4')"
+check "the other four files known as copies" "1" "$(echo "$OUT7" | grep -c 'Copies:        4 ')"
+check "back as its own library" "4" \
+  "$(q "select count(*) from space_assets sa join spaces s on s.id = sa.space_id where s.kind = 'shared' and s.name = '$SS';")"
+check "and none of it anyone's own" "0" \
+  "$(q "select count(*) from space_assets sa join spaces s on s.id = sa.space_id join assets a on a.id = sa.asset_id
+        where s.kind = 'personal' and a.storage_path like '%/Photos/Shared/%';")"
+check "the shared root's copy is the one indexed" "shared/$SS/2026/07/IMG_9101.jpg" "$(indexed IMG_9101.jpg)"
+check "else its owner's" "homes/michael/Photos/Shared/$SS/2026/07/IMG_9102.HEIC" "$(indexed IMG_9102.HEIC)"
+check "else that of whoever has it" "homes/morgan/Photos/Shared/$SS/2026/07/IMG_9103.jpg" "$(indexed IMG_9103.jpg)"
+check "every other copy is its member's own" \
+  "michael IMG_9101.jpg, morgan IMG_9101.jpg, morgan IMG_9102.HEIC, morgan IMG_9102.MOV" \
+  "$(q "select string_agg(u.dsm_username || ' ' || substring(be.path from '[^/]+$'), ', ' order by u.dsm_username, be.path)
+        from browse_entries be join users u on u.id = be.user_id
+        where be.path like '$LIB/homes/' || u.dsm_username || '/Photos/Shared/$SS/%';")"
+check "the Live Photo is one item, its copies in two homes" "tile motion" \
+  "$(q "select string_agg(case when media_type = 'video' and live_group_id is not null then 'motion' else 'tile' end,
+        ' ' order by media_type) from assets where storage_path like '%/IMG_9102.%';")"
+check "its members are whoever's home holds it" "michael:owner morgan:contributor" \
+  "$(q "select string_agg(u.dsm_username || ':' || m.role, ' ' order by u.dsm_username)
+        from space_members m join users u on u.id = m.user_id join spaces s on s.id = m.space_id where s.name = '$SS';")"
+check "and it says who they are" "1" "$(echo "$OUT7" | grep -c "  $SS: michael (owner), morgan$")"
+check "one only under the shared root still has just its owner" "1" \
+  "$(echo "$OUT7" | grep -c '  Family Shared: greg (owner)$')"
+OUT8=$(rebuild)
+check "a second run knows every copy" "1" "$(echo "$OUT8" | grep -c 'every file on disk is already indexed')"
 
 admin "DROP DATABASE IF EXISTS $DB;" >/dev/null
 
