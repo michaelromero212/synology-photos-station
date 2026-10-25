@@ -256,6 +256,19 @@ changed them since.
 | Date | From | Into | Files | Size | Imported | Stored once already | Already in library | Failed | Took |
 |---|---|---|---|---|---|---|---|---|---|
 | 2026-10-06 | Shared Space, `/volume1/photo` | Family Shared | 2,734 | 277.7 GB | 2,616 | 110 | 8 | 0 | 1h 5m |
+| 2026-10-25 | A person's `MobileBackup` and `PhotoLibrary` | Their personal library | 19,807 | 130.9 GB | 18,865 | 942 | 0 | 0 | 4h 5m |
+
+The personal library's grid matches Synology Photos': 16,494 items to
+Synology's 16,493 (one photo Synology had filed under another account came in
+too), no item split or joined, and 19,805 of its 19,806 files at the same local
+time to the second. The one apart is the second copy of a June 2020 video,
+which Synology shows on the day it was copied, March 21, 2023, for no reason
+its bytes show; here it sits beside its original. Getting there took the date
+rules above, `--keep-copies` for 74 copies, grouping by Live Photo identifier
+(3,193 items of more than one file, done by `regroup` since the import came
+first), and `--synology` for 8 Instagram copies Synology had kept apart. It
+ran at about 1.3 files a second, the server making each file's thumbnails
+alongside.
 
 That's about 70 MB/s, or 250 GB an hour, for files averaging about 100 MB.
 ARCHITECTURE.md's ~175 MB/s estimate was for hashing alone, so plan with the
