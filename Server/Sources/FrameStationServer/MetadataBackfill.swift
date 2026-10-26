@@ -304,6 +304,14 @@ enum MetadataBackfill {
     /// transcode itself in one sitting.
     static func enqueueMissingPlaybackRenditions(on app: Application) async {
         do {
+            // Every rendition that failed, whichever video it's for: the 500
+            // below are any high-bitrate videos, and with thousands of those a
+            // failed one could wait for ever (209 had, 2026-10-26, most for an
+            // audio track since handled).
+            try await app.sql.raw("""
+                UPDATE derivation_jobs SET state = 'pending', attempts = 0, last_error = NULL
+                WHERE kind = \(bind: Derivatives.playbackJobKind) AND state = 'failed'
+                """).run()
             try await app.sql.raw("""
                 WITH todo AS (
                     SELECT DISTINCT a.id

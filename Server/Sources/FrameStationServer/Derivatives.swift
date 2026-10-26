@@ -335,6 +335,17 @@ enum Derivatives {
                     + ":force_original_aspect_ratio=decrease:force_divisible_by=2"]
             : []
 
+        // Copied when an MP4 can carry it as it is, as it can an iPhone's
+        // usual AAC, and encoded when it can't. iPhones from 2026 record a
+        // Live Photo's sound as uncompressed PCM, which this ffmpeg won't put
+        // in an MP4: every one of those clips failed, 202 of 209 failures.
+        let audio: [String]
+        if let codec = await audioCodec(blob), !mp4Audio.contains(codec) {
+            audio = ["-c:a", "aac", "-b:a", "192k"]
+        } else {
+            audio = ["-c:a", "copy"]
+        }
+
         logger.info("derive \(sha256.prefix(8)): playback rendition")
         let transcode: [String] = [
             // Before the input, this sets the decoder's threads; the one
@@ -360,7 +371,7 @@ enum Derivatives {
             "-threads", String(playbackThreads),
             // Frame rate is inherited, not forced. Synology's proxy drops to
             // 15fps and it shows — a child running looks like a flipbook.
-            "-c:a", "copy",
+        ] + audio + [
             // Moves the index to the front so playback can start before the
             // whole file has been fetched. Without it AVPlayer must read the
             // end of the file first, which is a wasted round trip.
@@ -401,6 +412,21 @@ enum Derivatives {
         }
         try FileManager.default.moveItem(at: partial, to: destination)
         return destination
+    }
+
+    /// Audio an MP4 holds as it is, so the rendition copies it.
+    static let mp4Audio: Set<String> = ["aac", "alac", "mp3", "ac3", "eac3"]
+
+    /// The codec of a file's first audio track, nil when it has none.
+    static func audioCodec(_ file: URL) async -> String? {
+        let output = try? await Shell.run(
+            "ffprobe",
+            ["-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", file.path],
+            timeout: 120
+        )
+        let codec = output?.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return codec.isEmpty ? nil : codec
     }
 
     /// Whether a file has a video track ffmpeg can actually read.

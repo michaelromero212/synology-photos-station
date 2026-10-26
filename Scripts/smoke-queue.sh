@@ -1,8 +1,10 @@
 #!/bin/bash
 # The derivation queue keeps photos ahead of video transcodes. Only one
-# transcode runs at a time, on two threads (two cores, on Linux). A restart
-# puts photos the queue gave up on back in line before any lane starts. And a
-# photo opened before its thumbnail was made gets one there and then.
+# transcode runs at a time, on two threads (two cores, on Linux), and a clip
+# whose sound an MP4 can't carry as it is gets it encoded. A restart puts
+# photos the queue gave up on back in line before any lane starts, and tries
+# every failed transcode again. And a photo opened before its thumbnail was
+# made gets one there and then.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-queue.sh
 #
@@ -51,11 +53,16 @@ echo "Three videos that each need a cellular copy"
 # 4K at about 24 Mbps, over the 12 Mbps line, and a few seconds' transcode
 # each, so ones that overlap can be seen. The tones differ so they aren't
 # stored once as the same file.
-for tone in 440 550 660; do
+for tone in 440 550; do
   ffmpeg -v error -y -f lavfi -i "testsrc2=size=3840x2160:rate=30:duration=6" \
     -f lavfi -i "sine=frequency=$tone:duration=6" -c:v libx264 -preset ultrafast \
     -b:v 24M -maxrate 24M -bufsize 24M -pix_fmt yuv420p -c:a aac -shortest "$LIB/clip-$tone.mp4"
 done
+# And one with its sound uncompressed, as iPhones from 2026 record a Live
+# Photo's: an MP4 can't carry that as it is, so its copy's is encoded.
+ffmpeg -v error -y -f lavfi -i "testsrc2=size=3840x2160:rate=30:duration=6" \
+  -f lavfi -i "sine=frequency=660:duration=6" -c:v libx264 -preset ultrafast \
+  -b:v 24M -maxrate 24M -bufsize 24M -pix_fmt yuv420p -c:a pcm_s16le -shortest "$LIB/clip-660.mov"
 for p in photo photo2; do
   vips gaussnoise "$ROOT/n.v" 900 600 >/dev/null 2>&1 && vips copy "$ROOT/n.v" "$LIB/$p.jpg" >/dev/null 2>&1
 done
@@ -97,6 +104,10 @@ check "with only ever one ffmpeg transcoding" "1" "$MOST_FFMPEG"
 check "on two threads to decode and two to encode" "2" \
   "$(echo "$ARGS" | grep -o -- '-threads 2' | wc -l | tr -d ' ')"
 check "and every photo and video has its thumbnail" "0" "$(q "SELECT count(*) FROM assets WHERE derived_at IS NULL")"
+PCM=$(asset clip-660.mov id); PCM_SHA=$(asset clip-660.mov sha256)
+check "a clip with uncompressed sound gets a copy with AAC sound" "aac" \
+  "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 \
+     "$FRAMESTATION_BLOB_ROOT/derivatives/${PCM_SHA:0:2}/${PCM_SHA:2:2}/$PCM_SHA/playback-1080.mp4")"
 
 echo "A photo opened before its thumbnail was made"
 PHOTO=$(asset photo.jpg id); SHA=$(asset photo.jpg sha256)
@@ -141,9 +152,13 @@ q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, started_at = NULL
    WHERE asset_id = '$PHOTO' AND kind = 'thumbnails'" >/dev/null
 q "UPDATE derivation_jobs SET state = 'pending', attempts = 0, started_at = NULL
    WHERE kind = 'playback'" >/dev/null
+# And one cellular copy that failed three times, which a restart tries again.
+q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, last_error = 'gave up'
+   WHERE asset_id = '$PCM' AND kind = 'playback'" >/dev/null
 FRAMESTATION_DERIVATION_LANES=1 serve
 for _ in $(seq 1 120); do
-  [ "$(derived "$PHOTO")" = "t" ] && [ "$(derived "$VIDEO")" = "t" ] && break
+  [ "$(derived "$PHOTO")" = "t" ] && [ "$(derived "$VIDEO")" = "t" ] \
+    && [ "$(job "$PCM" playback state)" = "done" ] && break
   sleep 0.5
 done
 check "the photo's thumbnail is made" "t" "$(derived "$PHOTO")"
@@ -151,6 +166,7 @@ check "before any transcode started" "t" "$(q "SELECT j.started_at < COALESCE(
     (SELECT min(started_at) FROM derivation_jobs WHERE kind = 'playback'), 'infinity')
   FROM derivation_jobs j WHERE j.asset_id = '$PHOTO' AND j.kind = 'thumbnails'")"
 check "and the video left to the queue is made too" "t" "$(derived "$VIDEO")"
+check "a cellular copy that failed for good is tried again" "done|" "$(job "$PCM" playback "state, last_error")"
 
 echo
 echo "$PASS passed, $FAIL failed"
