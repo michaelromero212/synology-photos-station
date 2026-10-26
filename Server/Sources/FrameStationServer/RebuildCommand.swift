@@ -14,10 +14,16 @@ import Vapor
 /// It reads the layout the library already writes:
 ///
 ///     <homes>/<dsm user>/Photos/MobileBackup/<device>/YYYY/MM/IMG_4821.heic
+///     <homes>/<dsm user>/Photos/Shared/<Space>/YYYY/MM/IMG_9001.jpg
 ///     <shared>/<Space>/YYYY/MM/IMG_9001.jpg
 ///
 /// and turns it back into users, libraries, assets and placements. Nothing is
 /// copied or moved: `storage_path` points at the file where it already lies.
+///
+/// A shared library is in every member's home, a copy of each photo in each
+/// (`BrowseTree`), and comes back as the one library: each photo indexed once,
+/// the other homes' copies recorded as those members' own, and its members the
+/// people whose homes hold it.
 ///
 /// ## What comes back, and what does not
 ///
@@ -34,7 +40,7 @@ struct RebuildCommand: AsyncCommand {
         @Option(name: "shared", help: "Shared library root (default $FRAMESTATION_SHARED_ROOT)")
         var shared: String?
 
-        @Option(name: "owner", help: "DSM username to own rebuilt shared libraries (default: the first user found)")
+        @Option(name: "owner", help: "DSM username to own rebuilt shared libraries (default: the first whose home holds each, else the first user found)")
         var owner: String?
 
         @Option(name: "concurrency", short: "c", help: "Parallel hash workers (default 4)")
@@ -99,13 +105,17 @@ struct RebuildCommand: AsyncCommand {
     enum Home: Hashable {
         /// `<homes>/<user>/Photos/MobileBackup/<device>/…`
         case personal(user: String, device: String?)
-        /// `<shared>/<Space>/…`
-        case shared(space: String)
+        /// `<shared>/<Space>/…`, or a member's copy of it in their own home,
+        /// `<homes>/<holder>/Photos/Shared/<Space>/…`.
+        case shared(space: String, holder: String?)
     }
 
     private struct Found {
         let candidate: LibraryScanner.Candidate
         let home: Home
+        /// A shared library's file's path within the library,
+        /// `2026/07/IMG_9001.jpg`, the same for its copy in every home.
+        var within: String? = nil
     }
 
     private struct IDRow: Decodable { let id: UUID }
@@ -140,32 +150,50 @@ struct RebuildCommand: AsyncCommand {
             return
         }
 
-        // Already indexed: the same file at the same path. Makes a re-run after
-        // an interrupted rebuild resume rather than start over, and makes
-        // running this against a live database a no-op for everything it
-        // already knows.
-        struct PathRow: Decodable { let storagePath: String }
+        // Already indexed: the same file at the same path, or somebody's File
+        // Station copy of one. Makes a re-run after an interrupted rebuild
+        // resume rather than start over, and makes running this against a
+        // live database a no-op for everything it already knows.
+        struct PathRow: Decodable { let path: String }
         let indexed = Set(
             try await app.sql.raw("""
-                SELECT storage_path AS "storagePath" FROM assets
-                WHERE storage_path IS NOT NULL
-                """).all(decoding: PathRow.self).map(\.storagePath)
+                SELECT storage_path AS "path" FROM assets WHERE storage_path IS NOT NULL
+                UNION SELECT path FROM browse_entries
+                """).all(decoding: PathRow.self).map(\.path)
         )
         let pending = found.filter { !indexed.contains($0.candidate.url.path) }
 
+        // Everyone with a home holding library files, a shared library's
+        // copies included.
         let people = Set(found.compactMap { item -> String? in
-            if case .personal(let user, _) = item.home { return user }
-            return nil
+            switch item.home {
+            case .personal(let user, _): return user
+            case .shared(_, let holder): return holder
+            }
         }).sorted()
-        let sharedLibraries = Set(found.compactMap { item -> String? in
-            if case .shared(let space) = item.home { return space }
-            return nil
-        }).sorted()
+        var holders: [String: Set<String>] = [:]
+        for item in found {
+            if case .shared(let space, let holder) = item.home {
+                holders[space, default: []].formUnion(holder.map { [$0] } ?? [])
+            }
+        }
+        let sharedLibraries = holders.keys.sorted()
+        // Each one's owner: whoever is named, else the first of those whose
+        // homes hold it, else, for one only under the shared root, which
+        // names nobody, the first person found.
+        let owners = Dictionary(uniqueKeysWithValues: sharedLibraries.compactMap { library in
+            (signature.owner ?? holders[library]?.min() ?? people.first).map { (library, $0) }
+        })
+        let (toIndex, copies) = Self.collapse(pending, owners: owners)
+        let copyCount = copies.values.reduce(0) { $0 + $1.count }
 
         console.info("")
         console.info("  Found:         \(found.count) files")
         console.info("  Already known: \(found.count - pending.count)")
-        console.info("  To index:      \(pending.count) (\(ImportCommand.humanBytes(pending.reduce(Int64(0)) { $0 + $1.candidate.byteSize })))")
+        console.info("  To index:      \(toIndex.count) (\(ImportCommand.humanBytes(toIndex.reduce(Int64(0)) { $0 + $1.candidate.byteSize })))")
+        if copyCount > 0 {
+            console.info("  Copies:        \(copyCount) (a shared photo in another member's home, kept as theirs)")
+        }
         console.info("  People:        \(people.isEmpty ? "—" : people.joined(separator: ", "))")
         console.info("  Shared:        \(sharedLibraries.isEmpty ? "—" : sharedLibraries.joined(separator: ", "))")
         console.info("")
@@ -174,7 +202,7 @@ struct RebuildCommand: AsyncCommand {
             console.info("Dry run — nothing written.")
             return
         }
-        guard !pending.isEmpty else {
+        guard !toIndex.isEmpty else {
             console.info("Nothing to do — every file on disk is already indexed.")
             return
         }
@@ -194,40 +222,46 @@ struct RebuildCommand: AsyncCommand {
                 try await resolvePersonalSpace(of: userID, on: app.sql)
         }
 
-        // A shared folder names the library but nobody in it, so somebody has
-        // to be named here. Resolved once rather than per file, so every
-        // placement in a rebuilt shared library is attributed consistently
-        // instead of to whichever account happened to sort first.
-        var sharedOwnerID: UUID?
-        if !sharedLibraries.isEmpty {
-            if let requested = signature.owner {
-                sharedOwnerID = try await resolveUser(dsmUsername: requested, on: app.sql)
-            } else {
-                sharedOwnerID = people.first.flatMap { users[$0] }
-            }
-            guard let sharedOwnerID else {
+        // No folder says who added a shared library's photos, so they're all
+        // its owner's: resolved once per library rather than per file, so each
+        // library's placements are attributed consistently instead of to
+        // whichever account happened to sort first.
+        var sharedOwners: [String: UUID] = [:]
+        for library in sharedLibraries {
+            guard let owner = owners[library] else {
                 throw Abort(.badRequest, reason:
                     "Shared libraries were found but there is nobody to own them — "
                     + "no home directories were scanned. Pass --owner <dsm username>.")
             }
-            for library in sharedLibraries {
-                spaces[.shared(space: library)] =
-                    try await resolveSharedSpace(named: library, owner: sharedOwnerID, on: app.sql)
-            }
+            let ownerID = try await resolveUser(dsmUsername: owner, on: app.sql)
+            sharedOwners[library] = ownerID
+            spaces[.shared(space: library, holder: nil)] = try await resolveSharedSpace(
+                named: library, owner: ownerID,
+                members: holders[library, default: []].sorted().compactMap { users[$0] },
+                on: app.sql
+            )
         }
 
-        // Both halves of a Live Photo sit in the same folder, but a batch
-        // boundary could still fall between them — paired over everything
-        // pending, once.
-        let liveGroups = LibraryScanner.liveGroups(pending.map(\.candidate))
+        // Into items the way an import's files are (`ImportGrouping`): by the
+        // Live Photo identifier each file's probe reads, a folder at a time
+        // once the last of its files is in. A batch boundary can fall between
+        // a Live Photo's photo and its video, and a run stopped halfway leaves
+        // its folder to the next, which groups it with what it adds.
+        var unfinished = Dictionary(toIndex.map { (Self.folder(of: $0), 1) }, uniquingKeysWith: +)
+        let folders = Dictionary(
+            grouping: found.filter { unfinished[Self.folder(of: $0)] != nil }, by: Self.folder(of:)
+        )
+        var identifiers: [String: String] = [:]
+        var grouping = ImportGrouping.Summary()
+        var ungrouped = 0
 
         // --------------------------------------------------------------- index
         let started = Date()
         var indexedCount = 0, failed = 0
         var bytesDone: Int64 = 0
 
-        for chunk in stride(from: 0, to: pending.count, by: batchSize).map({
-            Array(pending[$0..<min($0 + batchSize, pending.count)])
+        for chunk in stride(from: 0, to: toIndex.count, by: batchSize).map({
+            Array(toIndex[$0..<min($0 + batchSize, toIndex.count)])
         }) {
             let hashes = await Self.hashes(of: chunk.map(\.candidate), concurrency: concurrency)
             let photos = chunk.filter { $0.candidate.mediaType == .photo }.map(\.candidate.url)
@@ -242,11 +276,18 @@ struct RebuildCommand: AsyncCommand {
                 }
                 guard let spaceID = spaces[Self.spaceKey(item.home)],
                       let userID = Self.userID(
-                          for: item.home, sharedOwner: sharedOwnerID, in: users
+                          for: item.home, sharedOwners: sharedOwners, in: users
                       ) else {
                     failed += 1
                     app.logger.error("rebuild: no library for \(path)")
                     continue
+                }
+                // The other members' copies of it, each theirs.
+                let theirs = (copies[path] ?? []).compactMap { copy -> (UUID, String)? in
+                    guard case .shared(_, let holder?) = copy.home, let holderID = users[holder] else {
+                        return nil
+                    }
+                    return (holderID, copy.candidate.url.path)
                 }
 
                 do {
@@ -262,9 +303,9 @@ struct RebuildCommand: AsyncCommand {
 
                     try await index(
                         item, sha: sha, metadata: metadata,
-                        liveGroupID: liveGroups[path],
-                        spaceID: spaceID, userID: userID, app: app
+                        spaceID: spaceID, userID: userID, copies: theirs, app: app
                     )
+                    identifiers[path] = metadata.liveIdentifier ?? ""
                     indexedCount += 1
                     bytesDone += item.candidate.byteSize
                 } catch {
@@ -273,13 +314,33 @@ struct RebuildCommand: AsyncCommand {
                 }
             }
 
+            // Each folder this batch finished, grouped as a whole. One that
+            // can't be is left as the batch left it, rather than costing the
+            // rest of the library its rebuild.
+            for item in chunk {
+                let folder = Self.folder(of: item)
+                unfinished[folder, default: 0] -= 1
+                guard unfinished[folder] == 0, let files = folders[folder] else { continue }
+                do {
+                    let summary = try await group(
+                        files, identifiers: identifiers, spaces: spaces, batchSize: batchSize, app: app
+                    )
+                    grouping.items += summary.items
+                    grouping.livePhotos += summary.livePhotos
+                    grouping.stacked += summary.stacked
+                } catch {
+                    ungrouped += 1
+                    app.logger.error("rebuild: could not group \(folder): \(String(reflecting: error))")
+                }
+            }
+
             let done = indexedCount + failed
             let elapsed = Date().timeIntervalSince(started)
             let rate = elapsed > 0 ? Double(done) / elapsed : 0
             console.info(
-                "  \(done)/\(pending.count)  \(ImportCommand.humanBytes(bytesDone))  "
+                "  \(done)/\(toIndex.count)  \(ImportCommand.humanBytes(bytesDone))  "
                 + String(format: "%.1f files/s  ", rate)
-                + "eta \(ImportCommand.humanDuration(rate > 0 ? Double(pending.count - done) / rate : 0))"
+                + "eta \(ImportCommand.humanDuration(rate > 0 ? Double(toIndex.count - done) / rate : 0))"
             )
         }
 
@@ -288,6 +349,14 @@ struct RebuildCommand: AsyncCommand {
         console.info("  Indexed: \(indexedCount)")
         console.info("  Failed:  \(failed)")
         console.info("  Elapsed: \(ImportCommand.humanDuration(Date().timeIntervalSince(started)))")
+        console.info("")
+        console.info("  Grouped as Synology Photos groups them:")
+        console.info("    items of more than one file: \(grouping.items)")
+        console.info("    of them Live Photos:         \(grouping.livePhotos)")
+        console.info("    files kept with another:     \(grouping.stacked)")
+        if ungrouped > 0 {
+            console.warning("  \(ungrouped) folders couldn't be grouped (see above): a Live Photo in one may show as more than one tile.")
+        }
         console.info("")
         console.info("Thumbnails are queued; the derivation worker draws them down in the background.")
         console.info("")
@@ -298,8 +367,23 @@ struct RebuildCommand: AsyncCommand {
         console.warning("  favorites, ratings, tags, captions, albums, and per-photo attribution")
         console.warning("  in shared libraries. Photo ids changed, so every app will refetch.")
         if !sharedLibraries.isEmpty {
-            console.warning("Shared libraries came back with one member — their owner. Re-add")
-            console.warning("  everyone else in the app, or nobody else can see them.")
+            struct MemberRow: Decodable { let library: String; let name: String; let role: String }
+            let members = try await app.sql.raw("""
+                SELECT s.name AS "library", COALESCE(u.dsm_username, u.display_name) AS "name", m.role
+                FROM spaces s
+                JOIN space_members m ON m.space_id = s.id
+                JOIN users u ON u.id = m.user_id
+                WHERE s.kind = 'shared' AND s.name = ANY(\(bind: sharedLibraries)::text[])
+                ORDER BY s.name, m.role <> 'owner', 2
+                """).all(decoding: MemberRow.self)
+            console.warning("Shared libraries came back with their owner and whoever's home holds them:")
+            for library in sharedLibraries {
+                let names = members.filter { $0.library == library }
+                    .map { $0.role == "owner" ? "\($0.name) (owner)" : $0.name }
+                console.warning("  \(library): \(names.joined(separator: ", "))")
+            }
+            console.warning("  Anyone can make that folder in their own home, so check each in the")
+            console.warning("  app, and add back anyone with no home here, or they can't see it.")
         }
         console.info("")
         console.info("People sign in with DSM as usual; their accounts are already here waiting.")
@@ -319,6 +403,10 @@ struct RebuildCommand: AsyncCommand {
     /// behind — and someone whose photos all arrived through the browser would
     /// have been skipped entirely. Everything under `Photos` is the library,
     /// wherever a previous app chose to file it.
+    ///
+    /// Except `Photos/Shared/<Space>`, where the tree files a shared library's
+    /// photos in each member's home: those are that library's, not the
+    /// person's own, and the person whose home holds them is one of its members.
     private static func scanHomes(_ root: String, logger: Logger) throws -> [Found] {
         let manager = FileManager.default
         guard let people = try? manager.contentsOfDirectory(atPath: root) else {
@@ -337,12 +425,23 @@ struct RebuildCommand: AsyncCommand {
             let candidates = try LibraryScanner.scan(
                 root: URL(fileURLWithPath: photos, isDirectory: true), logger: logger
             )
-            found += candidates.map {
-                Found(
-                    candidate: $0,
+            // As given and as the walk spells it, links resolved: macOS's
+            // /tmp is a link to /private/tmp.
+            let roots = Set([photos, ImportGrouping.realPath(photos)])
+            found += candidates.map { candidate in
+                let parts = roots.lazy.map { relative(candidate.url.path, to: $0) }
+                    .first { !$0.isEmpty } ?? []
+                if parts.count >= 3, parts[0] == "Shared" {
+                    return Found(
+                        candidate: candidate, home: .shared(space: parts[1], holder: person),
+                        within: parts.dropFirst(2).joined(separator: "/")
+                    )
+                }
+                return Found(
+                    candidate: candidate,
                     home: .personal(
                         user: person,
-                        device: legacyDevice(of: $0.url.path, under: photos)
+                        device: legacyDevice(of: candidate.url.path, under: photos)
                     )
                 )
             }
@@ -384,7 +483,14 @@ struct RebuildCommand: AsyncCommand {
             let candidates = try LibraryScanner.scan(
                 root: URL(fileURLWithPath: path, isDirectory: true), logger: logger
             )
-            found += candidates.map { Found(candidate: $0, home: .shared(space: library)) }
+            let roots = Set([path, ImportGrouping.realPath(path)])
+            found += candidates.map { candidate in
+                Found(
+                    candidate: candidate, home: .shared(space: library, holder: nil),
+                    within: roots.lazy.map { relative(candidate.url.path, to: $0) }
+                        .first { !$0.isEmpty }?.joined(separator: "/")
+                )
+            }
         }
         return found
     }
@@ -394,6 +500,38 @@ struct RebuildCommand: AsyncCommand {
         let root = root.hasSuffix("/") ? String(root.dropLast()) : root
         guard path.hasPrefix(root + "/") else { return [] }
         return path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
+    }
+
+    /// One file of each shared photo to index, however many homes hold a copy
+    /// of it: the shared root's if there is one, else its owner's, else the
+    /// first member's. The rest, at the same path in the library and the same
+    /// size, are the other members' copies, kept as theirs rather than indexed
+    /// again, and not read: the tree makes every copy of the one file.
+    private static func collapse(
+        _ pending: [Found], owners: [String: String]
+    ) -> (index: [Found], copies: [String: [Found]]) {
+        var photos: [String: [Found]] = [:]
+        for item in pending {
+            guard case .shared(let space, _) = item.home, let within = item.within else { continue }
+            photos["\(space)\n\(within)\n\(item.candidate.byteSize)", default: []].append(item)
+        }
+        func preference(_ item: Found) -> (Int, String) {
+            guard case .shared(let space, let holder?) = item.home else { return (0, "") }
+            return (holder == owners[space] ? 1 : 2, holder)
+        }
+        var chosen: Set<String> = []
+        var copies: [String: [Found]] = [:]
+        for items in photos.values {
+            let ordered = items.sorted { preference($0) < preference($1) }
+            let first = ordered[0].candidate.url.path
+            chosen.insert(first)
+            if ordered.count > 1 { copies[first] = Array(ordered.dropFirst()) }
+        }
+        let index = pending.filter { item in
+            guard case .shared = item.home, item.within != nil else { return true }
+            return chosen.contains(item.candidate.url.path)
+        }
+        return (index, copies)
     }
 
     private static func hashes(
@@ -423,23 +561,24 @@ struct RebuildCommand: AsyncCommand {
 
     // MARK: - Accounts
 
-    /// The device folder is part of the path but not of the library's identity,
-    /// so it is dropped when looking a space up.
+    /// The device folder, and the home a shared library's copy is in, are part
+    /// of the path but not of the library's identity, so they're dropped when
+    /// looking a space up.
     private static func spaceKey(_ home: Home) -> Home {
         switch home {
         case .personal(let user, _): return .personal(user: user, device: nil)
-        case .shared: return home
+        case .shared(let space, _): return .shared(space: space, holder: nil)
         }
     }
 
     /// Who a placement is attributed to. A home directory names its person; a
     /// shared folder names nobody, so those go to the library's owner.
     private static func userID(
-        for home: Home, sharedOwner: UUID?, in users: [String: UUID]
+        for home: Home, sharedOwners: [String: UUID], in users: [String: UUID]
     ) -> UUID? {
         switch home {
         case .personal(let user, _): return users[user]
-        case .shared: return sharedOwner
+        case .shared(let space, _): return sharedOwners[space]
         }
     }
 
@@ -492,44 +631,58 @@ struct RebuildCommand: AsyncCommand {
         return created.id
     }
 
-    /// Membership is deliberately not guessed.
+    /// Its members are its owner and the people whose homes hold it.
     ///
-    /// The folder says a shared library exists and what it is called; it does
-    /// not say who was in it. Adding everyone with a home would be the friendly
-    /// guess and the wrong one — it hands a family member a library they may
-    /// never have been in. One member, and a loud line in the summary.
+    /// The tree files a shared library's photos in each member's home and
+    /// takes them out of the home of anyone who leaves, so a home holding it
+    /// is the record of who was in it. A folder under the shared root says a
+    /// library exists and what it is called, but not who was in it, and adding
+    /// everyone with a home would be the friendly guess and the wrong one: it
+    /// hands a family member a library they may never have been in. Anyone can
+    /// make the folder in their own home, too, so the summary names everyone
+    /// let in.
+    ///
+    /// Only when the library is made. One that's already here keeps the
+    /// members it has, so a re-run never puts back someone since removed.
     private func resolveSharedSpace(
-        named name: String, owner: UUID, on sql: any SQLDatabase
+        named name: String, owner: UUID, members: [UUID], on sql: any SQLDatabase
     ) async throws -> UUID {
         if let existing = try await sql.raw("""
             SELECT id FROM spaces WHERE kind = 'shared' AND name = \(bind: name)
             """).first(decoding: IDRow.self) {
             return existing.id
         }
+        // The library and everyone in it at once, so a run stopped in between
+        // can't leave one with nobody in it to be found on the next.
         guard let created = try await sql.raw("""
-            INSERT INTO spaces (kind, name, created_by)
-            VALUES ('shared', \(bind: name), \(bind: owner))
-            RETURNING id
+            WITH created AS (
+                INSERT INTO spaces (kind, name, created_by)
+                VALUES ('shared', \(bind: name), \(bind: owner))
+                RETURNING id
+            ), joined AS (
+                INSERT INTO space_members (space_id, user_id, role)
+                SELECT created.id, m.user_id,
+                       CASE WHEN m.user_id = \(bind: owner) THEN 'owner' ELSE 'contributor' END
+                FROM created, unnest(\(bind: Array(Set([owner] + members)))::uuid[]) AS m(user_id)
+            )
+            SELECT id FROM created
             """).first(decoding: IDRow.self) else {
             throw Abort(.internalServerError, reason: "Could not recreate the library \(name).")
         }
-        try await sql.raw("""
-            INSERT INTO space_members (space_id, user_id, role)
-            VALUES (\(bind: created.id), \(bind: owner), 'owner')
-            ON CONFLICT DO NOTHING
-            """).run()
         return created.id
     }
 
     // MARK: - Indexing one file
 
+    /// An item of its own until its folder is grouped (`group`). `copies` are
+    /// the other members' copies of a shared photo, each recorded as theirs.
     private func index(
         _ item: Found,
         sha: String,
         metadata: MediaProbe.Metadata,
-        liveGroupID: UUID?,
         spaceID: UUID,
         userID: UUID,
+        copies: [(user: UUID, path: String)],
         app: Application
     ) async throws {
         let candidate = item.candidate
@@ -544,14 +697,13 @@ struct RebuildCommand: AsyncCommand {
                 // put one person's copy in the other person's library.
                 guard let asset = try await sql.raw("""
                     INSERT INTO assets
-                        (sha256, byte_size, media_type, mime, blob_ext, is_raw,
-                         live_group_id, storage_path)
+                        (sha256, byte_size, media_type, mime, blob_ext, is_raw, storage_path)
                     VALUES
                         (\(bind: sha), \(bind: candidate.byteSize),
                          \(bind: candidate.mediaType.rawValue),
                          \(bind: metadata.mime ?? candidate.mime),
                          \(bind: BlobStore.fileExtension(for: filename)),
-                         \(bind: metadata.isRaw), \(bind: liveGroupID), \(bind: path))
+                         \(bind: metadata.isRaw), \(bind: path))
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "asset insert returned nothing")
@@ -564,9 +716,8 @@ struct RebuildCommand: AsyncCommand {
                     metadata, assetID: asset.id, on: sql, geocoder: app.geocoder
                 )
 
-                // browse_path is the file itself. Left NULL, the browse-tree
-                // worker would try to link a second copy out of a blob store
-                // that has nothing in it.
+                // browse_path is the file itself. Nothing has read it since
+                // the tree's entries became one per person (`browse_entries`).
                 guard let placement = try await sql.raw("""
                     INSERT INTO space_assets
                         (space_id, asset_id, uploaded_by_user_id, filename,
@@ -576,6 +727,21 @@ struct RebuildCommand: AsyncCommand {
                     RETURNING id
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "placement insert returned nothing")
+                }
+
+                // Each other member's copy of a shared photo is their File
+                // Station copy, as if the tree had just made it, so it's taken
+                // out of their home if they leave. Never this file, the only
+                // one: the tree unlinks an entry's file when its photo is
+                // removed or its person leaves.
+                if !copies.isEmpty {
+                    try await sql.raw("""
+                        INSERT INTO browse_entries (space_asset_id, user_id, path, link_kind)
+                        SELECT \(bind: placement.id), v.user_id, v.path, 'reflink'
+                        FROM unnest(\(bind: copies.map(\.user))::uuid[], \(bind: copies.map(\.path))::text[])
+                             AS v(user_id, path)
+                        ON CONFLICT (space_asset_id, user_id) DO NOTHING
+                        """).run()
                 }
 
                 _ = try await ChangeLog.append(
@@ -592,5 +758,69 @@ struct RebuildCommand: AsyncCommand {
                 throw error
             }
         }
+    }
+
+    // MARK: - Grouping
+
+    /// The folder a file is grouped in. A shared library's by its folder in
+    /// the library, so a folder's photos group together whichever home holds
+    /// the copy of each that's indexed.
+    private static func folder(of item: Found) -> String {
+        if case .shared(let space, _) = item.home, let within = item.within {
+            return space + "\n" + (within as NSString).deletingLastPathComponent
+        }
+        return item.candidate.url.deletingLastPathComponent().path
+    }
+
+    /// Groups one folder's files into items as an import's are, those an
+    /// earlier run indexed there with them: nothing kept their identifiers,
+    /// so they're read off the files again, one exiftool run per batch.
+    private func group(
+        _ files: [Found], identifiers: [String: String], spaces: [Home: UUID],
+        batchSize: Int, app: Application
+    ) async throws -> ImportGrouping.Summary {
+        struct Row: Decodable {
+            let assetID: UUID
+            let placementID: UUID
+            let spaceID: UUID
+            let path: String
+            let mediaType: String
+            let liveGroupID: UUID?
+            let stackedUnder: UUID?
+        }
+        // Each file's row, in the library its folder belongs to.
+        let placed = files.compactMap { file in
+            spaces[Self.spaceKey(file.home)].map { (file.candidate.url.path, $0) }
+        }
+        let rows = try await app.sql.raw("""
+            SELECT a.id AS "assetID", sa.id AS "placementID", sa.space_id AS "spaceID",
+                   a.storage_path AS "path", a.media_type AS "mediaType",
+                   a.live_group_id AS "liveGroupID", a.stacked_under AS "stackedUnder"
+            FROM unnest(\(bind: placed.map(\.0))::text[], \(bind: placed.map(\.1))::uuid[]) AS f(path, space)
+            JOIN assets a ON a.storage_path = f.path
+            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = f.space
+            """).all(decoding: Row.self)
+
+        let unread = rows.map(\.path).filter { identifiers[$0] == nil }
+        var read: [String: String] = [:]
+        for start in stride(from: 0, to: unread.count, by: batchSize) {
+            let batch = unread[start..<min(start + batchSize, unread.count)]
+            let identified = try await MediaProbe.liveIdentifiers(batch.map { URL(fileURLWithPath: $0) })
+            read.merge(identified) { $1 }
+        }
+
+        let byPath = Dictionary(files.map { ($0.candidate.url.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let members = rows.compactMap { row -> ImportGrouping.Member? in
+            guard let file = byPath[row.path] else { return nil }
+            return ImportGrouping.Member(
+                assetID: row.assetID, placementID: row.placementID, spaceID: row.spaceID,
+                // A shared photo by its path in the library, wherever its copy is.
+                path: file.within.map { "/" + $0 } ?? row.path,
+                identifier: identifiers[row.path] ?? read[row.path],
+                mediaType: row.mediaType, modifiedAt: file.candidate.modifiedAt,
+                liveGroupID: row.liveGroupID, stackedUnder: row.stackedUnder
+            )
+        }
+        return try await ImportGrouping.group(members, app: app)
     }
 }

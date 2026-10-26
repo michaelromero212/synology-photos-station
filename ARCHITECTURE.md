@@ -194,16 +194,36 @@ already lies. Accounts are recreated from the home directory names and keyed on
 `dsm_username`, so DSM sign-in adopts them rather than making a second account
 for the same person. Re-running skips what it already indexed, which makes it
 both resumable and a way to pick up files dropped into the library by hand.
+Files come back in the grid items an import makes of them (`ImportGrouping`):
+every file in a folder carrying the same Live Photo identifier is one, grouped
+once the last of the folder is in, and a folder a stopped run left is grouped
+by the next.
+
+A shared library, which the tree files in every member's home at
+`Photos/Shared/<Space>`, comes back as the one library rather than as a copy
+in each member's own. Each photo is indexed once: the shared root's copy if an
+older version left one there, else the owner's, else whoever has it. Every
+other member's copy is recorded as their File Station copy (`browse_entries`),
+so leaving still takes it out of their home. The copy indexed is never
+recorded that way, because the tree unlinks an entry's file, and it's the only
+one; so it stays in its holder's home even if they leave, and a rename moves
+only the copies around it (`BrowseTreeWorker.relocateRenamed`).
 
 `Scripts/smoke-rebuild.sh` is the proof, against its own database: drop the
 schema entirely, run the command, and check that the library comes back —
 right photos in the right libraries, EXIF dates and dimensions read off the
-files, SHA-256 matching the bytes on disk, and `@eaDir`, `#recycle` and
-everything outside `Photos` correctly left out.
+files, SHA-256 matching the bytes on disk, Live Photos and their exports in
+one item each, a shared library from its members' homes as one library, and
+`@eaDir`, `#recycle` and everything outside `Photos` correctly left out.
 
 **What does not come back.** Favorites, ratings, tags, captions and albums are
-in the database and nowhere else; a folder has no place to keep them. Shared
-libraries come back with one member — their owner — because the folder says a
+in the database and nowhere else; a folder has no place to keep them. A shared
+library's members come back from the folders: its owner, and everyone whose
+home holds its folder, since the tree puts it only in members' homes and takes
+it out of the home of anyone who leaves. Anybody can make that folder in their
+own home, though, so the command lists who came back in each library to be
+checked, and someone with no home on the NAS has to be added again. A library
+only under the shared root comes back with its owner alone: that folder says a
 library exists and what it is called, but not who was in it, and guessing that
 hands someone a library they may never have been in. Photo ids are new, so
 every client refetches. The command prints all of this rather than implying a

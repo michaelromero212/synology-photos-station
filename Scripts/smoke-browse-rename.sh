@@ -3,7 +3,8 @@
 # renames `Photos/Shared/<name>` in every member's home, in one move that keeps
 # anything a member put there, and later photos land in the renamed folder
 # rather than a second one. Where the new name is already a folder, photos move
-# one by one. Leaving takes the folder away, not just the photos in it.
+# one by one. Leaving takes the folder away, not just the photos in it. A
+# rebuilt library's photo, whose only file is a member's copy, stays put.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-browse-rename.sh
 #
@@ -65,20 +66,21 @@ LIB=$(curl -s -X POST "$API/v1/spaces" -H "$AO" -H 'Content-Type: application/js
 [ -n "$LIB" ] || { echo "setup failed"; exit 1; }
 
 N=0
-# put <name> <capturedAt>: a photo into the shared library, as its owner
+# put <name> <capturedAt> [library]: a photo into the shared library, as its owner
 put(){
   N=$((N + 1))
-  local f="$ROOT/files/$1" sha size up
+  local f="$ROOT/files/$1" space="${3:-$LIB}" sha size up
   vips gaussnoise "$ROOT/files/n.v" $((200 + N)) 200 >/dev/null 2>&1
   vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
   up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$AO" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$LIB\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$1\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
+    -d "{\"spaceID\":\"$space\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$1\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
   curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$AO" --data-binary "@$f" >/dev/null
   curl -s -X POST "$API/v1/uploads/$up/commit" -H "$AO" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$LIB\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$((200 + N)),\"height\":200,\"capturedAt\":\"$2\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" >/dev/null
+    -d "{\"spaceID\":\"$space\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$((200 + N)),\"height\":200,\"capturedAt\":\"$2\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" >/dev/null
 }
-rename(){ code -X PATCH "$API/v1/spaces/$LIB" -H "$AO" -H 'Content-Type: application/json' -d "{\"name\":\"$1\"}"; }
+# rename <name> [library]
+rename(){ code -X PATCH "$API/v1/spaces/${2:-$LIB}" -H "$AO" -H 'Content-Type: application/json' -d "{\"name\":\"$1\"}"; }
 
 echo "Placed under the library's name"
 put IMG_1.jpg 2024-06-01T12:00:00Z; put IMG_2.jpg 2024-07-04T12:00:00Z
@@ -121,6 +123,32 @@ check "the kid leaves" "204" "$(code -X DELETE "$API/v1/spaces/$LIB/members/$K" 
 until_there "$HOMES/kid/$OLD" gone
 gone "and their folder for it goes, not just its photos" "$HOMES/kid/$OLD"
 exists "while everyone else keeps theirs" "$HOMES/member/$OLD/2024/07/IMG_2.jpg"
+
+echo "A rebuilt library's photo stays where its row says"
+# After a rebuild, a shared photo's only file is one member's copy, in their
+# home (`RebuildCommand`). Once the tree has put a later photo in that folder
+# too, a rename would move the folder whole, and the row would point at
+# nothing. Only the copies move.
+TRIP="Photos/Shared/Trip"; mkdir -p "$HOMES/owner/$TRIP/2023/05" "$HOMES/member/$TRIP/2023/05"
+vips gaussnoise "$ROOT/files/n.v" 300 200 >/dev/null 2>&1
+vips copy "$ROOT/files/n.v" "$HOMES/owner/$TRIP/2023/05/IMG_9.jpg" >/dev/null 2>&1
+cp -p "$HOMES/owner/$TRIP/2023/05/IMG_9.jpg" "$HOMES/member/$TRIP/2023/05/"
+(cd "$SERVER_DIR" && "$BIN" rebuild --homes "$HOMES" --shared "$ROOT/no-shared-root" --owner owner \
+  > "$ROOT/rebuild.log" 2>&1)
+check "the rebuild indexes the photo, and none of the tree's copies" "1" "$(grep -c 'Indexed: 1$' "$ROOT/rebuild.log")"
+REBUILT=$(q "SELECT id FROM spaces WHERE kind = 'shared' AND name = 'Trip'")
+ITS="SELECT storage_path FROM assets WHERE storage_path LIKE '%/IMG_9.jpg'"
+check "its file is the owner's copy" "$HOMES/owner/$TRIP/2023/05/IMG_9.jpg" "$(q "$ITS")"
+put IMG_10.jpg 2023-05-20T12:00:00Z "$REBUILT"
+until_there "$HOMES/owner/$TRIP/2023/05/IMG_10.jpg"
+check "renamed" "200" "$(rename "Road Trip" "$REBUILT")"
+ROAD="Photos/Shared/Road Trip"
+until_there "$HOMES/owner/$ROAD/2023/05/IMG_10.jpg"
+exists "a later photo's copy follows the name" "$HOMES/owner/$ROAD/2023/05/IMG_10.jpg"
+until_there "$HOMES/member/$ROAD/2023/05/IMG_9.jpg"
+exists "and so does the member's copy of the rebuilt one" "$HOMES/member/$ROAD/2023/05/IMG_9.jpg"
+exists "while the rebuilt photo's own file stays put" "$HOMES/owner/$TRIP/2023/05/IMG_9.jpg"
+exists "where its row still finds it" "$(q "$ITS")"
 
 echo
 echo "$PASS passed, $FAIL failed"

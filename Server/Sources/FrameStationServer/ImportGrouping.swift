@@ -29,6 +29,9 @@ import Darwin
 /// arrived before their Live Photos were items of their own. Given Synology's
 /// own items (`synologyItems`, from `Scripts/export-synology-dates.sh`), a
 /// group is split where Synology split it. Only split: never joined.
+///
+/// A rebuilt library's files are grouped the same way (`RebuildCommand`), so
+/// a rebuild brings back the items an import made rather than pairing by name.
 enum ImportGrouping {
     struct Summary {
         /// Items of more than one file.
@@ -41,15 +44,28 @@ enum ImportGrouping {
         var changed = 0
     }
 
-    private struct Member: Decodable {
+    /// A file to group, as it's grouped now.
+    struct Member: Decodable {
         let assetID: UUID
         let placementID: UUID
+        /// The library that hears of a change to it.
+        let spaceID: UUID
         let path: String
+        /// nil or "" for a file that carries none.
         let identifier: String?
         let mediaType: String
         let modifiedAt: Date
         let liveGroupID: UUID?
         let stackedUnder: UUID?
+    }
+
+    /// What files make together: the Live Photo each pair plays as, and the
+    /// file each of the rest is stacked under. Any other file is an item of
+    /// its own.
+    struct Layout {
+        var liveGroup: [UUID: UUID] = [:]
+        var stackedUnder: [UUID: UUID] = [:]
+        var summary = Summary()
     }
 
     /// Regroups every file imported into `space` from under `root`, by the
@@ -60,11 +76,10 @@ enum ImportGrouping {
         space: UUID, root: String, app: Application, synologyItems: [String: String]? = nil,
         progress: (Int, Int) -> Void = { _, _ in }
     ) async throws -> Summary {
-        var summary = Summary()
         // As given and as the walk may have recorded it, its links resolved:
         // macOS's /var is a link to /private/var.
         let prefixes = Array(Set([root, realPath(root)].map { $0.hasSuffix("/") ? $0 : $0 + "/" }))
-        summary.read = try await recordMissingIdentifiers(
+        let read = try await recordMissingIdentifiers(
             under: prefixes, in: space, app: app, progress: progress
         )
 
@@ -72,46 +87,26 @@ enum ImportGrouping {
             SELECT a.id AS "assetID", sa.id AS "placementID", r.source_path AS "path",
                    NULLIF(r.live_identifier, '') AS "identifier", a.media_type AS "mediaType",
                    r.modified_at AS "modifiedAt", a.live_group_id AS "liveGroupID",
-                   a.stacked_under AS "stackedUnder"
+                   a.stacked_under AS "stackedUnder", sa.space_id AS "spaceID"
             FROM import_records r
             JOIN assets a ON a.id = r.asset_id
             JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
             WHERE EXISTS (SELECT 1 FROM unnest(\(bind: prefixes)::text[]) p WHERE starts_with(r.source_path, p))
             """).all(decoding: Member.self)
 
-        var groups: [String: [Member]] = [:]
-        for member in members {
-            guard let identifier = member.identifier else { continue }
-            groups[folder(of: member.path) + "\n" + identifier, default: []].append(member)
-        }
+        var summary = try await group(members, app: app, synologyItems: synologyItems)
+        summary.read = read
+        return summary
+    }
 
-        var liveGroup: [UUID: UUID] = [:]
-        var stackedUnder: [UUID: UUID] = [:]
-        for group in groups.values.flatMap({ split($0, as: synologyItems) }) where group.count > 1 {
-            summary.items += 1
-            let photos = group.filter { $0.mediaType == "photo" }
-            let videos = group.filter { $0.mediaType == "video" }
-            let videoStems = Set(videos.map { stem(of: $0.path) })
-            let shown: Member
-            if let photo = photos.min(by: { rank($0, partners: videoStems) < rank($1, partners: videoStems) }) {
-                shown = photo
-                let photoStem: Set<String> = [stem(of: photo.path)]
-                if let motion = videos.min(by: { rank($0, partners: photoStem) < rank($1, partners: photoStem) }) {
-                    // The pair's id as it was, when it was already this pair.
-                    let id = photo.liveGroupID != nil && photo.liveGroupID == motion.liveGroupID
-                        ? photo.liveGroupID! : UUID()
-                    liveGroup[photo.assetID] = id
-                    liveGroup[motion.assetID] = id
-                    summary.livePhotos += 1
-                }
-            } else {
-                shown = videos.min(by: { rank($0, partners: []) < rank($1, partners: []) })!
-            }
-            for member in group where member.assetID != shown.assetID && liveGroup[member.assetID] == nil {
-                stackedUnder[member.assetID] = shown.assetID
-                summary.stacked += 1
-            }
-        }
+    /// Groups `members` into items, and writes and announces what changed.
+    /// Every file of a folder at once: an item is made of the files given.
+    static func group(
+        _ members: [Member], app: Application, synologyItems: [String: String]? = nil
+    ) async throws -> Summary {
+        let layout = layout(of: members, synologyItems: synologyItems)
+        let liveGroup = layout.liveGroup, stackedUnder = layout.stackedUnder
+        var summary = layout.summary
 
         // Only what changes, with its announcement: a device showing a file
         // that's now stacked away, or a photo that's now a Live Photo, has to
@@ -151,7 +146,7 @@ enum ImportGrouping {
                 }
                 for member in changed {
                     _ = try await ChangeLog.append(
-                        spaceID: space, entity: "space_asset", entityID: member.placementID,
+                        spaceID: member.spaceID, entity: "space_asset", entityID: member.placementID,
                         op: "update", on: sql
                     )
                 }
@@ -162,6 +157,47 @@ enum ImportGrouping {
             }
         }
         return summary
+    }
+
+    /// The items `members` make: every file in a folder with the same
+    /// identifier is one, its photo shown, its first video that photo's
+    /// motion, and the rest stacked under it, split where Synology's items
+    /// split it when they're given. Nothing else decides it, so an import and
+    /// a rebuild make the same items of the same files.
+    static func layout(of members: [Member], synologyItems: [String: String]? = nil) -> Layout {
+        var groups: [String: [Member]] = [:]
+        for member in members {
+            guard let identifier = member.identifier, !identifier.isEmpty else { continue }
+            groups[folder(of: member.path) + "\n" + identifier, default: []].append(member)
+        }
+
+        var layout = Layout()
+        for group in groups.values.flatMap({ split($0, as: synologyItems) }) where group.count > 1 {
+            layout.summary.items += 1
+            let photos = group.filter { $0.mediaType == "photo" }
+            let videos = group.filter { $0.mediaType == "video" }
+            let videoStems = Set(videos.map { stem(of: $0.path) })
+            let shown: Member
+            if let photo = photos.min(by: { rank($0, partners: videoStems) < rank($1, partners: videoStems) }) {
+                shown = photo
+                let photoStem: Set<String> = [stem(of: photo.path)]
+                if let motion = videos.min(by: { rank($0, partners: photoStem) < rank($1, partners: photoStem) }) {
+                    // The pair's id as it was, when it was already this pair.
+                    let id = photo.liveGroupID != nil && photo.liveGroupID == motion.liveGroupID
+                        ? photo.liveGroupID! : UUID()
+                    layout.liveGroup[photo.assetID] = id
+                    layout.liveGroup[motion.assetID] = id
+                    layout.summary.livePhotos += 1
+                }
+            } else {
+                shown = videos.min(by: { rank($0, partners: []) < rank($1, partners: []) })!
+            }
+            for member in group where member.assetID != shown.assetID && layout.liveGroup[member.assetID] == nil {
+                layout.stackedUnder[member.assetID] = shown.assetID
+                layout.summary.stacked += 1
+            }
+        }
+        return layout
     }
 
     /// A group as Synology's items divide it, when they're known. A file
@@ -236,7 +272,7 @@ enum ImportGrouping {
 
     /// `realpath`, not `resolvingSymlinksInPath`, which takes `/private` back
     /// off a path the walk recorded with it.
-    private static func realPath(_ path: String) -> String {
+    static func realPath(_ path: String) -> String {
         guard let resolved = realpath(path, nil) else { return path }
         defer { free(resolved) }
         return String(cString: resolved)

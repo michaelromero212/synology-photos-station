@@ -11,8 +11,6 @@ enum LibraryScanner {
         let modifiedAt: Date
         let mediaType: MediaType
         let mime: String
-        /// Basename without extension — used to pair Live Photos.
-        let stem: String
     }
 
     static let photoExtensions: Set<String> = [
@@ -84,38 +82,13 @@ enum LibraryScanner {
                     byteSize: Int64(values?.fileSize ?? 0),
                     modifiedAt: values?.contentModificationDate ?? Date(),
                     mediaType: mediaType,
-                    mime: mimeType(for: ext),
-                    stem: url.deletingPathExtension().lastPathComponent
+                    mime: mimeType(for: ext)
                 )
             )
         }
 
         logger.info("scanned \(root.path): \(candidates.count) media files, skipped \(skippedDirectories) excluded directories")
         return candidates
-    }
-
-    /// Groups a still and its paired video into one Live Photo.
-    ///
-    /// Synology (and the Photos export before it) writes these as `IMG_1234.HEIC`
-    /// + `IMG_1234.MOV` in the same folder. Uploading them without pairing gives
-    /// you a silent duplicate video sitting next to every Live Photo.
-    static func liveGroups(_ candidates: [Candidate]) -> [String: UUID] {
-        var byFolderAndStem: [String: [Candidate]] = [:]
-        for candidate in candidates {
-            let key = candidate.url.deletingLastPathComponent().path + "/" + candidate.stem
-            byFolderAndStem[key, default: []].append(candidate)
-        }
-
-        var groups: [String: UUID] = [:]
-        for (_, group) in byFolderAndStem {
-            guard group.count == 2,
-                  group.contains(where: { $0.mediaType == .photo }),
-                  group.contains(where: { $0.mediaType == .video })
-            else { continue }
-            let id = UUID()
-            for member in group { groups[member.url.path] = id }
-        }
-        return groups
     }
 
     /// Streaming SHA-256 — a 4 GB video must not be read into memory.

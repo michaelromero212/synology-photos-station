@@ -644,8 +644,18 @@ actor BrowseTreeWorker {
                         WHERE be.user_id = \(bind: member.userID) AND sa.space_id <> \(bind: member.spaceID)
                           AND starts_with(be.path, \(bind: old + "/"))
                         """).first(decoding: CountRow.self)?.count ?? 0
+                    // A rebuilt library's photo can be the file itself, in a
+                    // member's home (`RebuildCommand`), and if it moved with the
+                    // folder its row would point at nothing. A folder holding
+                    // one moves photo by photo: the copies go, and it stays
+                    // where its row says.
+                    let canonical = try await sql.raw("""
+                        SELECT count(*)::int AS count FROM assets
+                        WHERE starts_with(storage_path, \(bind: old + "/"))
+                        """).first(decoding: CountRow.self)?.count ?? 1
 
-                    if others == 0, manager.fileExists(atPath: old), !manager.fileExists(atPath: folder) {
+                    if others == 0, canonical == 0,
+                       manager.fileExists(atPath: old), !manager.fileExists(atPath: folder) {
                         try manager.moveItem(atPath: old, toPath: folder)
                         try await sql.raw("""
                             UPDATE browse_entries be
