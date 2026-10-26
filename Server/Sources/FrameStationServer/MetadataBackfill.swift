@@ -307,10 +307,13 @@ enum MetadataBackfill {
             // Every rendition that failed, whichever video it's for: the 500
             // below are any high-bitrate videos, and with thousands of those a
             // failed one could wait for ever (209 had, 2026-10-26, most for an
-            // audio track since handled).
+            // audio track since handled). Not one deleted for good, whose file
+            // is gone with it: 7 of those failed again on every start.
             try await app.sql.raw("""
-                UPDATE derivation_jobs SET state = 'pending', attempts = 0, last_error = NULL
-                WHERE kind = \(bind: Derivatives.playbackJobKind) AND state = 'failed'
+                UPDATE derivation_jobs j SET state = 'pending', attempts = 0, last_error = NULL
+                WHERE j.kind = \(bind: Derivatives.playbackJobKind) AND j.state = 'failed'
+                  AND EXISTS (SELECT 1 FROM space_assets sa
+                              WHERE sa.asset_id = j.asset_id AND sa.purged_at IS NULL)
                 """).run()
             try await app.sql.raw("""
                 WITH todo AS (

@@ -152,9 +152,14 @@ q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, started_at = NULL
    WHERE asset_id = '$PHOTO' AND kind = 'thumbnails'" >/dev/null
 q "UPDATE derivation_jobs SET state = 'pending', attempts = 0, started_at = NULL
    WHERE kind = 'playback'" >/dev/null
-# And one cellular copy that failed three times, which a restart tries again.
+# And one cellular copy that failed three times, which a restart tries again,
+# and one for a clip deleted for good, which it leaves alone.
 q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, last_error = 'gave up'
    WHERE asset_id = '$PCM' AND kind = 'playback'" >/dev/null
+GONE=$(asset clip-550.mp4 id)
+q "UPDATE space_assets SET deleted_at = now(), purged_at = now() WHERE asset_id = '$GONE'" >/dev/null
+q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, last_error = 'blob missing'
+   WHERE asset_id = '$GONE' AND kind = 'playback'" >/dev/null
 FRAMESTATION_DERIVATION_LANES=1 serve
 for _ in $(seq 1 120); do
   [ "$(derived "$PHOTO")" = "t" ] && [ "$(derived "$VIDEO")" = "t" ] \
@@ -167,6 +172,7 @@ check "before any transcode started" "t" "$(q "SELECT j.started_at < COALESCE(
   FROM derivation_jobs j WHERE j.asset_id = '$PHOTO' AND j.kind = 'thumbnails'")"
 check "and the video left to the queue is made too" "t" "$(derived "$VIDEO")"
 check "a cellular copy that failed for good is tried again" "done|" "$(job "$PCM" playback "state, last_error")"
+check "but not one for a clip deleted for good" "failed" "$(job "$GONE" playback state)"
 
 echo
 echo "$PASS passed, $FAIL failed"
