@@ -149,7 +149,7 @@ Photos goes by, so a library lands where it shows there:
 | An EXIF date and zone (the zone may be in `OffsetTimeOriginal`, `OffsetTimeDigitized` or `OffsetTime`) | that date, in that zone |
 | An EXIF date and no zone | that clock reading, as it is |
 | An iPhone video's `com.apple.quicktime.creationdate` | that local time and zone |
-| Only a video's UTC stamp (`.mov` or `.mp4`) | that moment, in the household's zone (`--time-zone`) |
+| Only a video's UTC stamp (`.mov` or `.mp4`), as its movie header records it | that moment, in the household's zone (`--time-zone`) |
 | Anything else: a stamp in a 64-bit (version 1) movie header, only an XMP `DateCreated`, or no date | its modification time, in the household's zone |
 
 The last two rows are Synology's own rule, worked out by comparing every file
@@ -164,7 +164,10 @@ recording carries the time it was saved, sometimes years after it was
 filmed, and a screenshot's XMP date can be written in the zone it was taken
 in. Tested on every one of that library's 1,372 videos with a stamp and no
 local date, the rule matched all but a second copy of one of them, which
-Synology dated by its modification time instead.
+Synology dated by its modification time instead. A video editor such as CapCut
+writes a `creation_time` key of its own beside the header's stamp, minutes
+off it, and ffprobe reports the key. Synology goes by the header, so the
+import reads the header itself (two clips in the second library).
 
 A file whose bytes the server already holds, in the Shared Space or anyone's
 library, comes in as a row of its own but stores them once. Its time is still

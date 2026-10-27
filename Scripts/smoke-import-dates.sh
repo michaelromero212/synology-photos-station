@@ -3,7 +3,8 @@
 # library lands in the same hours and on the same days as it shows there. An
 # iPhone video by the local time and zone it records, not its UTC stamp. A
 # photo by its EXIF date and zone, the zone also taken from the other two
-# offset tags. Another video by its UTC stamp. Anything else by its
+# offset tags. Another video by its UTC stamp, the one in its movie header,
+# not the creation_time key a video editor writes too. Anything else by its
 # modification time, which Synology's backup sets from the phone's library:
 # an XMP date, and a stamp in a 64-bit (version 1) movie header, are passed
 # over, as Synology passes them over. A time with no zone shows in the
@@ -87,6 +88,26 @@ data[mvhd:mvhd + size] = struct.pack(">I4s", 8 + len(wide), b"mvhd") + wide
 struct.pack_into(">I", data, moov, moov_size + 8 + len(wide) - size)
 open(path, "wb").write(data)
 PY
+# A clip CapCut exported: besides its movie header's stamp it writes a
+# creation_time key of its own, six minutes earlier, which ffprobe reports.
+# Synology goes by the header's.
+video -metadata creation_time=2023-06-14T01:14:00Z "$L/capcut.mov"
+python3 - "$L/capcut.mov" <<'PY'
+import datetime, struct, sys
+path = sys.argv[1]
+data = bytearray(open(path, "rb").read())
+def boxes(start, end):
+    while start + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[start:start + 8])
+        yield start, kind, size
+        start += size
+moov, _, moov_size = next(b for b in boxes(0, len(data)) if b[1] == b"moov")
+mvhd, _, _ = next(b for b in boxes(moov + 8, moov + moov_size) if b[1] == b"mvhd")
+assert data[mvhd + 8] == 0
+moment = datetime.datetime(2023, 6, 14, 1, 20, 13, tzinfo=datetime.timezone.utc)
+struct.pack_into(">I", data, mvhd + 12, int(moment.timestamp()) + 2082844800)
+open(path, "wb").write(data)
+PY
 image "$L/zone.jpg";   stamp -DateTimeOriginal="2023:06:13 20:00:00" -OffsetTimeOriginal="-04:00" "$L/zone.jpg"
 image "$L/clock.jpg";  stamp -DateTimeOriginal="2023:06:13 19:00:00" "$L/clock.jpg"
 image "$L/offset.jpg"; stamp -DateTimeOriginal="2023:06:13 18:00:00" -OffsetTime="-04:00" "$L/offset.jpg"
@@ -124,7 +145,8 @@ printf '%s\t%s\t%s\n' \
   "$L/offset.jpg" "2023-06-13 18:00:00" 5  "$L/saved.png"  "2023-06-13 17:44:06" 6 \
   "$L/plain.png"  "2023-06-13 20:30:00" 7  "$L/zoned.png"  "2023-06-13 17:44:06" 8 \
   "$L/trimmed.MOV" "2023-06-13 23:07:13" 9 "$L/vimeo.mp4" "2023-06-13 21:10:00" 10 \
-  "$L/$SHOT"      "2023-06-13 17:15:30" 11 "$L/later/plain-2.png" "2023-06-13 22:00:00" 12 > "$SYNOLOGY"
+  "$L/$SHOT"      "2023-06-13 17:15:30" 11 "$L/later/plain-2.png" "2023-06-13 22:00:00" 12 \
+  "$L/capcut.mov" "2023-06-13 21:20:13" 13 > "$SYNOLOGY"
 # The same, but one file at the UTC time the old import kept for it, and the
 # Vimeo clip at the stamp it carries.
 sed -e 's/2023-06-13 20:30:00/2023-06-14 00:30:00/' -e 's/2023-06-13 21:10:00/2023-06-13 21:10:31/' \
@@ -137,6 +159,7 @@ TZ=UTC touch -t 202306140030.00 "$L/plain.png"
 TZ=UTC touch -t 202306140100.00 "$L/other.mp4"
 TZ=UTC touch -t 202306140150.07 "$L/trimmed.MOV"
 TZ=UTC touch -t 202306140110.00 "$L/vimeo.mp4"
+TZ=UTC touch -t 202306140130.00 "$L/capcut.mov"
 TZ=UTC touch -t 202306132115.30 "$L/$SHOT"
 TZ=UTC touch -t 202306140200.00 "$L/later/plain-2.png"
 TZ=UTC touch -t 202306132144.06 "$L/saved.png"
@@ -179,6 +202,7 @@ expect "an iPhone video keeps the evening and zone it was filmed in" iphone.mov 
 expect "a video's UTC stamp shows in the household's zone"          other.mp4  "2023-06-13 21:00:31" -14400 -14400 01:00:31
 expect "and a .mov's, minutes from its modified time"               trimmed.MOV "2023-06-13 23:07:13" -14400 -14400 03:07:13
 expect "a stamp in a 64-bit header is passed over for the modified time" vimeo.mp4 "2023-06-13 21:10:00" -14400 -14400 01:10:00
+expect "an editor's creation_time key is passed over for the header's stamp" capcut.mov "2023-06-13 21:20:13" -14400 -14400 01:20:13
 expect "a photo with a zone keeps it"                                zone.jpg   "2023-06-13 20:00:00" -14400 - 00:00:00
 expect "a photo with no zone keeps its clock"                        clock.jpg  "2023-06-13 19:00:00" -14400 -14400 23:00:00
 expect "a zone in OffsetTime counts"                                 offset.jpg "2023-06-13 18:00:00" -14400 - 22:00:00
@@ -194,14 +218,14 @@ for _ in $(seq 1 120); do
 done
 echo "After the metadata pass:"
 check "every local time is unchanged" \
-  "2023-06-13 22:31:13|2023-06-13 21:00:31|2023-06-13 23:07:13|2023-06-13 21:10:00|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:44:06|2023-06-13 17:44:06|2023-06-13 20:30:00|2023-06-13 22:00:00" \
-  "$(for f in iphone.mov other.mp4 trimmed.MOV vimeo.mp4 zone.jpg clock.jpg offset.jpg saved.png zoned.png plain.png plain-2.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
+  "2023-06-13 22:31:13|2023-06-13 21:00:31|2023-06-13 23:07:13|2023-06-13 21:10:00|2023-06-13 21:20:13|2023-06-13 20:00:00|2023-06-13 19:00:00|2023-06-13 18:00:00|2023-06-13 17:44:06|2023-06-13 17:44:06|2023-06-13 20:30:00|2023-06-13 22:00:00" \
+  "$(for f in iphone.mov other.mp4 trimmed.MOV vimeo.mp4 capcut.mov zone.jpg clock.jpg offset.jpg saved.png zoned.png plain.png plain-2.png; do row "$FIRST" "$f" | cut -c1-19; done | paste -sd'|' -)"
 
 echo "After importing, compare-dates checks what the library holds:"
 AFTER=$(compare --synology "$SYNOLOGY" --space "$FIRST")
 check "every stored time matches Synology Photos" "1" \
   "$(echo "$AFTER" | grep -c 'Every file matches Synology Photos to the second.')"
-check "the grid has as many items as Synology's" "12 12" \
+check "the grid has as many items as Synology's" "13 13" \
   "$(echo "$AFTER" | awk '/Grid items here:/ {h=$NF} /Grid items in Synology:/ {s=$NF} END {print h, s}')"
 
 # A row from before this fix: same bytes, no zone, its UTC stamp kept as local.
@@ -251,7 +275,7 @@ check "and is marked a screenshot all the same" "t" \
         WHERE sa.space_id = '$FIRST' AND sa.filename = '$SHOT'")"
 # Every stored time but the two rows changed by hand above.
 AGAIN=$(compare --synology "$SYNOLOGY" --space "$FIRST")
-check "and nothing else moved" "10 2" \
+check "and nothing else moved" "11 2" \
   "$(echo "$AGAIN" | awk '/Same local time:/ {s=$NF} /Different:/ {d=$NF} END {print s, d}')"
 
 echo

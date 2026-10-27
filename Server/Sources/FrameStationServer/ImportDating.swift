@@ -15,7 +15,8 @@ import Foundation
 ///
 /// The dates read are the ones Synology Photos goes by, so a library comes
 /// over in the order it shows there: a camera's date (EXIF), an iPhone video's
-/// own local time, a video's UTC stamp, and for anything else, its
+/// own local time, a video's UTC stamp as its movie header records it (not a
+/// creation_time key a video editor adds, minutes off), and for anything else, its
 /// modification time, which Synology's backup sets from the phone's library.
 /// Synology passes over an XMP date, and a UTC stamp in the 64-bit form of a
 /// movie header, which it doesn't read, so this does too. Comparing every file

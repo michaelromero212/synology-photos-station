@@ -420,12 +420,19 @@ struct MediaProbe {
             metadata.capturedTZOffset = zone
             metadata.capturedAtSource = .appleLocal
         } else if let stamp = normalized["creation_time"] as? String {
-            metadata.capturedAtSource = .quickTimeUTC
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            metadata.capturedAt = formatter.date(from: stamp)
-                ?? ISO8601DateFormatter().date(from: stamp)
-            metadata.movieHeaderVersion = movieHeaderVersion(url)
+            // The movie header's own stamp, the one Synology Photos goes by.
+            // An editor such as CapCut also writes a creation_time key, which
+            // ffprobe reports instead, minutes from the header's.
+            if let header = movieHeader(url) {
+                metadata.capturedAt = header.created
+                metadata.movieHeaderVersion = header.version
+            } else {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                metadata.capturedAt = formatter.date(from: stamp)
+                    ?? ISO8601DateFormatter().date(from: stamp)
+            }
+            if metadata.capturedAt != nil { metadata.capturedAtSource = .quickTimeUTC }
         }
         // Apple writes GPS as an ISO-6709 string, e.g. "+38.3487-077.9797+019.694/".
         if let location = (normalized["com.apple.quicktime.location.iso6709"] as? String)
@@ -451,11 +458,12 @@ struct MediaProbe {
         return metadata
     }
 
-    /// The version byte of a QuickTime or MP4 file's movie header (`moov` →
-    /// `mvhd`), nil when there's none to read. ffprobe reads both versions'
-    /// dates and doesn't say which it read. Only box headers are read, so a
+    /// A QuickTime or MP4 file's movie header (`moov` → `mvhd`): its version
+    /// and the moment it records, nil when there's no header to read. ffprobe
+    /// reads both versions' dates and doesn't say which it read, and reports
+    /// a creation_time key over the header's. Only box headers are read, so a
     /// header after the media costs a seek, not the file.
-    static func movieHeaderVersion(_ url: URL) -> Int? {
+    static func movieHeader(_ url: URL) -> (version: Int, created: Date?)? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let end = try? handle.seekToEnd() else { return nil }
@@ -487,8 +495,16 @@ struct MediaProbe {
                 var child = offset + top.header
                 while let inner = box(at: child, before: moovEnd) {
                     if inner.type == "mvhd" {
-                        guard (try? handle.seek(toOffset: child + inner.header)) != nil else { return nil }
-                        return (try? handle.read(upToCount: 1))?.first.map(Int.init)
+                        guard (try? handle.seek(toOffset: child + inner.header)) != nil,
+                              let read = try? handle.read(upToCount: 12), let version = read.first
+                        else { return nil }
+                        // The version, three bytes of flags, then the creation
+                        // time: seconds since 1904, 64 bits wide in version 1.
+                        let bytes = [UInt8](read)
+                        let width = version == 1 ? 8 : 4
+                        guard bytes.count >= 4 + width else { return (Int(version), nil) }
+                        let seconds = bytes[4..<4 + width].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+                        return (Int(version), headerDate(seconds))
                     }
                     child += inner.size
                 }
@@ -497,6 +513,14 @@ struct MediaProbe {
             offset += top.size
         }
         return nil
+    }
+
+    /// A movie header's creation time as ffmpeg reads it: none when it's
+    /// zero, and a value too small to count from 1904 is a writer's Unix time.
+    private static func headerDate(_ seconds: UInt64) -> Date? {
+        guard seconds > 0 else { return nil }
+        let since1970 = seconds >= 2_082_844_800 ? seconds - 2_082_844_800 : seconds
+        return Date(timeIntervalSince1970: TimeInterval(since1970))
     }
 
     private static func videoRotation(_ stream: [String: Any]) -> Int? {
