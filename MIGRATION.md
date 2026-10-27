@@ -429,11 +429,25 @@ For each person:
    alongside; allow an evening for the biggest, with the Mac awake and on the
    home network.
 6. **Check the dates again,** `compare-dates` with `--space`, and add a row to
-   the [log](#log).
-7. **When they first sign in,** the app opens its Backup settings: choose "Back
+   the [log](#log). A file left out because the app had backed it up is
+   checked as the library's copy of it.
+7. **Their albums.** Export them from Synology's database (copy the script to
+   `/tmp` first), then make each a personal album of theirs, dry run first:
+
+   ```bash
+   ssh -t nas 'sudo bash /tmp/export-synology-albums.sh "<user>" /volume1/docker/framestation/synology-albums.tsv'
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server import-albums --from /volume1/docker/framestation/synology-albums.tsv --space <space-id> --dry-run'
+   ```
+
+   Each item is found by its files: the import's copy, or for a file it left
+   out, the library's own, a Live Photo once. Items keep the album's order (by
+   time taken, newest first where Synology's album is set to it) and its
+   cover. An album of theirs with the same name only gets what it's missing,
+   so a second run changes nothing. Then delete `synology-albums.tsv`.
+8. **When they first sign in,** the app opens its Backup settings: choose "Back
    up future photos" under Backup Rule, so their phone doesn't send everything
    the import already brought in.
-8. **Afterward,** thumbnails fill in over the following hours. The videos'
+9. **Afterward,** thumbnails fill in over the following hours. The videos'
    cellular copies take longer, since only one is made at a time: a few
    thousand 4K clips can take days. Until a clip has one, it plays from the
    original, which is fine at home and may stutter on cellular. Their iPhone then
