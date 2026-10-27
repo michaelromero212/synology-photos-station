@@ -393,7 +393,11 @@ struct ImportCommand: AsyncCommand {
     /// Whether the library already holds these bytes in any state: live, in
     /// Recently Deleted, or purged. Keeping copies, a live one that another
     /// imported file brought in doesn't count: Synology Photos shows a file a
-    /// library holds twice as two items (74 in one library, 2026-10-24).
+    /// library holds twice as two items (74 in one library, 2026-10-24). One a
+    /// phone put here still does, even over a row another library's import
+    /// made: a backup of a photo the NAS already had from the Shared Space is
+    /// that photo, not a copy (609 in the second library, 2026-10-27). Only an
+    /// import or a rebuild places a file off the phone (`on_device` false).
     private func alreadyInSpace(
         sha: String, spaceID: UUID, keepingCopies: Bool, on sql: any SQLDatabase
     ) async throws -> Bool {
@@ -401,7 +405,7 @@ struct ImportCommand: AsyncCommand {
             SELECT sa.id FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND a.sha256 = \(bind: sha)
-              AND (NOT \(bind: keepingCopies) OR sa.deleted_at IS NOT NULL
+              AND (NOT \(bind: keepingCopies) OR sa.deleted_at IS NOT NULL OR sa.on_device
                    OR NOT EXISTS (SELECT 1 FROM import_records r WHERE r.asset_id = a.id))
             LIMIT 1
             """).first(decoding: IDRow.self) != nil

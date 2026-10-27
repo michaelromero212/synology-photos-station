@@ -405,7 +405,10 @@ For each person:
    with `--time-zone`, `--synology /volume1/docker/framestation/synology-dates.tsv`
    (see [the import](#the-import)) and `--keep-copies`. The last brings a file
    the library holds twice in twice, as Synology Photos shows it (74 in the
-   first library, mostly videos re-imported to the phone years later). Use it
+   first library, mostly videos re-imported to the phone years later). A photo
+   their phone already backed up through the app still counts once, even where
+   the NAS reused the Shared Space's copy of it for that backup (609 in the
+   second library). Use it
    on every run of a library, the trial month too: a copy left out once is
    recorded as done, and a later run won't bring it in. The first library's
    19,800 files took 4 hours, held back by the thumbnails the server makes

@@ -253,6 +253,17 @@ mkdir -p "$ROOT/dupes"; image "$ROOT/dupes/a.png"; cp -p "$ROOT/dupes/a.png" "$R
 (cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/dupes" --space "$SECOND" --time-zone America/New_York > "$ROOT/dupes.log" 2>&1)
 check "without --keep-copies, a second copy is left out" "1 1" \
   "$(awk '/Imported:/ {i=$NF} /Already in library:/ {a=$4} END {print i, a}' "$ROOT/dupes.log")"
+# A phone's backup of a photo the NAS already had from another library's
+# import reuses that import's row. With --keep-copies, the same photo in this
+# library's own folders is still that photo, not a second copy.
+mkdir -p "$ROOT/shared" "$ROOT/mine"; image "$ROOT/shared/s.png"; cp -p "$ROOT/shared/s.png" "$ROOT/mine/m.png"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/shared" --space "$SECOND" > "$ROOT/shared.log" 2>&1)
+q "INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
+   SELECT '$FIRST', sa.asset_id, (SELECT created_by FROM spaces WHERE id = '$FIRST')
+   FROM space_assets sa WHERE sa.space_id = '$SECOND' AND sa.filename = 's.png'" >/dev/null
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine" --space "$FIRST" --keep-copies > "$ROOT/mine.log" 2>&1)
+check "with --keep-copies, a photo a phone put here over another library's row is left out" "0 1" \
+  "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine.log")"
 
 # The startup backfill dates files from names like 20230613_163000. One
 # placement made to look like an upload, so that its new time shows the pass
