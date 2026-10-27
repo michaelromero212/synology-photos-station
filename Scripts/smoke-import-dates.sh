@@ -264,6 +264,16 @@ q "INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
 (cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine" --space "$FIRST" --keep-copies > "$ROOT/mine.log" 2>&1)
 check "with --keep-copies, a photo a phone put here over another library's row is left out" "0 1" \
   "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine.log")"
+# And compare-dates checks a file left out like that against the library's
+# own copy, rather than calling it missing.
+printf '%s\t%s\t%s\n' "$ROOT/mine/m.png" \
+  "$(q "SELECT to_char(a.local_captured_at, 'YYYY-MM-DD HH24:MI:SS') FROM space_assets sa
+        JOIN assets a ON a.id = sa.asset_id WHERE sa.space_id = '$SECOND' AND sa.filename = 's.png'")" 1 \
+  > "$ROOT/mine.tsv"
+HELD=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/mine" --synology "$ROOT/mine.tsv" \
+  --space "$FIRST" --time-zone America/New_York 2>&1)
+check "and compare-dates compares it with the library's copy, one grid item" "1 0 1" \
+  "$(echo "$HELD" | awk '/Same local time:/ {s=$NF} /In Synology, not here:/ {n=$NF} /showing these files:/ {t=$NF} END {print s, n, t}')"
 
 # The startup backfill dates files from names like 20230613_163000. One
 # placement made to look like an upload, so that its new time shows the pass

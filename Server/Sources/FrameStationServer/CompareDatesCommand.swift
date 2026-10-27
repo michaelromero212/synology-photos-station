@@ -123,15 +123,18 @@ struct CompareDatesCommand: AsyncCommand {
         console.info("  Different:               \(differences.count)")
         console.info("  Here, not in Synology:   \(notInSynology)")
         console.info("  In Synology, not here:   \(notHere)")
-        var grouping: (split: [[String]], joined: [[String]]) = ([], [])
+        var grouping: (split: [[String]], joined: [[String]], shown: Set<String>) = ([], [], [])
         if signature.space != nil, let spaceID = signature.space.flatMap(UUID.init(uuidString:)) {
             let tiles = try await Self.tiles(in: spaceID, on: context.application.sql)
             let theirTiles = Set(synology.values.map(\.item)).count
-            console.info("  Grid items here:         \(tiles)")
-            console.info("  Grid items in Synology:  \(theirTiles)")
             grouping = try await Self.grouping(
                 under: root, in: spaceID, synology: synology, on: context.application.sql
             )
+            // A library the phone has backed up to holds more than Synology
+            // did: what came after, and what Synology never had.
+            console.info("  Grid items here:         \(tiles.count)")
+            console.info("    showing these files:   \(tiles.intersection(grouping.shown).count)")
+            console.info("  Grid items in Synology:  \(theirTiles)")
             console.info("  Items split here:        \(grouping.split.count)")
             console.info("  Items joined here:       \(grouping.joined.count)")
         }
@@ -238,17 +241,38 @@ struct CompareDatesCommand: AsyncCommand {
         let local: String?
     }
 
-    /// The times an import stored, by the path it was imported from.
+    /// Each imported file's row in the library, as `held(path, asset_id)`: the
+    /// one the import made, or for a file it left out because the library had
+    /// its bytes already, such as a photo the phone backed up through the app,
+    /// the library's own copy, so that one is compared too.
+    private static func held(under root: String, in space: UUID) -> SQLQueryString {
+        """
+        WITH held AS (
+            SELECT r.source_path AS path, r.asset_id
+            FROM import_records r
+            JOIN space_assets sa ON sa.asset_id = r.asset_id AND sa.space_id = \(bind: space)
+            WHERE starts_with(r.source_path, \(bind: root)) AND sa.deleted_at IS NULL
+            UNION ALL
+            SELECT r.source_path, (
+                SELECT a.id FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: space) AND sa.deleted_at IS NULL AND a.sha256 = r.sha256
+                ORDER BY (a.stacked_under IS NOT NULL), sa.uploaded_at LIMIT 1)
+            FROM import_records r
+            WHERE starts_with(r.source_path, \(bind: root)) AND r.asset_id IS NULL
+              AND r.outcome = 'already in library'
+        )
+        """
+    }
+
+    /// The times the library holds, by the path each file was imported from.
     private static func stored(
         under root: String, in space: UUID, on sql: any SQLDatabase
     ) async throws -> [String: Ours] {
         let rows = try await sql.raw("""
-            SELECT r.source_path AS "path",
+            \(held(under: root, in: space))
+            SELECT h.path AS "path",
                    to_char(a.local_captured_at, 'YYYY-MM-DD HH24:MI:SS.US') AS "local"
-            FROM import_records r
-            JOIN assets a ON a.id = r.asset_id
-            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
-            WHERE starts_with(r.source_path, \(bind: root)) AND sa.deleted_at IS NULL
+            FROM held h JOIN assets a ON a.id = h.asset_id
             """).all(decoding: StoredRow.self)
         var result: [String: Ours] = [:]
         for row in rows {
@@ -267,11 +291,12 @@ struct CompareDatesCommand: AsyncCommand {
     /// more than one tile, or more than one item as one tile, each as its files.
     private static func grouping(
         under root: String, in space: UUID, synology: [String: Synology], on sql: any SQLDatabase
-    ) async throws -> (split: [[String]], joined: [[String]]) {
+    ) async throws -> (split: [[String]], joined: [[String]], shown: Set<String>) {
         // Each imported file's tile: the file it's stacked under, the photo a
         // Live Photo's video plays from, or its own.
         let rows = try await sql.raw("""
-            SELECT r.source_path AS "path",
+            \(held(under: root, in: space))
+            SELECT h.path AS "path",
                    COALESCE(a.stacked_under,
                             CASE WHEN a.media_type = 'video' AND a.live_group_id IS NOT NULL THEN
                                 (SELECT p.id FROM assets p
@@ -281,10 +306,7 @@ struct CompareDatesCommand: AsyncCommand {
                                  LIMIT 1)
                             END,
                             a.id)::text AS "tile"
-            FROM import_records r
-            JOIN assets a ON a.id = r.asset_id
-            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
-            WHERE starts_with(r.source_path, \(bind: root)) AND sa.deleted_at IS NULL
+            FROM held h JOIN assets a ON a.id = h.asset_id
             """).all(decoding: TileRow.self)
         var tilesByItem: [String: Set<String>] = [:], itemsByTile: [String: Set<String>] = [:]
         var filesByItem: [String: [String]] = [:], filesByTile: [String: [String]] = [:]
@@ -299,19 +321,19 @@ struct CompareDatesCommand: AsyncCommand {
             .map { filesByItem[$0, default: []].sorted() }.sorted { $0.first ?? "" < $1.first ?? "" }
         let joined = itemsByTile.filter { $0.value.count > 1 }.keys
             .map { filesByTile[$0, default: []].sorted() }.sorted { $0.first ?? "" < $1.first ?? "" }
-        return (split, joined)
+        return (split, joined, Set(rows.map(\.tile)))
     }
 
-    private struct CountRow: Decodable { let count: Int }
+    private struct TileID: Decodable { let tile: String }
 
-    /// Tiles in the grid: a Live Photo's video half isn't one.
-    private static func tiles(in space: UUID, on sql: any SQLDatabase) async throws -> Int {
-        try await sql.raw("""
-            SELECT count(*)::int AS count
+    /// The grid's tiles: a Live Photo's video half isn't one.
+    private static func tiles(in space: UUID, on sql: any SQLDatabase) async throws -> Set<String> {
+        Set(try await sql.raw("""
+            SELECT a.id::text AS tile
             FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: space) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
-            """).first(decoding: CountRow.self)?.count ?? 0
+            """).all(decoding: TileID.self).map(\.tile))
     }
 
     // MARK: - Formatting
