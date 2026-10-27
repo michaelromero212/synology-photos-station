@@ -122,7 +122,11 @@ fingerprint it. The clones themselves are instant and take no space.
   them. `--user <id>` credits another member instead.
 - **Names and dates.** Original filenames are kept, and the files are copied
   byte for byte: nothing in them is changed. Each is dated by what it records
-  itself ([below](#same-order-as-synology-photos)).
+  itself ([below](#same-order-as-synology-photos)), except that given
+  Synology's export (`--synology`), a file Synology Photos shows at another
+  time takes that time: a date set in Synology Photos or on the phone, which no
+  file records (86 files in the second library; chosen 2026-10-27 so the grid
+  matches).
 - **Items, as Synology Photos makes them.** Every file in a folder that carries
   the same Apple Live Photo identifier is one grid item: a Live Photo's photo
   and video, and a JPEG exported or an Instagram copy saved from it. The photo
@@ -137,6 +141,14 @@ fingerprint it. The clones themselves are instant and take no space.
   check: a group is then split where Synology split it, never joined. `regroup
   --path … --space … [--synology …]` does the same for a library imported
   before this (2026-10-25), changing nothing but the grouping.
+- **What the phone already backed up.** A file whose bytes the library holds
+  from the app is left out. Another version of one, edited or the Shared
+  Space's copy, which Synology never had, comes in kept with the phone's, so
+  it shows once, as it did in Synology: where Synology's item says so (a Live
+  Photo whose video the app has byte for byte), or where the phone's version
+  has the same name, kind and second and no file of Synology's holds it. A
+  burst frame or a JPEG beside a photo Synology also has stays an item of its
+  own.
 
 ## Same order as Synology Photos
 
@@ -202,7 +214,8 @@ and again after:
    else groups the files that differ by kind (`.mov`, `.png`…), with the date
    each side went by and up to 10 of each with both times. A group where
    Synology went by one of the file's own dates is a rule to change here;
-   "some other date" means Synology knows something the file doesn't say.
+   "some other date" means Synology knows something the file doesn't say, a
+   date set there or on the phone, which the import takes with `--synology`.
 
 3. **After importing,** the same with `--space <space-id>` compares the times
    the library holds, the number of grid items with Synology's (a Live Photo is
@@ -385,8 +398,9 @@ For each person:
    Expect Synology's `MobileBackup` and `PhotoLibrary` beside the app's
    `Personal` and `Shared`. Anything else is a folder they made, so ask them.
 3. **Check the dates first:** export Synology's, then `compare-dates` on each
-   folder ([above](#same-order-as-synology-photos)). Go on only when it says
-   every file matches.
+   folder ([above](#same-order-as-synology-photos)). Go on only when every
+   file matches or differs only by "some other date", which `--synology`
+   takes from Synology.
 4. **If their phone has backed up to the app already, try one month first.**
    That overlap is skipped only where the bytes are identical, and Synology's
    backup may have kept a different version of the same picture, such as an

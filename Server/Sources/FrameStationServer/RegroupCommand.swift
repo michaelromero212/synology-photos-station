@@ -39,6 +39,7 @@ struct RegroupCommand: AsyncCommand {
         console.info("  Items of more than one file:  \(summary.items)")
         console.info("  Of them Live Photos:          \(summary.livePhotos)")
         console.info("  Files kept with another:      \(summary.stacked)")
+        console.info("  Kept with the phone's version: \(summary.keptWithPhone)")
         console.info("  Files whose grouping changed: \(summary.changed)")
     }
 }

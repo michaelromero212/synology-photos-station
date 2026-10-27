@@ -43,6 +43,7 @@ struct ImportDating {
         case fileClock = "its date, with no zone"
         case fileUTC = "its date, in UTC"
         case modified = "its modification time"
+        case synology = "Synology Photos' own date"
     }
 
     static func resolve(
@@ -74,6 +75,31 @@ struct ImportDating {
     /// library.
     static func modified(_ modifiedAt: Date, household: TimeZone?) -> ImportDating {
         fromMoment(modifiedAt, household: household, source: .modified)
+    }
+
+    /// The time Synology Photos shows a file at where the file says otherwise
+    /// or nothing: a date set in Synology Photos, or on the phone after its
+    /// backup, which no file records. In the second library (2026-10-27) 86
+    /// of 11,500 files, such as five downloaded videos all set to one evening
+    /// in 2012; the person chose Synology's, so the grid matches it. A clock
+    /// reading with no zone, so placed in the household's.
+    static func synology(_ clock: Date, household: TimeZone?) -> ImportDating {
+        var dating = fromClock(clock, household: household)
+        dating.source = .synology
+        return dating
+    }
+
+    /// Synology Photos' time for each file, from `Scripts/export-synology-dates.sh`:
+    /// `path<TAB>taken<TAB>item` per line, taken as a local clock reading.
+    static func synologyDates(from file: String) throws -> [String: Date] {
+        var dates: [String: Date] = [:]
+        for line in try String(contentsOfFile: file, encoding: .utf8).split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 2, let parsed = MediaProbe.parseDateAndZone(String(fields[1])),
+                  parsed.zone == nil else { continue }
+            dates[String(fields[0])] = parsed.clock
+        }
+        return dates
     }
 
     /// Whether Synology Photos goes by the modification time rather than the

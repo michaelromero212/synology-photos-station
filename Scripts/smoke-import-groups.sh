@@ -178,6 +178,52 @@ curl -s -o /dev/null -X POST "$API/v1/spaces/$FIRST/collections/deleted/purge" "
   -d "{\"assetIDs\":[\"$HEIC\"]}"
 check "and purged together" "purged purged purged purged live" "$(item_states)"
 
+echo "Another version of something the phone backed up is kept with the phone's:"
+PHONE="$ROOT/phone"; MINE="$ROOT/mine/2024/10"; mkdir -p "$PHONE" "$MINE"
+E=9C1D3A55-2E6B-4F3A-8D41-6A2B7C0E1F22
+taken(){ exiftool -q -q -overwrite_original -DateTimeOriginal="2024:10:19 12:00:00" -OffsetTimeOriginal="-04:00" "$@"; }
+# What the phone backed up through the app: a Live Photo, three photos and a
+# burst frame, all in one second.
+image "$PHONE/IMG_1322.HEIC"; apple "$PHONE/IMG_1322.HEIC" $E; taken "$PHONE/IMG_1322.HEIC"
+video -metadata "com.apple.quicktime.content.identifier=$E" \
+      -metadata "com.apple.quicktime.creationdate=2024-10-19T12:00:00-0400" "$PHONE/IMG_1322.MOV"
+for f in IMG_1531.HEIC IMG_1319.HEIC IMG_5001.JPG IMG_2398.JPG; do image "$PHONE/$f"; taken "$PHONE/$f"; done
+# Synology's: the Live Photo's photo in another version, its video byte for
+# byte the phone's; the photo of the same name in another version; the photo
+# as the phone backed it up beside a JPEG of it; one named otherwise; and the
+# burst frame beside another.
+image "$MINE/IMG_1322.HEIC"; apple "$MINE/IMG_1322.HEIC" $E; taken "$MINE/IMG_1322.HEIC"
+cp -p "$PHONE/IMG_1322.MOV" "$PHONE/IMG_1319.HEIC" "$PHONE/IMG_2398.JPG" "$MINE/"
+for f in IMG_1531.HEIC IMG_1319.jpeg IMG_5000.JPG IMG_2401.JPG; do image "$MINE/$f"; taken "$MINE/$f"; done
+# The phone's, as the app would have put them: placed from the phone, with no
+# import of their own.
+(cd "$SERVER_DIR" && "$BIN" import --path "$PHONE" --space "$FIRST" --time-zone America/New_York > "$ROOT/phone.log" 2>&1)
+P1322=$(asset "$PHONE/IMG_1322.HEIC"); P1531=$(asset "$PHONE/IMG_1531.HEIC")
+q "UPDATE space_assets SET on_device = true WHERE space_id = '$FIRST' AND asset_id IN
+     (SELECT asset_id FROM import_records WHERE starts_with(source_path, '$PHONE/'))" >/dev/null
+q "DELETE FROM import_records WHERE starts_with(source_path, '$PHONE/')" >/dev/null
+printf '%s\t2024-10-19 12:00:00\t%s\n' \
+  "$MINE/IMG_1322.HEIC" 60 "$MINE/IMG_1322.MOV" 60 "$MINE/IMG_1531.HEIC" 61 "$MINE/IMG_1319.HEIC" 62 \
+  "$MINE/IMG_1319.jpeg" 63 "$MINE/IMG_5000.JPG" 64 "$MINE/IMG_2401.JPG" 65 "$MINE/IMG_2398.JPG" 66 > "$ROOT/mine.tsv"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine" --space "$FIRST" --time-zone America/New_York \
+  --keep-copies --synology "$ROOT/mine.tsv" > "$ROOT/mine.log" 2>&1)
+mine(){ q "SELECT COALESCE(stacked_under::text, 'tile') FROM assets WHERE id = '$(asset "$MINE/$1")'"; }
+check "the phone's own bytes are left out" "already in library|already in library|already in library" \
+  "$(for f in IMG_1322.MOV IMG_1319.HEIC IMG_2398.JPG; do
+       q "SELECT outcome FROM import_records WHERE source_path = '$MINE/$f'"; done | paste -sd'|' -)"
+check "a Live Photo's other photo goes under the phone's, as Synology's item says" "$P1322" "$(mine IMG_1322.HEIC)"
+check "a photo of the same name and second goes under the phone's version" "$P1531" "$(mine IMG_1531.HEIC)"
+check "a JPEG of a photo Synology has as the phone does is an item of its own" "tile" "$(mine IMG_1319.jpeg)"
+check "and so are one named otherwise, and a burst frame" "tile tile" "$(mine IMG_5000.JPG) $(mine IMG_2401.JPG)"
+check "the import says how many" "2" "$(awk "/kept with the phone's version:/ {print \$NF}" "$ROOT/mine.log")"
+MINED=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/mine" --synology "$ROOT/mine.tsv" \
+  --space "$FIRST" --time-zone America/New_York 2>&1)
+check "compare-dates finds each of Synology's items once" "7 7 0 0" \
+  "$(echo "$MINED" | awk '/showing these files:/ {h=$NF} /Grid items in Synology:/ {s=$NF} /Items split here:/ {p=$NF} /Items joined here:/ {j=$NF} END {print h, s, p, j}')"
+(cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/mine" --space "$FIRST" --synology "$ROOT/mine.tsv" \
+  > "$ROOT/mine-regroup.log" 2>&1)
+check "and regrouping changes nothing" "0" "$(awk '/grouping changed:/ {print $NF}' "$ROOT/mine-regroup.log")"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

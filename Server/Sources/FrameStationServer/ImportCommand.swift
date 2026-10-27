@@ -80,7 +80,7 @@ struct ImportCommand: AsyncCommand {
         @Flag(name: "keep-copies", help: "A file whose bytes another imported file of this library brought in becomes an item of its own, as Synology Photos shows it twice")
         var keepCopies: Bool
 
-        @Option(name: "synology", help: "Synology Photos' items, from Scripts/export-synology-dates.sh: group split where it split")
+        @Option(name: "synology", help: "Synology Photos' items and dates, from Scripts/export-synology-dates.sh: group as it grouped, and date a file as it shows it")
         var synology: String?
     }
 
@@ -136,6 +136,7 @@ struct ImportCommand: AsyncCommand {
         }
         // And Synology's items, the same way: read now, not after hours of it.
         let synologyItems = try signature.synology.map(ImportGrouping.synologyItems(from:))
+        let synologyDates = try signature.synology.map(ImportDating.synologyDates(from:))
 
         let missing = Derivatives.missingTools()
         guard missing.isEmpty else {
@@ -287,9 +288,18 @@ struct ImportCommand: AsyncCommand {
                         ? (photoMetadata[candidate.url.path] ?? MediaProbe.Metadata())
                         : try await MediaProbe.probe(url: candidate.url, mediaType: .video)
 
-                    let dating = ImportDating.resolve(
+                    var dating = ImportDating.resolve(
                         probe: metadata, modifiedAt: candidate.modifiedAt, household: household
                     )
+                    // Where Synology Photos shows it at another time than the
+                    // file says, one set there or on the phone, that time: the
+                    // grid matches Synology's. Elsewhere the file's own reading
+                    // stands, zone and all.
+                    if let shown = synologyDates?[candidate.url.path],
+                       Int(shown.timeIntervalSince1970.rounded(.down))
+                        != Int(dating.local.timeIntervalSince1970.rounded(.down)) {
+                        dating = ImportDating.synology(shown, household: household)
+                    }
 
                     // Named now, from the file's own position. An upload is
                     // named by its metadata job, but an import is queued for
@@ -381,6 +391,7 @@ struct ImportCommand: AsyncCommand {
         console.info("    items of more than one file: \(grouping.items)")
         console.info("    of them Live Photos:         \(grouping.livePhotos)")
         console.info("    files kept with another:     \(grouping.stacked)")
+        console.info("    kept with the phone's version: \(grouping.keptWithPhone)")
         console.info("")
         console.info("Thumbnails are queued; the derivation worker drains them in the background.")
         if failed > 0 {

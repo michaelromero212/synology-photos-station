@@ -32,6 +32,11 @@ import Darwin
 ///
 /// A rebuilt library's files are grouped the same way (`RebuildCommand`), so
 /// a rebuild brings back the items an import made rather than pairing by name.
+///
+/// A library the phone backed up to through the app may hold another version
+/// of something Synology has, edited or from the Shared Space, which Synology
+/// never had. There the imported file is kept with the phone's (`join`), so
+/// the grid shows it once, as Synology's did.
 enum ImportGrouping {
     struct Summary {
         /// Items of more than one file.
@@ -42,6 +47,8 @@ enum ImportGrouping {
         var read = 0
         /// Files whose grouping changed.
         var changed = 0
+        /// Files kept with the phone's version of the same item.
+        var keptWithPhone = 0
     }
 
     /// A file to group, as it's grouped now.
@@ -57,6 +64,27 @@ enum ImportGrouping {
         let modifiedAt: Date
         let liveGroupID: UUID?
         let stackedUnder: UUID?
+        /// Its local time to the second, to find the phone's version by.
+        var local: String? = nil
+    }
+
+    /// A tile the phone backed up through the app.
+    struct PhoneTile: Decodable {
+        let id: UUID
+        let mediaType: String
+        /// Its local time to the second.
+        let local: String
+        let sha: String?
+        /// Every name it has in any library, `/` between them.
+        let names: String?
+    }
+
+    /// A file the import left out because the library had its bytes, and the
+    /// tile that shows them here.
+    struct Held: Decodable {
+        let path: String
+        let sha: String
+        let tile: UUID?
     }
 
     /// What files make together: the Live Photo each pair plays as, and the
@@ -87,14 +115,50 @@ enum ImportGrouping {
             SELECT a.id AS "assetID", sa.id AS "placementID", r.source_path AS "path",
                    NULLIF(r.live_identifier, '') AS "identifier", a.media_type AS "mediaType",
                    r.modified_at AS "modifiedAt", a.live_group_id AS "liveGroupID",
-                   a.stacked_under AS "stackedUnder", sa.space_id AS "spaceID"
+                   a.stacked_under AS "stackedUnder", sa.space_id AS "spaceID",
+                   to_char(a.local_captured_at, 'YYYY-MM-DD HH24:MI:SS') AS "local"
             FROM import_records r
             JOIN assets a ON a.id = r.asset_id
             JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: space)
             WHERE EXISTS (SELECT 1 FROM unnest(\(bind: prefixes)::text[]) p WHERE starts_with(r.source_path, p))
             """).all(decoding: Member.self)
 
-        var summary = try await group(members, app: app, synologyItems: synologyItems)
+        // The files left out because the library had their bytes, each with
+        // the tile it shows as: its stack's, a Live Photo's photo, or its own.
+        let held = try await app.sql.raw("""
+            SELECT r.source_path AS "path", r.sha256 AS "sha", (
+                SELECT COALESCE(a.stacked_under,
+                                CASE WHEN a.media_type = 'video' AND a.live_group_id IS NOT NULL THEN
+                                    (SELECT p.id FROM assets p
+                                     JOIN space_assets ps ON ps.asset_id = p.id
+                                      AND ps.space_id = \(bind: space) AND ps.deleted_at IS NULL
+                                     WHERE p.live_group_id = a.live_group_id AND p.media_type = 'photo'
+                                     LIMIT 1)
+                                END,
+                                a.id)
+                FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: space) AND sa.deleted_at IS NULL AND a.sha256 = r.sha256
+                ORDER BY (a.stacked_under IS NOT NULL), sa.uploaded_at
+                LIMIT 1) AS "tile"
+            FROM import_records r
+            WHERE r.outcome = 'already in library' AND r.sha256 IS NOT NULL
+              AND EXISTS (SELECT 1 FROM unnest(\(bind: prefixes)::text[]) p WHERE starts_with(r.source_path, p))
+            """).all(decoding: Held.self)
+        // Every tile the phone put here, with each name it has anywhere.
+        let phone = try await app.sql.raw("""
+            SELECT a.id, a.media_type AS "mediaType",
+                   to_char(a.local_captured_at, 'YYYY-MM-DD HH24:MI:SS') AS "local", a.sha256 AS "sha",
+                   (SELECT string_agg(DISTINCT n.filename, '/') FROM space_assets n
+                    WHERE n.asset_id = a.id AND n.filename IS NOT NULL) AS "names"
+            FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: space) AND sa.deleted_at IS NULL AND sa.on_device
+              AND a.stacked_under IS NULL AND a.local_captured_at IS NOT NULL
+              AND NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)
+            """).all(decoding: PhoneTile.self)
+
+        var summary = try await group(
+            members, app: app, synologyItems: synologyItems, held: held, phone: phone
+        )
         summary.read = read
         return summary
     }
@@ -102,9 +166,11 @@ enum ImportGrouping {
     /// Groups `members` into items, and writes and announces what changed.
     /// Every file of a folder at once: an item is made of the files given.
     static func group(
-        _ members: [Member], app: Application, synologyItems: [String: String]? = nil
+        _ members: [Member], app: Application, synologyItems: [String: String]? = nil,
+        held: [Held] = [], phone: [PhoneTile] = []
     ) async throws -> Summary {
-        let layout = layout(of: members, synologyItems: synologyItems)
+        var layout = layout(of: members, synologyItems: synologyItems)
+        join(&layout, members: members, held: held, phone: phone, synologyItems: synologyItems)
         let liveGroup = layout.liveGroup, stackedUnder = layout.stackedUnder
         var summary = layout.summary
 
@@ -198,6 +264,83 @@ enum ImportGrouping {
             }
         }
         return layout
+    }
+
+    /// Keeps an imported file that's another version of something the phone
+    /// backed up with the phone's tile, so the grid shows it once, as
+    /// Synology's did: Synology never had the phone's version.
+    ///
+    /// Synology's item says so where the phone's copy of one of its files is
+    /// here already: a Live Photo whose video the app backed up byte for byte
+    /// and whose photo it backed up otherwise (in the second library the app
+    /// had it from the Shared Space). Without that, only a tile of the same
+    /// kind, second and name the phone backed up and no file of Synology's
+    /// holds: a burst frame the phone also backed up is in Synology too, and
+    /// stays an item of its own. A whole item goes under the phone's tile, its
+    /// motion and kept files too, one level deep, as every stack is.
+    private static func join(
+        _ layout: inout Layout, members: [Member], held: [Held], phone: [PhoneTile],
+        synologyItems: [String: String]?
+    ) {
+        guard !phone.isEmpty else { return }
+        var photoOfPair: [UUID: UUID] = [:]
+        for member in members where member.mediaType == "photo" {
+            if let pair = layout.liveGroup[member.assetID] { photoOfPair[pair] = member.assetID }
+        }
+        var tileOf: [UUID: UUID] = [:]
+        for member in members {
+            if let under = layout.stackedUnder[member.assetID] {
+                tileOf[member.assetID] = under
+            } else if member.mediaType == "video", let pair = layout.liveGroup[member.assetID],
+                      let photo = photoOfPair[pair] {
+                tileOf[member.assetID] = photo
+            } else {
+                tileOf[member.assetID] = member.assetID
+            }
+        }
+
+        var joins: [UUID: UUID] = [:]
+        let phoneIDs = Set(phone.map(\.id))
+        if let synologyItems {
+            var phoneTileOfItem: [String: UUID] = [:]
+            for file in held {
+                guard let tile = file.tile, phoneIDs.contains(tile),
+                      let item = synologyItems[file.path], phoneTileOfItem[item] == nil else { continue }
+                phoneTileOfItem[item] = tile
+            }
+            for member in members {
+                guard let item = synologyItems[member.path], let tile = phoneTileOfItem[item],
+                      let own = tileOf[member.assetID] else { continue }
+                joins[own] = tile
+            }
+        }
+        let heldBytes = Set(held.map(\.sha))
+        var unheld: [String: [PhoneTile]] = [:]
+        for tile in phone where !(tile.sha.map(heldBytes.contains) ?? false) {
+            unheld[tile.local + "|" + tile.mediaType, default: []].append(tile)
+        }
+        for member in members where tileOf[member.assetID] == member.assetID && joins[member.assetID] == nil {
+            guard let local = member.local, let candidates = unheld[local + "|" + member.mediaType] else { continue }
+            let name = stem(of: member.path).uppercased()
+            if let match = candidates.first(where: { candidate in
+                (candidate.names ?? "").split(separator: "/").contains { stem(of: String($0)).uppercased() == name }
+            }) {
+                joins[member.assetID] = match.id
+            }
+        }
+        guard !joins.isEmpty else { return }
+
+        let grouped = Set(layout.stackedUnder.values).union(photoOfPair.values)
+        var pairs = Set<UUID>()
+        for member in members {
+            guard let own = tileOf[member.assetID], let tile = joins[own] else { continue }
+            if let pair = layout.liveGroup.removeValue(forKey: member.assetID) { pairs.insert(pair) }
+            if layout.stackedUnder[member.assetID] != nil { layout.summary.stacked -= 1 }
+            layout.stackedUnder[member.assetID] = tile
+            layout.summary.keptWithPhone += 1
+        }
+        layout.summary.livePhotos -= pairs.count
+        layout.summary.items -= Set(joins.keys).intersection(grouped).count
     }
 
     /// A group as Synology's items divide it, when they're known. A file

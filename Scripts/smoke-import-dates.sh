@@ -275,6 +275,20 @@ HELD=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/mine" --synology "
 check "and compare-dates compares it with the library's copy, one grid item" "1 0 1" \
   "$(echo "$HELD" | awk '/Same local time:/ {s=$NF} /In Synology, not here:/ {n=$NF} /showing these files:/ {t=$NF} END {print s, n, t}')"
 
+# Given Synology's dates, a time Synology shows that the file doesn't carry,
+# set there or on the phone, is the one the grid goes by: a download Synology
+# shows in 2015. Where the two agree the file's reading stands, zone and all.
+mkdir -p "$ROOT/edited"; image "$ROOT/edited/download.png"; TZ=UTC touch -t 202502201344.43 "$ROOT/edited/download.png"
+image "$ROOT/edited/away.jpg"; stamp -DateTimeOriginal="2023:06:13 20:00:00" -OffsetTimeOriginal="-07:00" "$ROOT/edited/away.jpg"
+printf '%s\t%s\t%s\n' "$ROOT/edited/download.png" "2015-03-05 02:20:43" 1 \
+  "$ROOT/edited/away.jpg" "2023-06-13 20:00:00" 2 > "$ROOT/edited.tsv"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/edited" --space "$SECOND" --time-zone America/New_York \
+  --synology "$ROOT/edited.tsv" > "$ROOT/edited.log" 2>&1)
+check "a time Synology shows that the file doesn't carry is the grid's, in the household's zone" \
+  "2015-03-05 02:20:43 -18000 -18000 07:20:43" "$(row "$SECOND" download.png)"
+check "where they agree, the file's own zone stays" "2023-06-13 20:00:00 -25200 - 03:00:00" "$(row "$SECOND" away.jpg)"
+check "and the import says which came from Synology" "1" "$(grep -c "Synology Photos' own date: 1" "$ROOT/edited.log")"
+
 # The startup backfill dates files from names like 20230613_163000. One
 # placement made to look like an upload, so that its new time shows the pass
 # has run past the imported files it must leave alone.
@@ -296,6 +310,11 @@ check "and is marked a screenshot all the same" "t" \
         WHERE sa.space_id = '$FIRST' AND sa.filename = '$SHOT'")"
 # Every stored time but the two rows changed by hand above.
 AGAIN=$(compare --synology "$SYNOLOGY" --space "$FIRST")
+for _ in $(seq 1 120); do
+  [ "$(q "SELECT count(*) FROM derivation_jobs WHERE state IN ('pending', 'running')")" = "0" ] && break; sleep 1
+done
+check "a time taken from Synology stays through the server's passes" \
+  "2015-03-05 02:20:43 -18000 -18000 07:20:43" "$(row "$SECOND" download.png)"
 check "and nothing else moved" "11 2" \
   "$(echo "$AGAIN" | awk '/Same local time:/ {s=$NF} /Different:/ {d=$NF} END {print s, d}')"
 
