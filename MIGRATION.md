@@ -397,9 +397,13 @@ added there since its import came in the same day, by importing only the
 folder that held them (`PhotoLibrary/2026/10`, so nothing else was regrouped),
 and `credit-synology-uploaders.sh` credited each to the person who shared it;
 6 of them were photos already shared to Family Shared from the app, and show
-once. All 2,774 of its files are now here at Synology's times. What still
-differs is grouping from before the import grouped by Live Photo identifier
-and kept copies (6 items split, 7 joined), left for its last import.
+once. All 2,774 of its files are now here at Synology's times. Its grouping,
+from before the import grouped by Live Photo identifier and kept copies (6
+items split, 7 joined), went to Synology's items the same day too: the 5
+copies its import had left out came in with `--keep-copies`, and the import's
+regroup did the rest, all but one Live Photo. Its rows are also the second
+library's, where Synology groups the same files otherwise, so its grouping is
+left as it was (grouping keeps a row another library shows).
 
 ## Who shared each Shared Space photo
 
