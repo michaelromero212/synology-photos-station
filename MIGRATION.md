@@ -5,8 +5,9 @@ downloading or re-uploading anything. The import reads each file where it
 already lies on the NAS and clones it into the blob store. The Synology copy is
 left exactly as it was, and the clone takes no extra space.
 
-Synology Photos' Shared Space came across on 2026-10-06; the [log](#log) has the
-numbers. Each person's own library is still to do, and
+Synology Photos' Shared Space came across on 2026-10-06, and two people's own
+libraries on 2026-10-25 and 2026-10-27; the [log](#log) has the numbers. One
+person's library is still to do, and
 [the plan for it](#next-everyones-personal-library) is at the end.
 
 Every command goes through the `ssh nas` alias, so no hostname or address
@@ -256,7 +257,8 @@ from the files (albums, tags, people). It prints counts, never names.
 
 **The Shared Space came in before this.** Its import kept every video's UTC
 stamp as if it were local time, so 1,118 of its 1,120 videos show four or five
-hours late, the evening ones on the next day (2026-10-24 audit). Its own
+hours late, the evening ones on the next day (2026-10-24 audit), until
+2026-10-28 ([log](#log)). Its own
 dates come from the same export, `--shared-space` in place of a user, and
 `redate --path /volume1/photo --space <Family Shared> --with-other-libraries`
 puts its rows right: with the option, because a phone's backup of a photo the
@@ -304,6 +306,7 @@ each such row at one time in both libraries.
 |---|---|---|---|---|---|---|---|---|---|
 | 2026-10-06 | Shared Space, `/volume1/photo` | Family Shared | 2,734 | 277.7 GB | 2,616 | 110 | 8 | 0 | 1h 5m |
 | 2026-10-25 | A person's `MobileBackup` and `PhotoLibrary` | Their personal library | 19,807 | 130.9 GB | 18,865 | 942 | 0 | 0 | 4h 5m |
+| 2026-10-27 | A second person's `MobileBackup` and `PhotoLibrary` | Their personal library | 9,494 | 344.0 GB | 7,089 | 1,203 | 1,202 | 0 | 2h 37m |
 
 The personal library's grid matches Synology Photos': 16,494 items to
 Synology's 16,493 (one photo Synology had filed under another account came in
@@ -354,6 +357,42 @@ had started long 4K transcodes of the imported videos, and those took most of
 the processor besides. The re-queue now runs before any lane starts, only one
 video is transcoded at a time, on two cores, and opening a photo that's still
 gray makes its thumbnail then and there.
+
+**The second personal library (2026-10-27)** matches Synology Photos too: all
+9,491 of its files at the same local time to the second, and its 9,307 grid
+items showing them to Synology's 9,307, none split or joined. Three files
+Synology never indexed came in as well, each beside a twin of the same bytes.
+The person's phone had been backing up to the app for weeks, so 1,202 files
+were left out as already there, 628 of them on rows the app had linked to the
+Shared Space import's own. Getting there took:
+
+- Synology's own time for 85 files whose time no file records (chosen
+  2026-10-27), and `redate` for 10 of the phone's own backups: 6 videos a
+  second off, 2 screen recordings, and 2 photos whose time was set in
+  Synology.
+- The Shared Space's repair (below) for the 628.
+- `--keep-copies` counting the phone's rows as Synology's items: 16 photos
+  the phone holds twice, byte for byte, came in as second copies, and the 3
+  duplicates Synology shows once stayed out.
+- Grouping joined by Synology's items for one Live Photo whose photo had lost
+  its make, and a phone's photo counted as Synology's in either folder, so a
+  copy in `PhotoLibrary` of a photo in `MobileBackup` stayed an item of its
+  own. Those three fixes came after the import: the 16 copies by clearing
+  their records and running the import again, the copy by `regroup`.
+- Its 4 albums, 408 items, with `import-albums`.
+
+`MobileBackup` took 2 hours for 316 GB, about 42 MB/s and 0.8 files a second:
+mostly long videos, against the first library's 100 MB average.
+
+**The Shared Space, put right (2026-10-28).** `redate --with-other-libraries`
+with the Shared Space's own export put 1,200 of its import's rows at the times
+Synology shows, and all 2,733 of its files now match to the second. Synology
+showed each of the 628 rows it shares with the second library at one time in
+both, checked before anything changed. One more row, of a file the Shared
+Space's Synology never indexed, took the second library's time. What still
+differs there is grouping from before the import grouped by Live Photo
+identifier and kept copies (6 items split, 7 joined), and 41 files added since
+its import: both for its last import.
 
 ## Who shared each Shared Space photo
 
