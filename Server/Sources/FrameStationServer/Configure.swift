@@ -65,6 +65,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(SpacesCommand(), as: "spaces")
     app.asyncCommands.use(ImportCommand(), as: "import")
     app.asyncCommands.use(CompareDatesCommand(), as: "compare-dates")
+    app.asyncCommands.use(RedateCommand(), as: "redate")
     app.asyncCommands.use(RegroupCommand(), as: "regroup")
     app.asyncCommands.use(ImportAlbumsCommand(), as: "import-albums")
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")

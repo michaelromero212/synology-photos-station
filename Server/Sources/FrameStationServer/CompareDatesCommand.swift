@@ -244,8 +244,9 @@ struct CompareDatesCommand: AsyncCommand {
     /// Each imported file's row in the library, as `held(path, asset_id)`: the
     /// one the import made, or for a file it left out because the library had
     /// its bytes already, such as a photo the phone backed up through the app,
-    /// the library's own copy, so that one is compared too.
-    private static func held(under root: String, in space: UUID) -> SQLQueryString {
+    /// the library's own copy, so that one is compared too. `RedateCommand`
+    /// puts right the same rows.
+    static func held(under root: String, in space: UUID) -> SQLQueryString {
         """
         WITH held AS (
             SELECT r.source_path AS path, r.asset_id
@@ -338,7 +339,7 @@ struct CompareDatesCommand: AsyncCommand {
 
     // MARK: - Formatting
 
-    private static func text(_ clock: Date) -> String {
+    static func text(_ clock: Date) -> String {
         let seconds = Int(clock.timeIntervalSince1970.rounded(.down))
         let days = seconds >= 0 ? seconds / 86_400 : (seconds - 86_399) / 86_400
         let time = seconds - days * 86_400

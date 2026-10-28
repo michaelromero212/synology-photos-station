@@ -138,11 +138,17 @@ fingerprint it. The clones themselves are instant and take no space.
   can't say is which arrived first: Synology starts an item from that file, and
   a camera's original doesn't join an item an app's copy started (8 Instagram
   copies there). So pass `--synology <export>` too, the same export as the date
-  check: a group is then split where Synology split it, never joined. `regroup
-  --path … --space … [--synology …]` does the same for a library imported
-  before this (2026-10-25), changing nothing but the grouping.
+  check: a group is then split where Synology split it, and joined where
+  Synology made one item of files the identifiers keep apart (in the second
+  library, a Live Photo's own photo whose make had gone, beside its video of
+  the same name). `regroup --path … --space … [--synology …]` does the same for
+  a library imported before this (2026-10-25), changing nothing but the
+  grouping.
 - **What the phone already backed up.** A file whose bytes the library holds
-  from the app is left out. Another version of one, edited or the Shared
+  from the app is left out, once for each row the phone made of them: a photo
+  the phone holds twice, byte for byte, is one row here and two items in
+  Synology, so with `--keep-copies` its second file comes in as a copy (16 in
+  the second library). Another version of one, edited or the Shared
   Space's copy, which Synology never had, comes in kept with the phone's, so
   it shows once, as it did in Synology: where Synology's item says so (a Live
   Photo whose video the app has byte for byte), or where the phone's version
@@ -222,6 +228,23 @@ and again after:
    one of each), and which files each shows together: an item Synology shows as
    one tile and here as more, or the reverse, is listed with its files.
 
+4. **Put right what the import didn't write.** A file left out because the
+   library had its bytes is compared with the row that has them, at whatever
+   time that row has: an earlier import's (the Shared Space's, below) or the
+   app's, which dates a photo by the file and not by a date set in Synology.
+   `redate` puts each at the time Synology shows it, in the household's zone,
+   as the import gives one now. Dry run first:
+
+   ```bash
+   ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose run --rm server redate --path "/volume1/homes/<user>/Photos" --space <space-id> --synology /volume1/docker/framestation/synology-dates.tsv --time-zone America/New_York --dry-run'
+   ```
+
+   It changes the database only. A file in the library layout moves to its new
+   month's folder, as a time edited in the app does, and every library showing
+   a row hears of the change. A row another library shows too is left alone
+   unless `--with-other-libraries`, which changes it there as well; a row two
+   of Synology's files share at different times is left alone either way.
+
 Then delete `synology-dates.tsv`.
 
 `Scripts/audit-synology-library.sh "<user>"` is a read-only look first: what a
@@ -230,8 +253,13 @@ from the files (albums, tags, people). It prints counts, never names.
 
 **The Shared Space came in before this.** Its import kept every video's UTC
 stamp as if it were local time, so 1,118 of its 1,120 videos show four or five
-hours late, the evening ones on the next day (2026-10-24 audit). Nothing has
-changed them since.
+hours late, the evening ones on the next day (2026-10-24 audit). Its own
+dates come from the same export, `--shared-space` in place of a user, and
+`redate --path /volume1/photo --space <Family Shared> --with-other-libraries`
+puts its rows right: with the option, because a phone's backup of a photo the
+NAS already had from the Shared Space can share its row with a personal
+library (609 in the second library). Before that, check that Synology shows
+each such row at one time in both libraries.
 
 ## When it goes wrong
 
@@ -430,7 +458,10 @@ For each person:
    home network.
 6. **Check the dates again,** `compare-dates` with `--space`, and add a row to
    the [log](#log). A file left out because the app had backed it up is
-   checked as the library's copy of it.
+   checked as the library's copy of it, and where that copy is at another time,
+   `redate` puts it at Synology's (step 4 of
+   [the date check](#same-order-as-synology-photos)). One the Shared Space's
+   import made goes right with the Shared Space's.
 7. **Their albums.** Export them from Synology's database (copy the script to
    `/tmp` first), then make each a personal album of theirs, dry run first:
 
