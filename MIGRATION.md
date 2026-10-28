@@ -148,7 +148,10 @@ fingerprint it. The clones themselves are instant and take no space.
   from the app is left out, once for each row the phone made of them: a photo
   the phone holds twice, byte for byte, is one row here and two items in
   Synology, so with `--keep-copies` its second file comes in as a copy (16 in
-  the second library). Another version of one, edited or the Shared
+  the second library). Given Synology's export, only a file that's an item of
+  its own there: one it doesn't list (a screen recording saved twice, once
+  unindexed) or one of an item already left out (a Live Photo's video saved
+  under two names) stays the phone's. Another version of one, edited or the Shared
   Space's copy, which Synology never had, comes in kept with the phone's, so
   it shows once, as it did in Synology: where Synology's item says so (a Live
   Photo whose video the app has byte for byte), or where the phone's version

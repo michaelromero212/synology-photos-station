@@ -277,8 +277,9 @@ struct ImportCommand: AsyncCommand {
                     // source library holds the file twice and the grid should
                     // look the same (`--keep-copies`).
                     if try await alreadyInSpace(
-                        sha: sha, spaceID: spaceID, keepingCopies: signature.keepCopies,
-                        prefixes: prefixes, synologyFiles: synologyDates, on: app.sql
+                        sha: sha, path: candidate.url.path, spaceID: spaceID,
+                        keepingCopies: signature.keepCopies, prefixes: prefixes,
+                        synologyItems: synologyItems, on: app.sql
                     ) {
                         present += 1
                         bytesDone += candidate.byteSize
@@ -411,16 +412,17 @@ struct ImportCommand: AsyncCommand {
     /// phone put here still does, even over a row another library's import
     /// made: a backup of a photo the NAS already had from the Shared Space is
     /// that photo, not a copy (609 in the second library, 2026-10-27). But
-    /// only for as many of the library's files as the phone put rows here: a
+    /// only for as many of the library's items as the phone put rows here: a
     /// photo the phone holds twice, byte for byte, is one row here and two
     /// items in Synology (16 in that library), so its second file comes in
-    /// as a copy. The library's files are those under `prefixes`, and given
-    /// Synology's export, every file in it, so a copy in a sibling folder
-    /// counts. Only an import or a rebuild places a file off the phone
-    /// (`on_device` false).
+    /// as a copy. Given Synology's items, those are the items: a file it
+    /// doesn't list, or one of an item already left out with these bytes (a
+    /// Live Photo's video saved under two names), is the phone's photo too.
+    /// Without them, every file under `prefixes` counts. Only an import or a
+    /// rebuild places a file off the phone (`on_device` false).
     private func alreadyInSpace(
-        sha: String, spaceID: UUID, keepingCopies: Bool, prefixes: [String],
-        synologyFiles: [String: Date]?, on sql: any SQLDatabase
+        sha: String, path: String, spaceID: UUID, keepingCopies: Bool, prefixes: [String],
+        synologyItems: [String: String]?, on sql: any SQLDatabase
     ) async throws -> Bool {
         struct Placed: Decodable {
             let removed: Bool
@@ -439,15 +441,18 @@ struct ImportCommand: AsyncCommand {
         let phoneRows = placed.filter(\.phone).count
         guard phoneRows > 0 else { return false }
 
-        // The library's files already left out for being one of those rows.
+        // The files already left out for being one of those rows.
         struct Matched: Decodable { let path: String }
         let matched = try await sql.raw("""
             SELECT source_path AS "path" FROM import_records
             WHERE sha256 = \(bind: sha) AND outcome = 'already in library'
-            """).all(decoding: Matched.self).filter { record in
-                prefixes.contains { record.path.hasPrefix($0) } || synologyFiles?[record.path] != nil
-            }
-        return matched.count < phoneRows
+            """).all(decoding: Matched.self).map(\.path)
+        if let synologyItems {
+            guard let item = synologyItems[path] else { return true }
+            let items = Set(matched.compactMap { synologyItems[$0] })
+            return items.contains(item) || items.count < phoneRows
+        }
+        return matched.filter { file in prefixes.contains { file.hasPrefix($0) } }.count < phoneRows
     }
 
     /// The oldest row over these bytes, anywhere, to copy rather than probe

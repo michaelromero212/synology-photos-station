@@ -288,6 +288,17 @@ printf '%s\t%s\t%s\n' "$ROOT/mine/m.png" "2023-06-13 20:30:00" 1 "$ROOT/mine-too
   --synology "$ROOT/mine-too.tsv" > "$ROOT/mine-too.log" 2>&1)
 check "and so does one in another of its folders, given Synology's export" "1 0" \
   "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine-too.log")"
+# But not a file Synology doesn't list, nor one of an item already left out
+# with those bytes (a Live Photo's video saved twice): Synology shows neither
+# as an item of its own.
+mkdir -p "$ROOT/mine-more"
+cp -p "$ROOT/mine/m.png" "$ROOT/mine-more/unlisted.png"; cp -p "$ROOT/mine/m.png" "$ROOT/mine-more/same-item.png"
+{ cat "$ROOT/mine-too.tsv"; printf '%s\t%s\t%s\n' "$ROOT/mine-more/same-item.png" "2023-06-13 20:30:00" 1; } \
+  > "$ROOT/mine-more.tsv"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine-more" --space "$FIRST" --keep-copies \
+  --synology "$ROOT/mine-more.tsv" > "$ROOT/mine-more.log" 2>&1)
+check "but not one Synology doesn't list, nor one of an item already left out" "0 2" \
+  "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine-more.log")"
 
 # Given Synology's dates, a time Synology shows that the file doesn't carry,
 # set there or on the phone, is the one the grid goes by: a download Synology
