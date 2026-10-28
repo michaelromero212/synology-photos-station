@@ -274,6 +274,20 @@ HELD=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/mine" --synology "
   --space "$FIRST" --time-zone America/New_York 2>&1)
 check "and compare-dates compares it with the library's copy, one grid item" "1 0 1" \
   "$(echo "$HELD" | awk '/Same local time:/ {s=$NF} /In Synology, not here:/ {n=$NF} /showing these files:/ {t=$NF} END {print s, n, t}')"
+# But a photo the phone holds twice, byte for byte, is one row here and two
+# items in Synology: the library's second file of it comes in as a copy. One in
+# another of the library's folders too, given Synology's export.
+cp -p "$ROOT/mine/m.png" "$ROOT/mine/m-again.png"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine" --space "$FIRST" --keep-copies > "$ROOT/mine-again.log" 2>&1)
+check "with --keep-copies, a second file of a photo the phone put here comes in" "1 0" \
+  "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine-again.log")"
+mkdir -p "$ROOT/mine-too"; cp -p "$ROOT/mine/m.png" "$ROOT/mine-too/m.png"
+printf '%s\t%s\t%s\n' "$ROOT/mine/m.png" "2023-06-13 20:30:00" 1 "$ROOT/mine-too/m.png" "2023-06-13 20:30:00" 2 \
+  > "$ROOT/mine-too.tsv"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/mine-too" --space "$FIRST" --keep-copies \
+  --synology "$ROOT/mine-too.tsv" > "$ROOT/mine-too.log" 2>&1)
+check "and so does one in another of its folders, given Synology's export" "1 0" \
+  "$(awk '/Stored once already:/ {r=$4} /Already in library:/ {a=$4} END {print r, a}' "$ROOT/mine-too.log")"
 
 # Given Synology's dates, a time Synology shows that the file doesn't carry,
 # set there or on the phone, is the one the grid goes by: a download Synology
