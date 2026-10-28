@@ -158,9 +158,25 @@ enum ImportGrouping {
               AND a.stacked_under IS NULL AND a.local_captured_at IS NOT NULL
               AND NOT (a.media_type = 'video' AND a.live_group_id IS NOT NULL)
             """).all(decoding: PhoneTile.self)
+        // The bytes of every file of the library left out as the phone's, in
+        // any of its folders, which Synology has too. Given its items, the
+        // library is every file of the export: in the second library a copy
+        // in PhotoLibrary of a photo whose MobileBackup file the phone had
+        // went under the phone's tile, as another version would (2026-10-28).
+        struct LeftOut: Decodable {
+            let path: String
+            let sha: String
+        }
+        let heldBytes = Set(try await app.sql.raw("""
+            SELECT source_path AS "path", sha256 AS "sha" FROM import_records
+            WHERE outcome = 'already in library' AND sha256 IS NOT NULL
+            """).all(decoding: LeftOut.self).filter { file in
+                prefixes.contains { file.path.hasPrefix($0) } || synologyItems?[file.path] != nil
+            }.map(\.sha))
 
         var summary = try await group(
-            members, app: app, synologyItems: synologyItems, held: held, phone: phone
+            members, app: app, synologyItems: synologyItems, held: held, heldBytes: heldBytes,
+            phone: phone
         )
         summary.read = read
         return summary
@@ -170,10 +186,11 @@ enum ImportGrouping {
     /// Every file of a folder at once: an item is made of the files given.
     static func group(
         _ members: [Member], app: Application, synologyItems: [String: String]? = nil,
-        held: [Held] = [], phone: [PhoneTile] = []
+        held: [Held] = [], heldBytes: Set<String>? = nil, phone: [PhoneTile] = []
     ) async throws -> Summary {
         var layout = layout(of: members, synologyItems: synologyItems)
-        join(&layout, members: members, held: held, phone: phone, synologyItems: synologyItems)
+        join(&layout, members: members, held: held, heldBytes: heldBytes ?? Set(held.map(\.sha)),
+             phone: phone, synologyItems: synologyItems)
         let liveGroup = layout.liveGroup, stackedUnder = layout.stackedUnder
         var summary = layout.summary
 
@@ -284,8 +301,8 @@ enum ImportGrouping {
     /// stays an item of its own. A whole item goes under the phone's tile, its
     /// motion and kept files too, one level deep, as every stack is.
     private static func join(
-        _ layout: inout Layout, members: [Member], held: [Held], phone: [PhoneTile],
-        synologyItems: [String: String]?
+        _ layout: inout Layout, members: [Member], held: [Held], heldBytes: Set<String>,
+        phone: [PhoneTile], synologyItems: [String: String]?
     ) {
         guard !phone.isEmpty else { return }
         var photoOfPair: [UUID: UUID] = [:]
@@ -319,7 +336,6 @@ enum ImportGrouping {
                 joins[own] = tile
             }
         }
-        let heldBytes = Set(held.map(\.sha))
         var unheld: [String: [PhoneTile]] = [:]
         for tile in phone where !(tile.sha.map(heldBytes.contains) ?? false) {
             unheld[tile.local + "|" + tile.mediaType, default: []].append(tile)

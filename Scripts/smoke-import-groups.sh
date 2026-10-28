@@ -241,6 +241,23 @@ check "compare-dates finds each of Synology's items once" "7 7 0 0" \
 (cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/mine" --space "$FIRST" --synology "$ROOT/mine.tsv" \
   > "$ROOT/mine-regroup.log" 2>&1)
 check "and regrouping changes nothing" "0" "$(awk '/grouping changed:/ {print $NF}' "$ROOT/mine-regroup.log")"
+# A photo the phone backed up, in two of the library's folders imported one
+# at a time: the first file is the phone's, and the copy in the other is an
+# item of its own in Synology, not another version of the phone's.
+P2="$ROOT/phone2"; mkdir -p "$P2"; image "$P2/IMG_9000.JPG"; taken "$P2/IMG_9000.JPG"
+(cd "$SERVER_DIR" && "$BIN" import --path "$P2" --space "$FIRST" --time-zone America/New_York > /dev/null 2>&1)
+q "UPDATE space_assets SET on_device = true WHERE space_id = '$FIRST' AND asset_id = '$(asset "$P2/IMG_9000.JPG")'" >/dev/null
+q "DELETE FROM import_records WHERE starts_with(source_path, '$P2/')" >/dev/null
+TWO="$ROOT/two"; mkdir -p "$TWO/MobileBackup/2024/10" "$TWO/PhotoLibrary/2024/10"
+cp -p "$P2/IMG_9000.JPG" "$TWO/MobileBackup/2024/10/"; cp -p "$P2/IMG_9000.JPG" "$TWO/PhotoLibrary/2024/10/"
+printf '%s\t2024-10-19 12:00:00\t%s\n' "$TWO/MobileBackup/2024/10/IMG_9000.JPG" 70 \
+  "$TWO/PhotoLibrary/2024/10/IMG_9000.JPG" 71 > "$ROOT/two.tsv"
+for f in MobileBackup PhotoLibrary; do
+  (cd "$SERVER_DIR" && "$BIN" import --path "$TWO/$f" --space "$FIRST" --time-zone America/New_York \
+    --keep-copies --synology "$ROOT/two.tsv" > "$ROOT/two-$f.log" 2>&1)
+done
+check "a copy in a sibling folder of a photo the phone backed up stays an item of its own" "1 0 tile" \
+  "$(awk '/Stored once already:/ {r=$4} /kept with the phone.s version:/ {k=$NF} END {print r, k}' "$ROOT/two-PhotoLibrary.log") $(q "SELECT COALESCE(stacked_under::text, 'tile') FROM assets WHERE id = '$(asset "$TWO/PhotoLibrary/2024/10/IMG_9000.JPG")'")"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -14,7 +14,7 @@ struct RegroupCommand: AsyncCommand {
         @Option(name: "space", short: "s", help: "The library it was imported into")
         var space: String?
 
-        @Option(name: "synology", help: "Synology Photos' items, from Scripts/export-synology-dates.sh: split where it split")
+        @Option(name: "synology", help: "Synology Photos' items, from Scripts/export-synology-dates.sh: split and join as it did")
         var synology: String?
     }
 
