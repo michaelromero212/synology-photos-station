@@ -389,10 +389,14 @@ with the Shared Space's own export put 1,200 of its import's rows at the times
 Synology shows, and all 2,733 of its files now match to the second. Synology
 showed each of the 628 rows it shares with the second library at one time in
 both, checked before anything changed. One more row, of a file the Shared
-Space's Synology never indexed, took the second library's time. What still
-differs there is grouping from before the import grouped by Live Photo
-identifier and kept copies (6 items split, 7 joined), and 41 files added since
-its import: both for its last import.
+Space's Synology never indexed, took the second library's time. The 41 files
+added there since its import came in the same day, by importing only the
+folder that held them (`PhotoLibrary/2026/10`, so nothing else was regrouped),
+and `credit-synology-uploaders.sh` credited each to the person who shared it;
+6 of them were photos already shared to Family Shared from the app, and show
+once. All 2,774 of its files are now here at Synology's times. What still
+differs is grouping from before the import grouped by Live Photo identifier
+and kept copies (6 items split, 7 joined), left for its last import.
 
 ## Who shared each Shared Space photo
 
