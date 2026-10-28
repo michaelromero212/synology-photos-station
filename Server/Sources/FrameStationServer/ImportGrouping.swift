@@ -28,7 +28,10 @@ import Darwin
 /// item an app's copy started, so in that library 8 Instagram copies that
 /// arrived before their Live Photos were items of their own. Given Synology's
 /// own items (`synologyItems`, from `Scripts/export-synology-dates.sh`), a
-/// group is split where Synology split it. Only split: never joined.
+/// group is split where Synology split it, and joined where Synology made one
+/// item of files the identifiers keep apart: in the second library
+/// (2026-10-27), a Live Photo's own photo whose Make had gone, beside its
+/// video of the same name.
 ///
 /// A rebuilt library's files are grouped the same way (`RebuildCommand`), so
 /// a rebuild brings back the items an import made rather than pairing by name.
@@ -227,8 +230,8 @@ enum ImportGrouping {
 
     /// The items `members` make: every file in a folder with the same
     /// identifier is one, its photo shown, its first video that photo's
-    /// motion, and the rest stacked under it, split where Synology's items
-    /// split it when they're given. Nothing else decides it, so an import and
+    /// motion, and the rest stacked under it, split and joined as Synology's
+    /// items are when they're given. Nothing else decides it, so an import and
     /// a rebuild make the same items of the same files.
     static func layout(of members: [Member], synologyItems: [String: String]? = nil) -> Layout {
         var groups: [String: [Member]] = [:]
@@ -236,9 +239,11 @@ enum ImportGrouping {
             guard let identifier = member.identifier, !identifier.isEmpty else { continue }
             groups[folder(of: member.path) + "\n" + identifier, default: []].append(member)
         }
+        var parts = groups.values.flatMap { split($0, as: synologyItems) }
+        if let synologyItems { parts = joined(parts, members: members, as: synologyItems) }
 
         var layout = Layout()
-        for group in groups.values.flatMap({ split($0, as: synologyItems) }) where group.count > 1 {
+        for group in parts where group.count > 1 {
             layout.summary.items += 1
             let photos = group.filter { $0.mediaType == "photo" }
             let videos = group.filter { $0.mediaType == "video" }
@@ -357,6 +362,30 @@ enum ImportGrouping {
         if divided.isEmpty { return [unknown] }
         divided[0] += unknown
         return divided
+    }
+
+    /// The parts as Synology's items join them: every file of one item in a
+    /// folder together, whatever its identifier, or with none. After `split`,
+    /// a part is of one item at most.
+    private static func joined(
+        _ parts: [[Member]], members: [Member], as synologyItems: [String: String]
+    ) -> [[Member]] {
+        func item(of member: Member) -> String? {
+            synologyItems[member.path].map { folder(of: member.path) + "\n" + $0 }
+        }
+        var result: [[Member]] = []
+        var index: [String: Int] = [:]
+        var grouped = Set<UUID>()
+        for part in parts {
+            grouped.formUnion(part.map(\.assetID))
+            guard let key = part.lazy.compactMap(item(of:)).first else { result.append(part); continue }
+            if let at = index[key] { result[at] += part } else { index[key] = result.count; result.append(part) }
+        }
+        for member in members where !grouped.contains(member.assetID) {
+            guard let key = item(of: member) else { continue }
+            if let at = index[key] { result[at].append(member) } else { index[key] = result.count; result.append([member]) }
+        }
+        return result
     }
 
     /// Synology's item for each file, from `Scripts/export-synology-dates.sh`:

@@ -7,7 +7,8 @@
 # whose edit dropped its Apple make, and a photo and video that share only a
 # name, stay apart, as Synology keeps them. A copy in another folder is an item
 # of its own. Given Synology's own items, a group is split where Synology
-# split it. `regroup` does the same to a library imported before this, and
+# split it, and joined where Synology made one item of files the identifiers
+# keep apart. `regroup` does the same to a library imported before this, and
 # compare-dates says when the grid's items match Synology's.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-import-groups.sh
@@ -161,6 +162,23 @@ check "and the grid has Synology's items again" "8 8 0 0" \
   "$(echo "$APART" | awk '/Grid items here:/ {h=$NF} /Grid items in Synology:/ {s=$NF} /Items split here:/ {p=$NF} /Items joined here:/ {j=$NF} END {print h, s, p, j}')"
 (cd "$SERVER_DIR" && "$BIN" regroup --path "$L" --space "$FIRST" > /dev/null 2>&1)
 check "without them, it's grouped by the files alone again" "$EXPECTED" "$(layout)"
+
+echo "Given Synology's items, a Live Photo whose own photo lost its Make is one, as Synology shows it:"
+J="$ROOT/joined/2020/03"; mkdir -p "$J"; F=66A97DF4-E8FC-4D9A-A3CA-9FEC8F2C275C
+image "$J/IMG_2847.jpeg"; apple "$J/IMG_2847.jpeg" $F ""
+video -metadata "com.apple.quicktime.content.identifier=$F" "$J/IMG_2847.MOV"
+printf '%s\t2020-07-24 15:44:37\t90\n' "$J/IMG_2847.jpeg" "$J/IMG_2847.MOV" > "$ROOT/joined.tsv"
+(cd "$SERVER_DIR" && "$BIN" import --path "$ROOT/joined" --space "$FIRST" --time-zone America/New_York \
+  --keep-copies --synology "$ROOT/joined.tsv" > "$ROOT/joined.log" 2>&1)
+check "its photo is the tile and its video the motion" "tile motion" \
+  "$(shown "$J/IMG_2847.jpeg") $(shown "$J/IMG_2847.MOV")"
+JOINED=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/joined" --synology "$ROOT/joined.tsv" \
+  --space "$FIRST" --time-zone America/New_York 2>&1)
+check "and compare-dates finds Synology's one item" "1 1 0 0" \
+  "$(echo "$JOINED" | awk '/showing these files:/ {h=$NF} /Grid items in Synology:/ {s=$NF} /Items split here:/ {p=$NF} /Items joined here:/ {j=$NF} END {print h, s, p, j}')"
+(cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/joined" --space "$FIRST" > /dev/null 2>&1)
+check "without them, the files alone keep the two apart" "tile tile" \
+  "$(shown "$J/IMG_2847.jpeg") $(shown "$J/IMG_2847.MOV")"
 
 echo "Removing the Live Photo takes what's kept with it, and so does restoring:"
 HEIC=$(asset "$D/IMG_8492.HEIC")
