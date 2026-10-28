@@ -176,6 +176,19 @@ JOINED=$(cd "$SERVER_DIR" && "$BIN" compare-dates --path "$ROOT/joined" --synolo
   --space "$FIRST" --time-zone America/New_York 2>&1)
 check "and compare-dates finds Synology's one item" "1 1 0 0" \
   "$(echo "$JOINED" | awk '/showing these files:/ {h=$NF} /Grid items in Synology:/ {s=$NF} /Items split here:/ {p=$NF} /Items joined here:/ {j=$NF} END {print h, s, p, j}')"
+# A row another library shows too keeps its grouping, and so does what's
+# grouped with it, or the item would change there as well: here the video is
+# in a second library.
+SECOND=$(redeem "Second" | jq '["personalSpace"]["id"]')
+q "INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
+   SELECT '$SECOND', '$(asset "$J/IMG_2847.MOV")', created_by FROM spaces WHERE id = '$SECOND'" >/dev/null
+KEPT=$(cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/joined" --space "$FIRST" 2>&1)
+check "without Synology's items, a pair whose video another library shows stays one" "tile motion 2" \
+  "$(shown "$J/IMG_2847.jpeg") $(shown "$J/IMG_2847.MOV") $(echo "$KEPT" | awk '/Left as they were, with a row another library shows:/ {print $NF}')"
+q "DELETE FROM space_assets WHERE space_id = '$SECOND'" >/dev/null
+DRY=$(cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/joined" --space "$FIRST" --dry-run 2>&1)
+check "a dry run says what would change, and changes nothing" "2 tile motion" \
+  "$(echo "$DRY" | awk '/Files whose grouping changed:/ {print $NF}') $(shown "$J/IMG_2847.jpeg") $(shown "$J/IMG_2847.MOV")"
 (cd "$SERVER_DIR" && "$BIN" regroup --path "$ROOT/joined" --space "$FIRST" > /dev/null 2>&1)
 check "without them, the files alone keep the two apart" "tile tile" \
   "$(shown "$J/IMG_2847.jpeg") $(shown "$J/IMG_2847.MOV")"

@@ -142,9 +142,12 @@ fingerprint it. The clones themselves are instant and take no space.
   check: a group is then split where Synology split it, and joined where
   Synology made one item of files the identifiers keep apart (in the second
   library, a Live Photo's own photo whose make had gone, beside its video of
-  the same name). `regroup --path … --space … [--synology …]` does the same for
-  a library imported before this (2026-10-25), changing nothing but the
-  grouping.
+  the same name). `regroup --path … --space … [--synology …] [--dry-run]` does
+  the same for a library imported before this (2026-10-25), changing nothing
+  but the grouping. A grouping is the row's, so a row another library shows
+  too (a phone's backup linked to Family Shared's row before libraries had
+  copies of their own) keeps it, and so does everything grouped with it; both
+  commands say how many files that left as they were.
 - **What the phone already backed up.** A file whose bytes the library holds
   from the app is left out, once for each row the phone made of them: a photo
   the phone holds twice, byte for byte, is one row here and two items in

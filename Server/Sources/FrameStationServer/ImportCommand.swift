@@ -396,6 +396,9 @@ struct ImportCommand: AsyncCommand {
         console.info("    of them Live Photos:         \(grouping.livePhotos)")
         console.info("    files kept with another:     \(grouping.stacked)")
         console.info("    kept with the phone's version: \(grouping.keptWithPhone)")
+        if grouping.leftShared > 0 {
+            console.info("    left as they were, with a row another library shows: \(grouping.leftShared)")
+        }
         console.info("")
         console.info("Thumbnails are queued; the derivation worker drains them in the background.")
         if failed > 0 {

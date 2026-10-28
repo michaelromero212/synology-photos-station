@@ -52,6 +52,12 @@ enum ImportGrouping {
         var changed = 0
         /// Files kept with the phone's version of the same item.
         var keptWithPhone = 0
+        /// Files whose grouping would have changed, left as it was because a
+        /// row it's grouped with, before or after, is in another library too.
+        var leftShared = 0
+        /// Those files and the changed ones, by path.
+        var changedPaths: [String] = []
+        var leftPaths: [String] = []
     }
 
     /// A file to group, as it's grouped now.
@@ -105,7 +111,7 @@ enum ImportGrouping {
     /// kept a Live Photo's copy in another folder apart from it.
     static func regroup(
         space: UUID, root: String, app: Application, synologyItems: [String: String]? = nil,
-        progress: (Int, Int) -> Void = { _, _ in }
+        write: Bool = true, progress: (Int, Int) -> Void = { _, _ in }
     ) async throws -> Summary {
         // As given and as the walk may have recorded it, its links resolved:
         // macOS's /var is a link to /private/var.
@@ -176,7 +182,7 @@ enum ImportGrouping {
 
         var summary = try await group(
             members, app: app, synologyItems: synologyItems, held: held, heldBytes: heldBytes,
-            phone: phone
+            phone: phone, write: write
         )
         summary.read = read
         return summary
@@ -186,7 +192,7 @@ enum ImportGrouping {
     /// Every file of a folder at once: an item is made of the files given.
     static func group(
         _ members: [Member], app: Application, synologyItems: [String: String]? = nil,
-        held: [Held] = [], heldBytes: Set<String>? = nil, phone: [PhoneTile] = []
+        held: [Held] = [], heldBytes: Set<String>? = nil, phone: [PhoneTile] = [], write: Bool = true
     ) async throws -> Summary {
         var layout = layout(of: members, synologyItems: synologyItems)
         join(&layout, members: members, held: held, heldBytes: heldBytes ?? Set(held.map(\.sha)),
@@ -197,11 +203,27 @@ enum ImportGrouping {
         // Only what changes, with its announcement: a device showing a file
         // that's now stacked away, or a photo that's now a Live Photo, has to
         // hear about it.
-        let changed = members.filter {
+        var moving = members.filter {
             $0.liveGroupID != liveGroup[$0.assetID] || $0.stackedUnder != stackedUnder[$0.assetID]
         }
+        // A grouping is the row's, so a row another library shows too would
+        // change there as well: in the second library 628 of its phone's
+        // backups were Family Shared's own rows, linked before a library got
+        // copies of its own. Such a row keeps its grouping, and so does every
+        // file grouped with it before or after, so no item is left half made.
+        if !moving.isEmpty, let space = members.first?.spaceID {
+            let elsewhere = try await shownElsewhere(members.map(\.assetID), besides: space, app: app)
+            let kept = entangled(members, liveGroup: liveGroup, stackedUnder: stackedUnder,
+                                 changed: moving, with: elsewhere)
+            let left = moving.filter { kept.contains($0.assetID) }
+            summary.leftShared = left.count
+            summary.leftPaths = left.map(\.path).sorted()
+            moving.removeAll { kept.contains($0.assetID) }
+        }
+        let changed = moving
         summary.changed = changed.count
-        guard !changed.isEmpty else { return summary }
+        summary.changedPaths = changed.map(\.path).sorted()
+        guard !changed.isEmpty, write else { return summary }
         let ids = changed.map(\.assetID)
         let paired = changed.compactMap { member in liveGroup[member.assetID].map { (member.assetID, $0) } }
         let stacked = changed.compactMap { member in stackedUnder[member.assetID].map { (member.assetID, $0) } }
@@ -378,6 +400,50 @@ enum ImportGrouping {
         if divided.isEmpty { return [unknown] }
         divided[0] += unknown
         return divided
+    }
+
+    /// The rows of `ids` another library than `space` shows too.
+    private static func shownElsewhere(
+        _ ids: [UUID], besides space: UUID, app: Application
+    ) async throws -> Set<UUID> {
+        struct Row: Decodable { let id: UUID }
+        return Set(try await app.sql.raw("""
+            SELECT DISTINCT asset_id AS id FROM space_assets
+            WHERE asset_id = ANY(\(bind: ids)) AND space_id <> \(bind: space) AND deleted_at IS NULL
+            """).all(decoding: Row.self).map(\.id))
+    }
+
+    /// The members whose grouping goes with a row another library shows:
+    /// every member joined to it by an item, as grouped now or as `liveGroup`
+    /// and `stackedUnder` would group it, through any chain of items in which
+    /// something changes.
+    private static func entangled(
+        _ members: [Member], liveGroup: [UUID: UUID], stackedUnder: [UUID: UUID],
+        changed: [Member], with elsewhere: Set<UUID>
+    ) -> Set<UUID> {
+        guard !elsewhere.isEmpty else { return [] }
+        var parent: [String: String] = [:]
+        func find(_ key: String) -> String {
+            var root = key
+            while let next = parent[root], next != root { root = next }
+            var node = key
+            while let next = parent[node], next != root { parent[node] = root; node = next }
+            return root
+        }
+        for member in members {
+            let me = member.assetID.uuidString
+            let links = [member.liveGroupID.map { "live " + $0.uuidString }, member.stackedUnder?.uuidString,
+                         liveGroup[member.assetID].map { "live " + $0.uuidString },
+                         stackedUnder[member.assetID]?.uuidString]
+            for link in links.compactMap({ $0 }) {
+                let (a, b) = (find(me), find(link))
+                if a != b { parent[a] = b }
+            }
+        }
+        let moving = Set(changed.map { find($0.assetID.uuidString) })
+        let held = Set(members.filter { elsewhere.contains($0.assetID) }.map { find($0.assetID.uuidString) })
+            .intersection(moving)
+        return Set(members.filter { held.contains(find($0.assetID.uuidString)) }.map(\.assetID))
     }
 
     /// The parts as Synology's items join them: every file of one item in a
