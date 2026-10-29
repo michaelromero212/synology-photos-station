@@ -35,10 +35,10 @@ end-to-end encryption, sharing outside the household, web client.
 | Derivative format | JPEG, not HEIC | Encoding HEIC needs an x265 encoder the container otherwise doesn't carry; at 256 px the saving is a few KB. HEIC *decode* still works — that's libheif |
 | Metadata authority | Device wins on capture time and dimensions; server fills the rest | `PHAsset.creationDate` is reliable where EXIF is often absent, wrong, or timezone-naive |
 | Video | Own ffmpeg build in container | DSM's HEVC licensing removal doesn't apply; QuickSync via `/dev/dri` when needed |
-| Transcoding | A 1080p H.264 copy of any clip over 12 Mbps, queued at upload, built in the background one at a time on two of the four cores | A 4K original stutters on cellular, and a J4125 takes minutes per clip, too long to wait through on pressing play. Nobody is waiting on the copy itself, so it never holds up a thumbnail |
+| Transcoding | A stream ladder for every video over 2.5 Mbps that is shown as a video (not a Live Photo's motion): 1080p, 720p, 432p and 270p H.264 in one-second HLS pieces, queued at upload, built in the background one at a time on two of the four cores, newest video first | A 4K original stutters on cellular, and so did the single 1080p copy that came before (median 6 Mbps, two to four times Synology's 720p copies). A J4125 takes minutes per clip, too long to wait through on pressing play. Nobody is waiting on the ladder itself, so it never holds up a thumbnail |
 | Auth | **DSM credentials exchanged server-side for a device token** | One password per person, managed in DSM. The app sends them once over TLS; the server validates against DSM on localhost and returns its own token. The Keychain stores the token, never the password — so a stolen phone is not a compromised NAS account, and DSM's API is never exposed |
 | Per-user data | One database, one library per user, plus a browsable per-user folder tree | Separate databases per user would make Family Shared impossible — you cannot join across databases, so shared spaces, attribution, and cross-user dedup all break |
-| Video playback | Direct play of the original over HTTP Range | AVPlayer streams and seeks natively at 1080p and 4K with no transcode and no quality loss. HLS ladders deferred until 4K-over-cellular actually hurts |
+| Video playback | Direct play of the original over HTTP Range at home; the stream ladder away | At home AVPlayer streams and seeks the 4K original with no quality loss. Away, it picks a size piece by piece from what the link delivers: through a simulated 5 Mbps link with a 150 ms round trip, playing in 1.2 s with no stalls, where the 1080p copy stalled 13 times in 25 s |
 | Device deletions | NAS copy is **kept** | The NAS is the archive of record; that's the point |
 | Push | APNs direct from container | Household deployment — the `.p8` key never leaves your NAS |
 | Search v1 | Metadata only, place first | Place is populated automatically at import; tags are not, so tag search waits on keyword extraction. Face/semantic search deferred; no ML runtime in the container |
@@ -253,7 +253,8 @@ One DSM shared folder, one service account. No per-user folders.
       thumb-512.heic
       preview-2048.heic               ← lazy
       poster.jpg                      ← video: sharpest of its opening frames (Derivatives.extractPoster)
-      hls/                            ← lazy, LRU-evictable
+      stream-v1/                      ← video: the stream ladder (StreamLadder) — master.m3u8,
+                                        and for each size a playlist and one .m4s it reads by range
   incoming/<uploadSessionId>/         ← upload.data, each chunk written in place
   browse/<user>/2026/07/IMG_4821.heic ← hardlinks, zero extra space
   pgdata/
@@ -433,10 +434,13 @@ That gap is how an October 2026 server change shipped with no video playing
 anywhere: the stream query decoded a row it no longer selected every column of,
 while every other request — and so every other check — went on answering.
 
-Direct play only. `ffmpeg` transcoding 4K on a J4125 is not on the table, and on
-a home network it isn't needed — the file streams as-is and a seek fetches only
-the bytes being watched. HLS would slot in as a different `kind` in
-`PlaybackURLResponse` without changing the call site.
+Direct play at home: on a home network the file streams as-is and a seek
+fetches only the bytes being watched. Away from home an app that asks
+(`adaptive=1`) gets a stream ladder instead, `kind` "adaptive" in
+`PlaybackURLResponse`, at the same call site: an HLS playlist of sizes built in
+the background (`StreamLadder`), signed in the path rather than the query
+because every piece a playlist names resolves against the playlist's own
+address. An app from before ladders never asks, and gets what it always did.
 
 
 ### Background backup leans on the resumable protocol, not on bookkeeping
@@ -786,7 +790,7 @@ GET    /v1/assets/:id                                → full metadata + uploade
 GET    /v1/assets/:id/thumb?size=256|512
 GET    /v1/assets/:id/preview
 GET    /v1/assets/:id/original                       → Range-capable
-GET    /v1/assets/:id/hls/master.m3u8                → lazy transcode
+GET    /v1/hls/:id/:user/:expires/:signature/:file   → a stream ladder's playlists and pieces
 
 POST   /v1/uploads/probe          { sha256, byteSize } → have | need | partial
 PUT    /v1/uploads/:sid/chunk/:n                       → raw bytes
@@ -1461,7 +1465,7 @@ Adopted from Synology, with the gaps filled:
 | Favorites sync | Two-way with Apple Photos via `PHAsset.isFavorite`; last-write-wins by timestamp |
 | Sort order | Ascending/descending by date taken |
 | Show dates and locations | Overlay toggle for full-screen browsing |
-| Playback quality | Auto / Original / High / Medium → the lazy HLS ladder |
+| Playback quality ✅ | Auto / Quality first / Speed first, Synology's words. Auto plays the original at home and the stream ladder away; Speed first holds the ladder to 720p |
 | **Auto Play Next Video** ✅ | When a clip ends, continue to the next video from the same day. Replaced a "Play All Videos" slideshow mode — watching a day's clips isn't a mode you pick up front, it's what you want after tapping the first one |
 | Cache management ✅ | Size readout, cap (250 MB / 500 MB / 1 GB / 2 GB, default 500), clear. Backs the bounded LRU disk cache. No "unlimited" option: that is the bug it exists to close, not a preference |
 | Deletion settings | See below — **two axes, not one** |

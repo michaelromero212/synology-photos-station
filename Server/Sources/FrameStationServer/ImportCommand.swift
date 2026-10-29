@@ -648,8 +648,8 @@ struct ImportCommand: AsyncCommand {
                 // The jobs an upload queues, so an imported photo ends up with
                 // everything an uploaded one has: the full metadata dump the
                 // Information panel shows (metadata), its tiles (thumbnails),
-                // and for a video the cellular rendition (playback, which
-                // no-ops for a photo). This used to queue thumbnails alone,
+                // and for a video the sizes it plays in away from home (its
+                // stream ladder). This used to queue thumbnails alone,
                 // which left the rest to catch-up passes that run only when the
                 // server starts, 5,000 photos and 500 videos at a time — fine
                 // for the Shared Space, and many restarts for a 67,000-photo
@@ -658,7 +658,8 @@ struct ImportCommand: AsyncCommand {
                 //
                 // A copied row brought all of it with it, from the row it copies.
                 if original == nil {
-                    for kind in ["thumbnails", "metadata", Derivatives.playbackJobKind] {
+                    let video = candidate.mediaType == .video ? [StreamLadder.jobKind] : []
+                    for kind in ["thumbnails", "metadata"] + video {
                         try await DerivationWorker.enqueue(assetID: asset.id, kind: kind, on: sql)
                     }
                 }

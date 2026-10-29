@@ -194,13 +194,12 @@ func configure(_ app: Application) async throws {
         // Information panel now shows — same "no re-upload" idea, but the work
         // goes on the derivation queue rather than running inline.
         Task { await MetadataBackfill.enqueueMissingExif(on: app) }
-        // Videos uploaded before the cellular rendition existed. Last, and
-        // bounded: it is the only job here that can occupy a worker for minutes
-        // at a time, and nothing on screen is waiting for it.
-        Task { await MetadataBackfill.enqueueMissingPlaybackRenditions(on: app) }
-        // And rebuild any whose file has since vanished — including one the
-        // generator itself discarded for being unplayable.
-        Task { await MetadataBackfill.requeueVanishedPlaybackRenditions(on: app) }
+        // Every video that should have a stream ladder and hasn't. Last: it is
+        // the only job here that occupies a worker for minutes at a time, and
+        // the worker takes it after everything else anyway.
+        Task { await MetadataBackfill.enqueueMissingLadders(on: app) }
+        // And rebuild any whose folder has since vanished.
+        Task { await MetadataBackfill.requeueVanishedLadders(on: app) }
         // Take apart the old hardlink tree under the blob root, which kept the
         // bytes of permanently deleted photos on disk. Once it is gone this is
         // a single failed `stat` per boot.

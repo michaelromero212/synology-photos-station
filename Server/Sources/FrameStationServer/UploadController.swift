@@ -529,24 +529,27 @@ struct UploadController: RouteCollection {
                 try await DerivationWorker.enqueue(
                     assetID: asset.id, kind: "thumbnails", on: sql
                 )
-                // And, for a video, the cellular rendition. Queued at upload
-                // rather than built on demand: a 4K transcode takes minutes on
-                // this box, so waiting until someone presses play on mobile data
-                // would mean waiting through it. The job no-ops for photos and
-                // for clips already lean enough to stream as they are. It sits
+                // And, for a video, its stream ladder: the sizes it plays in
+                // away from home. Queued at upload rather than built on demand:
+                // a 4K transcode takes minutes on this box, so waiting until
+                // someone presses play on mobile data would mean waiting
+                // through it. The job no-ops for a Live Photo's motion and for
+                // clips already lean enough to stream as they are. It sits
                 // behind thumbnails in the worker's order, which is right —
                 // nobody is watching a transcode, but they are watching the grid
-                // fill.
+                // fill — and ahead of every older video still waiting for one.
                 //
                 // Non-fatal, but *logged*. This was once a bare `try?`, and when
                 // the job kind turned out to violate a CHECK constraint the
                 // failure went nowhere at all: uploads succeeded, no rendition
                 // was ever queued, and the only way to find out was to read the
                 // queue by hand.
-                try await Self.bestEffort("playback_job", on: sql, logger: logger) {
-                    try await DerivationWorker.enqueue(
-                        assetID: asset.id, kind: Derivatives.playbackJobKind, on: sql
-                    )
+                if input.mediaType == .video {
+                    try await Self.bestEffort("ladder_job", on: sql, logger: logger) {
+                        try await DerivationWorker.enqueue(
+                            assetID: asset.id, kind: StreamLadder.jobKind, on: sql
+                        )
+                    }
                 }
 
                 if let uploadID {

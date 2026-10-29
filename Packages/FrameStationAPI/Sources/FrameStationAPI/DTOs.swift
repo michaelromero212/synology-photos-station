@@ -232,8 +232,9 @@ public enum PlaybackQuality: String, Codable, Sendable, CaseIterable {
     /// The file exactly as it was recorded. Needs a link that can carry it —
     /// roughly 51 Mbps for 4K60 — so this is the wi-fi answer.
     case original
-    /// The 1080p rendition, for links that can't. Audio is bit-identical to the
-    /// original; only the picture is reduced.
+    /// Smaller, for links that can't: a stream ladder for an app that asks for
+    /// one (`adaptive=1`), otherwise the 1080p rendition an older server made.
+    /// The sound is the original's; only the picture is reduced.
     case mobile
 
     /// What an older client gets when it asks for nothing, so a version skew
@@ -244,8 +245,11 @@ public enum PlaybackQuality: String, Codable, Sendable, CaseIterable {
 public struct PlaybackURLResponse: Codable, Sendable, Hashable {
     public let url: URL
     public let expiresAt: Date
-    /// Direct play of the stored file — no transcode. HLS would land here later
-    /// as a different value without changing the call site.
+    /// What the link plays: "direct", the stored file as it is; "rendition",
+    /// the one 1080p file older servers made for cellular; or "adaptive", a
+    /// stream ladder — an HLS playlist of sizes the player chooses between,
+    /// handed only to an app that asked for one. A player takes any of them
+    /// at the same call site.
     public let kind: String
 
     public init(url: URL, expiresAt: Date, kind: String = "direct") {

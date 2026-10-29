@@ -49,9 +49,9 @@ derived(){ q "SELECT derived_at IS NOT NULL FROM assets WHERE id = '$1'"; }
 open(){ curl -s -o "$ROOT/opened.jpg" -w '%{http_code}' "$API/v1/assets/$1/preview" \
   -H "Authorization: Bearer $TOKEN"; }
 
-echo "Three videos that each need a cellular copy"
-# 4K at about 24 Mbps, over the 12 Mbps line, and a few seconds' transcode
-# each, so ones that overlap can be seen. The tones differ so they aren't
+echo "Three videos that each need a stream ladder"
+# 4K at about 24 Mbps, far over the ladder's 2.5 Mbps line, and a few seconds'
+# transcode each, so ones that overlap can be seen. The tones differ so they aren't
 # stored once as the same file.
 for tone in 440 550; do
   ffmpeg -v error -y -f lavfi -i "testsrc2=size=3840x2160:rate=30:duration=6" \
@@ -59,7 +59,7 @@ for tone in 440 550; do
     -b:v 24M -maxrate 24M -bufsize 24M -pix_fmt yuv420p -c:a aac -shortest "$LIB/clip-$tone.mp4"
 done
 # And one with its sound uncompressed, as iPhones from 2026 record a Live
-# Photo's: an MP4 can't carry that as it is, so its copy's is encoded.
+# Photo's: an MP4 can't carry that as it is, so its ladder's is encoded.
 ffmpeg -v error -y -f lavfi -i "testsrc2=size=3840x2160:rate=30:duration=6" \
   -f lavfi -i "sine=frequency=660:duration=6" -c:v libx264 -preset ultrafast \
   -b:v 24M -maxrate 24M -bufsize 24M -pix_fmt yuv420p -c:a pcm_s16le -shortest "$LIB/clip-660.mov"
@@ -75,17 +75,16 @@ TOKEN=$(echo "$R" | jq '["token"]'); SPACE=$(echo "$R" | jq '["personalSpace"]["
 check "the worker says how it transcodes" "1" "$(grep -c "one transcode at a time on" "$ROOT/server.log")"
 
 # Watched from the start of the import: the jobs in the database, and the
-# ffmpeg processes themselves. Photos have playback jobs too, which do
-# nothing, so only the videos' are counted.
+# ffmpeg processes themselves.
 VIDEO_JOBS="FROM derivation_jobs j JOIN assets a ON a.id = j.asset_id
-  WHERE j.kind = 'playback' AND a.media_type = 'video'"
+  WHERE j.kind = 'ladder' AND a.media_type = 'video'"
 (cd "$SERVER_DIR" && "$BIN" import --path "$LIB" --space "$SPACE" >/dev/null 2>&1) &
 IMPORTER=$!
 MOST=0; MOST_FFMPEG=0; ARGS=""
 for _ in $(seq 1 1200); do
   IFS='|' read -r RUNNING SETTLED <<< "$(q "SELECT count(*) FILTER (WHERE j.state = 'running'),
       count(*) FILTER (WHERE j.state IN ('done', 'failed')) $VIDEO_JOBS")"
-  PIDS=$(pgrep -f 'playback-1080.mp4.partial')
+  PIDS=$(pgrep -f 'stream-v1.partial')
   FF=$(echo "$PIDS" | grep -c .)
   [ "${RUNNING:-0}" -gt "$MOST" ] && MOST=$RUNNING
   [ "$FF" -gt "$MOST_FFMPEG" ] && MOST_FFMPEG=$FF
@@ -96,18 +95,19 @@ done
 wait $IMPORTER
 for _ in $(seq 1 120); do [ "$(q "SELECT count(*) FROM assets WHERE derived_at IS NULL")" = "0" ] && break; sleep 0.5; done
 
-check "every video gets its cellular copy" "3" "$(q "SELECT count(*) $VIDEO_JOBS AND j.state = 'done'")"
+check "every video gets its stream ladder" "3" "$(q "SELECT count(*) $VIDEO_JOBS AND j.state = 'done'")"
 check "and they're on disk" "3" \
-  "$(find "$FRAMESTATION_BLOB_ROOT/derivatives" -name playback-1080.mp4 | wc -l | tr -d ' ')"
+  "$(find "$FRAMESTATION_BLOB_ROOT/derivatives" -path '*/stream-v1/master.m3u8' | wc -l | tr -d ' ')"
 check "but never more than one at a time" "1" "$MOST"
 check "with only ever one ffmpeg transcoding" "1" "$MOST_FFMPEG"
-check "on two threads to decode and two to encode" "2" \
+# One for the decoder, then one for each of a 4K clip's four sizes.
+check "on two threads to decode and two for each size" "5" \
   "$(echo "$ARGS" | grep -o -- '-threads 2' | wc -l | tr -d ' ')"
 check "and every photo and video has its thumbnail" "0" "$(q "SELECT count(*) FROM assets WHERE derived_at IS NULL")"
 PCM=$(asset clip-660.mov id); PCM_SHA=$(asset clip-660.mov sha256)
-check "a clip with uncompressed sound gets a copy with AAC sound" "aac" \
+check "a clip with uncompressed sound gets a ladder with AAC sound" "aac" \
   "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 \
-     "$FRAMESTATION_BLOB_ROOT/derivatives/${PCM_SHA:0:2}/${PCM_SHA:2:2}/$PCM_SHA/playback-1080.mp4")"
+     "$FRAMESTATION_BLOB_ROOT/derivatives/${PCM_SHA:0:2}/${PCM_SHA:2:2}/$PCM_SHA/stream-v1/v1080.m4s")"
 
 echo "A photo opened before its thumbnail was made"
 PHOTO=$(asset photo.jpg id); SHA=$(asset photo.jpg sha256)
@@ -151,28 +151,28 @@ q "UPDATE assets SET derived_at = NULL WHERE id = '$PHOTO'" >/dev/null
 q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, started_at = NULL
    WHERE asset_id = '$PHOTO' AND kind = 'thumbnails'" >/dev/null
 q "UPDATE derivation_jobs SET state = 'pending', attempts = 0, started_at = NULL
-   WHERE kind = 'playback'" >/dev/null
-# And one cellular copy that failed three times, which a restart tries again,
-# and one for a clip deleted for good, which it leaves alone.
+   WHERE kind = 'ladder'" >/dev/null
+# And one ladder that failed three times, which a restart tries again, and one
+# for a clip deleted for good, which it leaves alone.
 q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, last_error = 'gave up'
-   WHERE asset_id = '$PCM' AND kind = 'playback'" >/dev/null
+   WHERE asset_id = '$PCM' AND kind = 'ladder'" >/dev/null
 GONE=$(asset clip-550.mp4 id)
 q "UPDATE space_assets SET deleted_at = now(), purged_at = now() WHERE asset_id = '$GONE'" >/dev/null
 q "UPDATE derivation_jobs SET state = 'failed', attempts = 3, last_error = 'blob missing'
-   WHERE asset_id = '$GONE' AND kind = 'playback'" >/dev/null
+   WHERE asset_id = '$GONE' AND kind = 'ladder'" >/dev/null
 FRAMESTATION_DERIVATION_LANES=1 serve
 for _ in $(seq 1 120); do
   [ "$(derived "$PHOTO")" = "t" ] && [ "$(derived "$VIDEO")" = "t" ] \
-    && [ "$(job "$PCM" playback state)" = "done" ] && break
+    && [ "$(job "$PCM" ladder state)" = "done" ] && break
   sleep 0.5
 done
 check "the photo's thumbnail is made" "t" "$(derived "$PHOTO")"
 check "before any transcode started" "t" "$(q "SELECT j.started_at < COALESCE(
-    (SELECT min(started_at) FROM derivation_jobs WHERE kind = 'playback'), 'infinity')
+    (SELECT min(started_at) FROM derivation_jobs WHERE kind = 'ladder'), 'infinity')
   FROM derivation_jobs j WHERE j.asset_id = '$PHOTO' AND j.kind = 'thumbnails'")"
 check "and the video left to the queue is made too" "t" "$(derived "$VIDEO")"
-check "a cellular copy that failed for good is tried again" "done|" "$(job "$PCM" playback "state, last_error")"
-check "but not one for a clip deleted for good" "failed" "$(job "$GONE" playback state)"
+check "a ladder that failed for good is tried again" "done|" "$(job "$PCM" ladder "state, last_error")"
+check "but not one for a clip deleted for good" "failed" "$(job "$GONE" ladder state)"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -86,13 +86,14 @@ enum VideoQualityPreference: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .auto:
-            return "Full quality at home, and a smaller version when you're away "
-                + "so it doesn't stall."
+            return "Full quality at home. Away, the sharpest version your "
+                + "connection can carry without stopping to buffer."
         case .original:
             return "Always the file exactly as recorded. Away from home this may "
                 + "pause to buffer."
         case .dataSaver:
-            return "Always the smaller version. Audio is unchanged — only the picture is reduced."
+            return "Never more than 720p, to save data. Audio is unchanged — only "
+                + "the picture is reduced."
         }
     }
 }

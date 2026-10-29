@@ -4,8 +4,14 @@ import Testing
 
 /// Answers every request with an empty 200, except a path containing "hang",
 /// which it never answers at all: a request that can only end by being called
-/// off. Kept apart from `StubServer`, whose queued answers other suites share.
+/// off, and a playback link, which gets one. Kept apart from `StubServer`,
+/// whose queued answers other suites share.
 final class ReportingStub: URLProtocol {
+    /// Every address asked for, in order.
+    nonisolated(unsafe) private static var asked: [URL] = []
+    private static let lock = NSLock()
+    static var requested: [URL] { lock.withLock { asked } }
+
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ReportingStub.self]
@@ -16,12 +22,17 @@ final class ReportingStub: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let url = request.url, !url.path.contains("hang") else { return }
+        guard let url = request.url else { return }
+        Self.lock.withLock { Self.asked.append(url) }
+        guard !url.path.contains("hang") else { return }
         let response = HTTPURLResponse(
             url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
         )!
+        let body = url.path.hasSuffix("/playback")
+            ? Data(#"{"url":"https://nas.test/v1/stream/x","expiresAt":"2030-01-01T00:00:00Z","kind":"direct"}"#.utf8)
+            : Data()
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 
@@ -70,6 +81,25 @@ struct ClientReportingTests {
         request.cancel()
         await #expect(throws: (any Error).self) { try await request.value }
         #expect(heard.outcomes.isEmpty)
+    }
+
+    /// A server from before ladders reads `quality` and nothing else, so the
+    /// question rides beside it: asked as a quality of its own, an old server
+    /// would have taken it for a request for the original, a 51 Mbps file on a
+    /// cellular link.
+    @Test("A ladder is asked for beside the quality, never in its place")
+    func adaptiveIsAskedBesideTheQuality() async throws {
+        let client = await client(heard: Heard())
+        let asset = UUID()
+        _ = try await client.playbackURL(assetID: asset, quality: .mobile, adaptive: true)
+        _ = try await client.playbackURL(assetID: asset, quality: .original)
+        let asked = ReportingStub.requested.filter { $0.path.contains(asset.uuidString) }
+        let queries = asked.map { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems ?? [] }
+        #expect(queries.count == 2)
+        #expect(queries.first == [
+            URLQueryItem(name: "quality", value: "mobile"), URLQueryItem(name: "adaptive", value: "1"),
+        ])
+        #expect(queries.last == [URLQueryItem(name: "quality", value: "original")])
     }
 
     @Test("Writes the server accepted are reported by path, and reads aren't")

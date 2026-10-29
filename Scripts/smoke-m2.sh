@@ -174,9 +174,9 @@ check "5 assets after re-import" "5" "$(q 'select count(*) from assets;')"
 echo
 echo "=== 10. the jobs an upload gets, queued and drained ==="
 for _ in $(seq 1 90); do
-  [ "$(q "select count(*) from derivation_jobs where state='done';")" = "15" ] && break; sleep 1
+  [ "$(q "select count(*) from derivation_jobs where state='done';")" = "11" ] && break; sleep 1
 done
-check "thumbnails, metadata and playback for each of the 5" "metadata:5 playback:5 thumbnails:5" \
+check "thumbnails and metadata for each of the 5, and the video's ladder" "ladder:1 metadata:5 thumbnails:5" \
   "$(q "select string_agg(kind || ':' || n, ' ' order by kind) from (select kind, count(*) n from derivation_jobs where state='done' group by kind) k;")"
 check "no failed jobs"         "0" "$(q "select count(*) from derivation_jobs where state='failed';")"
 check "every file got the full metadata dump" "5" "$(q 'select count(*) from assets where exif is not null;')"

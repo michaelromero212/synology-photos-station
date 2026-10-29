@@ -18,6 +18,25 @@ import Vapor
 enum PlaybackToken {
     static let lifetime: TimeInterval = 300
 
+    /// What a stream ladder's links are signed for, beside the two
+    /// `PlaybackQuality` values. Never one of theirs, so a ladder's link can't
+    /// be turned into one for the original.
+    static let adaptive = "adaptive"
+
+    /// How long a ladder's link lasts: long enough to watch the clip through
+    /// twice with pauses, and never less than ten minutes or more than four
+    /// hours.
+    ///
+    /// Longer than a file's link because it can't be renewed under the player.
+    /// Every piece a player fetches resolves against the playlist's address,
+    /// signature and all, so a fresh link means a fresh player item, and a
+    /// stall to change it. Revoking someone still takes effect at once: the
+    /// membership check runs on every piece, not only on the playlist.
+    static func adaptiveLifetime(durationMS: Int?) -> TimeInterval {
+        let seconds = Double(durationMS ?? 0) / 1000
+        return min(4 * 3600, max(600, seconds * 2 + 600))
+    }
+
     /// Stable across restarts when configured; otherwise per-boot, which only
     /// means links minted before a restart stop working a few minutes early.
     static func secret(for app: Application) -> SymmetricKey {
@@ -40,20 +59,33 @@ enum PlaybackToken {
     /// representation: without that, a `mobile` URL could be turned into an
     /// `original` one by changing a query parameter, which is the whole point of
     /// signing.
+    ///
+    /// `representation` is a quality's raw value, or `adaptive` for a ladder.
     private static func message(
-        assetID: UUID, userID: UUID, expires: Int, quality: PlaybackQuality
+        assetID: UUID, userID: UUID, expires: Int, representation: String
     ) -> Data {
-        Data("\(assetID.uuidString):\(userID.uuidString):\(expires):\(quality.rawValue)".utf8)
+        Data("\(assetID.uuidString):\(userID.uuidString):\(expires):\(representation)".utf8)
     }
 
     static func sign(
         assetID: UUID, userID: UUID, expires: Int,
         quality: PlaybackQuality = .default, key: SymmetricKey
     ) -> String {
+        sign(
+            assetID: assetID, userID: userID, expires: expires,
+            representation: quality.rawValue, key: key
+        )
+    }
+
+    static func sign(
+        assetID: UUID, userID: UUID, expires: Int, representation: String, key: SymmetricKey
+    ) -> String {
         // The user is inside the signature so a leaked link can't outlive that
         // person's access to the space any more than it already does.
         let mac = HMAC<SHA256>.authenticationCode(
-            for: message(assetID: assetID, userID: userID, expires: expires, quality: quality),
+            for: message(
+                assetID: assetID, userID: userID, expires: expires, representation: representation
+            ),
             using: key
         )
         return Data(mac).base64URLEncodedString()
@@ -63,16 +95,27 @@ enum PlaybackToken {
         assetID: UUID, userID: UUID, expires: Int,
         quality: PlaybackQuality = .default, signature: String, key: SymmetricKey
     ) -> Bool {
+        verify(
+            assetID: assetID, userID: userID, expires: expires,
+            representation: quality.rawValue, signature: signature, key: key
+        )
+    }
+
+    static func verify(
+        assetID: UUID, userID: UUID, expires: Int, representation: String,
+        signature: String, key: SymmetricKey
+    ) -> Bool {
         guard expires > Int(Date().timeIntervalSince1970) else { return false }
         let expected = sign(
-            assetID: assetID, userID: userID, expires: expires, quality: quality, key: key
+            assetID: assetID, userID: userID, expires: expires,
+            representation: representation, key: key
         )
         // Constant-time: a byte-by-byte early exit would leak the signature.
         guard expected.utf8.count == signature.utf8.count else { return false }
         return HMAC<SHA256>.isValidAuthenticationCode(
             Data(base64URLEncoded: signature) ?? Data(),
             authenticating: message(
-                assetID: assetID, userID: userID, expires: expires, quality: quality
+                assetID: assetID, userID: userID, expires: expires, representation: representation
             ),
             using: key
         )

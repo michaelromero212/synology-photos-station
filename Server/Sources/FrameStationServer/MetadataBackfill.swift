@@ -245,17 +245,17 @@ enum MetadataBackfill {
         }
     }
 
-    /// Re-queues a rendition whose file is no longer on disk.
+    /// Re-queues a stream ladder whose folder is no longer on disk.
     ///
     /// A finished job says the work was done, not that the result survived — a
-    /// file can be deleted, or thrown away by the generator itself for being
-    /// unplayable. Without this the job stays `done` for ever and the server
-    /// quietly falls back to the 51 Mbps original on every cellular play, which
-    /// is exactly the thing the rendition exists to avoid.
+    /// folder can be deleted, or a NAS restored from a backup that predates it.
+    /// Without this the job stays `done` for ever and the server quietly hands
+    /// out the original on every cellular play, which is exactly what the
+    /// ladder exists to avoid.
     ///
-    /// Bounded, and a `stat` each: cheap for a handful, and it stops long before
-    /// it could matter on a migrated library.
-    static func requeueVanishedPlaybackRenditions(on app: Application) async {
+    /// Every finished one, a `stat` each: a few thousand on a family library,
+    /// which is a fraction of a second.
+    static func requeueVanishedLadders(on app: Application) async {
         struct Row: Decodable {
             let id: UUID
             let sha256: String
@@ -266,80 +266,66 @@ enum MetadataBackfill {
                 FROM assets a
                 JOIN derivation_jobs j ON j.asset_id = a.id
                 WHERE a.media_type = 'video'
-                  AND j.kind = \(bind: Derivatives.playbackJobKind)
+                  AND j.kind = \(bind: StreamLadder.jobKind)
                   AND j.state = 'done'
-                LIMIT 500
                 """).all(decoding: Row.self)
-
+            var vanished: [UUID] = []
             for row in rows {
-                let file = app.blobStore
-                    .derivativeDirectory(sha256: row.sha256)
-                    .appendingPathComponent(Derivatives.playbackName)
-                guard !FileManager.default.fileExists(atPath: file.path) else { continue }
-                app.logger.info(
-                    "playback rendition for \(row.sha256.prefix(8)) is gone; re-queuing"
-                )
-                try await app.sql.raw("""
-                    UPDATE derivation_jobs
-                    SET state = 'pending', attempts = 0, last_error = NULL
-                    WHERE asset_id = \(bind: row.id)
-                      AND kind = \(bind: Derivatives.playbackJobKind)
-                    """).run()
+                // A clip that never needed one has no folder either; the job
+                // decides that again, cheaply, before any transcode.
+                guard !StreamLadder.exists(sha256: row.sha256, store: app.blobStore) else { continue }
+                vanished.append(row.id)
             }
+            guard !vanished.isEmpty else { return }
+            try await app.sql.raw("""
+                UPDATE derivation_jobs
+                SET state = 'pending', attempts = 0, last_error = NULL
+                WHERE kind = \(bind: StreamLadder.jobKind)
+                  AND asset_id = ANY(\(bind: vanished)::uuid[])
+                  -- Only those the job would build: the rest stay done.
+                  AND asset_id IN (SELECT a.id FROM assets a
+                                   WHERE \(unsafeRaw: TimelineController.visible)
+                                     AND a.duration_ms > 0
+                                     AND (a.byte_size * 8000 / a.duration_ms)
+                                         >= \(bind: StreamLadder.bitrateThreshold))
+                """).run()
         } catch {
-            app.logger.error("playback rendition re-queue failed: \(String(reflecting: error))")
+            app.logger.error("stream ladder re-queue failed: \(String(reflecting: error))")
         }
     }
 
-    /// Queues the cellular rendition for videos uploaded before it existed.
+    /// Queues the stream ladder for every video that should have one.
     ///
-    /// Filtered in SQL to fat clips only, so the library's already-lean videos
-    /// never reach the worker: the job would no-op on them anyway, but on a
-    /// migrated library that is thousands of rows of pointless queue churn.
-    /// Duration is required — a row without it has no bitrate to judge, and the
-    /// worker will make that call for itself.
+    /// The whole library at once, not a few hundred a boot: the worker takes
+    /// ladders newest first (`DerivationWorker.claim`), which only means
+    /// something if every video is already in line. A queue of a few thousand
+    /// rows costs Postgres nothing; the transcodes are what take days.
     ///
-    /// Idempotent by the same `ON CONFLICT` as the thumbnail heal, and bounded,
-    /// so a big library trickles through restarts rather than trying to
-    /// transcode itself in one sitting.
-    static func enqueueMissingPlaybackRenditions(on app: Application) async {
+    /// Only videos shown as videos (`TimelineController.visible`, so no Live
+    /// Photo motion) and fat enough to need it — the job would decide both
+    /// again, but each row it skips is a row that never waits in line.
+    /// Idempotent, and retries a failed one, but never one deleted for good.
+    static func enqueueMissingLadders(on app: Application) async {
         do {
-            // Every rendition that failed, whichever video it's for: the 500
-            // below are any high-bitrate videos, and with thousands of those a
-            // failed one could wait for ever (209 had, 2026-10-26, most for an
-            // audio track since handled). Not one deleted for good, whose file
-            // is gone with it: 7 of those failed again on every start.
             try await app.sql.raw("""
                 UPDATE derivation_jobs j SET state = 'pending', attempts = 0, last_error = NULL
-                WHERE j.kind = \(bind: Derivatives.playbackJobKind) AND j.state = 'failed'
+                WHERE j.kind = \(bind: StreamLadder.jobKind) AND j.state = 'failed'
                   AND EXISTS (SELECT 1 FROM space_assets sa
                               WHERE sa.asset_id = j.asset_id AND sa.purged_at IS NULL)
                 """).run()
             try await app.sql.raw("""
-                WITH todo AS (
-                    SELECT DISTINCT a.id
-                    FROM assets a
-                    JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
-                    WHERE a.media_type = 'video'
-                      AND a.duration_ms > 0
-                      AND (a.byte_size * 8000 / a.duration_ms)
-                          >= \(bind: Derivatives.playbackBitrateThreshold)
-                    LIMIT 500
-                )
                 INSERT INTO derivation_jobs (asset_id, kind)
-                SELECT id, \(bind: Derivatives.playbackJobKind) FROM todo
-                -- Retries a *failed* rendition, and only a failed one. The
-                -- worker gives up after three attempts, so without this a job
-                -- that died for a reason since fixed — a bad ffmpeg argument,
-                -- say — stays dead forever and the only cure is editing the
-                -- table by hand. Restricted to 'failed' because resetting a
-                -- 'done' row would retranscode the whole library on every boot.
-                ON CONFLICT (asset_id, kind) DO UPDATE
-                  SET state = 'pending', attempts = 0, last_error = NULL
-                  WHERE derivation_jobs.state = 'failed'
+                SELECT DISTINCT a.id, \(bind: StreamLadder.jobKind)
+                FROM assets a
+                JOIN space_assets sa ON sa.asset_id = a.id AND sa.deleted_at IS NULL
+                WHERE a.media_type = 'video'
+                  AND \(unsafeRaw: TimelineController.visible)
+                  AND a.duration_ms > 0
+                  AND (a.byte_size * 8000 / a.duration_ms) >= \(bind: StreamLadder.bitrateThreshold)
+                ON CONFLICT (asset_id, kind) DO NOTHING
                 """).run()
         } catch {
-            app.logger.error("playback rendition heal failed: \(String(reflecting: error))")
+            app.logger.error("stream ladder heal failed: \(String(reflecting: error))")
         }
     }
 }

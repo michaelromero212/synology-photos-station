@@ -616,6 +616,8 @@ enum Derivatives {
 enum DerivativeError: Error, CustomStringConvertible {
     case posterFailed(String)
     case renditionFailed(String)
+    case ladderFailed(String)
+    case ladderMisaligned(String, [String])
     case malformedPPM(String)
 
     var description: String {
@@ -624,6 +626,11 @@ enum DerivativeError: Error, CustomStringConvertible {
             return "Could not extract a poster frame from \(name)."
         case .renditionFailed(let name):
             return "Could not build a playback rendition for \(name)."
+        case .ladderFailed(let name):
+            return "Could not build the stream ladder for \(name)."
+        case .ladderMisaligned(let name, let counts):
+            return "The stream ladder for \(name) came out with sizes cut differently: "
+                + counts.joined(separator: ", ") + " pieces."
         case .malformedPPM(let reason):
             return "Malformed PPM: \(reason)"
         }

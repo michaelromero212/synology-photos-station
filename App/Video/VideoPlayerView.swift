@@ -77,6 +77,13 @@ final class VideoPlaybackModel {
     @ObservationIgnored private var linkCheck: Task<Void, Never>?
     /// Looks in on a clip a few seconds after it was told to play. See `start`.
     @ObservationIgnored private var startWatch: Task<Void, Never>?
+    /// When the clip was last told to play while it wasn't, so the log can say
+    /// how long the first frame took. See `noteStarted`.
+    @ObservationIgnored private var waitingSince: Date?
+    @ObservationIgnored private var startObserver: NSKeyValueObservation?
+    /// Each size a stream ladder plays, as the player changes it.
+    @ObservationIgnored private var accessLogObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var loggedVariantBitrate: Double = 0
     #if DEBUG
     // Streaming diagnostics, console-only — see `diagnose`.
     @ObservationIgnored private var diagBufferEmpty: NSKeyValueObservation?
@@ -188,7 +195,9 @@ final class VideoPlaybackModel {
             isLoading = false
         }
         do {
-            let playback = try await client.playbackURL(assetID: assetID, quality: quality)
+            let playback = try await client.playbackURL(
+                assetID: assetID, quality: quality, adaptive: quality == .mobile
+            )
             // The signed URL is deliberately not recorded — it carries a
             // signature, and this log gets shared. What matters is which
             // representation came back, not how to fetch it.
@@ -198,6 +207,7 @@ final class VideoPlaybackModel {
             )
             noteLink(playback)
             let item = AVPlayerItem(url: playback.url)
+            fit(item, to: playback)
             // Preloaded, so buffer only a little ahead. Both pages either side
             // are warmed the moment the pager settles; left uncapped, each
             // greedily downloads its forward buffer and three streams fight over
@@ -235,6 +245,15 @@ final class VideoPlaybackModel {
         linkExpiresAt = playback.expiresAt
         linkLifetime = max(60, playback.expiresAt.timeIntervalSinceNow)
         renewingLink = false
+        loggedVariantBitrate = 0
+    }
+
+    /// A stream ladder plays whichever of its sizes the connection carries.
+    /// Speed first holds it to 720p, the smaller version it promises, however
+    /// fast the connection turns out to be.
+    private func fit(_ item: AVPlayerItem, to playback: PlaybackURLResponse) {
+        guard playback.kind == "adaptive", PlaybackSettings.videoQuality == .dataSaver else { return }
+        item.preferredMaximumResolution = CGSize(width: 1280, height: 1280)
     }
 
     /// Whether the link in hand won't see this clip out but a fresh one would
@@ -279,7 +298,8 @@ final class VideoPlaybackModel {
                 guard !Task.isCancelled, let self else { return }
                 do {
                     let playback = try await source.client.playbackURL(
-                        assetID: source.assetID, quality: source.quality
+                        assetID: source.assetID, quality: source.quality,
+                        adaptive: source.quality == .mobile
                     )
                     guard !Task.isCancelled else { return }
                     Diagnostics.shared.log(
@@ -314,6 +334,7 @@ final class VideoPlaybackModel {
     private func install(_ playback: PlaybackURLResponse, at seconds: Double) {
         noteLink(playback)
         let item = AVPlayerItem(url: playback.url)
+        fit(item, to: playback)
         item.preferredForwardBufferDuration = wantsPlayback
             ? Self.playingForwardBuffer : Self.preloadForwardBuffer
         positionAtInstall = seconds
@@ -442,6 +463,7 @@ final class VideoPlaybackModel {
         // With that much headroom, waiting for a cushion costs almost nothing and
         // buys back the stability the override destroyed.
         player.automaticallyWaitsToMinimizeStalling = true
+        if player.timeControlStatus != .playing { waitingSince = Date() }
         player.play()
         isPlaying = true
         // A clip that never gets going reports no stall — it was never playing
@@ -455,8 +477,50 @@ final class VideoPlaybackModel {
                   let item = self.player?.currentItem,
                   self.player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
             else { return }
+            // Said with what has arrived, which a clip stuck at the start had
+            // no other way to say: a log from cellular showed two clips at
+            // 0:00 for twelve seconds and not one number about why.
+            Diagnostics.shared.log(
+                .playback,
+                "Still waiting at \(Self.mmss(self.position)) after 4s, "
+                    + String(format: "%.1fs", Self.secondsBuffered(item)) + " buffered"
+            )
+            self.measure("waiting")
             self.checkLinkWhileStalled(item)
         }
+    }
+
+    /// How far past the playhead the clip is loaded.
+    private static func secondsBuffered(_ item: AVPlayerItem) -> Double {
+        let now = item.currentTime()
+        guard let range = item.loadedTimeRanges.map(\.timeRangeValue)
+            .first(where: { $0.containsTime(now) })
+        else { return 0 }
+        return max(0, range.end.seconds - now.seconds)
+    }
+
+    /// The first frame arriving after a play: how long it took, which is the
+    /// number "speedy" is measured by.
+    private func noteStarted() {
+        guard let since = waitingSince else { return }
+        waitingSince = nil
+        Diagnostics.shared.log(
+            .playback,
+            String(format: "Playing after %.2fs", Date().timeIntervalSince(since))
+                + " at \(Self.mmss(position))"
+        )
+    }
+
+    /// Each size a stream ladder settles on, as the player changes it, with what
+    /// the link was managing. A single file gets one line, when it starts.
+    private func noteVariant(_ item: AVPlayerItem) {
+        guard let event = item.accessLog()?.events.last, event.indicatedBitrate > 0,
+              event.indicatedBitrate != loggedVariantBitrate
+        else { return }
+        loggedVariantBitrate = event.indicatedBitrate
+        var text = "Size of \(Self.mbps(event.indicatedBitrate))"
+        if event.observedBitrate > 0 { text += ", link \(Self.mbps(event.observedBitrate))" }
+        Diagnostics.shared.log(.quality, text)
     }
 
     /// How far ahead this clip may read.
@@ -485,6 +549,7 @@ final class VideoPlaybackModel {
     /// video being closed.
     func pause() {
         wantsPlayback = false
+        waitingSince = nil
         player?.pause()
         // Re-cap: a clip scrolled off (or advanced past) must stop reading
         // ahead, or it keeps pulling bytes in the background and starves the one
@@ -569,6 +634,14 @@ final class VideoPlaybackModel {
             }
         }
         if let item = player.currentItem { trackItem(item, on: player) }
+        // Hopped to the main actor rather than assumed on it: this is only a
+        // log line, and not worth a crash if AVFoundation ever reports the
+        // change from another thread.
+        startObserver = player.observe(\.timeControlStatus, options: [.new]) {
+            [weak self] player, _ in
+            guard player.timeControlStatus == .playing else { return }
+            Task { @MainActor in self?.noteStarted() }
+        }
     }
 
     /// Everything watched on the item itself, so a fresh link — a new item in
@@ -650,6 +723,12 @@ final class VideoPlaybackModel {
                 self.measure("at stall")
                 self.checkLinkWhileStalled(item)
             }
+        }
+
+        accessLogObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemNewAccessLogEntry, object: item, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.noteVariant(item) }
         }
 
         #if DEBUG
@@ -761,12 +840,14 @@ final class VideoPlaybackModel {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
         if let stalledObserver { NotificationCenter.default.removeObserver(stalledObserver) }
+        if let accessLogObserver { NotificationCenter.default.removeObserver(accessLogObserver) }
         statusObserver?.invalidate()
         recoveryObserver?.invalidate()
         linkCheck?.cancel()
         endObserver = nil
         stallObserver = nil
         stalledObserver = nil
+        accessLogObserver = nil
         statusObserver = nil
         recoveryObserver = nil
         linkCheck = nil
@@ -874,6 +955,7 @@ final class VideoPlaybackModel {
         if isPlaying {
             Diagnostics.shared.log(.action, "Pause at \(Self.mmss(position))")
             measure("paused")
+            waitingSince = nil
             player.pause()
             isPlaying = false
             // Paused by hand: a reconnect while it sits there mustn't start it.
@@ -896,6 +978,7 @@ final class VideoPlaybackModel {
             // Lift the cap `pause` left on the item. Without this, pausing once
             // meant the rest of the clip streamed on a two-second buffer.
             bufferFreely(true)
+            if player.timeControlStatus != .playing { waitingSince = Date() }
             player.play()
             isPlaying = true
             hasFinished = false
@@ -1076,6 +1159,9 @@ final class VideoPlaybackModel {
         isReconnecting = false
         if let observer { player?.removeTimeObserver(observer) }
         observer = nil
+        startObserver?.invalidate()
+        startObserver = nil
+        waitingSince = nil
         untrackItem()
         #if DEBUG
         diagBufferEmpty = nil

@@ -18,7 +18,8 @@ actor DerivationWorker {
     /// Set once the lanes are running. See `deriveNow(assetID:)`.
     private var lanesStarted = false
 
-    /// Whether a lane is building a playback rendition.
+    /// Whether a lane is transcoding: building a stream ladder, or a playback
+    /// rendition left in the queue from before ladders.
     ///
     /// One at a time. A 4K transcode holds its lane for minutes, and when two
     /// ran at once after a restart they had half the lanes and the processor
@@ -157,7 +158,7 @@ actor DerivationWorker {
                 await Shell.$isBackground.withValue(true) {
                     await process(job: job, app: app)
                 }
-                if job.kind == Derivatives.playbackJobKind {
+                if Self.transcodeKinds.contains(job.kind) {
                     await worker.finishedTranscoding()
                 }
             } catch is CancellationError {
@@ -180,7 +181,7 @@ actor DerivationWorker {
         transcoding = true
         do {
             let job = try await Self.claim(app: app, includingTranscodes: true)
-            transcoding = job?.kind == Derivatives.playbackJobKind
+            transcoding = job.map { Self.transcodeKinds.contains($0.kind) } ?? false
             return job
         } catch {
             transcoding = false
@@ -189,6 +190,9 @@ actor DerivationWorker {
     }
 
     private func finishedTranscoding() { transcoding = false }
+
+    /// The jobs that hold a lane for minutes at a time.
+    static let transcodeKinds: Set<String> = [StreamLadder.jobKind, Derivatives.playbackJobKind]
 
     /// Atomically takes the oldest claimable job.
     ///
@@ -218,7 +222,8 @@ actor DerivationWorker {
                            AND j.attempts < 3))
                       -- One transcode at a time; see `transcoding`.
                       AND (\(bind: includingTranscodes)
-                           OR j.kind <> \(bind: Derivatives.playbackJobKind))
+                           OR (j.kind <> \(bind: StreamLadder.jobKind)
+                               AND j.kind <> \(bind: Derivatives.playbackJobKind)))
                     -- Thumbnails first: they are what someone watching the grid
                     -- is waiting on, so a burst of uploads (and the exif-dump
                     -- backfill sharing this queue) fills tiles before it spends
@@ -230,8 +235,18 @@ actor DerivationWorker {
                     -- rebuild (every video's poster, say) ahead of whatever
                     -- somebody uploads while it runs, leaving their new photos
                     -- gray until the whole rebuild had finished.
+                    --
+                    -- Ladders last, newest video first. A library-wide build
+                    -- takes days on this processor, so the order is what
+                    -- decides who waits: the clips people are watching this
+                    -- week are ready on the first day, and one just uploaded
+                    -- goes ahead of all of them, still without a thumbnail.
                     ORDER BY (j.kind = 'thumbnails') DESC,
                              (a.derived_at IS NULL) DESC,
+                             (j.kind = \(bind: StreamLadder.jobKind)) ASC,
+                             CASE WHEN j.kind = \(bind: StreamLadder.jobKind)
+                                  THEN COALESCE(a.local_captured_at, a.created_at AT TIME ZONE 'UTC')
+                             END DESC NULLS LAST,
                              j.created_at
                     FOR UPDATE OF j SKIP LOCKED
                     LIMIT 1
@@ -336,45 +351,38 @@ actor DerivationWorker {
                     }
                 }
 
+            case StreamLadder.jobKind:
+                // Only a video somebody watches as a video. A Live Photo's
+                // motion plays from its still, three seconds at a time, and
+                // there were thousands of them among the renditions this
+                // replaced — each one a transcode for nothing.
+                guard mediaType == .video,
+                      let shape = try await VideoShape.read(asset.id, on: app.sql),
+                      !shape.isHidden
+                else { break }
+                _ = try await StreamLadder.make(
+                    blob: blob,
+                    sha256: asset.sha256,
+                    sourceBitrate: shape.bitrate,
+                    sourceLongEdge: shape.longEdge,
+                    sourceDurationMS: shape.durationMS,
+                    store: app.blobStore,
+                    logger: app.logger
+                )
+
             case Derivatives.playbackJobKind:
                 // Only video has one, and only video above the bitrate
-                // threshold — see `makePlaybackRendition`.
-                guard mediaType == .video else { break }
-
-                // Fetched here rather than widened into the shared `AssetRow`:
-                // every other job kind would carry two columns it never reads.
-                struct Shape: Decodable {
-                    let byteSize: Int?
-                    let durationMS: Int?
-                    let width: Int?
-                    let height: Int?
-                }
-                let shape = try await app.sql.raw("""
-                    SELECT byte_size AS "byteSize", duration_ms AS "durationMS",
-                           width, height
-                    FROM assets WHERE id = \(bind: asset.id)
-                    """).first(decoding: Shape.self)
-
-                // Bits per second from what is already on the row, so no new
-                // column is needed. Unknown duration means unknown bitrate,
-                // which `makePlaybackRendition` treats as "build it" — better a
-                // wasted transcode than a clip that stutters on cellular.
-                var bitrate: Int?
-                if let bytes = shape?.byteSize, let ms = shape?.durationMS, ms > 0 {
-                    bitrate = Int(Double(bytes) * 8.0 / (Double(ms) / 1000.0))
-                }
-
-                // Nil when the probe never recorded dimensions, which the
-                // rendition treats as "scale it" — the clip is over the bitrate
-                // threshold, so it is very unlikely to be small.
-                let longEdge = [shape?.width, shape?.height].compactMap(\.self).max()
-
+                // threshold — see `makePlaybackRendition`. No longer queued:
+                // the ladder above replaced it. Kept for a row from before.
+                guard mediaType == .video,
+                      let shape = try await VideoShape.read(asset.id, on: app.sql)
+                else { break }
                 _ = try await Derivatives.makePlaybackRendition(
                     blob: blob,
                     sha256: asset.sha256,
-                    sourceBitrate: bitrate,
-                    sourceLongEdge: longEdge,
-                    sourceDurationMS: shape?.durationMS,
+                    sourceBitrate: shape.bitrate,
+                    sourceLongEdge: shape.longEdge,
+                    sourceDurationMS: shape.durationMS,
                     store: app.blobStore,
                     logger: app.logger
                 )
@@ -389,6 +397,42 @@ actor DerivationWorker {
         } catch {
             app.logger.error("derivation \(job.kind) failed for \(job.assetID): \(error)")
             try? await finish(job: job, app: app, error: String(describing: error))
+        }
+    }
+
+    /// What a transcode needs to know about a video before it starts.
+    ///
+    /// Fetched by the transcodes rather than widened into the shared
+    /// `AssetRow`: every other job kind would carry columns it never reads.
+    struct VideoShape: Decodable {
+        let byteSize: Int?
+        let durationMS: Int?
+        let width: Int?
+        let height: Int?
+        /// A Live Photo's motion, or a file stacked under another: never shown
+        /// as a video of its own. See `TimelineController.visible`.
+        let isHidden: Bool
+
+        /// Bits per second from what is already on the row, so no new column
+        /// is needed. Unknown duration means unknown bitrate, which a
+        /// transcode treats as "build it" — better a wasted transcode than a
+        /// clip that stutters on cellular.
+        var bitrate: Int? {
+            guard let byteSize, let durationMS, durationMS > 0 else { return nil }
+            return Int(Double(byteSize) * 8.0 / (Double(durationMS) / 1000.0))
+        }
+
+        /// Nil when the probe never recorded dimensions, which a transcode
+        /// treats as "scale it": a clip over the bitrate threshold is very
+        /// unlikely to be small.
+        var longEdge: Int? { [width, height].compactMap(\.self).max() }
+
+        static func read(_ assetID: UUID, on sql: any SQLDatabase) async throws -> VideoShape? {
+            try await sql.raw("""
+                SELECT byte_size AS "byteSize", duration_ms AS "durationMS", width, height,
+                       NOT \(unsafeRaw: TimelineController.visible) AS "isHidden"
+                FROM assets a WHERE a.id = \(bind: assetID)
+                """).first(decoding: VideoShape.self)
         }
     }
 

@@ -27,6 +27,11 @@ struct AssetController: RouteCollection {
         // itself and an AirPlay receiver fetches it from another device
         // entirely, so neither can carry our Authorization header.
         routes.get("stream", ":assetID", use: stream)
+        // A stream ladder's playlists and pieces, signed in the path rather
+        // than the query: every piece a playlist names resolves against the
+        // playlist's own address, and a query string is the one part of an
+        // address that doesn't carry over.
+        routes.get("hls", ":assetID", ":userID", ":expires", ":signature", ":file", use: adaptiveStream)
     }
 
     private struct AssetRow: Decodable {
@@ -40,6 +45,7 @@ struct AssetController: RouteCollection {
         let storagePath: String?
         /// Whether its thumbnails have been made.
         let isDerived: Bool
+        let durationMS: Int?
 
         /// The columns an `AssetRow` is decoded from, for every query that
         /// decodes one — selected from `assets a`.
@@ -53,7 +59,8 @@ struct AssetController: RouteCollection {
             a.id, a.sha256, a.media_type AS "mediaType",
             a.blob_ext AS "blobExt", a.mime,
             a.storage_path AS "storagePath",
-            a.derived_at IS NOT NULL AS "isDerived"
+            a.derived_at IS NOT NULL AS "isDerived",
+            a.duration_ms AS "durationMS"
             """
     }
 
@@ -216,6 +223,33 @@ struct AssetController: RouteCollection {
         // predates renditions behaves exactly as it always did.
         let requested = req.query[String.self, at: "quality"]
             .flatMap(PlaybackQuality.init(rawValue:)) ?? .default
+
+        // The stream ladder, for an app that says it can play one. Said beside
+        // `quality` rather than as a value of it: a server from before ladders
+        // ignores the extra question and goes on answering `mobile` with the
+        // rendition, where a quality it couldn't read would have been taken as
+        // a request for the 51 Mbps original.
+        if requested == .mobile, req.query[String.self, at: "adaptive"] == "1",
+           StreamLadder.exists(sha256: asset.sha256, store: req.application.blobStore) {
+            let expires = Int(
+                Date().addingTimeInterval(PlaybackToken.adaptiveLifetime(durationMS: asset.durationMS))
+                    .timeIntervalSince1970
+            )
+            let signature = PlaybackToken.sign(
+                assetID: asset.id, userID: device.userID, expires: expires,
+                representation: PlaybackToken.adaptive, key: PlaybackToken.secret(for: req.application)
+            )
+            let path = "/v1/hls/\(asset.id.uuidString)/\(device.userID.uuidString)/\(expires)/"
+                + "\(signature)/\(StreamLadder.masterName)"
+            guard let url = URL(string: path, relativeTo: baseURL(req))?.absoluteURL else {
+                throw Abort(.internalServerError, reason: "Could not build a playback URL.")
+            }
+            return PlaybackURLResponse(
+                url: url, expiresAt: Date(timeIntervalSince1970: TimeInterval(expires)),
+                kind: "adaptive"
+            )
+        }
+
         // Asking for the rendition doesn't conjure one: until the transcode has
         // run there is nothing to serve, and the original is a far better answer
         // than an error. `stream` makes the same check when it picks the file.
@@ -282,22 +316,7 @@ struct AssetController: RouteCollection {
             throw Abort(.notFound, reason: "No such asset.")
         }
 
-        // The signature proves the link was issued; membership is still checked
-        // now, so revoking someone mid-lifetime takes effect immediately. A
-        // clip in Recently Deleted counts, as it did when the link was issued,
-        // until it's purged. See `requireReadableAsset`.
-        guard let asset = try await req.sql.raw("""
-            SELECT \(unsafeRaw: AssetRow.columns)
-            FROM assets a
-            WHERE a.id = \(bind: assetID)
-              AND EXISTS (
-                  SELECT 1 FROM space_assets sa
-                  JOIN space_members m ON m.space_id = sa.space_id
-                  WHERE sa.asset_id = a.id
-                    AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
-                    AND m.user_id = \(bind: userID)
-              )
-            """).first(decoding: AssetRow.self) else {
+        guard let asset = try await streamable(assetID, by: userID, req) else {
             throw Abort(.notFound, reason: "No such asset.")
         }
 
@@ -319,6 +338,60 @@ struct AssetController: RouteCollection {
 
         let blob = fileURL(for: asset, req)
         return try await streamFile(req, at: blob, contentType: asset.mime, immutable: true)
+    }
+
+    /// A stream ladder's top-level playlist, a size's playlist, or a piece of
+    /// one, by the link `playbackURL` signed for it.
+    ///
+    /// The pieces are byte ranges of one file per size, served as any file is
+    /// here, so a player's `Range` requests get the 206s they expect.
+    @Sendable
+    func adaptiveStream(req: Request) async throws -> Response {
+        let assetID = try req.parameters.require("assetID", as: UUID.self)
+        // Every way a link can be wrong is the same 404 as an unknown asset,
+        // so a bad one reveals nothing. The file name is checked against the
+        // few a ladder has before anything touches the disk.
+        guard let userID = req.parameters.get("userID", as: UUID.self),
+              let expires = req.parameters.get("expires", as: Int.self),
+              let signature = req.parameters.get("signature"),
+              let file = req.parameters.get("file"), StreamLadder.isServable(file),
+              PlaybackToken.verify(
+                  assetID: assetID, userID: userID, expires: expires,
+                  representation: PlaybackToken.adaptive, signature: signature,
+                  key: PlaybackToken.secret(for: req.application)
+              ),
+              let asset = try await streamable(assetID, by: userID, req)
+        else {
+            throw Abort(.notFound, reason: "No such asset.")
+        }
+        let path = StreamLadder.directory(sha256: asset.sha256, store: req.application.blobStore)
+            .appendingPathComponent(file)
+        return try await streamFile(
+            req, at: path, contentType: StreamLadder.contentType(for: file), immutable: true
+        )
+    }
+
+    /// The asset a signed link may stream, if the person it was signed for can
+    /// still see it.
+    ///
+    /// The signature proves the link was issued; membership is checked on
+    /// every request anyway, so revoking someone mid-lifetime takes effect
+    /// immediately — for a ladder, on the very next piece. A clip in Recently
+    /// Deleted counts, as it did when the link was issued, until it's purged.
+    /// See `requireReadableAsset`.
+    private func streamable(_ assetID: UUID, by userID: UUID, _ req: Request) async throws -> AssetRow? {
+        try await req.sql.raw("""
+            SELECT \(unsafeRaw: AssetRow.columns)
+            FROM assets a
+            WHERE a.id = \(bind: assetID)
+              AND EXISTS (
+                  SELECT 1 FROM space_assets sa
+                  JOIN space_members m ON m.space_id = sa.space_id
+                  WHERE sa.asset_id = a.id
+                    AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
+                    AND m.user_id = \(bind: userID)
+              )
+            """).first(decoding: AssetRow.self)
     }
 
     /// Honors a reverse proxy, so a link minted behind DSM points at the

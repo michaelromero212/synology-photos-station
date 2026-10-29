@@ -135,11 +135,18 @@ public actor FrameStationClient {
     /// The signed URL to play. `quality` picks which representation — the
     /// server falls back to the original whenever the rendition it asks for
     /// hasn't been built yet, so this can always be asked for optimistically.
+    ///
+    /// `adaptive` says this app can play a stream ladder: a link to a playlist
+    /// of sizes rather than to one file (`kind` "adaptive"). Asked beside
+    /// `quality` rather than as a value of it, so a server from before ladders
+    /// ignores the question and answers `mobile` as it always did — a quality
+    /// it couldn't read, it would have taken as a request for the original.
     public func playbackURL(
-        assetID: UUID, quality: PlaybackQuality = .default
+        assetID: UUID, quality: PlaybackQuality = .default, adaptive: Bool = false
     ) async throws -> PlaybackURLResponse {
         try await send(
             .get, "v1/assets/\(assetID.uuidString)/playback?quality=\(quality.rawValue)"
+                + (adaptive ? "&adaptive=1" : "")
         )
     }
 
