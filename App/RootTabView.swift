@@ -126,6 +126,18 @@ struct RootTabView: View {
             )
             .modifier(TabBarStepsAside())
         }
+        // Whether the NAS can be reached, over every tab. See `ConnectionPill`.
+        // Raised while a toast has the same spot, rather than drawn through it.
+        .overlay(alignment: .bottom) {
+            if let connection {
+                ConnectionPill(monitor: connection)
+                    .padding(
+                        .bottom,
+                        FloatingTabBarMetrics.contentInset + (session.toast == nil ? 0 : 52)
+                    )
+                    .animation(.spring(duration: 0.35), value: session.toast == nil)
+            }
+        }
         // Over every tab, for what finished as its screen closed. See
         // `AppSession.toast`.
         .modifier(GridToast(message: $session.toast))

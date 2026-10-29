@@ -28,6 +28,9 @@ final class CollectionsStore {
     private var fetchedFor: String?
     /// How far into the library's changes it had got. See `isStale`.
     private var fetchedCursor: Int64?
+    /// And how many of this device's own changes it had seen. See
+    /// `AppSession.libraryRevision`.
+    private var fetchedRevision: Int?
     /// Set while a request is out, so a second caller doesn't send another.
     /// The Albums page asks from two places as it appears, and both used to go
     /// to the NAS: two identical requests per visit.
@@ -59,10 +62,13 @@ final class CollectionsStore {
     ///
     /// A change the grid has already seen doesn't wait out the minute. Favorite
     /// a photo, or trash one, and the Favorites count or the trip it belonged to
-    /// should say so the moment you arrive here.
+    /// should say so the moment you arrive here. Nor does one made from this
+    /// device that the grid hasn't seen, like a photo restored from Recently
+    /// Deleted (`AppSession.libraryRevision`).
     var isStale: Bool {
         guard let fetchedAt, fetchedFor == Self.dayStamp() else { return true }
         if session?.changeCursor(for: spaceID) != fetchedCursor { return true }
+        if session?.libraryRevision != fetchedRevision { return true }
         return Date().timeIntervalSince(fetchedAt) > 60
     }
 
@@ -80,6 +86,15 @@ final class CollectionsStore {
         await refresh()
     }
 
+    /// Asks again only if the library has moved since the last answer, however
+    /// recent that was. For a page that's watching. See `LiveCounts`.
+    func refreshIfChanged() async {
+        guard !isRefreshing else { return }
+        guard fetchedAt == nil || session?.changeCursor(for: spaceID) != fetchedCursor
+                || session?.libraryRevision != fetchedRevision else { return }
+        await refresh()
+    }
+
     /// Asks again on the next visit. See `AppSession.hiddenContentChanged`.
     func expire() { fetchedAt = nil }
 
@@ -92,6 +107,7 @@ final class CollectionsStore {
         // Read before asking, not after: a change that lands while the request
         // is out may not be in the answer, and must still count as unseen.
         let cursor = session?.changeCursor(for: spaceID)
+        let revision = session?.libraryRevision
         // Failure is quiet, but it must not be destructive. Assigning the
         // result straight through meant one failed pull-to-refresh replaced a
         // good page with nil — and the page above, seeing nothing, replaced
@@ -107,6 +123,7 @@ final class CollectionsStore {
             fetchedAt = Date()
             fetchedFor = Self.dayStamp()
             fetchedCursor = cursor
+            fetchedRevision = revision
         }
     }
 }
@@ -561,6 +578,9 @@ struct CollectionDetailView: View {
         // moment the row changes. The highlights switch is part of the key, so
         // flipping it loads the other set.
         .task(id: "\(collection.key)#\(showAll)") { await load() }
+        // A photo deleted from the viewer drops out of the trip it was in, and
+        // one restored comes back to it. See `FollowsOwnChanges`.
+        .modifier(FollowsOwnChanges(session: session) { await load() })
         .onChange(of: collection.key) {
             showAll = false
             highlightsAvailable = false
@@ -1273,10 +1293,15 @@ struct RecentlyDeletedView: View {
 struct MediaTypesView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
+    /// What the Albums page had when this was opened, until the store has
+    /// newer. Read from the store after that, so a video deleted from Videos
+    /// isn't still counted here on the way back.
     let types: [CollectionSummary]
 
+    private var store: CollectionsStore { session.collectionsStore(for: space.id) }
+
     var body: some View {
-        List(types) { type in
+        List(store.page?.mediaTypes ?? types) { type in
             NavigationLink {
                 CollectionDetailView(session: session, space: space, collection: type)
             } label: {
@@ -1290,5 +1315,7 @@ struct MediaTypesView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .onAppear { Task { await store.refreshIfStale() } }
+        .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
     }
 }

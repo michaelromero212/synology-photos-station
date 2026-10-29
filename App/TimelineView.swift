@@ -274,7 +274,6 @@ struct TimelineView: View {
             #if os(iOS)
             if let engine, !showsGrid {
                 backupBanner(engine)
-                    .animation(.easeOut(duration: 0.2), value: connection?.state)
             }
             #endif
 
@@ -304,40 +303,8 @@ struct TimelineView: View {
         // status bar respected now has to say so.
         .overlay(alignment: .top) { TopEdgeFade(topInset: windowTopInset) }
         .overlay(alignment: .top) { floatingTopBar.padding(.top, windowTopInset) }
-        // And the backup banner at the other end, for the same reason the
-        // controls are up there: an overlay moves nothing when it goes.
-        //
-        // It used to be the last item in the scroll content so it would scroll
-        // away with the photographs. That is a nicer idea than it is a
-        // behavior — dismissing it made the content shorter, and a grid
-        // anchored to its own end has to take up the slack, so the library
-        // jumped by the banner's height every time someone pressed the X.
-        //
-        // Aligned to the bottom *inside* the safe area, so it rides above the
-        // tab bar rather than under it. Only when the grid is up; the empty-
-        // library case still puts it in the stack in `body`, where there is no
-        // scroll view for it to disturb.
-        .overlay(alignment: .bottom) {
-            // Only the connection banner floats now, and only because it is an
-            // error rather than a status: a NAS that isn't answering breaks
-            // browsing as well as backup, and saying so where somebody is
-            // already looking is worth covering a row for. A status is not, and
-            // the one that used to float here is gone entirely — see the note
-            // at the end of the scroll content.
-            //
-            // Not while selecting. The selection bar goes here too, and of the
-            // two only one is something to act on.
-            //
-            // Above the floating bar, not through it: eight points off the safe
-            // area was right when the system drew the tab bar and reserved its
-            // own space, and ours floats twenty-one points from the bottom of
-            // the display and reserves nothing.
-            if let connection, connection.state != .online, showsGrid, !selection.isActive {
-                connectionBanner(connection.state)
-                    .padding(.bottom, FloatingTabBarMetrics.contentInset)
-                    .allowsHitTesting(true)
-            }
-        }
+        // Nothing floats at the bottom any more. The connection banner did,
+        // over the grid alone; it is `ConnectionPill` now, over every tab.
         #endif
         // The count takes the title while selecting. It used to sit in the
         // leading slot beside the space name, which left two pieces of text
@@ -647,6 +614,10 @@ struct TimelineView: View {
                 await store?.refresh()
             }
         }
+        // And what this device changes, without waiting for the poll: a photo
+        // deleted from the viewer used to stay in the grid behind it for up to
+        // fifteen seconds. See `FollowsOwnChanges`.
+        .modifier(FollowsOwnChanges(session: session) { await store?.refresh() })
         #if os(iOS)
         // Outermost, and that is the entire trick.
         //
@@ -2654,19 +2625,18 @@ struct TimelineView: View {
     #if os(iOS)
     /// Present while backup is running, because "is my phone backed up" is a
     /// question people ask constantly and a banner that only appears during
-    /// work can't answer it — and present whenever the NAS is unreachable,
-    /// whatever backup is doing.
+    /// work can't answer it.
     ///
     /// Nothing at all when backup is simply off. That case used to raise a
     /// prompt here; it lives in Settings now.
     @ViewBuilder
     private func backupBanner(_ engine: BackupEngine) -> some View {
-        // Ahead of both backup states, and shown even when backup is off. A
-        // NAS that isn't answering breaks browsing too — tiles beyond the cache
-        // stay blank and tapping one fails — so this is the more useful thing
-        // to say regardless of whether anything is being uploaded.
+        // Nothing while the NAS can't be reached, either. `ConnectionPill`
+        // says so over every tab, and a backup status under it describing a
+        // run that can't move would be the second of two messages about one
+        // problem.
         if let connection, connection.state != .online {
-            connectionBanner(connection.state)
+            EmptyView()
         } else if space.kind != .personal {
             // Backup is about *this phone's camera roll*, which has nothing to
             // do with a library the family contributes to. Offering "turn on
@@ -2693,48 +2663,6 @@ struct TimelineView: View {
         } else {
             runningBanner(engine)
         }
-    }
-
-    /// Why the library is unreachable, in the terms that decide what to do
-    /// about it.
-    ///
-    /// "No signal" and "the NAS isn't answering" are separated deliberately:
-    /// one resolves itself and the other means somebody should go and look at
-    /// the box. Collapsing them into "offline" would leave a NAS that has been
-    /// down since Tuesday looking like a bad cell.
-    ///
-    /// Not a button. It clears itself within seconds of the server coming
-    /// back, and a tappable banner whose only action is the one already
-    /// running invites a tap that changes nothing.
-    private func connectionBanner(_ state: ConnectionMonitor.State) -> some View {
-        let isOffline = state == .offline
-        return HStack(spacing: 12) {
-            Image(systemName: isOffline ? "wifi.slash" : "exclamationmark.icloud.fill")
-                .font(.title3)
-                .foregroundStyle(.orange)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(isOffline ? "No Internet Connection" : "Can't Reach FrameStation")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.primary)
-                Text(
-                    isOffline
-                        ? "Photos will sync when you're back online."
-                        : "Your library is unavailable and backups are paused."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     /// The status row, once backup is actually on.

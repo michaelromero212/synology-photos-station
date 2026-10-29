@@ -124,6 +124,9 @@ struct AlbumDetailView: View {
             }
         }
         .task { await load() }
+        // A photo deleted from the viewer, or added from another screen.
+        // See `FollowsOwnChanges`.
+        .modifier(FollowsOwnChanges(session: session) { await load() })
         // Photos added from the grid, a new name from another device, people
         // added or gone: the Albums page's list hears of it first. Followed
         // here, so the title and Edit never work from the album as it was when

@@ -36,6 +36,9 @@ final class AlbumStore {
     /// library's changes it had got, for `isStale`.
     private var fetchedAt: Date?
     private var fetchedCursor: Int64?
+    /// And how many of this device's own changes it had seen. See
+    /// `AppSession.libraryRevision`.
+    private var fetchedRevision: Int?
     /// Set while a request is out, so a second caller doesn't send another.
     /// See `CollectionsStore.isRefreshing`.
     private var isRefreshing = false
@@ -79,6 +82,7 @@ final class AlbumStore {
     var isStale: Bool {
         guard let fetchedAt else { return true }
         if libraryCursor != fetchedCursor { return true }
+        if session?.libraryRevision != fetchedRevision { return true }
         return Date().timeIntervalSince(fetchedAt) > 60
     }
 
@@ -91,6 +95,15 @@ final class AlbumStore {
 
     func refreshIfStale() async {
         guard isStale, !isRefreshing else { return }
+        await refresh()
+    }
+
+    /// Asks again only if the library has moved since the last answer, however
+    /// recent that was. For a page that's watching. See `LiveCounts`.
+    func refreshIfChanged() async {
+        guard !isRefreshing else { return }
+        guard fetchedAt == nil || libraryCursor != fetchedCursor
+                || session?.libraryRevision != fetchedRevision else { return }
         await refresh()
     }
 
@@ -109,6 +122,7 @@ final class AlbumStore {
         defer { isLoading = false }
         // Before asking, as `CollectionsStore.refresh` does.
         let cursor = libraryCursor
+        let revision = session?.libraryRevision
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
@@ -129,6 +143,7 @@ final class AlbumStore {
             }
             fetchedAt = Date()
             fetchedCursor = cursor
+            fetchedRevision = revision
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -499,6 +514,11 @@ struct AlbumsView: View {
                 await store?.refreshIfStale()
             }
         }
+        // And the counts, while you're looking at them. See `LiveCounts`.
+        .modifier(LiveCounts(session: session) {
+            await collections?.refreshIfChanged()
+            await store?.refreshIfChanged()
+        })
     }
 
     /// The page: what the library noticed, then what you filed.
@@ -921,14 +941,18 @@ struct AlbumsView: View {
                 }
                 .buttonStyle(.plain)
             }
-            if let deleted = found.recentlyDeleted {
-                NavigationLink {
-                    RecentlyDeletedView(session: session, space: space)
-                } label: {
-                    utilityRow("Recently Deleted", systemImage: "trash", count: deleted.count)
-                }
-                .buttonStyle(.plain)
+            // Always, at zero too. The NAS leaves the card out when nothing is
+            // in it, and a row that only appears once you've deleted something
+            // is a place nobody knows to look for until they need it.
+            NavigationLink {
+                RecentlyDeletedView(session: session, space: space)
+            } label: {
+                utilityRow(
+                    "Recently Deleted", systemImage: "trash",
+                    count: found.recentlyDeleted?.count ?? 0
+                )
             }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, spacing)
     }
@@ -973,6 +997,97 @@ struct AlbumsView: View {
         .padding(.bottom, 10)
     }
 
+}
+
+/// Brings a screen up to date a moment after this device changes a library:
+/// a photo deleted or restored, an album's photos changed, an upload landing.
+/// See `AppSession.libraryRevision`.
+///
+/// A grid used to learn of its own changes when its fifteen-second poll next
+/// came round, or when it was next opened. Delete a photo from the viewer and
+/// the viewer closed onto a grid that still had it.
+///
+/// Never while a photo is open over the screen. The way out of the viewer
+/// flies the photo back into its tile, and a grid rebuilt underneath would
+/// take the tile away mid-flight; this waits for the viewer to go. Changes
+/// made while the screen was out of sight are caught up when it's back.
+///
+/// A modifier of its own so that only this reads the revision. Read in a
+/// screen's body, every photo a backup committed would rebuild the screen.
+struct FollowsOwnChanges: ViewModifier {
+    let session: AppSession
+    let refresh: @MainActor () async -> Void
+    /// The revision this screen last caught up to. Nil until it first appears,
+    /// when its own load is the catching up.
+    @State private var seen: Int?
+
+    private struct Watch: Equatable {
+        let revision: Int
+        let viewerOpen: Bool
+    }
+
+    func body(content: Content) -> some View {
+        content.task(id: Watch(revision: session.libraryRevision, viewerOpen: Self.viewerOpen)) {
+            guard let seen else {
+                self.seen = session.libraryRevision
+                return
+            }
+            guard seen != session.libraryRevision, !Self.viewerOpen else { return }
+            // Twenty photos deleted at once, or a backup landing one after
+            // another, settle first and are asked about once. Long enough,
+            // too, for a photo flying home to land in its tile.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self.seen = session.libraryRevision
+            await refresh()
+        }
+    }
+
+    private static var viewerOpen: Bool {
+        #if os(iOS)
+        !GridChrome.shared.openViewers.isEmpty
+        #else
+        false
+        #endif
+    }
+}
+
+/// Keeps a page's counts current for as long as it's on screen: the albums'
+/// numbers, Media Types, Recently Deleted.
+///
+/// Two sources of change. This device's own (a photo trashed or restored, an
+/// album changed, an upload landing) arrive as `AppSession.libraryRevision`,
+/// and are asked about a moment after they happen, so a run of them is one
+/// request. Everyone else's, and the NAS's (a backup landing from the phone's
+/// background extension, a photo deleted on the iPad), show up in the
+/// personal library's change log, read every fifteen seconds as the Photos
+/// grid reads it: an unchanged library answers with an empty list, and only a
+/// change sends the page's own heavier requests.
+///
+/// The first through `FollowsOwnChanges`, which every grid uses as well.
+struct LiveCounts: ViewModifier {
+    let session: AppSession
+    let refresh: @MainActor () async -> Void
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(FollowsOwnChanges(session: session, refresh: refresh))
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
+            .task(id: isVisible && scenePhase == .active) {
+                guard isVisible, scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(15))
+                    guard !Task.isCancelled else { return }
+                    if let space = session.personalSpace {
+                        await session.timelineStore(for: space)?.refresh()
+                    }
+                    await refresh()
+                }
+            }
+    }
 }
 
 extension CollectionSummary {

@@ -458,10 +458,13 @@ struct AssetDetailView: View {
         ) {
             Button("Remove", role: .destructive) {
                 Task { [asset = currentItem] in
-                    try? await session.client?.removeAsset(
+                    let removed = (try? await session.client?.removeAsset(
                         spaceID: space.id, assetID: asset.assetID
-                    )
-                    leave()
+                    )) != nil
+                    // Gone, it fades rather than flying home to a tile the
+                    // grid is about to take away, as a reported photo does.
+                    // Still there, because the NAS said no, it flies back.
+                    leave(flyingBack: !removed)
                 }
             }
             Button("Cancel", role: .cancel) {}

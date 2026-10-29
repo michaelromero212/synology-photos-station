@@ -14,6 +14,15 @@ import SwiftUI
 /// Evidence, not polling. The state changes when a request the app was making
 /// anyway fails, and `/health` is only asked while something is already known
 /// to be wrong. A healthy app never sends a single extra request.
+///
+/// And enough evidence before saying so. One failed request and one failed
+/// `/health` used to be the whole case, which is what a phone coming back from
+/// the background or changing networks produces with the NAS fine: its first
+/// requests die on connections that went stale, and the check sent straight
+/// after them finds the network not yet settled. The banner went up and, five
+/// seconds later, came down, too briefly to read. An outage now has to last:
+/// three checks over five seconds, each unanswered, and no other request
+/// getting through meanwhile.
 @Observable
 @MainActor
 final class ConnectionMonitor {
@@ -27,6 +36,23 @@ final class ConnectionMonitor {
     }
 
     private(set) var state: State = .online
+
+    /// What the status pill over the tab bar says. See `ConnectionPill`.
+    ///
+    /// Follows `state`, with one addition: when the connection comes back after
+    /// the pill has said it was gone, it says so for two seconds before it
+    /// goes. A warning that simply vanishes leaves you wondering whether it was
+    /// ever true, and whether it's safe to carry on.
+    enum Notice: Equatable {
+        case offline
+        case unreachable
+        case reconnected
+    }
+
+    private(set) var notice: Notice?
+
+    /// While a Try Again is being answered.
+    private(set) var isChecking = false
 
     /// Whether spending data on this path would spend the user's mobile
     /// allowance — cellular or a personal hotspot, as opposed to Wi-Fi or wired.
@@ -73,11 +99,25 @@ final class ConnectionMonitor {
     private var lastInterface: String?
     private var hasPath = true
     private var probe: Task<Void, Never>?
+    /// The checks that decide whether a failed request was an outage. See
+    /// `confirmOutage`.
+    private var confirmation: Task<Void, Never>?
+    /// Holds off `.offline` for a moment. See `pathChanged`.
+    private var pathLoss: Task<Void, Never>?
+    /// Takes `.reconnected` down again.
+    private var noticeTimer: Task<Void, Never>?
+    /// When a request last got an answer, so a check can tell whether the NAS
+    /// answered something else while it was waiting.
+    private var lastSuccess: Date?
     /// The probe's own `/health` request goes through the same client the
     /// observer watches, so without this the probe would report its own result
     /// back to itself — canceling the task it was reporting from. While a
     /// probe is in flight its result is the only one that counts.
-    private var isProbing = false
+    ///
+    /// A count, because the confirming checks and the reconnect poll can each
+    /// have one out at once, and the first to finish mustn't speak for both.
+    private var probesInFlight = 0
+    private var isProbing: Bool { probesInFlight > 0 }
 
     init(client: @escaping @MainActor () -> FrameStationClient?) {
         self.client = client
@@ -157,7 +197,13 @@ final class ConnectionMonitor {
 
     /// Anything that reached the server and got an answer.
     func noteSuccess() {
-        guard !isProbing, state != .online else { return }
+        guard !isProbing else { return }
+        lastSuccess = Date()
+        // An answer while an outage was still being checked is the check's
+        // answer too.
+        confirmation?.cancel()
+        confirmation = nil
+        guard state != .online else { return }
         recover()
     }
 
@@ -168,26 +214,45 @@ final class ConnectionMonitor {
         guard failure == .unreachable, !isProbing else { return }
         guard state == .online else { return }
 
-        // No path is not worth confirming: `NWPathMonitor` is authoritative
-        // about the radio, and asking the network a question while the device
-        // knows there is no network wastes a few seconds showing nothing.
-        guard hasPath else {
-            state = .offline
-            beginProbing()
-            return
-        }
+        // No path is the path monitor's to report, and it does: see
+        // `pathChanged`. Asking the network a question while the device knows
+        // there is no network only spends a few seconds showing nothing.
+        guard hasPath else { return }
 
-        // With a path, one failed request is not yet evidence of an outage —
-        // it could be a single dropped connection. `/health` is cheap and
-        // unauthenticated, so ask before showing anyone a red banner.
-        probe?.cancel()
-        probe = Task { [weak self] in
-            guard let self else { return }
-            if await self.isHealthy() { return }
-            guard !Task.isCancelled else { return }
-            self.state = .serverUnreachable
-            await self.pollUntilHealthy()
+        // With a path, one failed request is not yet evidence of an outage:
+        // it could be one dropped connection, or a dozen dropped at once on
+        // the way back from the background. The checks already running answer
+        // for this failure as well.
+        guard confirmation == nil else { return }
+        let failedAt = Date()
+        confirmation = Task { [weak self] in
+            await self?.confirmOutage(since: failedAt)
         }
+    }
+
+    /// Seconds before each check. The first goes at once, which is all a
+    /// single dropped connection needs; the last is five seconds in, past the
+    /// time a phone takes to settle on a network it has just joined.
+    private static let confirmationDelays: [Double] = [0, 2, 3]
+
+    /// Decides whether a failed request at `failedAt` was the NAS going away.
+    private func confirmOutage(since failedAt: Date) async {
+        for delay in Self.confirmationDelays {
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled else { return }
+            // Gone altogether: the path monitor speaks for that.
+            guard hasPath else { break }
+            // The NAS answered something else in the meantime.
+            if let lastSuccess, lastSuccess > failedAt { break }
+            if await isHealthy() { break }
+            guard !Task.isCancelled else { return }
+            // All three unanswered, with a network to ask over: the NAS.
+            if delay == Self.confirmationDelays.last, state == .online {
+                set(.serverUnreachable)
+                beginProbing()
+            }
+        }
+        confirmation = nil
     }
 
     // MARK: - Path
@@ -195,16 +260,85 @@ final class ConnectionMonitor {
     private func pathChanged(satisfied: Bool) {
         hasPath = satisfied
         if !satisfied {
-            state = .offline
+            confirmation?.cancel()
+            confirmation = nil
             probe?.cancel()
             probe = nil
+            // A path that comes straight back isn't being offline: Wi-Fi
+            // handing over to cellular on the way out of the house drops it
+            // for a moment. Said only once it has stayed gone.
+            guard state != .offline, pathLoss == nil else { return }
+            pathLoss = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard let self, !Task.isCancelled else { return }
+                self.pathLoss = nil
+                guard !self.hasPath else { return }
+                self.set(.offline)
+            }
             return
         }
+        pathLoss?.cancel()
+        pathLoss = nil
         // A path coming back is not the same as the NAS being up — the phone
         // can rejoin Wi-Fi while the NAS is still rebooting. Confirm before
         // clearing.
         guard state != .online else { return }
         beginProbing()
+    }
+
+    // MARK: - Saying so
+
+    /// Every change of state goes through here, so the pill can't fall out of
+    /// step with it.
+    private func set(_ new: State) {
+        guard new != state else { return }
+        state = new
+        noticeTimer?.cancel()
+        noticeTimer = nil
+        switch new {
+        case .offline:
+            notice = .offline
+        case .serverUnreachable:
+            notice = .unreachable
+        case .online:
+            // Only a pill that warned of something has anything to take back.
+            guard notice == .offline || notice == .unreachable else {
+                notice = nil
+                return
+            }
+            notice = .reconnected
+            noticeTimer = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                self?.notice = nil
+            }
+        }
+    }
+
+    /// Checks now, for the Try Again on the pill, rather than whenever the
+    /// backed-off poll next comes round: half a minute is a long time to wait
+    /// after switching the NAS back on.
+    func retryNow() {
+        guard state != .online, !isChecking else { return }
+        probe?.cancel()
+        probe = Task { [weak self] in
+            guard let self else { return }
+            self.isChecking = true
+            let started = Date()
+            let healthy = self.hasPath ? await self.isHealthy() : false
+            // Long enough to be seen to have tried: an answer back in forty
+            // milliseconds flashed the spinner too briefly to register, and
+            // the tap looked like it had done nothing.
+            let shown = Date().timeIntervalSince(started)
+            if shown < 0.6 { try? await Task.sleep(for: .seconds(0.6 - shown)) }
+            self.isChecking = false
+            guard !Task.isCancelled else { return }
+            if healthy {
+                self.recover()
+            } else {
+                await self.pollUntilHealthy()
+            }
+        }
     }
 
     // MARK: - Probing
@@ -237,7 +371,7 @@ final class ConnectionMonitor {
             // The path is up and the server still isn't answering, so this is
             // the NAS rather than the phone — correct the state if we arrived
             // here from `.offline`.
-            if state == .offline { state = .serverUnreachable }
+            if state == .offline { set(.serverUnreachable) }
         }
     }
 
@@ -251,8 +385,8 @@ final class ConnectionMonitor {
 
     private func isHealthy() async -> Bool {
         guard let client = client() else { return false }
-        isProbing = true
-        defer { isProbing = false }
+        probesInFlight += 1
+        defer { probesInFlight -= 1 }
         do {
             _ = try await client.health()
             return true
@@ -270,7 +404,7 @@ final class ConnectionMonitor {
         guard state != .online else { return }
         probe?.cancel()
         probe = nil
-        state = .online
+        set(.online)
         if let onReconnect {
             Task { @MainActor in await onReconnect() }
         }
@@ -344,3 +478,138 @@ extension EnvironmentValues {
         set { self[ConnectionMonitorKey.self] = newValue }
     }
 }
+
+#if os(iOS)
+/// The connection's state, in one place on every tab: a pill just above the
+/// tab bar, where the app's other passing word goes (`GridToast`).
+///
+/// It replaces a banner that floated over the Photos grid alone, on a fill so
+/// faint over photographs that it couldn't be read, and that came and went in
+/// a few seconds because it went up on too little evidence (see
+/// `ConnectionMonitor`). Here it sits on glass, on whichever tab is open, and
+/// stays for as long as the NAS really is out of reach. When the NAS answers
+/// again it says so before it goes.
+///
+/// Out of the way while the tab bar is: a photo open, or a grid selecting,
+/// each has its own bar in this strip, and a photo that can't load says why
+/// itself (`ConnectionMonitor.mediaMessage`).
+struct ConnectionPill: View {
+    let monitor: ConnectionMonitor
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            if let notice = monitor.notice, !GridChrome.shared.hidesTabBar {
+                pill(notice)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .move(edge: .bottom).combined(with: .opacity)
+                    )
+            }
+        }
+        .animation(.spring(duration: 0.4), value: monitor.notice)
+        .onChange(of: monitor.notice) { _, notice in
+            // Said aloud as well as shown: it comes and goes without anyone
+            // having touched anything.
+            guard let notice else { return }
+            AccessibilityNotification.Announcement(Self.title(notice)).post()
+        }
+    }
+
+    private func pill(_ notice: ConnectionMonitor.Notice) -> some View {
+        content(notice)
+            // One message out, then the next in, while the capsule resizes
+            // between them. Left to morph, "Can't Reach Your NAS" and
+            // "Connected Again" were drawn through each other for a moment,
+            // half of each legible.
+            .id(notice)
+            .transition(.asymmetric(
+                insertion: .opacity.animation(.easeIn(duration: 0.18).delay(0.12)),
+                removal: .opacity.animation(.easeOut(duration: 0.12))
+            ))
+            .padding(.leading, 14)
+            .padding(.trailing, notice == .unreachable ? 8 : 18)
+            .padding(.vertical, 9)
+            // Glass alone wasn't enough. Clear glass passes the photograph
+            // under it straight through, and over a pale one the white title
+            // measured worse than the banner this replaces. The background
+            // color under the text makes it read on anything, dark mode or
+            // light; the glass is left for the edge.
+            .background(Color(uiColor: .systemBackground).opacity(0.78), in: Capsule())
+            .glassCapsule(interactive: false, fallback: .regularMaterial)
+            .shadow(color: .black.opacity(0.22), radius: 12, y: 4)
+            .padding(.horizontal, 16)
+    }
+
+    private func content(_ notice: ConnectionMonitor.Notice) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: Self.symbol(notice))
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Self.tint(notice))
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Self.title(notice))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                if let detail = Self.detail(notice) {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            // Only where trying again is up to the NAS. Without a network
+            // there is nothing to try, and the phone says when there is one.
+            if notice == .unreachable {
+                Button { monitor.retryNow() } label: {
+                    ZStack {
+                        // Both laid out so the pill doesn't change width
+                        // under a finger.
+                        Text("Try Again").opacity(monitor.isChecking ? 0 : 1)
+                        ProgressView()
+                            .controlSize(.small)
+                            .opacity(monitor.isChecking ? 1 : 0)
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(.tint.opacity(0.18), in: Capsule())
+                    .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+                .disabled(monitor.isChecking)
+                .accessibilityLabel(monitor.isChecking ? "Checking" : "Try Again")
+            }
+        }
+    }
+
+    static func title(_ notice: ConnectionMonitor.Notice) -> String {
+        switch notice {
+        case .offline: return "No Internet Connection"
+        case .unreachable: return "Can't Reach Your NAS"
+        case .reconnected: return "Connected Again"
+        }
+    }
+
+    static func detail(_ notice: ConnectionMonitor.Notice) -> String? {
+        switch notice {
+        case .offline: return "Your library will update when you're back online."
+        case .unreachable: return "Trying again automatically."
+        case .reconnected: return nil
+        }
+    }
+
+    private static func symbol(_ notice: ConnectionMonitor.Notice) -> String {
+        switch notice {
+        case .offline: return "wifi.slash"
+        case .unreachable: return "exclamationmark.icloud.fill"
+        case .reconnected: return "checkmark.circle.fill"
+        }
+    }
+
+    private static func tint(_ notice: ConnectionMonitor.Notice) -> Color {
+        notice == .reconnected ? .green : .orange
+    }
+}
+#endif

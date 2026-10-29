@@ -8,6 +8,8 @@ struct ConnectionView: View {
     @Bindable var session: AppSession
     #if !os(tvOS)
     @State private var showAdvanced = false
+    /// The field being typed in. See `firstEmptyField`.
+    @FocusState private var focus: FieldKind?
     #endif
 
     var body: some View {
@@ -57,12 +59,7 @@ struct ConnectionView: View {
             .frame(maxWidth: 420)
             #endif
 
-            Button(session.useDSMLogin ? "Sign In" : "Connect") {
-                Task {
-                    if session.useDSMLogin { await session.signInWithDSM() }
-                    else { await session.connect() }
-                }
-            }
+            Button(session.useDSMLogin ? "Sign In" : "Connect") { submit() }
             #if os(tvOS)
             .buttonStyle(.borderedProminent)
             #else
@@ -93,11 +90,76 @@ struct ConnectionView: View {
         .sheet(isPresented: $showAdvanced) {
             AdvancedConnectionSheet(session: session) { showAdvanced = false }
         }
+        // Straight to the first field still to fill: the password, for anyone
+        // signing in again, since the address and username are remembered
+        // (`AppSession.Remembered`). A moment in, once the screen is in its
+        // window; asked for sooner, the focus is dropped.
+        //
+        // Not over something to read. The keyboard covers the bottom of the
+        // screen, where a failed sign-in says why and a deleted account says
+        // so, and a reason you can't see is worse than a field you have to
+        // tap. After a wrong password the keyboard stays down for the same
+        // reason.
+        .task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard focus == nil, session.phase == .disconnected,
+                  session.signedOutNotice == nil else { return }
+            focus = firstEmptyField
+        }
+        // The code field appears only once DSM asks for it, and the code is
+        // all that's left to type.
+        .onChange(of: session.needsTwoFactor) { _, needed in
+            if needed { focus = .otp }
+        }
         #endif
     }
 
+    /// Signs in, from the button or from Return in the last field.
+    private func submit() {
+        guard session.phase != .connecting,
+              !session.host.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        #if !os(tvOS)
+        focus = nil
+        #endif
+        Task {
+            if session.useDSMLogin { await session.signInWithDSM() }
+            else { await session.connect() }
+        }
+    }
+
     #if !os(tvOS)
-    private enum FieldKind { case host, username, name, code, otp }
+    private enum FieldKind { case host, username, password, name, code, otp }
+
+    /// Where typing should start: the first field that's empty.
+    private var firstEmptyField: FieldKind {
+        func blank(_ text: String) -> Bool {
+            text.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if blank(session.host) { return .host }
+        if session.useDSMLogin {
+            if blank(session.dsmUsername) { return .username }
+            // A code was asked for and the password survived to send with it.
+            if session.needsTwoFactor, !session.dsmPassword.isEmpty { return .otp }
+            return .password
+        }
+        return blank(session.displayName) ? .name : .code
+    }
+
+    /// Return in one field moves to the next, and in the last one signs in.
+    private func advance(from kind: FieldKind) {
+        switch kind {
+        case .host:
+            focus = session.useDSMLogin ? .username : .name
+        case .username:
+            focus = .password
+        case .name:
+            focus = .code
+        case .password where session.needsTwoFactor:
+            focus = .otp
+        case .password, .code, .otp:
+            submit()
+        }
+    }
 
     @ViewBuilder
     private func field(
@@ -105,6 +167,9 @@ struct ConnectionView: View {
     ) -> some View {
         TextField(title, text: text)
             .autocorrectionDisabled()
+            .focused($focus, equals: kind)
+            .submitLabel(kind == .code || kind == .otp ? .go : .next)
+            .onSubmit { advance(from: kind) }
             .padding(.vertical, 12)
             #if os(iOS)
             .textInputAutocapitalization(kind == .code ? .characters : (kind == .name ? .words : .never))
@@ -120,6 +185,9 @@ struct ConnectionView: View {
 
     private func secureField(_ title: String, text: Binding<String>) -> some View {
         SecureField(title, text: text)
+            .focused($focus, equals: .password)
+            .submitLabel(session.needsTwoFactor ? .next : .go)
+            .onSubmit { advance(from: .password) }
             .padding(.vertical, 12)
             #if os(iOS)
             .textContentType(.password)

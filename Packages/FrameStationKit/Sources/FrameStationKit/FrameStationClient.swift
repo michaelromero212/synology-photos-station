@@ -21,6 +21,7 @@ public actor FrameStationClient {
     private var configuration: Configuration
     private let session: URLSession
     private var outcomeObserver: (@Sendable (TransferFailure?) -> Void)?
+    private var writeObserver: (@Sendable (String) -> Void)?
 
     public init(configuration: Configuration, session: URLSession = .shared) {
         self.configuration = configuration
@@ -36,6 +37,16 @@ public actor FrameStationClient {
     /// success.
     public func observeOutcomes(_ observer: (@Sendable (TransferFailure?) -> Void)?) {
         outcomeObserver = observer
+    }
+
+    /// Hears the path of every write the server accepted: a photo trashed or
+    /// restored, an album changed, an upload committed.
+    ///
+    /// For the pages that keep counts of what a library holds. Here for the
+    /// reason `observeOutcomes` is: one place every write passes, so a new
+    /// endpoint can't leave those counts behind by being forgotten.
+    public func observeWrites(_ observer: (@Sendable (String) -> Void)?) {
+        writeObserver = observer
     }
 
     public func setToken(_ token: String?) {
@@ -339,11 +350,26 @@ public actor FrameStationClient {
             }
             try validate(response, data: data)
             outcomeObserver?(nil)
+            if request.httpMethod != Method.get.rawValue, let path = request.url?.path {
+                writeObserver?(path)
+            }
             return data
         } catch {
-            outcomeObserver?(TransferFailure.classify(error))
+            // Except a request the app called off itself. Leaving a screen
+            // cancels whatever it was loading, and `TransferFailure` files a
+            // cancellation with the transport errors, so each one told the
+            // connection monitor the NAS might be gone. That's how a NAS that
+            // was answering all along got a "Can't Reach" banner for a few
+            // seconds.
+            if !Self.isCancellation(error) {
+                outcomeObserver?(TransferFailure.classify(error))
+            }
             throw error
         }
+    }
+
+    static func isCancellation(_ error: any Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
     private func validate(_ response: URLResponse, data: Data) throws {

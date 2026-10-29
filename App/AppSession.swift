@@ -432,6 +432,16 @@ final class AppSession {
         collectionsStores.removeAll()
         serverCapabilities = nil
         self.client = client
+        // Weak at the outer hop, as `ConnectionMonitor.start` does: the
+        // closure lives as long as the client.
+        Task { [weak self] in
+            await client.observeWrites { path in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.noteWrite(path)
+                }
+            }
+        }
         self.loader = ThumbnailLoader(
             client: client, diskLimitBytes: CacheSettings.limit.bytes
         )
@@ -595,6 +605,31 @@ final class AppSession {
         let store = TimelineStore(client: client, spaceID: space.id)
         timelineStores[space.id] = store
         return store
+    }
+
+    /// Moves each time the NAS accepts a change made from this device that a
+    /// grid shows or the Albums page counts: a photo trashed, restored or
+    /// deleted for good, an album or its photos changed, an upload landed.
+    /// See `FollowsOwnChanges`.
+    ///
+    /// `changeCursor` alone left those counts behind. It only moves while the
+    /// Photos grid is on screen to follow the library, so restoring a photo
+    /// from Recently Deleted, or taking one out of an album, came back to the
+    /// old numbers. Some of these never reach the library's change log at all:
+    /// an album's photos and a photo deleted for good are not the timeline's
+    /// business.
+    private(set) var libraryRevision = 0
+
+    /// Which writes count. Everything under a library or an album, and an
+    /// upload once committed, but not what a curation pass reports about the
+    /// photos it looked at: that arrives in batches all the time it runs, and
+    /// changes nothing on the page until the NAS has decided something.
+    private func noteWrite(_ path: String) {
+        let changesLibrary = (path.contains("/v1/spaces") && !path.contains("/curation/"))
+            || path.contains("/v1/albums")
+            || (path.contains("/v1/uploads/") && path.hasSuffix("/commit"))
+        guard changesLibrary else { return }
+        libraryRevision &+= 1
     }
 
     /// How far into a library's changes the grid has followed it. Nil until
