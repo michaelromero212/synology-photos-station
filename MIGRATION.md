@@ -5,10 +5,12 @@ downloading or re-uploading anything. The import reads each file where it
 already lies on the NAS and clones it into the blob store. The Synology copy is
 left exactly as it was, and the clone takes no extra space.
 
-Synology Photos' Shared Space came across on 2026-10-06, and two people's own
-libraries on 2026-10-25 and 2026-10-27; the [log](#log) has the numbers. One
-person's library is still to do, and
-[the plan for it](#next-everyones-personal-library) is at the end.
+Synology Photos' Shared Space came across on 2026-10-06, and the three people's
+own libraries on 2026-10-25, 2026-10-27 and 2026-10-28; the [log](#log) has the
+numbers. What's left is a last import of whatever Synology receives before
+everyone's phone stops backing up to it, and
+[the steps for a personal library](#next-everyones-personal-library) are at the
+end.
 
 Every command goes through the `ssh nas` alias, so no hostname or address
 appears here (see [DEPLOY.md](DEPLOY.md)). `<space-id>`, `<user>` and `<device>`
@@ -310,6 +312,7 @@ each such row at one time in both libraries.
 | 2026-10-06 | Shared Space, `/volume1/photo` | Family Shared | 2,734 | 277.7 GB | 2,616 | 110 | 8 | 0 | 1h 5m |
 | 2026-10-25 | A person's `MobileBackup` and `PhotoLibrary` | Their personal library | 19,807 | 130.9 GB | 18,865 | 942 | 0 | 0 | 4h 5m |
 | 2026-10-27 | A second person's `MobileBackup` and `PhotoLibrary` | Their personal library | 9,494 | 344.0 GB | 7,089 | 1,203 | 1,202 | 0 | 2h 37m |
+| 2026-10-28 | A third person's `MobileBackup` | Their personal library | 40,789 | 89.0 GB | 39,990 | 799 | 0 | 0 | 8h 15m |
 
 The personal library's grid matches Synology Photos': 16,494 items to
 Synology's 16,493 (one photo Synology had filed under another account came in
@@ -405,6 +408,21 @@ regroup did the rest, all but one Live Photo. Its rows are also the second
 library's, where Synology groups the same files otherwise, so its grouping is
 left as it was (grouping keeps a row another library shows).
 
+**The third personal library (2026-10-28)** matched Synology Photos on its
+first run, with nothing to put right afterward: all 40,789 of its files at the
+same local time to the second, and its 40,132 grid items showing them to
+Synology's 40,132, none split or joined (657 of them Live Photos). The person
+had never used the app, so nothing was left out as already there; the 799
+"stored once already" are bytes the blob store held before, from this library
+or another, each with a row of its own. One photo with no date inside took
+the time Synology shows (`--synology`): March 2013, the month of its folder,
+where its file says December 2012. Its 8 `Thumbs.db` files, Windows' thumbnail
+caches, aren't media and stayed out. No albums. Most of it is PNG images
+(34,546 files) and most of it is from 2023 and 2024, so its 40,789 files came
+to only 89 GB. At 1.4 files a second, about the first library's pace, that
+took 8 hours: with files this small, about 2 MB each, plan by count, about 5,000 files
+an hour, the server making each one's thumbnails alongside.
+
 ## Who shared each Shared Space photo
 
 The import credits every photo to the destination's owner, because a file
@@ -452,7 +470,7 @@ Started 2026-10-24 with one library: about 19,800 files and 140 GB, every one
 indexed by Synology Photos (its count agreed with the disk's to within one),
 and no albums. Counted in August 2026: about 67,000 files and 662 GB in three
 people's `MobileBackup` folders, plus about 2,500 files under `PhotoLibrary`.
-There will be more by now.
+All three were in by 2026-10-28, 70,090 files in all ([log](#log)).
 
 The bar for each: their grid here looks exactly as it does in Synology Photos,
 every item on the same day in the same order, with the files copied untouched.
