@@ -240,6 +240,14 @@ struct TimelineView: View {
     /// a zero here silently halved the top margin and moved the whole library
     /// 62pt a tenth of a second after launch. See `WindowMetrics`.
     private var windowTopInset: CGFloat { WindowMetrics.topInset }
+    /// Where the grid's content begins: below the clock and the floating bar's
+    /// fade. See `collectionGrid`.
+    private var gridTopInset: CGFloat { windowTopInset + TopEdgeFade.barHeight }
+    /// Where it ends: clear of the tab bar, or of whichever bar is standing in
+    /// for it in its slot. See `collectionGrid`.
+    private var gridBottomInset: CGFloat {
+        WindowMetrics.bottomInset + max(FloatingTabBarMetrics.contentInset, bottomBarHeight)
+    }
     #endif
     #if os(macOS)
     /// The photo a double-click opened, the day it came from — the slideshows
@@ -2164,9 +2172,8 @@ struct TimelineView: View {
                 // newest row and the selection bar — the tab bar's clearance
                 // kept for a tab bar that had gone — and ending it took the
                 // band away again, so the library jumped twice.
-                topInset: windowTopInset + TopEdgeFade.barHeight,
-                bottomInset: WindowMetrics.bottomInset
-                    + max(FloatingTabBarMetrics.contentInset, bottomBarHeight),
+                topInset: gridTopInset,
+                bottomInset: gridBottomInset,
                 progress: scrollProgress,
                 controller: gridController,
                 selection: selection,
@@ -2224,21 +2231,28 @@ struct TimelineView: View {
             if store.buckets.count > 1 {
                 // As in the SwiftUI grid: a phone gets the scrubber, and a
                 // phone wide enough to call itself regular gets the rail.
-                if wantsRail {
-                    TimelineRail(buckets: store.buckets, progress: scrollProgress) { bucket, target in
-                        scrubCollection(to: bucket, target: target, in: store)
-                    } onScrubEnd: {
-                        scrubEnded(in: store)
+                Group {
+                    if wantsRail {
+                        TimelineRail(buckets: store.buckets, progress: scrollProgress) { bucket, target in
+                            scrubCollection(to: bucket, target: target, in: store)
+                        } onScrubEnd: {
+                            scrubEnded(in: store)
+                        }
+                    } else {
+                        FastScroller(buckets: store.buckets, progress: scrollProgress) { bucket, target in
+                            scrubCollection(to: bucket, target: target, in: store)
+                        } onScrubEnd: {
+                            scrubEnded(in: store)
+                        }
                     }
-                    .padding(.vertical, 6)
-                } else {
-                    FastScroller(buckets: store.buckets, progress: scrollProgress) { bucket, target in
-                        scrubCollection(to: bucket, target: target, in: store)
-                    } onScrubEnd: {
-                        scrubEnded(in: store)
-                    }
-                    .padding(.vertical, 6)
                 }
+                // The same line the grid's content keeps at each end, and a
+                // little more. This overlay is as tall as the screen, so at 6pt
+                // the thumb's travel ran up under the fade and the clock at the
+                // oldest photo and down behind the tab bar at the newest — the
+                // two places it is most often resting.
+                .padding(.top, gridTopInset + 6)
+                .padding(.bottom, gridBottomInset + 6)
             }
         }
         .onChange(of: pendingJump) { _, target in
