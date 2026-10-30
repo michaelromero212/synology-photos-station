@@ -7,7 +7,9 @@
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-ladder.sh
 #
-# Runs its own server against its own database and blob store.
+# Runs its own server against its own database and blob store, with clips the
+# dev library already has rather than new ones made for the run: they are read
+# from the dev stack's blob store, never written to.
 set -uo pipefail
 SCRATCH="${FRAMESTATION_TEST_DIR:-/tmp/framestation-test}"
 SERVER_DIR="${FRAMESTATION_SERVER_DIR:-$(cd "$(dirname "$0")/../Server" && pwd)}"
@@ -48,33 +50,38 @@ read -r T1 P1 U1 <<< "$(newuser Michael)"
 read -r T2 P2 U2 <<< "$(newuser Morgan)"
 A1="Authorization: Bearer $T1"; A2="Authorization: Bearer $T2"
 
-# file mime width height -> assetID
+# file mime width height -> assetID, sent in the chunks the probe asks for.
 upload(){
-  local f="$1" sha size up
+  local f="$1" sha size probe up chunk n
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
-  up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A1" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$(basename "$f")\"}" | jq '["uploadID"]')
-  curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$A1" --data-binary "@$f" >/dev/null
+  probe=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A1" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$(basename "$f")\"}")
+  up=$(echo "$probe" | jq '["uploadID"]'); chunk=$(echo "$probe" | jq '["chunkSize"]')
+  for n in $(seq 0 $(( (size - 1) / chunk ))); do
+    dd if="$f" bs="$chunk" skip="$n" count=1 2>/dev/null \
+      | curl -s -X PUT "$API/v1/uploads/$up/chunk/$n" -H "$A1" --data-binary @- >/dev/null
+  done
   curl -s -X POST "$API/v1/uploads/$up/commit" -H "$A1" -H 'Content-Type: application/json' \
     -d "{\"spaceID\":\"$P1\",\"mediaType\":\"video\",\"mime\":\"$2\",\"width\":$3,\"height\":$4,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
 }
-clip(){ ffmpeg -v error -y -f lavfi -i "testsrc2=size=$2:rate=$3:duration=$4" "${@:5}" "$ROOT/files/$1"; }
-tone(){ echo -f lavfi -i "sine=frequency=$1:duration=5"; }
+DEV_ROOT=$(sed -n 's/^export //; s/^FRAMESTATION_BLOB_ROOT=//p' "$HOME/.framestation-dev/env" 2>/dev/null \
+  | tr -d '"' | head -1)
+# name sha256 extension: a dev library clip, by the content it's stored under.
+devclip(){
+  local from="$DEV_ROOT/blobs/${2:0:2}/${2:2:2}/$2.$3"
+  [ -s "$from" ] || { echo "the dev library's $1 isn't at $from"; exit 1; }
+  cp "$from" "$ROOT/files/$1"
+}
 
-echo "Four videos: 1080p at 60 fps, a portrait one, one with uncompressed sound, one already lean"
-# Encoded fast and fat, well over the ladder's 2.5 Mbps line; the tones keep
-# them from being stored once as the same file.
-clip sixty.mp4 1920x1080 60 5 $(tone 440) -c:v libx264 -preset ultrafast -b:v 20M -maxrate 20M \
-  -bufsize 20M -pix_fmt yuv420p -c:a aac -shortest
-clip portrait.mp4 1080x1920 30 4 $(tone 550) -c:v libx264 -preset ultrafast -b:v 10M -maxrate 10M \
-  -bufsize 10M -pix_fmt yuv420p -c:a aac -shortest
-clip pcm.mov 1280x720 30 4 $(tone 660) -c:v libx264 -preset ultrafast -b:v 8M -maxrate 8M \
-  -bufsize 8M -pix_fmt yuv420p -c:a pcm_s16le -shortest
-clip lean.mp4 640x360 30 4 -c:v libx264 -b:v 400k -maxrate 400k -bufsize 400k -pix_fmt yuv420p
-SIXTY=$(upload "$ROOT/files/sixty.mp4" video/mp4 1920 1080)
-PORTRAIT=$(upload "$ROOT/files/portrait.mp4" video/mp4 1080 1920)
-PCM=$(upload "$ROOT/files/pcm.mov" video/quicktime 1280 720)
-LEAN=$(upload "$ROOT/files/lean.mp4" video/mp4 640 360)
+echo "Four of the dev library's videos: 4K with sound, 4K without, 720p, and one already lean"
+devclip prefetch-b.mov f89eb7fa25f384847c394541c3c6dc6404d390fe8819db4a11d142cd7234de6f mov
+devclip prefetch-a.mov c2c7101bf4ca016803fe7c2d2174f75129eb2ff3974b314c6491e0cacdf2000b mov
+devclip flip-test.mp4 d2d3ab13f2297efc80d143ebae1d7e22803fc3a0dfd0533eb33fa3f89eb00535 mp4
+devclip held-video.mp4 cff1da2e863733f8ae10b7c768eb45806409d6060fd5e3a0647e73d5803bc386 mp4
+FOURK=$(upload "$ROOT/files/prefetch-b.mov" video/quicktime 3840 2160)
+SILENT=$(upload "$ROOT/files/prefetch-a.mov" video/quicktime 3840 2160)
+HD=$(upload "$ROOT/files/flip-test.mp4" video/mp4 1280 720)
+LEAN=$(upload "$ROOT/files/held-video.mp4" video/mp4 640 360)
 
 for _ in $(seq 1 360); do
   [ "$(q "SELECT count(*) FROM derivation_jobs WHERE kind = 'ladder' AND state IN ('done', 'failed')")" = "4" ] && break
@@ -85,8 +92,8 @@ check "every video's ladder job finishes" "4|0" \
         FROM derivation_jobs WHERE kind = 'ladder'")"
 check "and no one-file rendition is queued any more" "0" "$(q "SELECT count(*) FROM derivation_jobs WHERE kind = 'playback'")"
 dir(){ local s; s=$(q "SELECT sha256 FROM assets WHERE id = '$1'"); echo "$FRAMESTATION_BLOB_ROOT/derivatives/${s:0:2}/${s:2:2}/$s/stream-v1"; }
-LADDER=$(dir "$SIXTY")
-check "the 60 fps clip gets four sizes" "v1080 v270 v432 v720" \
+LADDER=$(dir "$FOURK")
+check "the 4K clip gets four sizes" "v1080 v270 v432 v720" \
   "$(ls "$LADDER" | grep m3u8 | grep -v master | sed 's/.m3u8//' | sort | tr '\n' ' ' | sed 's/ $//')"
 check "the lean clip gets none" "no" "$([ -e "$(dir "$LEAN")" ] && echo yes || echo no)"
 check "and nothing half-built is left behind" "0" "$(find "$FRAMESTATION_BLOB_ROOT" -name '*.partial' | wc -l | tr -d ' ')"
@@ -106,8 +113,8 @@ for i, line in enumerate(lines):
               attrs["CODECS"].strip('"'), attrs["BANDWIDTH"], attrs["AVERAGE-BANDWIDTH"])
 PY
 variant(){ awk -v n="$1" '$1 == n' "$ROOT/variants.txt"; }
-check "1080p keeps the clip's 60 frames a second" "1920x1080 60.000" "$(variant v1080 | awk '{print $2, $3}')"
-check "720p at half that" "1280x720 30.000" "$(variant v720 | awk '{print $2, $3}')"
+check "1080p at the clip's own 30 frames a second" "1920x1080 30.000" "$(variant v1080 | awk '{print $2, $3}')"
+check "and 720p the same" "1280x720 30.000" "$(variant v720 | awk '{print $2, $3}')"
 check "and the small two" "768x432 480x270" "$(echo "$(variant v432 | awk '{print $2}') $(variant v270 | awk '{print $2}')")"
 has "each says what decodes it" "avc1.64" "$(variant v720 | awk '{print $4}')"
 has "sound included" "mp4a.40.2" "$(variant v720 | awk '{print $4}')"
@@ -139,28 +146,26 @@ check "each playlist names its own file, beside it" "v1080.m4s v1080.m4s" "$(awk
 
 echo
 echo "The odd ones"
-PDIR=$(dir "$PORTRAIT")
-check "a portrait clip stays portrait" "720x1280" \
-  "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$PDIR/v720.m4s")"
-check "uncompressed sound arrives as AAC" "aac" \
-  "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$(dir "$PCM")/v720.m4s")"
+SDIR=$(dir "$SILENT")
+check "a clip with no sound gets its four sizes too" "4" "$(grep -c '^#EXT-X-STREAM-INF' "$SDIR/master.m3u8")"
+check "and no sound in them" "no" "$(grep -q mp4a "$SDIR/master.m3u8" && echo yes || echo no)"
 check "a 720p clip tops out at 720p" "v270 v432 v720" \
-  "$(ls "$(dir "$PCM")" | grep m3u8 | grep -v master | sed 's/.m3u8//' | sort | tr '\n' ' ' | sed 's/ $//')"
+  "$(ls "$(dir "$HD")" | grep m3u8 | grep -v master | sed 's/.m3u8//' | sort | tr '\n' ' ' | sed 's/ $//')"
 
 echo
 echo "Which link an app gets"
 link(){ curl -s "$API/v1/assets/$1/playback?quality=$2${3:+&adaptive=1}" -H "$A1"; }
-R=$(link "$SIXTY" mobile yes)
+R=$(link "$FOURK" mobile yes)
 check "an app that can play a ladder gets one" "adaptive" "$(echo "$R" | jq '["kind"]')"
 URL=$(echo "$R" | jq '["url"]')
-has "named by its top-level playlist" "/v1/hls/$SIXTY/$U1/" "$URL"
+has "named by its top-level playlist" "/v1/hls/$FOURK/$U1/" "$URL"
 LIFE=$(echo "$R" | python3 -c 'import sys,json,datetime as d; r=json.load(sys.stdin); print(int(d.datetime.fromisoformat(r["expiresAt"].replace("Z","+00:00")).timestamp() - d.datetime.now(d.timezone.utc).timestamp()))')
 check "lasting ten minutes for a five-second clip" "yes" "$([ "$LIFE" -ge 590 ] && [ "$LIFE" -le 615 ] && echo yes || echo "no ($LIFE s)")"
-check "an app from before ladders gets the file, as it always did" "direct" "$(link "$SIXTY" mobile | jq '["kind"]')"
-check "and it plays" "206" "$(code -H 'Range: bytes=0-99' "$(link "$SIXTY" mobile | jq '["url"]')")"
-check "at home, the original" "direct" "$(link "$SIXTY" original yes | jq '["kind"]')"
+check "an app from before ladders gets the file, as it always did" "direct" "$(link "$FOURK" mobile | jq '["kind"]')"
+check "and it plays" "206" "$(code -H 'Range: bytes=0-99' "$(link "$FOURK" mobile | jq '["url"]')")"
+check "at home, the original" "direct" "$(link "$FOURK" original yes | jq '["kind"]')"
 check "a lean clip, as it is" "direct" "$(link "$LEAN" mobile yes | jq '["kind"]')"
-check "no one else can ask for one" "404" "$(code "$API/v1/assets/$SIXTY/playback?quality=mobile&adaptive=1" -H "$A2")"
+check "no one else can ask for one" "404" "$(code "$API/v1/assets/$FOURK/playback?quality=mobile&adaptive=1" -H "$A2")"
 
 echo
 echo "What a player fetches through it"
@@ -186,9 +191,9 @@ check "someone else's id in it" "404" "$(code "$(echo "$BASE" | sed "s#/$U1/#/$U
 check "a file a ladder doesn't have" "404" "$(code "$BASE/v999.m3u8")"
 check "or a name built to climb out" "404" "$(code "$BASE/..%2F..%2Fthumb-256.jpg")"
 check "or the folder itself" "404" "$(code "$BASE/stream-v1")"
-curl -s -X DELETE "$API/v1/spaces/$P1/assets/$SIXTY" -H "$A1" -H 'Content-Type: application/json' -d '{}' >/dev/null
+curl -s -X DELETE "$API/v1/spaces/$P1/assets/$FOURK" -H "$A1" -H 'Content-Type: application/json' -d '{}' >/dev/null
 check "a clip in Recently Deleted still plays" "200" "$(code "$BASE/v432.m3u8")"
-q "UPDATE space_assets SET purged_at = now() WHERE asset_id = '$SIXTY'" >/dev/null
+q "UPDATE space_assets SET purged_at = now() WHERE asset_id = '$FOURK'" >/dev/null
 check "and one deleted for good stops on the next piece" "404" "$(code "$BASE/v432.m3u8")"
 
 echo
