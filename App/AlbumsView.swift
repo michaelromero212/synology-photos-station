@@ -307,8 +307,41 @@ struct AlbumsView: View {
     @State private var pickedPlace: String?
     @Environment(\.scenePhase) private var scenePhase
 
-    private let columns = 2
     private let spacing: CGFloat = 14
+
+    /// Album tiles across `width`: two on a phone, and as many more as fit at
+    /// about the size Photos draws them on a wider screen.
+    ///
+    /// This was a fixed two, which on a phone is right and in a Mac window made
+    /// every album half the window wide — six hundred points of cover for a
+    /// row of two, where Photos shows six or seven. From the width rather than
+    /// the platform, so a narrow window is a phone's page and a wide one fills
+    /// with albums instead of growing them.
+    private func columns(across width: CGFloat) -> Int {
+        #if os(tvOS)
+        // The television's page is read from across a room; it keeps its two.
+        return 2
+        #else
+        let fitted = Int((width - spacing) / (Self.tileBasis + spacing))
+        return max(2, fitted)
+        #endif
+    }
+
+    /// About how wide an album cover is on a screen with room to spare.
+    #if os(macOS)
+    private static let tileBasis: CGFloat = 170
+    #else
+    private static let tileBasis: CGFloat = 180
+    #endif
+
+    #if os(macOS)
+    /// The featured cards' width in a window. Full width at five by four was a
+    /// cover taller than the window on a large display.
+    private static let heroWidth: CGFloat = 380
+    /// Shelf and trip rows sit in columns this wide or wider, rather than one
+    /// row stretched across the whole window with a small cover at one end.
+    private static let rowColumn: CGFloat = 320
+    #endif
 
     /// Starts from the session's stores, which are usually filled already —
     /// see `AppSession.albumStore`. Starting from nil and assigning them in a
@@ -525,7 +558,8 @@ struct AlbumsView: View {
     @ViewBuilder
     private func page(_ store: AlbumStore) -> some View {
         GeometryReader { proxy in
-            let side = (proxy.size.width - spacing * CGFloat(columns + 1)) / CGFloat(columns)
+            let across = columns(across: proxy.size.width)
+            let side = (proxy.size.width - spacing * CGFloat(across + 1)) / CGFloat(across)
             ScrollView {
                 // Generous, and deliberately so. The page holds few things;
                 // letting them sit apart is most of what stops it reading as a
@@ -539,12 +573,12 @@ struct AlbumsView: View {
                         // and it is the better one: this is the only thing on
                         // the page you could not have gone looking for, so it
                         // has to be the thing you see without looking.
-                        hero(found, space: space)
+                        hero(found, space: space, width: proxy.size.width)
                         standing(found, space: space)
                         automatic(found, space: space)
                     }
-                    manual(store, side: side)
-                    shared(store, side: side)
+                    manual(store, side: side, columns: across)
+                    shared(store, side: side, columns: across)
                     if let space = session.personalSpace {
                         places(space: space)
                     }
@@ -578,7 +612,7 @@ struct AlbumsView: View {
     private func standing(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
         let shelves = [found.recentlyAdded, found.favorites].compactMap { $0 }
         if !shelves.isEmpty {
-            VStack(spacing: 8) {
+            rowStack(spacing: 8) {
                 ForEach(shelves, id: \.key) { shelf in
                     NavigationLink {
                         CollectionDetailView(session: session, space: space, collection: shelf)
@@ -602,8 +636,29 @@ struct AlbumsView: View {
     /// before the row sends only that one. Absent on a library too young to
     /// have noticed anything, when the page simply starts with the shelves.
     @ViewBuilder
-    private func hero(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+    private func hero(_ found: CollectionsResponse, space: SpaceDTO, width: CGFloat) -> some View {
         let cards = found.featured ?? found.hero.map { [$0] } ?? []
+        #if os(macOS)
+        // A row of cards, several in view at once, the way Photos lays out its
+        // memories in a window — rather than one card the width of the window,
+        // paged like a phone. Never wider than the window has room for.
+        let cardWidth = min(Self.heroWidth, max(width - spacing * 2, 1))
+        if !cards.isEmpty {
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: spacing) {
+                    ForEach(cards, id: \.featuredID) { card in
+                        heroLink(card, space: space)
+                            .frame(width: cardWidth)
+                    }
+                }
+                .padding(.horizontal, spacing)
+                // Room for the cards' shadows, which the row would clip.
+                .padding(.vertical, 12)
+            }
+            .scrollIndicators(.hidden)
+            .padding(.vertical, -12)
+        }
+        #else
         if cards.count > 1 {
             VStack(spacing: 12) {
                 ScrollView(.horizontal) {
@@ -632,6 +687,25 @@ struct AlbumsView: View {
             heroLink(card, space: space)
                 .padding(.horizontal, spacing)
         }
+        #endif
+    }
+
+    /// The shelves and trip rows: one column on a phone, as many columns of
+    /// `rowColumn` as fit in a window.
+    @ViewBuilder
+    private func rowStack<Content: View>(
+        spacing rowSpacing: CGFloat, @ViewBuilder content: () -> Content
+    ) -> some View {
+        #if os(macOS)
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: Self.rowColumn), spacing: spacing * 2, alignment: .leading)],
+            alignment: .leading, spacing: rowSpacing
+        ) {
+            content()
+        }
+        #else
+        VStack(spacing: rowSpacing) { content() }
+        #endif
     }
 
     private func heroLink(_ card: CollectionSummary, space: SpaceDTO) -> some View {
@@ -701,16 +775,18 @@ struct AlbumsView: View {
                     .padding(.bottom, 10)
                 }
             }
-            ForEach(rows) { row in
-                NavigationLink {
-                    CollectionDetailView(session: session, space: space, collection: row)
-                } label: {
-                    CollectionRowCard(collection: row, loader: session.loader)
-                        .padding(.horizontal, spacing)
-                        .padding(.vertical, 9)
+            rowStack(spacing: 0) {
+                ForEach(rows) { row in
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: row)
+                    } label: {
+                        CollectionRowCard(collection: row, loader: session.loader)
+                            .padding(.horizontal, spacing)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .nameable(row) { naming = $0 }
                 }
-                .buttonStyle(.plain)
-                .nameable(row) { naming = $0 }
             }
         }
     }
@@ -718,18 +794,20 @@ struct AlbumsView: View {
     /// Personal albums, and only those. New Album's "Personal" says this is
     /// where one goes, and the note under the heading says who sees them.
     @ViewBuilder
-    private func manual(_ store: AlbumStore, side: CGFloat) -> some View {
+    private func manual(_ store: AlbumStore, side: CGFloat, columns: Int) -> some View {
         let albums = store.personal
         if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 sectionHeader("Albums", note: "Only you can see these.")
-                albumGrid(albums, store: store, side: side)
+                albumGrid(albums, store: store, side: side, columns: columns)
             }
         }
     }
 
-    private func albumGrid(_ albums: [AlbumDTO], store: AlbumStore, side: CGFloat) -> some View {
-        LazyVGrid(columns: gridColumns(side: side), spacing: spacing) {
+    private func albumGrid(
+        _ albums: [AlbumDTO], store: AlbumStore, side: CGFloat, columns: Int
+    ) -> some View {
+        LazyVGrid(columns: gridColumns(side: side, count: columns), spacing: spacing) {
             ForEach(albums) { album in
                 albumCell(album, store: store, side: side)
             }
@@ -737,8 +815,8 @@ struct AlbumsView: View {
         .padding(.horizontal, spacing)
     }
 
-    private func gridColumns(side: CGFloat) -> [GridItem] {
-        Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns)
+    private func gridColumns(side: CGFloat, count: Int) -> [GridItem] {
+        Array(repeating: GridItem(.fixed(side), spacing: spacing), count: count)
     }
 
     private func albumCell(_ album: AlbumDTO, store: AlbumStore, side: CGFloat) -> some View {
@@ -830,14 +908,14 @@ struct AlbumsView: View {
     /// it, since the destination that answers them belongs to the tab bar's
     /// stack. The albums show there all the same.
     @ViewBuilder
-    private func shared(_ store: AlbumStore, side: CGFloat) -> some View {
+    private func shared(_ store: AlbumStore, side: CGFloat, columns: Int) -> some View {
         let cards = sharedCards(store)
         if !cards.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 // No line saying who can see these. It said what "shared"
                 // already says, under the one heading on the page that says it.
                 sectionHeader("Shared Albums")
-                LazyVGrid(columns: gridColumns(side: side), spacing: spacing) {
+                LazyVGrid(columns: gridColumns(side: side, count: columns), spacing: spacing) {
                     ForEach(cards) { card in
                         switch card {
                         case .library(let space):

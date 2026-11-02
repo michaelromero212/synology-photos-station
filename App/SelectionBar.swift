@@ -16,7 +16,13 @@ import SwiftUI
 final class GridSelection {
     var isActive = false
     /// `space_assets.id` — the placement, which is what a removal acts on.
-    private(set) var picked: [TimelineItem] = []
+    private(set) var picked: [TimelineItem] = [] {
+        didSet { pickedIDs = Set(picked.map(\.id)) }
+    }
+    /// The same, for asking. Every tile asks whether it is picked each time the
+    /// selection changes, and walking the list to answer made a select-all of
+    /// a few thousand photographs cost millions of comparisons per redraw.
+    private var pickedIDs: Set<UUID> = []
 
     private(set) var isWorking = false
     private(set) var progress = ""
@@ -25,7 +31,7 @@ final class GridSelection {
     var count: Int { picked.count }
 
     func contains(_ item: TimelineItem) -> Bool {
-        picked.contains { $0.id == item.id }
+        pickedIDs.contains(item.id)
     }
 
     func toggle(_ item: TimelineItem) {

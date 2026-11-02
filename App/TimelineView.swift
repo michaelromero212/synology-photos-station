@@ -255,6 +255,8 @@ struct TimelineView: View {
     /// loaded, which is what the viewer steps through. iPhone and iPad open
     /// photos over the grid instead; see `viewerStage`.
     @State private var openItem: OpenedPhoto?
+    /// How the scrubber and a zoom move the Mac grid. See `MacTimelineGrid`.
+    @State private var macGridController = MacGridController()
     #endif
     #if os(iOS)
     /// Which photograph the viewer was opened on, so closing it can tell
@@ -702,6 +704,12 @@ struct TimelineView: View {
             // `PhotoGridMetrics.usesJustifiedRows`.
             #if os(iOS)
             collectionGrid(store)
+            #elseif os(macOS)
+            if #available(macOS 15.0, *) {
+                macGrid(store)
+            } else {
+                grid(store)
+            }
             #else
             grid(store)
             #endif
@@ -2294,6 +2302,73 @@ struct TimelineView: View {
             gridController.scroll(toContentY: target.offset)
         } else {
             gridController.jump(toDay: bucket.key)
+        }
+        scrubTarget = bucket.key
+        scrubLoad?.cancel()
+        scrubLoad = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            await store.loadBucket(bucket.key)
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    /// The library on a Mac: laid out whole, drawn only near the window. See
+    /// `MacTimelineGrid` for why it replaced `grid` there.
+    @available(macOS 15.0, *)
+    private func macGrid(_ store: TimelineStore) -> some View {
+        MacTimelineGrid(
+            space: space.id, buckets: store.buckets, items: store.items,
+            targetHeight: PhotoGridMetrics.targetRowHeight(for: store.zoom),
+            spacing: spacing, headerHeight: headerHeight, areaHeaderHeight: areaHeaderHeight,
+            total: store.total, progress: scrollProgress, controller: macGridController,
+            loadDay: { key in
+                await store.loadBucket(key)
+                await prefetchThumbnails(for: key, in: store)
+            }
+        ) { entry, size, dayItems in
+            cell(entry, size: size, dayItems: dayItems)
+        } dayHeader: { bucket in
+            header(bucket)
+        } areaHeader: { name in
+            areaHeader(name)
+        } libraryHeader: {
+            gridFooter(store.total)
+        }
+        // The top edge only, as the old grid did: no photographs over the
+        // window's toolbar. See `TopEdgeClip`.
+        .clipShape(TopEdgeClip())
+        // A zoom keeping its place, and any other jump to a day.
+        .onChange(of: pendingJump) { _, target in
+            guard let target else { return }
+            macGridController.jump(toDay: target)
+            pendingJump = nil
+        }
+        .overlay(alignment: .trailing) {
+            if store.buckets.count > 1 {
+                TimelineRail(
+                    buckets: store.buckets,
+                    progress: scrollProgress
+                ) { bucket, target in
+                    macScrub(to: bucket, target: target, in: store)
+                } onScrubEnd: {
+                    scrubEnded(in: store)
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    /// The rail, driving the Mac grid. To the exact point the thumb names: the
+    /// layout is exact, so the span is too. The debounced fetch is `scrub`'s.
+    private func macScrub(
+        to bucket: TimelineBucket, target: LibrarySpan.Target?, in store: TimelineStore
+    ) {
+        if let target {
+            macGridController.scroll(toY: target.offset)
+        } else {
+            macGridController.jump(toDay: bucket.key)
         }
         scrubTarget = bucket.key
         scrubLoad?.cancel()
