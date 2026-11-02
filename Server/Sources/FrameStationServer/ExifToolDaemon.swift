@@ -40,12 +40,14 @@ actor ExifToolDaemon {
     private static let recycleAfter = 500
 
     private struct Running {
+        /// The watch exiftool runs under, which stands in for it here: it
+        /// passes a `terminate` on to exiftool, and exits when exiftool does.
+        /// See `watch`.
         let process: Process
         /// Where commands are written.
         let commands: FileHandle
         /// Read from as exiftool writes, never waited on.
         let output: FileHandle
-        let outputURL: URL
     }
 
     /// A line when exiftool starts and when a command fails — every five
@@ -133,7 +135,11 @@ actor ExifToolDaemon {
         discard()
         _ = Self.ignoreBrokenPipes
 
-        guard let executable = Shell.resolve("exiftool") else { throw Failure.unavailable }
+        // Perl to run the watch under: exiftool is a Perl program, so wherever
+        // it runs there is one.
+        guard let executable = Shell.resolve("exiftool"),
+              let perl = Shell.resolve("perl")
+        else { throw Failure.unavailable }
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("framestation-exiftool-\(UUID().uuidString).out")
         guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
@@ -149,11 +155,20 @@ actor ExifToolDaemon {
             try? FileManager.default.removeItem(at: outputURL)
             throw Failure.unavailable
         }
+        // Open at both ends, the file needs its name no longer. It lasts as
+        // long as either handle, and goes with the last of them, however this
+        // server ends. Removed only in `discard`, which no server's end passes
+        // through, it stayed behind after every server: 2,143 of them in the
+        // Mac's temporary folder (2026-10-30).
+        try? FileManager.default.removeItem(at: outputURL)
 
         let commands = Pipe()
         let process = Process()
-        process.executableURL = executable
-        process.arguments = ["-stay_open", "True", "-@", "-"]
+        process.executableURL = perl
+        process.arguments = [
+            "-e", Self.watch, "--", String(ProcessInfo.processInfo.processIdentifier),
+            executable.path, "-stay_open", "True", "-@", "-",
+        ]
         process.standardInput = commands
         process.standardOutput = writer
         // Nothing reads it, so nothing can fill up waiting to be read. Failures
@@ -164,23 +179,24 @@ actor ExifToolDaemon {
         } catch {
             try? writer.close()
             try? reader.close()
-            try? FileManager.default.removeItem(at: outputURL)
             throw Failure.unavailable
         }
-        // exiftool holds its own copies now. Ours of its ends go, so that
-        // closing the command pipe on `discard` is an end of input it sees.
+        // exiftool holds its own copies now, and ours of its ends go: the
+        // writer, which only exiftool needs, and the pipe's reading end, so
+        // that a command written after exiftool has gone fails at once rather
+        // than waiting in a pipe nothing will read. Not so that closing the
+        // pipe would end exiftool: it reads on past the end. See `watch`.
         try? writer.close()
         try? commands.fileHandleForReading.close()
 
         let started = Running(
             process: process,
             commands: commands.fileHandleForWriting,
-            output: reader,
-            outputURL: outputURL
+            output: reader
         )
         running = started
         served = 0
-        logger.info("exiftool running for metadata reads (pid \(process.processIdentifier))")
+        logger.info("exiftool running for metadata reads (watch pid \(process.processIdentifier))")
         return started
     }
 
@@ -190,8 +206,56 @@ actor ExifToolDaemon {
         try? running.commands.close()
         if running.process.isRunning { running.process.terminate() }
         try? running.output.close()
-        try? FileManager.default.removeItem(at: running.outputURL)
     }
+
+    /// The few lines of Perl exiftool runs under, so that it ends when this
+    /// server does, however the server ends.
+    ///
+    /// On its own, it never did. `-stay_open` is a promise to read on past the
+    /// end of the commands, for a command file that is still being written, so
+    /// the end of the pipe, which is all a server leaves when it goes, reads
+    /// as "nothing yet", every 10 ms, for good. Not a copy of the pipe left
+    /// open somewhere: on the Mac, only the server and exiftool held it. Only
+    /// `discard`'s `terminate` ended one, and no crash, kill or plain shutdown
+    /// passes through `discard`. Nor does launchd's cleanup after a job that
+    /// has died reach it: `Process` starts every child in a process group of
+    /// its own. When the Mac's dev agent crash-looped against a server that
+    /// already held its port (2026-10-29 and 10-30), its 2,066 restarts left
+    /// 2,052 exiftools behind, until they had used up the Mac's processes and
+    /// simulators stopped booting. The NAS never saw it only because stopping
+    /// a container ends everything in it.
+    ///
+    /// So exiftool is the watch's child, and every second the watch checks
+    /// that its own parent is still the server, by the pid the server passed
+    /// it, which also catches a server that died before the watch began. A
+    /// parent that has gone is final, where the end of a pipe means nothing
+    /// to exiftool, and would never come while anything else held a copy of
+    /// the pipe's writing end. The watch passes a `terminate` on to exiftool,
+    /// and when exiftool exits, so does the watch, so `Process` sees the two
+    /// as one.
+    ///
+    /// Perl's builtins only. `use POSIX`, for one constant, nearly doubled
+    /// the watch, from 3.4 MB to 6.6 MB. And no name of its own in `ps`: on
+    /// macOS, setting `$0` put the first of the environment's strings where
+    /// `ps` shows arguments, and the server's environment holds the database
+    /// password.
+    private static let watch = """
+        my $server = shift;
+        my ($child, $stop, $asked);
+        $SIG{TERM} = $SIG{INT} = $SIG{HUP} = sub { $stop = 1 };
+        $SIG{CHLD} = sub {};  # cuts the sleep short when exiftool exits
+        defined($child = fork) or exit 1;
+        unless ($child) { exec { $ARGV[0] } @ARGV; exit 127 }
+        close STDIN; close STDOUT;  # the pipe and the file are exiftool's alone
+        until (waitpid($child, 1)) {  # 1 is WNOHANG, on Linux and macOS alike
+            # TERM, then KILL from the sixth second. TERM ends today's exiftool
+            # even when it is stopped, but one that caught TERM would hold it
+            # while stopped, and nothing here would continue it.
+            kill(($asked++ < 5 ? "TERM" : "KILL"), $child)
+                if $stop or getppid() != $server;
+            sleep 1;
+        }
+        """
 
     /// A command written to an exiftool that has just died would otherwise
     /// raise SIGPIPE, whose default is to end the process — the whole server,
