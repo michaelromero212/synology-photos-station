@@ -95,14 +95,9 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: SafetyController())
     try app.grouped("v1").register(collection: AccountController())
 
-    // Only the long-running server drains the queue.
-    //
-    // configure() runs before command dispatch, so without this check every
-    // CLI invocation — `import`, `invite`, `spaces` — also spins up worker
-    // lanes. Those processes claim jobs and then exit seconds later, leaving
-    // the rows stranded in 'running' with no error and no process behind them.
-    // A single `docker compose exec server ./FrameStationServer invite` is
-    // enough to strand a job on a live system.
+    // What only the long-running server needs. Built here, before anything is
+    // served, since requests find some of it in `app.storage`, and started by
+    // `startBackgroundWork(_:)` once the server is listening.
     if isServeCommand(app) {
         // One lane per core, capped: the J4125 has four, and thumbnailing is
         // CPU-bound, so oversubscribing just adds context switching.
@@ -110,16 +105,6 @@ func configure(_ app: Application) async throws {
             ?? min(4, ProcessInfo.processInfo.activeProcessorCount)
         let worker = DerivationWorker(app: app, concurrency: lanes)
         app.storage[DerivationWorkerKey.self] = worker
-        // Heal any live asset that reached the grid without a thumbnail, or
-        // whose thumbnail job ran out of tries, and only then start the lanes.
-        // Thumbnails outrank everything else in the queue, but only the ones
-        // that are in it: started side by side, the lanes made their first
-        // claims before the heal had run, and a restart began with lanes on
-        // long video transcodes while photos waited gray behind them.
-        Task {
-            await MetadataBackfill.enqueueMissingThumbnails(on: app)
-            await worker.start()
-        }
 
         // APNs speaks HTTP/2 only; without this the client offers 1.1 and the
         // connection is refused before any push is attempted.
@@ -156,57 +141,98 @@ func configure(_ app: Application) async throws {
             app: app, configuration: BrowseTree.Configuration.fromEnvironment()
         )
         app.storage[BrowseTreeWorkerKey.self] = browse
-        await browse.start()
 
         let sweeper = ActivitySweeper(app: app, apns: apns)
         app.storage[ActivitySweeperKey.self] = sweeper
-        await sweeper.start()
 
         // The other half of what push is for: telling people what arrived, and
         // getting a phone that stalled overnight moving again.
         let nudger = BackupNudger(app: app, apns: apns)
         app.storage[BackupNudgerKey.self] = nudger
-        await nudger.start()
 
         let retention = RetentionWorker(app: app)
         app.storage[RetentionWorkerKey.self] = retention
-        await retention.start()
-
-        // Ready before the first upload rather than started by it. See
-        // `ExifToolDaemon.warm`.
-        Task { await ExifToolDaemon.shared.warm() }
-
-        // Photos analyzed under older curation rules get the current ones,
-        // with no device involved. See `CurationVocabulary.retag`.
-        Task { await CurationVocabulary.retag(on: app) }
-
-        // Every stored photo's place named again when the rules for naming
-        // one change: Paris for its arrondissements, Walt Disney World for its
-        // parks. See `PlaceFiling`.
-        Task { await PlaceFiling.refile(on: app) }
-
-        // Fill dates and the screenshot kind into already-stored assets from
-        // their filenames, so the library that predates this reading gains the
-        // metadata without a re-upload. One pass, in the background, off the
-        // boot path.
-        Task { await MetadataBackfill.run(on: app) }
-        // And re-probe already-stored files for the full technical dump the
-        // Information panel now shows — same "no re-upload" idea, but the work
-        // goes on the derivation queue rather than running inline.
-        Task { await MetadataBackfill.enqueueMissingExif(on: app) }
-        // Every video that should have a stream ladder and hasn't. Last: it is
-        // the only job here that occupies a worker for minutes at a time, and
-        // the worker takes it after everything else anyway.
-        Task { await MetadataBackfill.enqueueMissingLadders(on: app) }
-        // And rebuild any whose folder has since vanished.
-        Task { await MetadataBackfill.requeueVanishedLadders(on: app) }
-        // Take apart the old hardlink tree under the blob root, which kept the
-        // bytes of permanently deleted photos on disk. Once it is gone this is
-        // a single failed `stat` per boot.
-        Task { await LegacyBrowseTree.retireInBackground(app: app) }
     }
 
     app.logger.info("framestation \(Build.version) configured")
+}
+
+/// Starts the server's background work: the derivation lanes, the sweepers
+/// and the nudger, and the passes each boot makes over the library.
+///
+/// Once `serve` is listening, not from `configure(_:)`, which runs before the
+/// port is bound. Started there, all of it was already at work when a server
+/// that couldn't bind its port shut down under it, and whatever reached for
+/// the pool or the blob store after the shutdown had emptied `app.storage`
+/// ended the process in `fatalError` rather than the exit 1 main.swift means:
+/// a lane's first claim, the requeue of abandoned jobs, the ladder passes.
+/// When the dev agent restarted 2,066 times against a server already on 8099
+/// (2026-10-29 and 10-30), it logged 2,575 "Postgres pool" and 490 "Blob
+/// store" fatal errors, and 15 of those starts left crash reports. A server
+/// that can't listen now starts none of it, nor requeues as abandoned the
+/// jobs the server on its port is running.
+func startBackgroundWork(_ app: Application) async {
+    // Only the long-running server drains the queue: `running` is set once
+    // `serve` has bound its port, and never by a command.
+    //
+    // main.swift calls this after a command has run as well, so without this
+    // check every CLI invocation — `import`, `invite`, `spaces` — would also
+    // spin up worker lanes. Those processes claim jobs and then exit seconds
+    // later, leaving the rows stranded in 'running' with no error and no
+    // process behind them. A single `docker compose exec server
+    // ./FrameStationServer invite` is enough to strand a job on a live system.
+    guard app.running != nil else { return }
+
+    // Heal any live asset that reached the grid without a thumbnail, or
+    // whose thumbnail job ran out of tries, and only then start the lanes.
+    // Thumbnails outrank everything else in the queue, but only the ones
+    // that are in it: started side by side, the lanes made their first
+    // claims before the heal had run, and a restart began with lanes on
+    // long video transcodes while photos waited gray behind them.
+    if let worker = app.storage[DerivationWorkerKey.self] {
+        Task {
+            await MetadataBackfill.enqueueMissingThumbnails(on: app)
+            await worker.start()
+        }
+    }
+
+    await app.storage[BrowseTreeWorkerKey.self]?.start()
+    await app.storage[ActivitySweeperKey.self]?.start()
+    await app.storage[BackupNudgerKey.self]?.start()
+    await app.storage[RetentionWorkerKey.self]?.start()
+
+    // Ready before the first upload rather than started by it. See
+    // `ExifToolDaemon.warm`.
+    Task { await ExifToolDaemon.shared.warm() }
+
+    // Photos analyzed under older curation rules get the current ones,
+    // with no device involved. See `CurationVocabulary.retag`.
+    Task { await CurationVocabulary.retag(on: app) }
+
+    // Every stored photo's place named again when the rules for naming
+    // one change: Paris for its arrondissements, Walt Disney World for its
+    // parks. See `PlaceFiling`.
+    Task { await PlaceFiling.refile(on: app) }
+
+    // Fill dates and the screenshot kind into already-stored assets from
+    // their filenames, so the library that predates this reading gains the
+    // metadata without a re-upload. One pass, in the background, off the
+    // boot path.
+    Task { await MetadataBackfill.run(on: app) }
+    // And re-probe already-stored files for the full technical dump the
+    // Information panel now shows — same "no re-upload" idea, but the work
+    // goes on the derivation queue rather than running inline.
+    Task { await MetadataBackfill.enqueueMissingExif(on: app) }
+    // Every video that should have a stream ladder and hasn't. Last: it is
+    // the only job here that occupies a worker for minutes at a time, and
+    // the worker takes it after everything else anyway.
+    Task { await MetadataBackfill.enqueueMissingLadders(on: app) }
+    // And rebuild any whose folder has since vanished.
+    Task { await MetadataBackfill.requeueVanishedLadders(on: app) }
+    // Take apart the old hardlink tree under the blob root, which kept the
+    // bytes of permanently deleted photos on disk. Once it is gone this is
+    // a single failed `stat` per boot.
+    Task { await LegacyBrowseTree.retireInBackground(app: app) }
 }
 
 enum ConfigurationError: Error, CustomStringConvertible {

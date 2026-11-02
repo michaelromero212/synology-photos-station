@@ -1,7 +1,7 @@
 import Foundation
 import Vapor
 
-// Vapor's standard async bootstrap. `app.execute()` dispatches to whichever
+// Vapor's standard async bootstrap. `app.startup()` dispatches to whichever
 // command was requested — `serve` by default, or `invite` from the CLI.
 let app: Application
 
@@ -20,10 +20,17 @@ do {
     try? await app.asyncShutdown()
     exit(1)
 }
+// `app.execute()` in its two halves, with the background work started between
+// them: `startup()` returns once `serve` is listening, or once a command has
+// finished, and `running` then waits out the server. A port that can't be
+// bound throws out of `startup()` before any of that work has started, so
+// nothing is left to race the shutdown below. See `startBackgroundWork(_:)`.
 do {
-    try await app.execute()
+    try await app.startup()
+    await startBackgroundWork(app)
+    try await app.running?.onStop.get()
 } catch {
-    // `execute()` has already logged it.
+    app.logger.report(error: error)
     try? await app.asyncShutdown()
     exit(1)
 }
