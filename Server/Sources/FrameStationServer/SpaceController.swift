@@ -159,7 +159,7 @@ struct SpaceController: RouteCollection {
                    m.joined_at AS "joinedAt",
                    (SELECT count(*)::int FROM space_assets sa
                     WHERE sa.space_id = m.space_id
-                      AND sa.uploaded_by_user_id = u.id
+                      AND COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id) = u.id
                       AND sa.deleted_at IS NULL) AS "contributedCount"
             FROM space_members m
             JOIN users u ON u.id = m.user_id

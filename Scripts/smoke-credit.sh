@@ -95,6 +95,10 @@ check "phones are told" "2" \
 P1=$(q "SELECT asset_id FROM space_assets WHERE space_id = '$SHARED' AND filename = 'p1.jpg'")
 check "and the Information panel says Added by them" "Jordan Test" \
   "$(curl -s "$API/v1/spaces/$SHARED/assets/$P1/detail" -H "Authorization: Bearer $TOKEN" | jq '["uploadedBy"]["displayName"]')"
+# The owner sent all five, but two are Jordan's and one Other's now.
+check "and Members counts what each person is credited with" "Owner:2 Other:1" \
+  "$(curl -s "$API/v1/spaces/$SHARED/members" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import sys,json; print(' '.join(f\"{m['user']['displayName']}:{m['contributedCount']}\" for m in json.load(sys.stdin)['members']))")"
 
 echo "Again"
 OUT=$(run credit-uploaders --from "$ROOT/credits.tsv" --space "$SHARED")
