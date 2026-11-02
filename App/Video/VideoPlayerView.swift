@@ -110,6 +110,9 @@ final class VideoPlaybackModel {
     @ObservationIgnored var onLinkFree: (() -> Void)?
     /// Whether this watch has already reported itself far enough ahead.
     @ObservationIgnored private var isAhead = false
+    /// Set when the clip's page is left, so coming back to it starts it again
+    /// from the beginning. See `start`.
+    @ObservationIgnored private var restartsOnReturn = false
 
     // MARK: Staying connected
 
@@ -427,6 +430,16 @@ final class VideoPlaybackModel {
     func start() {
         wantsPlayback = true
         needsLink()
+        // Back on a clip after swiping away from it: from the beginning, the
+        // way Photos plays it. It carried on from where it had been left,
+        // because leaving only pauses a clip so its buffer is still there to
+        // come back to. Only leaving does this: `pause` sets it, and a pause
+        // pressed on the clip itself doesn't go through `pause`, so play
+        // carries on from there as it always did.
+        if restartsOnReturn {
+            restartsOnReturn = false
+            if hasFinished || position > 0 { rewind() }
+        }
         guard let player else {
             // Shown with nothing to play: the link request failed while this
             // was a neighbor. Ask again now that it's wanted.
@@ -545,11 +558,19 @@ final class VideoPlaybackModel {
         #endif
     }
 
+    /// Back to the first frame, for a clip being returned to. See `start`.
+    private func rewind() {
+        position = 0
+        hasFinished = false
+        if player != nil { seek(to: 0, exact: true) }
+    }
+
     /// Leaves the buffer intact — this is a page scrolling out of view, not a
     /// video being closed.
     func pause() {
         wantsPlayback = false
         waitingSince = nil
+        restartsOnReturn = true
         player?.pause()
         // Re-cap: a clip scrolled off (or advanced past) must stop reading
         // ahead, or it keeps pulling bytes in the background and starves the one
