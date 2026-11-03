@@ -29,6 +29,8 @@ final class FocusedBackupSession {
     /// True once the screen has been taken down, so the view can stop
     /// counting and get out of the way.
     private(set) var isDimmed = false
+    /// Set when leaving the app ended the run, so coming back starts it again.
+    private(set) var wasInterrupted = false
 
     /// What the brightness was before we touched it.
     ///
@@ -53,10 +55,35 @@ final class FocusedBackupSession {
         isRunning = true
         isDimmed = false
 
+        wasInterrupted = false
+
         // The phone must not lock. Everything else here follows from that.
         UIApplication.shared.isIdleTimerDisabled = true
         brightnessBefore = UIScreen.main.brightness
+        dimSoon()
 
+        Task { [weak engine] in
+            await engine?.scanLibrary()
+            await engine?.start()
+        }
+    }
+
+    /// Brings the screen back up to show how it's going, then dark again.
+    ///
+    /// The screen used to stay dark whatever you did to it. The only way to
+    /// see the progress was the power button, and that locked the phone and
+    /// ended the backup it was checking on.
+    func wake() {
+        guard isRunning else { return }
+        if isDimmed, let brightnessBefore {
+            UIScreen.main.brightness = brightnessBefore
+        }
+        isDimmed = false
+        dimSoon()
+    }
+
+    private func dimSoon() {
+        dimTask?.cancel()
         dimTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.dimAfter * 1_000_000_000))
             guard !Task.isCancelled, let self, self.isRunning else { return }
@@ -65,11 +92,20 @@ final class FocusedBackupSession {
                 self.isDimmed = true
             }
         }
+    }
 
-        Task { [weak engine] in
-            await engine?.scanLibrary()
-            await engine?.start()
-        }
+    /// Leaving the app: everything put back, and noted, so that coming back
+    /// to this screen carries on rather than sitting there stopped.
+    func interrupt() {
+        guard isRunning else { return }
+        stop()
+        wasInterrupted = true
+    }
+
+    /// Back in the app after `interrupt`.
+    func resume() {
+        guard wasInterrupted else { return }
+        start()
     }
 
     /// Puts the phone back exactly as it was found.
@@ -101,6 +137,9 @@ struct FocusedBackupView: View {
 
     @State private var session: FocusedBackupSession?
     @State private var countdown = Int(FocusedBackupSession.dimAfter)
+    /// Counts the times the screen has been brought back up, which restarts
+    /// the countdown to dark.
+    @State private var wakes = 0
     @Environment(\.scenePhase) private var scenePhase
 
     private var waiting: Int { engine.progress.pending }
@@ -191,22 +230,39 @@ struct FocusedBackupView: View {
             .opacity(session?.isDimmed == true ? 0.35 : 1)
             .animation(.easeInOut(duration: 1.2), value: session?.isDimmed)
         }
+        // A tap anywhere brings the screen up to read, as a dark phone's own
+        // screen does. The stop button still stops.
+        .contentShape(Rectangle())
+        .onTapGesture { wake() }
         .task {
             let created = FocusedBackupSession(engine: engine)
             session = created
             created.start()
-            // Counts down only while there is something to count to.
+        }
+        // Counts down only while there is something to count to, again after
+        // each tap.
+        .task(id: wakes) {
+            countdown = Int(FocusedBackupSession.dimAfter)
             while countdown > 0, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 countdown -= 1
             }
         }
-        // Leaving the app ends it. The whole feature is "the app is in front";
-        // once it isn't, holding the screen awake would just be draining a
-        // phone in somebody's pocket.
+        // Leaving the app pauses it. The whole feature is "the app is in
+        // front"; once it isn't, holding the screen awake would just be
+        // draining a phone in somebody's pocket. Only for the background,
+        // though: pulling down Control Center or a notification makes the app
+        // inactive for a moment, and that used to end the run too. Coming back
+        // carries on.
         .onChange(of: scenePhase) { _, phase in
-            guard phase != .active else { return }
-            session?.stop()
+            switch phase {
+            case .background: session?.interrupt()
+            case .active:
+                guard session?.wasInterrupted == true else { return }
+                session?.resume()
+                wakes += 1
+            default: break
+            }
         }
         .onDisappear { session?.stop() }
         // Finishing is a reason to hand the phone back, not to sit on a dark
@@ -219,14 +275,20 @@ struct FocusedBackupView: View {
         .preferredColorScheme(.dark)
     }
 
+    private func wake() {
+        guard session?.isRunning == true else { return }
+        session?.wake()
+        wakes += 1
+    }
+
     private var footnote: String {
         if session?.isDimmed == true {
-            return "The screen is dark to save battery. Backup is still running."
+            return "The screen is dark to save battery. Backup is still running. Tap to check on it."
         }
         if countdown > 0 {
             return "The screen will turn dark in \(countdown) second\(countdown == 1 ? "" : "s")."
         }
-        return "The screen is dark to save battery. Backup is still running."
+        return "The screen is dark to save battery. Backup is still running. Tap to check on it."
     }
 
     private func condition(_ symbol: String, _ text: String) -> some View {
