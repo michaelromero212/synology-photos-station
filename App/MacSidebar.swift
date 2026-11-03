@@ -201,6 +201,19 @@ struct MacRootView: View {
 
         case .albums:
             AlbumsView(session: session)
+                // A shared library's card opens the library here, with a way
+                // back to Albums, as it does on the phone.
+                .navigationDestination(for: SharedAlbumRoute.self) { route in
+                    if let space = session.spaces.first(where: { $0.id == route.spaceID }) {
+                        TimelineView(session: session, space: space)
+                    } else {
+                        ContentUnavailableView {
+                            Label("Album Unavailable", systemImage: "person.2.slash")
+                        } description: {
+                            Text("This shared library is no longer available to you.")
+                        }
+                    }
+                }
 
         case .space(let id):
             if let space = session.spaces.first(where: { $0.id == id }) {

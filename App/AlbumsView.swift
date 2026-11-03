@@ -902,11 +902,11 @@ struct AlbumsView: View {
     /// for daily; these are the ones you visit when somebody adds to them, and
     /// the notification is what sends you.
     ///
-    /// No library cards on a Mac. A window has a sidebar, and the sidebar
-    /// already gives every shared library a row of its own — putting them here
-    /// as well would be the same list twice, and these would be the dead half of
-    /// it, since the destination that answers them belongs to the tab bar's
-    /// stack. The albums show there all the same.
+    /// The same on a Mac. The libraries were left out there because the
+    /// sidebar lists them too — and a library with no albums of its own then
+    /// left the whole section empty, so the family's shared album was on the
+    /// phone and nowhere on the Mac signed in to the same account. Photos keeps
+    /// Shared Albums on its Albums page and in its sidebar both; so does this.
     @ViewBuilder
     private func shared(_ store: AlbumStore, side: CGFloat, columns: Int) -> some View {
         let cards = sharedCards(store)
@@ -944,19 +944,15 @@ struct AlbumsView: View {
     }
 
     /// Albums shared with people first, then each shared library and its
-    /// albums. Albums of a library this device hasn't heard of yet, and every
-    /// one on a Mac, come last: shown, never dropped.
+    /// albums. Albums of a library this device hasn't heard of yet come last:
+    /// shown, never dropped.
     ///
     /// The ones shared with people lead because they're the ones somebody
     /// made to share — the family album, the one with the cousins — where a
     /// library is everyone's backup landing in one place.
     private func sharedCards(_ store: AlbumStore) -> [SharedCard] {
         let albums = store.family
-        #if os(macOS)
-        let libraries: [SpaceDTO] = []
-        #else
         let libraries = session.sharedSpaces
-        #endif
         var cards: [SharedCard] = store.sharedWithPeople.map(SharedCard.album)
         for space in libraries {
             cards.append(.library(space))
