@@ -1573,18 +1573,46 @@ struct TimelineView: View {
 
     /// Which day, and which tile of it, a photo is in the grid.
     private func gridPosition(of item: TimelineItem) -> (key: String, index: Int)? {
+        gridPosition { $0.id == item.id }
+    }
+
+    private func gridPosition(
+        where matches: (TimelineItem) -> Bool
+    ) -> (key: String, index: Int)? {
         guard let store,
-              let day = store.items.first(where: { _, items in
-                  items.contains { $0.id == item.id }
-              }),
+              let day = store.items.first(where: { _, items in items.contains(where: matches) }),
               let bucket = Self.mergedBuckets(store, queued: queuedByDay)
                   .first(where: { $0.key == day.key }),
               let index = entries(for: bucket, items: day.value).firstIndex(where: {
-                  if case .item(let entry) = $0 { return entry.id == item.id }
+                  if case .item(let entry) = $0 { return matches(entry) }
                   return false
               })
         else { return nil }
         return (day.key, index)
+    }
+
+    /// Brings the photo a share's review is pointing at on screen, in the
+    /// middle, and leaves the grid alone when it's already showing.
+    ///
+    /// This went to the top of the photo's day instead, on every step. In a
+    /// day of more photos than fit on screen the one ringed was below the
+    /// bottom edge, and stepping between two photos of the same day moved the
+    /// grid each time anyway: it went all over the place without ever showing
+    /// the photo it was pointing at.
+    private func revealReviewed(_ assetID: UUID, in store: TimelineStore) async {
+        guard let key = await bucketKey(for: assetID, in: store) else { return }
+        if let position = gridPosition(where: { $0.assetID == assetID }),
+           gridController.reveal(item: position.index, inDay: position.key) {
+            return
+        }
+        // Its day only just arrived and isn't in the grid yet: to the day
+        // first, then to the photo once the day has been laid out.
+        pendingJump = key
+        try? await Task.sleep(for: .milliseconds(150))
+        guard review?.current == assetID,
+              let position = gridPosition(where: { $0.assetID == assetID })
+        else { return }
+        gridController.reveal(item: position.index, inDay: position.key)
     }
 
     /// Keeps the grid under the viewer on the photo the viewer is showing.
@@ -2268,15 +2296,11 @@ struct TimelineView: View {
             gridController.jump(toDay: target)
             pendingJump = nil
         }
-        // Walks the grid to whichever moved item is being pointed at — see the
-        // same handler on the SwiftUI grid.
+        // Walks the grid to whichever moved item is being pointed at. See
+        // `revealReviewed`.
         .onChange(of: review?.index) { _, _ in
             guard let assetID = review?.current else { return }
-            Task {
-                if let key = await bucketKey(for: assetID, in: store) {
-                    pendingJump = key
-                }
-            }
+            Task { await revealReviewed(assetID, in: store) }
         }
         .onChange(of: store.buckets.count) { old, new in
             LayoutWatch.shared.note("buckets \(old) → \(new)")
