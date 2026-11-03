@@ -764,31 +764,12 @@ struct TimelineView: View {
             // first click selects at once, and a second one soon after means
             // open. Deciding from the interval is that behavior exactly, and
             // it leaves one gesture on the tile, which fires immediately.
-            .onTapGesture {
-                let now = Date()
-                let isSecondClick = lastClickedID == item.id
-                    && now.timeIntervalSince(lastClickAt) <= NSEvent.doubleClickInterval
-                lastClickAt = now
-                lastClickedID = item.id
-
-                if isSecondClick {
-                    // Undo the selection the first click made — opening is what
-                    // the pair meant, not "select then open".
-                    lastClickedID = nil
-                    selection.clear()
-                    openItem = OpenedPhoto(
-                        item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
-                    )
-                } else if NSEvent.modifierFlags.contains(.command) {
-                    // ⌘-click adds to what is picked; a plain click replaces it.
-                    selection.isActive = true
-                    selection.toggle(item)
-                } else {
-                    selection.clear()
-                    selection.begin(with: item)
-                }
-            }
-            .contextMenu { macCellMenu(for: item) }
+            .onTapGesture { macClick(item, dayItems: dayItems) }
+            // Built when the menu opens, not with the tile. Called directly,
+            // every tile built its whole menu — counts, filters, the shared
+            // libraries — as it scrolled into view, which measured as a sixth
+            // of the main thread in a fast scroll.
+            .contextMenu { Deferred { macCellMenu(for: item) } }
         #elseif !os(tvOS)
         if selection.isActive {
             // Identical on every platform: once you're selecting, a click and a
@@ -897,6 +878,60 @@ struct TimelineView: View {
     ///
     /// Delete says how many it will take, because "Delete" over a selection you
     /// cannot see all of is the one item here you cannot undo by repeating it.
+    /// What a click on a tile does: the first selects at once, a second soon
+    /// after opens, and ⌘ adds to the selection. Shared by every Mac grid; the
+    /// library's own finds the tile from the click's position rather than
+    /// giving each tile a gesture — see `MacTimelineGrid`.
+    private func macClick(_ item: TimelineItem, dayItems: [TimelineItem]) {
+        let now = Date()
+        let isSecondClick = lastClickedID == item.id
+            && now.timeIntervalSince(lastClickAt) <= NSEvent.doubleClickInterval
+        lastClickAt = now
+        lastClickedID = item.id
+
+        if isSecondClick {
+            // Undo the selection the first click made — opening is what
+            // the pair meant, not "select then open".
+            lastClickedID = nil
+            selection.clear()
+            openItem = OpenedPhoto(
+                item: item, dayItems: dayItems, pageItems: loadedItemsInOrder()
+            )
+        } else if NSEvent.modifierFlags.contains(.command) {
+            // ⌘-click adds to what is picked; a plain click replaces it.
+            selection.isActive = true
+            selection.toggle(item)
+        } else {
+            selection.clear()
+            selection.begin(with: item)
+        }
+    }
+
+    /// A library tile on the Mac: the picture and its selection, and nothing
+    /// that listens. Clicks and the menu belong to the grid as a whole.
+    private func macGridTile(_ entry: GridEntry, size: CGSize) -> some View {
+        Group {
+            switch entry {
+            case .item(let item):
+                PhotoCell(item: item, loader: session.loader, size: size)
+                    .overlay(alignment: .topLeading) {
+                        if selection.contains(item) {
+                            SelectionMark(isPicked: true).padding(5)
+                        }
+                    }
+                    .overlay {
+                        if selection.contains(item) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .strokeBorder(Color.accentColor, lineWidth: 3)
+                        }
+                    }
+            case .placeholder:
+                Rectangle().fill(.quaternary)
+                    .frame(width: size.width, height: size.height)
+            }
+        }
+    }
+
     @ViewBuilder
     private func macCellMenu(for item: TimelineItem) -> some View {
         let targets: [TimelineItem] = selection.contains(item) ? selection.picked : [item]
@@ -2350,9 +2385,15 @@ struct TimelineView: View {
             loadDay: { key in
                 await store.loadBucket(key)
                 await prefetchThumbnails(for: key, in: store)
-            }
-        ) { entry, size, dayItems in
-            cell(entry, size: size, dayItems: dayItems)
+            },
+            onClick: { item, dayItems in macClick(item, dayItems: dayItems) },
+            onClickEmpty: {
+                guard !NSEvent.modifierFlags.contains(.command) else { return }
+                selection.clear()
+            },
+            menu: { item in macCellMenu(for: item) }
+        ) { entry, size, _ in
+            macGridTile(entry, size: size)
         } dayHeader: { bucket in
             header(bucket)
         } areaHeader: { name in
@@ -3357,7 +3398,21 @@ struct TimelineView: View {
     /// heading that scrolls into view, and a `DateFormatter` is one of the more
     /// expensive things Foundation will build for you — two per heading was
     /// work in the middle of a fling that bought nothing.
+    /// Remembered per key: a day's heading is formatted every time its row is
+    /// built, and parsing then formatting a date measured as most of the cost
+    /// of a heading in a fast scroll. Keyed by the reader's language as well,
+    /// which can change underneath a running app.
     static func displayDate(_ key: String) -> String {
+        let cacheKey = "\(Locale.autoupdatingCurrent.identifier)|\(key)" as NSString
+        if let cached = displayDates.object(forKey: cacheKey) { return cached as String }
+        let formatted = formatDisplayDate(key)
+        displayDates.setObject(formatted as NSString, forKey: cacheKey)
+        return formatted
+    }
+
+    private nonisolated(unsafe) static let displayDates = NSCache<NSString, NSString>()
+
+    private static func formatDisplayDate(_ key: String) -> String {
         let parser: DateFormatter
         let display: DateFormatter
         switch key.count {

@@ -1237,7 +1237,7 @@ struct VideoPlayerView: View {
     /// Nil on macOS and tvOS, which have no monitor wired up yet; the wording
     /// falls back to classifying the error on its own.
     @Environment(\.connectionMonitor) private var connection
-    #if os(iOS)
+    #if os(iOS) || os(macOS)
     /// Whether the layer has put this clip's first frame on screen. The poster
     /// is over it until then. See `body`.
     @State private var showsFirstFrame = false
@@ -1245,7 +1245,7 @@ struct VideoPlayerView: View {
 
     var body: some View {
         ZStack {
-            #if !os(iOS)
+            #if os(tvOS)
             if let poster, model.player == nil {
                 Image(platformImage: poster).resizable().scaledToFit()
             }
@@ -1271,16 +1271,24 @@ struct VideoPlayerView: View {
                     withAnimation(.easeOut(duration: 0.2)) { showsFirstFrame = true }
                 }
                 .overlay { skipZones }
+                #elseif os(macOS)
+                // A bare layer, as on the phone, with the same transport over
+                // it (see `AssetDetailView.macVideoControls`). It used to be
+                // SwiftUI's `VideoPlayer` — AVKit's Mac bar, a different set of
+                // controls from the phone's — and that view says nothing about
+                // when it has a picture, so the poster went as soon as there was
+                // a player and every clip opened on black.
+                MacPlayerView(player: player) {
+                    withAnimation(.easeOut(duration: 0.2)) { showsFirstFrame = true }
+                }
                 #else
-                // macOS and tvOS get AVKit's own transport, which is the right
-                // answer there: it is the control surface people already know,
-                // it takes the Apple TV remote's swipe-to-scrub and the Mac's
-                // media keys for free, and neither platform has a chrome-hiding
-                // tap for it to interfere with.
+                // tvOS gets AVKit's own transport, which is the right answer
+                // there: it is the control surface people already know, and it
+                // takes the remote's swipe-to-scrub for free.
                 VideoPlayer(player: player)
                 #endif
             }
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             // Over the layer until the layer has a frame of its own to show, and
             // then faded out. The poster used to go the moment there was a
             // player, which is before AVPlayer has decoded anything, so the
@@ -1450,6 +1458,9 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 }
 
+#endif
+
+#if os(iOS) || os(macOS)
 /// Playback controls: a transport row centered on the video itself, and a
 /// single row underneath — elapsed time, the scrubber, time remaining and mute —
 /// on a pill of dark glass, as Photos draws its own.
@@ -1491,7 +1502,9 @@ struct VideoControls: View {
     private func skipButton(by delta: Double, symbol: String) -> some View {
         Button {
             model.skip(by: delta)
+            #if os(iOS)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            #endif
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 30, weight: .medium))
@@ -1560,7 +1573,14 @@ struct VideoControls: View {
         // bottom. Sideways there is far less height to spend — the rotated
         // layer is only as tall as the screen is wide — so the portrait figure
         // pushed the scrubber almost into the middle of the picture.
+        #if os(iOS)
         .padding(.bottom, MediaTilt.shared.isSideways ? 56 : 104)
+        #else
+        // A window has no action bar along the bottom — its verbs are in the
+        // toolbar — so the pill sits where Photos puts its own.
+        .padding(.bottom, 24)
+        .frame(maxWidth: 720)
+        #endif
         .onAppear { isMuted = model.player?.isMuted ?? false }
     }
 }
@@ -1658,5 +1678,61 @@ extension View {
     /// it — controls that stayed upright while the clip turned read as broken,
     /// so the two travel together.
     func videoTilt() -> some View { modifier(VideoTilt()) }
+}
+#endif
+
+#if os(macOS)
+/// `AVPlayerLayer` with nothing on top of it — the Mac's `PlayerLayerView`.
+///
+/// Bare, as on the phone, so the controls over it are this app's own and
+/// the same on both: AVKit's Mac bar is a different set of buttons in a
+/// different place. The poster is drawn over this until the layer says it
+/// has a frame, so a clip opens on its own picture rather than on black.
+struct MacPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+    var onFirstFrame: () -> Void = {}
+
+    func makeNSView(context: Context) -> PlayerHostView {
+        let view = PlayerHostView()
+        view.playerLayer.player = player
+        view.onFirstFrame = onFirstFrame
+        return view
+    }
+
+    func updateNSView(_ view: PlayerHostView, context: Context) {
+        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.onFirstFrame = onFirstFrame
+    }
+
+    final class PlayerHostView: NSView {
+        let playerLayer = AVPlayerLayer()
+        var onFirstFrame: () -> Void = {}
+        private var readiness: NSKeyValueObservation?
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            setUp()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            setUp()
+        }
+
+        override func makeBackingLayer() -> CALayer { playerLayer }
+
+        private func setUp() {
+            wantsLayer = true
+            playerLayer.videoGravity = .resizeAspect
+            playerLayer.backgroundColor = NSColor.clear.cgColor
+            // `isReadyForDisplay` can change off the main thread, so it is
+            // passed back to it.
+            readiness = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) {
+                [weak self] layer, _ in
+                guard layer.isReadyForDisplay else { return }
+                DispatchQueue.main.async { self?.onFirstFrame() }
+            }
+        }
+    }
 }
 #endif

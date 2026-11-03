@@ -269,6 +269,17 @@ struct AssetDetailView: View {
     /// `displayedItem` because the two drive each other in opposite
     /// directions — a swipe moves this, a button moves that.
     @State private var scrolledID: UUID?
+    /// Which page is on screen, for the pages to read — the same object the
+    /// phone's pager keeps, so a clip on a Mac starts, stops and hands over to
+    /// its neighbour by the same rules. Each page used to be handed a focus
+    /// naming itself, so every page the scroll view built thought it was the
+    /// one being watched, and opened a player of its own.
+    @State private var macFocus: PagerFocus
+    /// Whether the clip's controls are up. They come up as the pointer moves
+    /// and go a moment after it stops, while the clip plays — as Photos does
+    /// on a Mac. Paused, they stay. See `pokeControls`.
+    @State private var macControlsShown = true
+    @State private var macControlsHide: Task<Void, Never>?
     #endif
     #endif
 
@@ -301,6 +312,7 @@ struct AssetDetailView: View {
         // the first layout scrolls there visibly, so opening a photograph from
         // the middle of a day would flick past the ones before it.
         self._scrolledID = State(initialValue: item.id)
+        self._macFocus = State(initialValue: PagerFocus(currentID: item.id))
         #endif
         #endif
     }
@@ -959,13 +971,15 @@ struct AssetDetailView: View {
         // lands cleanly on one picture (first open included, no neighbour
         // creeping in), and the gap shows as `pageGap` of black between two
         // pictures mid-swipe — a thin `pageGap`-half inset at rest.
+        GeometryReader { outer in
+        ScrollViewReader { reader in
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(macPages) { page in
                     AssetPage(
                         model: cache.model(for: page, spaceID: space(of: page).id),
                         session: session,
-                        focus: PagerFocus(currentID: page.id),
+                        focus: macFocus,
                         preloader: preloader,
                         showsChrome: true,
                         onSingleTap: {},
@@ -986,6 +1000,27 @@ struct AssetDetailView: View {
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
         .background(Color.black)
+        // Beside the sidebar by padding rather than by safe area. Left to the
+        // safe area, the pager was as wide as the space beside the sidebar
+        // but also told the sidebar's width as a leading inset, and paging
+        // honors the inset — so every page landed that far right of center
+        // with its neighbour showing. Measured: 230 points of inset on a
+        // 1,826-point pager. Padded, the pager simply starts where the
+        // sidebar ends and has no inset to apply.
+        .padding(.leading, outer.safeAreaInsets.leading)
+        .padding(.trailing, outer.safeAreaInsets.trailing)
+        .ignoresSafeArea(.container, edges: .horizontal)
+        // Black under the sidebar's glass too, as before.
+        .background(Color.black)
+        // Back onto the page whenever the pages change width. Paging keeps the
+        // offset it had, and an offset is a multiple of the *old* width: open
+        // with the sidebar settling, or show or hide it, and the photo sat a
+        // sidebar's width off center with its neighbour showing beside it.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in
+            reader.scrollTo(displayedItem.id, anchor: .leading)
+        }
+        }
+        }
         .onChange(of: scrolledID) { _, new in
             guard let new, new != displayedItem.id,
                   let match = macPages.first(where: { $0.id == new }) else { return }
@@ -993,11 +1028,74 @@ struct AssetDetailView: View {
         }
         .onChange(of: displayedItem.id) { _, new in
             if scrolledID != new { scrolledID = new }
+            macFocus.currentID = new
+            // Whatever you just left stops, as it does on the phone. Nil on a
+            // photo, so moving from a clip to a still silences it too.
+            preloader.playOnly(
+                displayedItem.mediaType == .video ? displayedItem.assetID : nil
+            )
             warmNeighbours(around: new)
+            warmNextVideo()
         }
         // Warm the pictures on either side of the one opened, so the very first
         // swipe is smooth rather than the only rough one.
-        .onAppear { warmNeighbours(around: displayedItem.id) }
+        .onAppear {
+            warmNeighbours(around: displayedItem.id)
+            warmNextVideo()
+            pokeControls()
+        }
+        // The phone's transport, at the viewer rather than on a page for the
+        // phone's reason: it reads whichever clip is current, so it follows
+        // every advance — Next Video, auto-play, a swipe.
+        .overlay { macVideoControls }
+        .onContinuousHover { _ in pokeControls() }
+    }
+
+    @ViewBuilder
+    private var macVideoControls: some View {
+        if displayedItem.mediaType == .video,
+           let playback = preloader.existing(displayedItem.assetID) {
+            let showing = macControlsShown || !playback.isPlaying
+            VideoControls(model: playback)
+                .opacity(showing ? 1 : 0)
+                .allowsHitTesting(showing)
+                .animation(.easeInOut(duration: 0.2), value: showing)
+                .background {
+                    // Space plays and pauses, as in every Mac player.
+                    Button("Play/Pause") {
+                        playback.togglePlayPause()
+                        pokeControls()
+                    }
+                    .keyboardShortcut(.space, modifiers: [])
+                    .hidden()
+                }
+        }
+    }
+
+    /// Brings the controls up, and puts them away again shortly after.
+    private func pokeControls() {
+        if !macControlsShown { macControlsShown = true }
+        macControlsHide?.cancel()
+        macControlsHide = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            macControlsShown = false
+        }
+    }
+
+    /// Gets the next clip of the day buffering while this one plays.
+    ///
+    /// The pages either side warm themselves, as on the phone. Next Video and
+    /// auto-play jump past any photographs in between, to a page the scroll
+    /// view hasn't built — so that one is asked for here, and arriving at it
+    /// starts from a buffer rather than from a request.
+    private func warmNextVideo() {
+        guard displayedItem.mediaType == .video,
+              let next = adjacentVideo(forward: true) else { return }
+        preloader.warm(
+            assetID: next.assetID, client: session.client,
+            quality: PlaybackSettings.resolvedQuality(isLocal: NetworkLocality.shared.isLocal)
+        )
     }
 
     /// Decodes the photographs on either side of the one shown before a swipe
@@ -1592,7 +1690,7 @@ private struct AssetPage: View {
 
     @ViewBuilder
     private var video: some View {
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         // Only the page you're looking at gets a *layer*. A neighbour still
         // prepares — see the `task` below — but rendering three video layers to
         // have two of them offscreen costs GPU for nothing.

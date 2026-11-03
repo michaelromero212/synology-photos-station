@@ -62,6 +62,10 @@ struct MacGridDay {
     let items: [TimelineItem]
     let start: CGFloat
     let height: CGFloat
+    /// Changes whenever anything this day draws does — its photographs, their
+    /// details, its heading. A row compares this rather than the photographs
+    /// themselves; see `MacGridRowView`.
+    let version: Int
 }
 
 struct MacGridLayout {
@@ -99,6 +103,30 @@ struct MacGridLayout {
 
     /// The library as the scrubber measures it: every day's start and height
     /// in content coordinates, exact rather than estimated.
+    /// The day and photograph at a point, if it is on one.
+    ///
+    /// Walks the one row the point falls in, adding up the same widths the
+    /// row is drawn with — so it agrees with the picture exactly, gaps
+    /// included.
+    func hit(_ point: CGPoint) -> (day: Int, entry: Int)? {
+        for index in rows(from: point.y, to: point.y + 0.5) {
+            let row = rows[index]
+            guard row.y <= point.y, point.y < row.y + row.height,
+                  case .tiles(let range, let height) = row.kind else { continue }
+            let entries = days[row.day].entries
+            var x: CGFloat = 0
+            for entry in range {
+                let width = JustifiedLayout.width(
+                    forRatio: entries[entry].aspectRatio, height: Double(height)
+                )
+                if point.x >= x, point.x < x + width { return (row.day, entry) }
+                x += width + PhotoGridMetrics.spacing
+                if point.x < x { return nil }
+            }
+        }
+        return nil
+    }
+
     func span(header: CGFloat) -> LibrarySpan {
         var start: [String: Double] = [:]
         var height: [String: Double] = [:]
@@ -135,9 +163,14 @@ final class MacGridLayoutCache {
 
     private struct DayPieces {
         let signature: DaySignature
-        let entries: [GridEntry]
+        var bucket: TimelineBucket
+        var items: [TimelineItem]
+        var entries: [GridEntry]
         let pieces: [Piece]
+        var version: Int
     }
+
+    private var versions = 0
 
     private var cache: [String: DayPieces] = [:]
     private var cachedMetrics: MacGridMetrics?
@@ -155,16 +188,33 @@ final class MacGridLayoutCache {
 
         var signatures: [DaySignature] = []
         signatures.reserveCapacity(buckets.count)
+        // A photograph changed in place — favorited, rotated, redated within
+        // its day — keeps the day's shape, so its rows stay where they are, but
+        // what they draw is new. Without this the grid kept showing the old one.
+        var edited = false
         for bucket in buckets {
             let loaded = items[bucket.key]
-            signatures.append(DaySignature(
+            let signature = DaySignature(
                 count: bucket.count, loaded: loaded?.count ?? -1,
                 first: loaded?.first?.id, last: loaded?.last?.id,
                 areas: bucket.areas?.count ?? 0
-            ))
+            )
+            signatures.append(signature)
+            if var cached = cache[bucket.key], cached.signature == signature,
+               cached.bucket != bucket || !Self.same(cached.items, loaded ?? []) {
+                versions += 1
+                cached.bucket = bucket
+                if let loaded {
+                    cached.items = loaded
+                    cached.entries = loaded.map(GridEntry.item)
+                }
+                cached.version = versions
+                cache[bucket.key] = cached
+                edited = true
+            }
         }
         let keys = buckets.map(\.key)
-        if metrics == cachedMetrics, signatures == lastSignatures, keys == lastKeys {
+        if !edited, metrics == cachedMetrics, signatures == lastSignatures, keys == lastKeys {
             return layout
         }
         cachedMetrics = metrics
@@ -188,8 +238,10 @@ final class MacGridLayoutCache {
             if let cached = cache[bucket.key], cached.signature == signature {
                 pieces = cached
             } else {
+                versions += 1
                 pieces = Self.pieces(
-                    for: bucket, items: items[bucket.key], signature: signature, metrics: metrics
+                    for: bucket, items: items[bucket.key], signature: signature,
+                    metrics: metrics, version: versions
                 )
                 cache[bucket.key] = pieces
             }
@@ -222,8 +274,8 @@ final class MacGridLayoutCache {
             }
             next.dayIndex[key] = index
             next.days.append(MacGridDay(
-                bucket: bucket, entries: pieces.entries, items: items[key] ?? [],
-                start: start, height: y - start
+                bucket: pieces.bucket, entries: pieces.entries, items: pieces.items,
+                start: start, height: y - start, version: pieces.version
             ))
         }
         y += metrics.bottomClearance
@@ -240,9 +292,19 @@ final class MacGridLayoutCache {
         return next
     }
 
+    /// Whether two runs of photographs are the same, checking storage first:
+    /// a day nothing happened to hands back the very array it did last time,
+    /// so the common case costs a pointer comparison rather than a walk.
+    private static func same(_ a: [TimelineItem], _ b: [TimelineItem]) -> Bool {
+        let shared = a.withUnsafeBufferPointer { a in
+            b.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress && a.count == b.count }
+        }
+        return shared || a == b
+    }
+
     private static func pieces(
         for bucket: TimelineBucket, items: [TimelineItem]?, signature: DaySignature,
-        metrics: MacGridMetrics
+        metrics: MacGridMetrics, version: Int
     ) -> DayPieces {
         let entries: [GridEntry] = items.map { $0.map(GridEntry.item) }
             ?? (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) }
@@ -262,7 +324,10 @@ final class MacGridLayoutCache {
                 pieces.append(.tiles(range, height: CGFloat(row.height)))
             }
         }
-        return DayPieces(signature: signature, entries: entries, pieces: pieces)
+        return DayPieces(
+            signature: signature, bucket: bucket, items: items ?? [], entries: entries,
+            pieces: pieces, version: version
+        )
     }
 }
 
@@ -316,7 +381,7 @@ enum MacGridMemory {
 /// The library grid on a Mac. See `MacGridLayout` for why it is not a lazy
 /// stack.
 @available(macOS 15.0, *)
-struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHeader: View>: View {
+struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHeader: View, Menu: View>: View {
     let space: UUID
     let buckets: [TimelineBucket]
     let items: [String: [TimelineItem]]
@@ -328,6 +393,12 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
     let progress: ScrollProgress
     let controller: MacGridController
     let loadDay: (String) async -> Void
+    /// A click on a photograph, with the rest of its day.
+    let onClick: (TimelineItem, [TimelineItem]) -> Void
+    /// A click between photographs.
+    let onClickEmpty: () -> Void
+    /// The right-click menu for a photograph.
+    @ViewBuilder let menu: (TimelineItem) -> Menu
     @ViewBuilder let cell: (GridEntry, CGSize, [TimelineItem]) -> Cell
     @ViewBuilder let dayHeader: (TimelineBucket) -> DayHeader
     @ViewBuilder let areaHeader: (String) -> AreaHeader
@@ -355,6 +426,7 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
                 space: space, layout: layout, layoutWidth: width,
                 viewportWidth: proxy.size.width, headerHeight: headerHeight,
                 progress: progress, controller: controller, loadDay: loadDay,
+                onClick: onClick, onClickEmpty: onClickEmpty, menu: menu,
                 cell: cell, dayHeader: dayHeader, areaHeader: areaHeader,
                 libraryHeader: libraryHeader
             )
@@ -391,12 +463,65 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
     }
 }
 
+/// The rows, placed where the layout already says they go.
+///
+/// A `ZStack` of offset rows asked every row its size on each update — the
+/// scroll view measuring its content — which for rows of known size is work
+/// with a known answer. This states the size and places each row without
+/// asking.
+private struct MacGridCanvas: Layout {
+    let size: CGSize
+    let rows: [CGRect]
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (subview, frame) in zip(subviews, rows) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading, proposal: ProposedViewSize(frame.size)
+            )
+        }
+    }
+}
+
+/// One row of the grid, rebuilt only when something it draws has changed.
+///
+/// The row's content is a closure, which SwiftUI cannot compare, so without
+/// this every row on screen was rebuilt each time the scroller re-rendered —
+/// the window moving, or any day anywhere arriving from the NAS. Its own
+/// day's version says whether anything it shows is different. Selection and
+/// the like are still followed: they are read inside `body`, which observes
+/// them on its own.
+private struct MacGridRowView<Content: View>: View, Equatable {
+    let id: String
+    let version: Int
+    let width: CGFloat
+    let height: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    var body: some View { content() }
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.id == b.id && a.version == b.version && a.width == b.width && a.height == b.height
+    }
+}
+
+/// A view whose content is built when SwiftUI first asks for its body, not
+/// when the view is declared. For a context menu, that is when it opens.
+struct Deferred<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var body: some View { content() }
+}
+
 /// The scroll view, and the rows currently near the window.
 ///
 /// Split from `MacTimelineGrid` so the part that changes as you scroll — which
 /// rows exist — re-renders without re-checking the library's layout.
 @available(macOS 15.0, *)
-private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, LibraryHeader: View>: View {
+private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, LibraryHeader: View, Menu: View>: View {
     let space: UUID
     let layout: MacGridLayout
     let layoutWidth: CGFloat
@@ -405,6 +530,9 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     let progress: ScrollProgress
     let controller: MacGridController
     let loadDay: (String) async -> Void
+    let onClick: (TimelineItem, [TimelineItem]) -> Void
+    let onClickEmpty: () -> Void
+    let menu: (TimelineItem) -> Menu
     let cell: (GridEntry, CGSize, [TimelineItem]) -> Cell
     let dayHeader: (TimelineBucket) -> DayHeader
     let areaHeader: (String) -> AreaHeader
@@ -414,11 +542,18 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     /// The rows that exist as views right now.
     @State private var window: Range<Int> = 0..<0
     @State private var tracker = Tracker()
+    /// The photograph under the pointer, as state, so the menu is rebuilt for
+    /// the one it will open over. Changes as the pointer crosses from one
+    /// photograph to the next, not as it moves within one.
+    @State private var pointed: UUID?
 
     init(
         space: UUID, layout: MacGridLayout, layoutWidth: CGFloat, viewportWidth: CGFloat,
         headerHeight: CGFloat, progress: ScrollProgress, controller: MacGridController,
         loadDay: @escaping (String) async -> Void,
+        onClick: @escaping (TimelineItem, [TimelineItem]) -> Void,
+        onClickEmpty: @escaping () -> Void,
+        menu: @escaping (TimelineItem) -> Menu,
         cell: @escaping (GridEntry, CGSize, [TimelineItem]) -> Cell,
         dayHeader: @escaping (TimelineBucket) -> DayHeader,
         areaHeader: @escaping (String) -> AreaHeader,
@@ -432,6 +567,9 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         self.progress = progress
         self.controller = controller
         self.loadDay = loadDay
+        self.onClick = onClick
+        self.onClickEmpty = onClickEmpty
+        self.menu = menu
         self.cell = cell
         self.dayHeader = dayHeader
         self.areaHeader = areaHeader
@@ -464,16 +602,47 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         var layout = MacGridLayout()
         var loads: [String: Task<Void, Never>] = [:]
         var topKey: String?
+        /// The stretch of the library the drawn rows cover. See `updateWindow`.
+        var covered: ClosedRange<CGFloat>?
+        /// The pointer, in the scroll view's own coordinates.
+        var pointer: CGPoint?
     }
 
     var body: some View {
         ScrollView(.vertical) {
-            ZStack(alignment: .topLeading) {
-                Color.clear.frame(width: layoutWidth, height: layout.total)
-                ForEach(layout.rows[clamped(window)]) { row in
-                    rowView(row)
-                        .frame(width: layoutWidth, height: row.height, alignment: .topLeading)
-                        .offset(y: row.y)
+            let drawn = layout.rows[clamped(window)]
+            MacGridCanvas(
+                size: CGSize(width: layoutWidth, height: layout.total),
+                rows: drawn.map { CGRect(x: 0, y: $0.y, width: layoutWidth, height: $0.height) }
+            ) {
+                ForEach(drawn) { row in
+                    MacGridRowView(
+                        id: row.id,
+                        version: row.day >= 0 ? layout.days[row.day].version : layout.revision,
+                        width: layoutWidth, height: row.height
+                    ) {
+                        rowView(row)
+                    }
+                    .equatable()
+                }
+            }
+            // One click handler and one menu for the whole library, finding the
+            // photograph from the layout — how a collection view does it. A
+            // gesture on every tile was a third of the cost of a tile coming
+            // into view, measured, and a fast scroll brings dozens a second.
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .local) { point in
+                clicked(at: point)
+            }
+            .contextMenu {
+                Deferred {
+                    // Looked up afresh, in case the photographs have scrolled
+                    // under a pointer that hasn't moved; `pointed` is read so
+                    // the menu is rebuilt whenever the pointer reaches another.
+                    let _ = pointed
+                    if let item = item(at: tracker.pointer) {
+                        menu(item)
+                    }
                 }
             }
             // Held at the laid-out width while the pane animates to a new one —
@@ -486,6 +655,15 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         // newest end always does.
         .defaultScrollAnchor(.bottom, for: .alignment)
         .scrollIndicators(.hidden)
+        // Where the pointer is, for the menu to know what it was raised over.
+        // Kept in the window's terms, not the library's: a scroll moves the
+        // photographs under a pointer that hasn't moved.
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            guard case .active(let point) = phase else { return }
+            tracker.pointer = point
+            let id = item(at: point)?.id
+            if id != pointed { pointed = id }
+        }
         // Feeds the rail's thumb. See `ScrollProgress`.
         .modifier(ScrollActivityReporter(progress: progress))
         .onScrollGeometryChange(for: ScrollSample.self) { geometry in
@@ -548,6 +726,28 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         }
     }
 
+    // MARK: Clicking
+
+    private func clicked(at point: CGPoint) {
+        if let hit = layout.hit(point) {
+            let day = layout.days[hit.day]
+            if case .item(let item) = day.entries[hit.entry] {
+                onClick(item, day.items)
+                return
+            }
+        }
+        onClickEmpty()
+    }
+
+    /// The photograph under a point in the scroll view.
+    private func item(at pointer: CGPoint?) -> TimelineItem? {
+        guard let pointer,
+              let hit = layout.hit(CGPoint(x: pointer.x, y: tracker.visible.minY + pointer.y)),
+              case .item(let item) = layout.days[hit.day].entries[hit.entry]
+        else { return nil }
+        return item
+    }
+
     // MARK: Scrolling
 
     private func scrolled(_ sample: ScrollSample) {
@@ -559,12 +759,21 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         remember()
     }
 
-    /// The rows within most of a screen of the window: enough that a tile
-    /// exists, and has asked for its picture, before it scrolls into view.
+    /// The rows within a screen of the window: enough that a tile exists, and
+    /// has asked for its picture, before it scrolls into view.
+    ///
+    /// Moved in strides rather than a row at a time. Every change to the
+    /// window re-renders the scroller, and at fling speed a row boundary goes
+    /// by forty times a second; measured, that was most of the dropped frames.
+    /// Now the drawn stretch reaches a screen past each edge and moves once
+    /// the window has used up a quarter screen of that — about a tenth as
+    /// often at the same speed, and rows already drawn are left alone (see
+    /// `MacGridRowView`). Not bigger strides: a whole screen of new rows at
+    /// once measured as a 40 ms frame of its own.
     private func updateWindow() {
         let visible = tracker.visible
         guard visible.height > 0 else { return }
-        let margin = visible.height * 0.75
+        let margin = visible.height
         let next = layout.rows(from: visible.minY - margin, to: visible.maxY + margin)
         if next != window {
             window = next
@@ -625,6 +834,8 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         defer {
             tracker.layout = layout
             progress.span = layout.span(header: headerHeight)
+            // The rows have moved, so what the window covered is stale.
+            tracker.covered = nil
             updateWindow()
         }
         let old = tracker.layout

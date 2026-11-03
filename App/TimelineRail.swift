@@ -53,8 +53,14 @@ struct TimelineRail: View {
             ZStack(alignment: .topTrailing) {
                 Color.clear
 
-                density(height: height)
-                years(height: height)
+                // Its own view, compared by the library it draws, so a scroll
+                // — which moves only the line below — doesn't recount every
+                // bar and relay every year label sixty times a second.
+                Backdrop(
+                    buckets: buckets, height: height, slots: slots,
+                    barMaxWidth: barMaxWidth
+                )
+                .equatable()
                 position(height: height, fraction: fraction)
 
                 // The pill follows the pointer while hovering and the finger
@@ -113,6 +119,77 @@ struct TimelineRail: View {
             .animation(.easeOut(duration: 0.15), value: isDragging)
         }
         .frame(width: railWidth)
+    }
+
+    // MARK: - Where you are
+
+    /// A line rather than a thumb.
+    ///
+    /// The rail is the drag target now, so a separate grabbable thumb would be
+    /// a second thing to aim at that does the same job. A line says where you
+    /// are without implying it is the only place you may press.
+    private func position(height: CGFloat, fraction: Double) -> some View {
+        Rectangle()
+            .fill(.tint)
+            .frame(width: barMaxWidth + 10, height: isDragging ? 3 : 2)
+            .offset(y: height * fraction.clamped(to: 0...1) - 1)
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+            .allowsHitTesting(false)
+    }
+
+    /// `MAR 2021`, and the count beneath it.
+    static func pillTitle(for bucket: TimelineBucket) -> String {
+        FastScroller.label(for: bucket)
+    }
+
+    private struct RailPill: View {
+        let title: String
+        let count: Int
+
+        var body: some View {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                Text(count == 1 ? "1 photo" : "\(count) photos")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .fixedSize()
+            .padding(.horizontal, 13)
+            .padding(.vertical, 8)
+            .glassCapsule(interactive: false, fallback: .regularMaterial)
+            .shadow(color: .black.opacity(0.22), radius: 8, y: 2)
+        }
+    }
+}
+
+/// The rail's density strip and year labels: everything on it that depends
+/// on the library alone, not on where in it you are.
+private struct Backdrop: View, Equatable {
+    let buckets: [TimelineBucket]
+    let height: CGFloat
+    let slots: Int
+    let barMaxWidth: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            density(height: height)
+            years(height: height)
+        }
+    }
+
+    static func == (a: Self, b: Self) -> Bool {
+        guard a.height == b.height, a.slots == b.slots, a.barMaxWidth == b.barMaxWidth else {
+            return false
+        }
+        // The same array, untouched, in the usual case — so a pointer, not a walk.
+        let shared = a.buckets.withUnsafeBufferPointer { x in
+            b.buckets.withUnsafeBufferPointer { y in
+                x.baseAddress == y.baseAddress && x.count == y.count
+            }
+        }
+        return shared || a.buckets == b.buckets
     }
 
     // MARK: - The strip
@@ -208,47 +285,6 @@ struct TimelineRail: View {
         return marks
     }
 
-    // MARK: - Where you are
-
-    /// A line rather than a thumb.
-    ///
-    /// The rail is the drag target now, so a separate grabbable thumb would be
-    /// a second thing to aim at that does the same job. A line says where you
-    /// are without implying it is the only place you may press.
-    private func position(height: CGFloat, fraction: Double) -> some View {
-        Rectangle()
-            .fill(.tint)
-            .frame(width: barMaxWidth + 10, height: isDragging ? 3 : 2)
-            .offset(y: height * fraction.clamped(to: 0...1) - 1)
-            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
-            .allowsHitTesting(false)
-    }
-
-    /// `MAR 2021`, and the count beneath it.
-    static func pillTitle(for bucket: TimelineBucket) -> String {
-        FastScroller.label(for: bucket)
-    }
-
-    private struct RailPill: View {
-        let title: String
-        let count: Int
-
-        var body: some View {
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .monospacedDigit()
-                Text(count == 1 ? "1 photo" : "\(count) photos")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .fixedSize()
-            .padding(.horizontal, 13)
-            .padding(.vertical, 8)
-            .glassCapsule(interactive: false, fallback: .regularMaterial)
-            .shadow(color: .black.opacity(0.22), radius: 8, y: 2)
-        }
-    }
 }
 
 #endif
