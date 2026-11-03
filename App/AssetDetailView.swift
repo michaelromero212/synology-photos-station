@@ -942,14 +942,11 @@ struct AssetDetailView: View {
     ///
     /// Lazy on purpose: a day of four hundred photographs would otherwise build
     /// four hundred image views before showing the one you opened.
-    /// The black gap between two photographs mid-swipe.
+    /// The black gap between two photographs mid-swipe, and only mid-swipe.
     ///
-    /// Small on purpose. This is horizontal padding inside each page (see the
-    /// note on `macPager`), so half of it also shows as a resting inset — and a
-    /// wide one read as a cheap border sitting around the photo rather than a
-    /// clean full-bleed. At `24` the resting inset is 12 pt, enough to keep the
-    /// picture off the sidebar's glass and no more, while a swipe still parts
-    /// two pictures by a visible gutter.
+    /// It trails each page, past the window's edge, so at rest a photograph
+    /// runs edge to edge as in Photos. It was padding inside the page, which
+    /// left half of it as a 12-point black border around every picture.
     static let pageGap: CGFloat = 24
 
     private var macPager: some View {
@@ -965,12 +962,11 @@ struct AssetDetailView: View {
         // next to Photos. No `GeometryReader`: that measured the whole window
         // and let pictures bleed under the sidebar.
         //
-        // The gap is horizontal padding *inside* each page, not spacing between
-        // them, because `.paging` snaps by the viewport and would drift by the
-        // spacing otherwise. So each page stays exactly one screen wide, paging
-        // lands cleanly on one picture (first open included, no neighbour
-        // creeping in), and the gap shows as `pageGap` of black between two
-        // pictures mid-swipe — a thin `pageGap`-half inset at rest.
+        // Each page is a screen wide plus the gap, which trails it off the
+        // window's edge, and the scroll snaps to the start of a page rather
+        // than by the screen — `.paging` snaps by the viewport and would drift
+        // by the gap. So a picture at rest fills the window edge to edge, and
+        // the gap shows as `pageGap` of black between two pictures mid-swipe.
         GeometryReader { outer in
         ScrollViewReader { reader in
         ScrollView(.horizontal) {
@@ -989,33 +985,35 @@ struct AssetDetailView: View {
                         onFinished: { advanceToNextVideo(after: page) },
                         isZoomed: .constant(false)
                     )
-                    .padding(.horizontal, Self.pageGap / 2)
+                    // Beside the sidebar, inside the page. See below.
+                    .padding(.leading, outer.safeAreaInsets.leading)
+                    .padding(.trailing, outer.safeAreaInsets.trailing)
                     .containerRelativeFrame([.horizontal, .vertical])
+                    .padding(.trailing, Self.pageGap)
                 }
             }
             .scrollTargetLayout()
         }
-        .scrollTargetBehavior(.paging)
+        .modifier(OnePageAtATime())
         .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
-        .background(Color.black)
-        // Beside the sidebar by padding rather than by safe area. Left to the
-        // safe area, the pager was as wide as the space beside the sidebar
-        // but also told the sidebar's width as a leading inset, and paging
-        // honors the inset — so every page landed that far right of center
-        // with its neighbour showing. Measured: 230 points of inset on a
-        // 1,826-point pager. Padded, the pager simply starts where the
-        // sidebar ends and has no inset to apply.
-        .padding(.leading, outer.safeAreaInsets.leading)
-        .padding(.trailing, outer.safeAreaInsets.trailing)
+        // The whole window wide, under the sidebar too, and never resized by
+        // it. Each page keeps its picture beside the sidebar with padding of
+        // its own (above), which follows the sidebar as it slides.
+        //
+        // The pager used to be as wide as the space beside the sidebar. Then
+        // showing or hiding it changed the pages' width on every frame of the
+        // animation, and a paging offset is a multiple of the old width: for a
+        // frame each time — measured at up to 900 points — the photo beside
+        // this one showed behind the video, before a correction caught up. A
+        // scroll view the sidebar can't resize has nothing to correct. Inside
+        // the safe area it also took the sidebar's width as a leading inset,
+        // which paging honors, so photos sat 230 points right of center.
         .ignoresSafeArea(.container, edges: .horizontal)
-        // Black under the sidebar's glass too, as before.
         .background(Color.black)
-        // Back onto the page whenever the pages change width. Paging keeps the
-        // offset it had, and an offset is a multiple of the *old* width: open
-        // with the sidebar settling, or show or hide it, and the photo sat a
-        // sidebar's width off center with its neighbour showing beside it.
+        // Back onto the page if the window itself is resized: paging keeps the
+        // offset it had, and an offset is a multiple of the old width.
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in
             reader.scrollTo(displayedItem.id, anchor: .leading)
         }
@@ -2012,3 +2010,17 @@ private struct InformationSheet: View {
         }
     }
 }
+
+#if os(macOS)
+/// Snaps to the start of a page, one page per swipe — what `.paging` does,
+/// but by the pages' own width rather than the window's. See `macPager`.
+private struct OnePageAtATime: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
+        } else {
+            content.scrollTargetBehavior(.viewAligned)
+        }
+    }
+}
+#endif
