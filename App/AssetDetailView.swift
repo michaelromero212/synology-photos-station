@@ -639,7 +639,10 @@ struct AssetDetailView: View {
         let formatter = DateFormatter()
         formatter.locale = .current
         formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "MMM d, yyyy"
+        // Spelled out, weekday and all: the title area of a window has the
+        // room, and "Saturday, October 31, 2026" reads at a glance where
+        // "Oct 31, 2026" had to be deciphered.
+        formatter.dateFormat = "EEEE, MMMM d, yyyy"
         return formatter
     }()
 
@@ -663,12 +666,19 @@ struct AssetDetailView: View {
         ToolbarItem(placement: .principal) {
             let stamp = Self.macStamp(displayedItem.capturedAt)
             VStack(spacing: 0) {
+                // Larger than a toolbar's usual caption pair: this is the one
+                // thing in the title area, and it's there to be read.
                 Text(stamp.day)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.title3.weight(.semibold))
                 Text(stamp.time)
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.secondary)
             }
+            // Clear of the toolbar's capsule, which otherwise clips the first
+            // and last letters of the longer, spelled-out date.
+            .fixedSize()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 2)
             .help("Taken \(stamp.day) at \(stamp.time)")
         }
 
