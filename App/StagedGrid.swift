@@ -57,7 +57,11 @@ final class OverlayViewer {
 /// Only the grid's origin follows the scroll.
 @MainActor
 final class GridTiles {
-    static let space = "StagedGrid"
+    /// The grid's coordinate space, by name. `nonisolated` because each tile
+    /// names it inside `onGeometryChange`'s closure, which is Sendable and so
+    /// runs on no actor; as part of the main-actor class it drew a warning
+    /// there, and a constant string needs no actor.
+    nonisolated static let space = "StagedGrid"
 
     fileprivate var frames: [UUID: CGRect] = [:]
     /// The grid's top left, in the window.
