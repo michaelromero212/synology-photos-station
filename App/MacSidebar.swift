@@ -1,5 +1,6 @@
 #if os(macOS)
 import FrameStationAPI
+import FrameStationKit
 import SwiftUI
 
 /// Everywhere you can be, all at once, down the left.
@@ -30,7 +31,25 @@ struct MacRootView: View {
     /// Loaded here rather than read from `AlbumsView` because the sidebar
     /// outlives whatever is in the detail pane — these rows have to be there
     /// before you have visited anything.
-    @State private var mediaTypes: [CollectionSummary] = []
+    ///
+    /// Starts from the last list this Mac saw, so the rows are there with the
+    /// rest of the sidebar as the window opens. They used to wait for the NAS
+    /// to build the whole Albums page — every trip and occasion — and arrived
+    /// seconds after Library, Albums and the shared libraries.
+    @State private var mediaTypes: [CollectionSummary]
+
+    init(session: AppSession) {
+        self.session = session
+        _mediaTypes = State(initialValue: session.personalSpace.map(Self.savedMediaTypes) ?? [])
+    }
+
+    /// The last media types seen for a library, from their own small file, or
+    /// once — on the first launch after this shipped — from the saved Albums
+    /// page that already holds them.
+    private static func savedMediaTypes(for space: SpaceDTO) -> [CollectionSummary] {
+        if let types = AlbumsSnapshotStore.loadMediaTypes(spaceID: space.id) { return types }
+        return AlbumsSnapshotStore.loadCollections(spaceID: space.id)?.mediaTypes ?? []
+    }
     /// The toolbar's search field. Owned here because the field is part of the
     /// window rather than of whatever the detail pane happens to be showing.
     @State private var query = ""
@@ -222,8 +241,16 @@ struct MacRootView: View {
         // Only on success. A failed refresh that assigned nil would empty the
         // sidebar over a library that is perfectly fine — the same mistake the
         // Albums page made once already.
+        // Signed in, or the spaces arrived, after the window opened.
+        if mediaTypes.isEmpty { mediaTypes = Self.savedMediaTypes(for: personal) }
         if let page = try? await client.collections(spaceID: personal.id) {
-            mediaTypes = page.mediaTypes
+            // Assigned only when different, so an unchanged answer doesn't
+            // rebuild the sidebar under someone's pointer.
+            if page.mediaTypes != mediaTypes { mediaTypes = page.mediaTypes }
+            let spaceID = personal.id
+            Task.detached(priority: .utility) {
+                AlbumsSnapshotStore.saveMediaTypes(page.mediaTypes, spaceID: spaceID)
+            }
         }
     }
 

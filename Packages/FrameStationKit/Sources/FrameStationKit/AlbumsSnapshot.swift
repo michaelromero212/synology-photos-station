@@ -59,6 +59,19 @@ public enum AlbumsSnapshotStore {
         save(page, to: "collections-\(spaceID).json")
     }
 
+    // MARK: - Media types
+
+    /// Just the media types, for the Mac's sidebar, which draws them as the
+    /// window opens. Kept apart from the whole page so that is a small read
+    /// rather than decoding every trip and occasion before the first frame.
+    public static func loadMediaTypes(spaceID: UUID) -> [CollectionSummary]? {
+        load([CollectionSummary].self, from: "mediatypes-\(spaceID).json")
+    }
+
+    public static func saveMediaTypes(_ types: [CollectionSummary], spaceID: UUID) {
+        save(types, to: "mediatypes-\(spaceID).json")
+    }
+
     // MARK: - The Places row
 
     public static func loadPlaceTotal(spaceID: UUID) -> Int? {
