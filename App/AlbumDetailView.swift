@@ -24,6 +24,9 @@ struct AlbumDetailView: View {
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @State private var showPicker = false
+    /// The library's viewer, over the app. See `OverlayViewer`.
+    @Environment(\.overlayViewer) private var overlay
+    @State private var tiles = GridTiles()
     #endif
 
     /// The library's own width, not a number of its own.
@@ -149,43 +152,99 @@ struct AlbumDetailView: View {
 
     private var grid: some View {
         GeometryReader { proxy in
+            #if os(iOS)
+            StagedGridReader(tiles: tiles) {
+                ScrollView {
+                    section(width: proxy.size.width)
+                        .stagedGridContent(tiles)
+                }
+                .stagedGridScroller(tiles)
+                .refreshable { await load() }
+            }
+            #else
             ScrollView {
-                // The same layout the timeline uses. An album that squared
-                // everything off while the timeline kept shapes would be its own
-                // inconsistency, inside one app rather than between two.
-                PhotoGridSection(
-                    entries: items.map(GridEntry.item),
-                    width: proxy.size.width,
-                    targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
-                    spacing: spacing,
-                    columns: columns
-                ) { entry, size in
-                    if case .item(let item) = entry {
-                        NavigationLink {
-                            AssetDetailView(item: item, space: space(of: item), session: session)
-                        } label: {
-                            PhotoCell(item: item, loader: session.loader, size: size)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            // Whose photo it is to take out of a family album
-                            // is the NAS's call, and it says why when it's no.
-                            if album.mayAdd {
-                                Button(role: .destructive) {
-                                    Task { await remove(item) }
-                                } label: {
-                                    // "Remove from Album", not "Delete" — the
-                                    // photo stays in the library.
-                                    Label("Remove from Album", systemImage: "minus.circle")
-                                }
+                section(width: proxy.size.width)
+            }
+            .refreshable { await load() }
+            #endif
+        }
+    }
+
+    /// The same layout the timeline uses. An album that squared everything off
+    /// while the timeline kept shapes would be its own inconsistency, inside
+    /// one app rather than between two.
+    private func section(width: CGFloat) -> some View {
+        PhotoGridSection(
+            entries: items.map(GridEntry.item),
+            width: width,
+            targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
+            spacing: spacing,
+            columns: columns
+        ) { entry, size in
+            if case .item(let item) = entry {
+                tile(item, size: size)
+                    .contextMenu {
+                        // Whose photo it is to take out of a family album
+                        // is the NAS's call, and it says why when it's no.
+                        if album.mayAdd {
+                            Button(role: .destructive) {
+                                Task { await remove(item) }
+                            } label: {
+                                // "Remove from Album", not "Delete" — the
+                                // photo stays in the library.
+                                Label("Remove from Album", systemImage: "minus.circle")
                             }
                         }
                     }
-                }
             }
-            .refreshable { await load() }
         }
     }
+
+    /// Opens over the grid the way the library's tiles do — see
+    /// `OverlayViewer` — and swipes through the whole album.
+    @ViewBuilder
+    private func tile(_ item: TimelineItem, size: CGSize) -> some View {
+        #if os(iOS)
+        if let overlay {
+            PhotoCell(item: item, loader: session.loader, size: size)
+                .stagedTile(item.id, in: tiles, stage: overlay.stage)
+                .contentShape(Rectangle())
+                .onTapGesture { open(item, on: overlay) }
+        } else {
+            pushed(item, size: size)
+        }
+        #else
+        pushed(item, size: size)
+        #endif
+    }
+
+    private func pushed(_ item: TimelineItem, size: CGSize) -> some View {
+        NavigationLink {
+            AssetDetailView(item: item, space: space(of: item), session: session, pageItems: items)
+                .spaces(space(of:))
+        } label: {
+            PhotoCell(item: item, loader: session.loader, size: size)
+        }
+        .buttonStyle(.plain)
+    }
+
+    #if os(iOS)
+    private func open(_ item: TimelineItem, on overlay: OverlayViewer) {
+        let pages = items
+        overlay.open(
+            OpenedPhoto(item: item, dayItems: [], pageItems: pages),
+            from: tiles, session: session
+        ) { [tiles] opened in
+            AssetDetailView(
+                item: opened.item, space: space(of: opened.item), session: session,
+                pageItems: opened.pageItems,
+                onFocus: { overlay.follow($0, in: tiles) }
+            )
+            .spaces(space(of:))
+            .staged(on: overlay.stage)
+        }
+    }
+    #endif
 
     private func load() async {
         guard let client = session.client else { return }

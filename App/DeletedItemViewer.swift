@@ -26,7 +26,22 @@ struct DeletedItemViewer: View {
     /// What's here, in the page's order. What's recovered or deleted from this
     /// screen leaves it at once, and the next item takes its place.
     @State private var items: [TimelineItem]
+    #if os(iOS)
+    /// Which page is on screen. An observable the pages read themselves, as
+    /// the library's viewer does: they're built once and kept. See
+    /// `PagerFocus`.
+    @State private var focus: PagerFocus
+    private var currentID: UUID? { focus.currentID }
+    /// Set when the viewer is a layer over the grid, as the library's is: it
+    /// then draws no black of its own, follows a drag down, and closes by
+    /// flying back into its tile. See `ViewerStage`.
+    var stage: ViewerStage?
+    /// While a photo is pinched in, a drag down looks at more of it rather
+    /// than closing.
+    @State private var isZoomed = false
+    #else
     @State private var currentID: UUID?
+    #endif
     /// Outlives the pages, so a clip swiped away from and back to keeps its
     /// place. See `VideoPreloader`.
     @State private var preloader = VideoPreloader()
@@ -48,7 +63,52 @@ struct DeletedItemViewer: View {
         self.onDelete = onDelete
         self.onDone = onDone
         _items = State(initialValue: items)
+        #if os(iOS)
+        _focus = State(initialValue: PagerFocus(currentID: item.id))
+        #else
         _currentID = State(initialValue: item.id)
+        #endif
+    }
+
+    #if os(iOS)
+    /// This viewer as a layer over the grid. See `stage`.
+    func staged(on stage: ViewerStage) -> Self {
+        var copy = self
+        copy.stage = stage
+        return copy
+    }
+    #endif
+
+    private func show(_ id: UUID) {
+        #if os(iOS)
+        focus.currentID = id
+        #else
+        currentID = id
+        #endif
+    }
+
+    /// Back to the grid: over it, into the tile of what's on screen; otherwise
+    /// the page under this takes the viewer away.
+    private func close(velocity: CGSize = .zero) {
+        #if os(iOS)
+        if let stage, let current {
+            let image = session.loader?.cachedThumbnail(
+                assetID: current.assetID, size: PhotoGridMetrics.thumbnailPixels,
+                version: current.thumbnailVersion
+            ) ?? session.loader?.cachedPlaceholder(assetID: current.assetID)
+            stage.close(current: current, image: image, velocity: velocity)
+            return
+        }
+        #endif
+        onDone()
+    }
+
+    private var isStaged: Bool {
+        #if os(iOS)
+        stage != nil
+        #else
+        false
+        #endif
     }
 
     private var current: TimelineItem? {
@@ -57,11 +117,18 @@ struct DeletedItemViewer: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Over the grid, the black is the stage's, so a drag can fade it.
+            (isStaged ? Color.clear : Color.black).ignoresSafeArea()
             pages
         }
         .overlay {
-            if showsChrome { chrome.transition(.opacity) }
+            if showsChrome {
+                chrome
+                    #if os(iOS)
+                    .modifier(StageHidesChrome(stage: stage))
+                    #endif
+                    .transition(.opacity)
+            }
         }
         .animation(.easeOut(duration: 0.2), value: showsChrome)
         .viewerChromeScheme()
@@ -94,23 +161,38 @@ struct DeletedItemViewer: View {
     @ViewBuilder
     private var pages: some View {
         #if os(iOS)
-        TabView(selection: $currentID) {
-            ForEach(items) { item in
-                DeletedItemPage(
-                    item: item, session: session, isCurrent: item.id == current?.id,
-                    preloader: preloader, onTap: { showsChrome.toggle() }
+        // The library viewer's pager, for its drag down. See `PagerView`.
+        PagerView(
+            items: items, focus: focus,
+            transparent: isStaged,
+            dismissDrag: stage.map { stage in
+                PagerView.DismissDrag(
+                    canBegin: { !isZoomed },
+                    onChange: { stage.dragChanged($0) },
+                    onEnd: { translation, velocity in
+                        if stage.dragEnded(translation, velocity: velocity) {
+                            close(velocity: velocity)
+                        }
+                    }
                 )
-                .tag(Optional(item.id))
             }
+        ) { item in
+            DeletedItemPage(
+                item: item, session: session,
+                isCurrent: { [focus] in focus.currentID == item.id },
+                preloader: preloader, transparent: isStaged,
+                onTap: { showsChrome.toggle() },
+                onZoomChange: { isZoomed = $0 }
+            )
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
         .ignoresSafeArea()
+        .modifier(StageFollowsDrag(stage: stage))
         #else
         // No paging scroll view on a Mac: one at a time, with the arrow keys
         // and the buttons in the bar.
         if let current {
             DeletedItemPage(
-                item: current, session: session, isCurrent: true,
+                item: current, session: session, isCurrent: { true },
                 preloader: preloader, onTap: { showsChrome.toggle() }
             )
             .id(current.id)
@@ -138,7 +220,7 @@ struct DeletedItemViewer: View {
 
     private var topBar: some View {
         HStack {
-            Button(action: onDone) {
+            Button { close() } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white)
@@ -234,7 +316,7 @@ struct DeletedItemViewer: View {
         let index = items.firstIndex { $0.id == current?.id } ?? 0
         let target = index + offset
         return Button {
-            currentID = items[target].id
+            show(items[target].id)
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .medium))
@@ -266,10 +348,14 @@ struct DeletedItemViewer: View {
             let index = items.firstIndex { $0.id == item.id } ?? 0
             items.removeAll { $0.id == item.id }
             guard !items.isEmpty else {
+                // Nothing left to fly back to: the stage fades it.
+                #if os(iOS)
+                if let stage { stage.close(current: item, image: nil); return }
+                #endif
                 onDone()
                 return
             }
-            currentID = items[min(index, items.count - 1)].id
+            show(items[min(index, items.count - 1)].id)
         }
     }
 }
@@ -278,9 +364,30 @@ struct DeletedItemViewer: View {
 private struct DeletedItemPage: View {
     let item: TimelineItem
     let session: AppSession
-    let isCurrent: Bool
+    /// Asked in the body rather than handed in: a page is built once and kept,
+    /// so it must read the pager's focus itself. See `PagerFocus`.
+    let isCurrentNow: () -> Bool
     let preloader: VideoPreloader
+    /// Clear behind the photo, over the stage's black. See `ViewerStage`.
+    var transparent = false
     let onTap: () -> Void
+    var onZoomChange: (Bool) -> Void = { _ in }
+
+    init(
+        item: TimelineItem, session: AppSession, isCurrent: @escaping () -> Bool,
+        preloader: VideoPreloader, transparent: Bool = false,
+        onTap: @escaping () -> Void, onZoomChange: @escaping (Bool) -> Void = { _ in }
+    ) {
+        self.item = item
+        self.session = session
+        self.isCurrentNow = isCurrent
+        self.preloader = preloader
+        self.transparent = transparent
+        self.onTap = onTap
+        self.onZoomChange = onZoomChange
+    }
+
+    private var isCurrent: Bool { isCurrentNow() }
 
     /// The 512 at once, then for a photo the full-size preview over it. A
     /// clip's poster is the 512.
@@ -288,7 +395,7 @@ private struct DeletedItemPage: View {
 
     var body: some View {
         ZStack {
-            Color.black
+            transparent ? Color.clear : Color.black
             if item.mediaType == .video {
                 video
             } else if let image {
@@ -332,7 +439,11 @@ private struct DeletedItemPage: View {
     @ViewBuilder
     private func photo(_ image: PlatformImage) -> some View {
         #if os(iOS)
-        ZoomableImage(image: image, isCurrent: isCurrent, onSingleTap: onTap)
+        ZoomableImage(
+            image: image, isCurrent: isCurrent,
+            onZoomChange: { zoomed in if isCurrent { onZoomChange(zoomed) } },
+            onSingleTap: onTap
+        )
             .ignoresSafeArea()
         #else
         Image(platformImage: image).resizable().scaledToFit()

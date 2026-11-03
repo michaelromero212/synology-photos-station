@@ -185,8 +185,13 @@ final class ViewerModelCache {
 /// to be looked at.
 struct AssetDetailView: View {
     let item: TimelineItem
-    let space: SpaceDTO
+    /// The library the viewer opened in. See `space`.
+    let openedSpace: SpaceDTO
     @Bindable var session: AppSession
+    /// The library each photo is in, for a grid that runs across several: an
+    /// album holds photos from your own library and a shared one side by side.
+    /// Nil where everything is in `openedSpace`.
+    var spaceOf: ((TimelineItem) -> SpaceDTO)?
 
     /// The other photos from the same day, for the slideshows and for knowing
     /// what "all videos from that day" means.
@@ -278,7 +283,7 @@ struct AssetDetailView: View {
         onFocus: @escaping (TimelineItem) -> Void = { _ in }
     ) {
         self.item = item
-        self.space = space
+        self.openedSpace = space
         self.session = session
         self.dayItems = dayItems
         self.pageItems = pageItems
@@ -298,6 +303,28 @@ struct AssetDetailView: View {
         self._scrolledID = State(initialValue: item.id)
         #endif
         #endif
+    }
+
+    /// The library of the photo on screen: what deleting, sharing and the rest
+    /// act in.
+    private var space: SpaceDTO {
+        #if os(iOS)
+        space(of: currentItem)
+        #else
+        space(of: displayedItem)
+        #endif
+    }
+
+    private func space(of item: TimelineItem) -> SpaceDTO {
+        spaceOf?(item) ?? openedSpace
+    }
+
+    /// This viewer over a grid whose photos are in more than one library. See
+    /// `spaceOf`.
+    func spaces(_ spaceOf: @escaping (TimelineItem) -> SpaceDTO) -> Self {
+        var copy = self
+        copy.spaceOf = spaceOf
+        return copy
     }
 
     #if os(iOS)
@@ -845,7 +872,7 @@ struct AssetDetailView: View {
             }
         ) { entry in
             AssetPage(
-                model: cache.model(for: entry, spaceID: space.id),
+                model: cache.model(for: entry, spaceID: space(of: entry).id),
                 session: session,
                 focus: focus,
                 preloader: preloader,
@@ -936,7 +963,7 @@ struct AssetDetailView: View {
             LazyHStack(spacing: 0) {
                 ForEach(macPages) { page in
                     AssetPage(
-                        model: cache.model(for: page, spaceID: space.id),
+                        model: cache.model(for: page, spaceID: space(of: page).id),
                         session: session,
                         focus: PagerFocus(currentID: page.id),
                         preloader: preloader,
@@ -992,7 +1019,7 @@ struct AssetDetailView: View {
         for offset in [-2, -1, 1, 2] {
             let neighbour = index + offset
             guard macPages.indices.contains(neighbour) else { continue }
-            let model = cache.model(for: macPages[neighbour], spaceID: space.id)
+            let model = cache.model(for: macPages[neighbour], spaceID: space(of: macPages[neighbour]).id)
             Task {
                 await model.load(loader: session.loader, client: session.client)
                 await model.loadPreview(loader: session.loader)

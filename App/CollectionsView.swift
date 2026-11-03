@@ -535,6 +535,11 @@ struct CollectionDetailView: View {
     /// The collection `items` belongs to, so switching between highlights and
     /// everything doesn't blank the grid the way switching collections must.
     @State private var loadedKey: String?
+    #if os(iOS)
+    /// The library's viewer, over the app. See `OverlayViewer`.
+    @Environment(\.overlayViewer) private var overlay
+    @State private var tiles = GridTiles()
+    #endif
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
     private static let highlightCount = 30
@@ -589,51 +594,103 @@ struct CollectionDetailView: View {
 
     private var grid: some View {
         GeometryReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if let subtitle = collection.subtitle {
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-
-                    if highlightsAvailable {
-                        Picker("Show", selection: $showAll) {
-                            Text("Highlights").tag(false)
-                            Text("All \(total)").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 10)
-                    }
-
-                    PhotoGridSection(
-                        entries: items.map { GridEntry.item($0) },
-                        width: proxy.size.width,
-                        targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
-                        spacing: spacing,
-                        columns: TimelineZoom.day.columns
-                    ) { entry, size in
-                        if case .item(let item) = entry {
-                            NavigationLink {
-                                AssetDetailView(
-                                    item: item, space: space, session: session,
-                                    pageItems: items
-                                )
-                            } label: {
-                                PhotoCell(item: item, loader: session.loader, size: size)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, spacing)
+            #if os(iOS)
+            StagedGridReader(tiles: tiles) {
+                ScrollView {
+                    stack(width: proxy.size.width)
+                        .stagedGridContent(tiles)
                 }
+                .stagedGridScroller(tiles)
             }
+            #else
+            ScrollView {
+                stack(width: proxy.size.width)
+            }
+            #endif
         }
     }
+
+    private func stack(width: CGFloat) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            if let subtitle = collection.subtitle {
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+
+            if highlightsAvailable {
+                Picker("Show", selection: $showAll) {
+                    Text("Highlights").tag(false)
+                    Text("All \(total)").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+
+            PhotoGridSection(
+                entries: items.map { GridEntry.item($0) },
+                width: width,
+                targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
+                spacing: spacing,
+                columns: TimelineZoom.day.columns
+            ) { entry, size in
+                if case .item(let item) = entry {
+                    tile(item, size: size)
+                }
+            }
+            .padding(.horizontal, spacing)
+        }
+    }
+
+    /// Opens over the grid the way the library's tiles do. See
+    /// `OverlayViewer`.
+    @ViewBuilder
+    private func tile(_ item: TimelineItem, size: CGSize) -> some View {
+        #if os(iOS)
+        if let overlay {
+            PhotoCell(item: item, loader: session.loader, size: size)
+                .stagedTile(item.id, in: tiles, stage: overlay.stage)
+                .contentShape(Rectangle())
+                .onTapGesture { open(item, on: overlay) }
+        } else {
+            pushed(item, size: size)
+        }
+        #else
+        pushed(item, size: size)
+        #endif
+    }
+
+    private func pushed(_ item: TimelineItem, size: CGSize) -> some View {
+        NavigationLink {
+            AssetDetailView(
+                item: item, space: space, session: session,
+                pageItems: items
+            )
+        } label: {
+            PhotoCell(item: item, loader: session.loader, size: size)
+        }
+        .buttonStyle(.plain)
+    }
+
+    #if os(iOS)
+    private func open(_ item: TimelineItem, on overlay: OverlayViewer) {
+        overlay.open(
+            OpenedPhoto(item: item, dayItems: [], pageItems: items),
+            from: tiles, session: session
+        ) { [tiles, space, session] opened in
+            AssetDetailView(
+                item: opened.item, space: space, session: session,
+                pageItems: opened.pageItems,
+                onFocus: { overlay.follow($0, in: tiles) }
+            )
+            .staged(on: overlay.stage)
+        }
+    }
+    #endif
 
     private func load() async {
         guard let client = session.client else { return }
@@ -891,6 +948,11 @@ struct RecentlyDeletedView: View {
     /// The item open full size. See `DeletedItemViewer`.
     @State private var opened: TimelineItem?
     #endif
+    #if os(iOS)
+    /// The library's viewer, over the app. See `OverlayViewer`.
+    @Environment(\.overlayViewer) private var overlay
+    @State private var tiles = GridTiles()
+    #endif
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
 
@@ -982,26 +1044,38 @@ struct RecentlyDeletedView: View {
 
     private var grid: some View {
         GeometryReader { proxy in
+            #if os(iOS)
+            StagedGridReader(tiles: tiles) {
+                ScrollView {
+                    stack(width: proxy.size.width)
+                        .stagedGridContent(tiles)
+                }
+                .stagedGridScroller(tiles)
+                .refreshable { await load() }
+            }
+            #else
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    header
-                    PhotoGridSection(
-                        entries: items.map { GridEntry.item($0) },
-                        width: proxy.size.width,
-                        targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
-                        spacing: spacing,
-                        columns: TimelineZoom.day.columns
-                    ) { entry, size in
-                        if case .item(let item) = entry {
-                            tile(item, size: size)
-                        }
-                    }
-                    .padding(.horizontal, spacing)
+                stack(width: proxy.size.width)
+            }
+            #endif
+        }
+    }
+
+    private func stack(width: CGFloat) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            header
+            PhotoGridSection(
+                entries: items.map { GridEntry.item($0) },
+                width: width,
+                targetHeight: PhotoGridMetrics.targetRowHeight(for: .day),
+                spacing: spacing,
+                columns: TimelineZoom.day.columns
+            ) { entry, size in
+                if case .item(let item) = entry {
+                    tile(item, size: size)
                 }
             }
-            #if os(iOS)
-            .refreshable { await load() }
-            #endif
+            .padding(.horizontal, spacing)
         }
     }
 
@@ -1054,6 +1128,9 @@ struct RecentlyDeletedView: View {
             .overlay(alignment: .topLeading) {
                 if isSelecting { SelectionMark(isPicked: isPicked).padding(5) }
             }
+            #if os(iOS)
+            .stagedTile(item.id, in: tiles, stage: overlay?.stage)
+            #endif
             .contentShape(Rectangle())
             .onTapGesture { tap(item) }
             .accessibilityAddTraits(isPicked ? .isSelected : [])
@@ -1075,6 +1152,18 @@ struct RecentlyDeletedView: View {
     private func tap(_ item: TimelineItem) {
         guard !isWorking else { return }
         if !isSelecting, session.supports(ServerCapability.deletedPreview) {
+            #if os(iOS)
+            // Over the grid, as the library opens a photo. See `OverlayViewer`.
+            if let overlay {
+                overlay.open(
+                    OpenedPhoto(item: item, dayItems: [], pageItems: items),
+                    from: tiles, session: session
+                ) { opened in
+                    viewer(opening: opened.item).staged(on: overlay.stage)
+                }
+                return
+            }
+            #endif
             opened = item
             return
         }
@@ -1088,7 +1177,7 @@ struct RecentlyDeletedView: View {
         }
     }
 
-    private func viewer(opening item: TimelineItem) -> some View {
+    private func viewer(opening item: TimelineItem) -> DeletedItemViewer {
         DeletedItemViewer(
             session: session, items: items, opening: item, canEdit: canEdit,
             onRecover: { try await act(.recover(all: false), on: $0) },

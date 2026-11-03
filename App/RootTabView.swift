@@ -46,6 +46,9 @@ struct RootTabView: View {
     /// `ShareReviews`.
     @State private var reviews = ShareReviews()
     @Environment(\.scenePhase) private var scenePhase
+    /// The viewer albums, collections and Recently Deleted open photos in.
+    /// See `OverlayViewer`.
+    @State private var overlayViewer = OverlayViewer()
     #endif
 
     /// Which tab is on screen. Bound so following a share can move you.
@@ -126,6 +129,11 @@ struct RootTabView: View {
             )
             .modifier(TabBarStepsAside())
         }
+        // The library's viewer for albums, collections and Recently Deleted:
+        // over the tab view, so over their navigation bars too. See
+        // `OverlayViewer`.
+        .overlay { OverlayViewerLayer(viewer: overlayViewer) }
+        .environment(\.overlayViewer, overlayViewer)
         // Whether the NAS can be reached, over every tab. See `ConnectionPill`.
         // Raised while a toast has the same spot, rather than drawn through it.
         .overlay(alignment: .bottom) {
