@@ -428,6 +428,43 @@ struct CollectionListView: View {
     private var rows: [CollectionSummary] { store.page?[keyPath: list] ?? [] }
 
     var body: some View {
+        #if os(macOS)
+        // Photos' cards, as on the Albums page this opened from.
+        GeometryReader { proxy in
+            let layout = MacCardLayout(width: proxy.size.width)
+            ScrollView {
+                LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                    ForEach(rows) { row in
+                        NavigationLink {
+                            CollectionDetailView(session: session, space: space, collection: row)
+                        } label: {
+                            MacCollectionTile(
+                                title: row.title, detail: row.subtitle ?? macItems(row.count),
+                                side: layout.side
+                            ) {
+                                CollectionCover(
+                                    assetIDs: row.coverAssetIDs, loader: session.loader, size: 512
+                                )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .nameable(row) { naming = $0 }
+                    }
+                }
+                .padding(.horizontal, MacCardLayout.margin)
+                .padding(.vertical, 22)
+            }
+        }
+        .navigationTitle(title)
+        .sheet(item: $naming) { collection in
+            NameOccasionSheet(
+                session: session, spaceID: space.id, collection: collection
+            ) { changed in
+                naming = nil
+                if changed { Task { await store.refresh() } }
+            }
+        }
+        #else
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(rows) { row in
@@ -456,6 +493,7 @@ struct CollectionListView: View {
                 if changed { Task { await store.refresh() } }
             }
         }
+        #endif
         #endif
     }
 }
@@ -1390,6 +1428,35 @@ struct MediaTypesView: View {
     private var store: CollectionsStore { session.collectionsStore(for: space.id) }
 
     var body: some View {
+        #if os(macOS)
+        // Photos' cards, as on the Albums page this opened from.
+        GeometryReader { proxy in
+            let layout = MacCardLayout(width: proxy.size.width)
+            ScrollView {
+                LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                    ForEach(store.page?.mediaTypes ?? types) { type in
+                        NavigationLink {
+                            CollectionDetailView(session: session, space: space, collection: type)
+                        } label: {
+                            MacCollectionTile(
+                                title: type.title, detail: macItems(type.count), side: layout.side
+                            ) {
+                                CollectionCover(
+                                    assetIDs: type.coverAssetIDs, loader: session.loader, size: 512
+                                )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, MacCardLayout.margin)
+                .padding(.vertical, 22)
+            }
+        }
+        .navigationTitle("Media Types")
+        .onAppear { Task { await store.refreshIfStale() } }
+        .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+        #else
         List(store.page?.mediaTypes ?? types) { type in
             NavigationLink {
                 CollectionDetailView(session: session, space: space, collection: type)
@@ -1406,5 +1473,6 @@ struct MediaTypesView: View {
         #endif
         .onAppear { Task { await store.refreshIfStale() } }
         .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+        #endif
     }
 }

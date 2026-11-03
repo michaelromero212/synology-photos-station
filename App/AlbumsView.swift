@@ -306,6 +306,11 @@ struct AlbumsView: View {
     /// The place the Places list handed back, pushed as its own screen.
     @State private var pickedPlace: String?
     @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    /// The sections folded away with their round buttons, by key, kept between
+    /// launches as Photos keeps its own.
+    @AppStorage("albums.collapsedSections") private var collapsedSections = ""
+    #endif
 
     private let spacing: CGFloat = 14
 
@@ -328,20 +333,7 @@ struct AlbumsView: View {
     }
 
     /// About how wide an album cover is on a screen with room to spare.
-    #if os(macOS)
-    private static let tileBasis: CGFloat = 170
-    #else
     private static let tileBasis: CGFloat = 180
-    #endif
-
-    #if os(macOS)
-    /// The featured cards' width in a window. Full width at five by four was a
-    /// cover taller than the window on a large display.
-    private static let heroWidth: CGFloat = 380
-    /// Shelf and trip rows sit in columns this wide or wider, rather than one
-    /// row stretched across the whole window with a small cover at one end.
-    private static let rowColumn: CGFloat = 320
-    #endif
 
     /// Starts from the session's stores, which are usually filled already —
     /// see `AppSession.albumStore`. Starting from nil and assigning them in a
@@ -366,6 +358,11 @@ struct AlbumsView: View {
     /// request was slow or failed. So both halves must have actually reported
     /// before this is allowed to be true.
     private var hasNothing: Bool {
+        #if os(macOS)
+        // The Mac's page says what each empty section is for, in the section,
+        // as Photos does. See `macPage`.
+        return false
+        #else
         guard let store, !store.isLoading else { return false }
         guard let collections, collections.hasLoaded else { return false }
         // Shared albums count, on the platforms that list them here. Without
@@ -375,6 +372,7 @@ struct AlbumsView: View {
         guard session.sharedSpaces.isEmpty else { return false }
         #endif
         return store.albums.isEmpty && (collections.page?.isEmpty ?? true)
+        #endif
     }
 
     var body: some View {
@@ -557,6 +555,9 @@ struct AlbumsView: View {
     /// The page: what the library noticed, then what you filed.
     @ViewBuilder
     private func page(_ store: AlbumStore) -> some View {
+        #if os(macOS)
+        macPage(store)
+        #else
         GeometryReader { proxy in
             let across = columns(across: proxy.size.width)
             let side = (proxy.size.width - spacing * CGFloat(across + 1)) / CGFloat(across)
@@ -593,6 +594,7 @@ struct AlbumsView: View {
                 await collections?.refresh()
             }
         }
+        #endif
     }
 
 
@@ -638,27 +640,6 @@ struct AlbumsView: View {
     @ViewBuilder
     private func hero(_ found: CollectionsResponse, space: SpaceDTO, width: CGFloat) -> some View {
         let cards = found.featured ?? found.hero.map { [$0] } ?? []
-        #if os(macOS)
-        // A row of cards, several in view at once, the way Photos lays out its
-        // memories in a window — rather than one card the width of the window,
-        // paged like a phone. Never wider than the window has room for.
-        let cardWidth = min(Self.heroWidth, max(width - spacing * 2, 1))
-        if !cards.isEmpty {
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: spacing) {
-                    ForEach(cards, id: \.featuredID) { card in
-                        heroLink(card, space: space)
-                            .frame(width: cardWidth)
-                    }
-                }
-                .padding(.horizontal, spacing)
-                // Room for the cards' shadows, which the row would clip.
-                .padding(.vertical, 12)
-            }
-            .scrollIndicators(.hidden)
-            .padding(.vertical, -12)
-        }
-        #else
         if cards.count > 1 {
             VStack(spacing: 12) {
                 ScrollView(.horizontal) {
@@ -687,25 +668,13 @@ struct AlbumsView: View {
             heroLink(card, space: space)
                 .padding(.horizontal, spacing)
         }
-        #endif
     }
 
-    /// The shelves and trip rows: one column on a phone, as many columns of
-    /// `rowColumn` as fit in a window.
-    @ViewBuilder
+    /// The shelves and trip rows, one under another.
     private func rowStack<Content: View>(
         spacing rowSpacing: CGFloat, @ViewBuilder content: () -> Content
     ) -> some View {
-        #if os(macOS)
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: Self.rowColumn), spacing: spacing * 2, alignment: .leading)],
-            alignment: .leading, spacing: rowSpacing
-        ) {
-            content()
-        }
-        #else
         VStack(spacing: rowSpacing) { content() }
-        #endif
     }
 
     private func heroLink(_ card: CollectionSummary, space: SpaceDTO) -> some View {
@@ -830,7 +799,9 @@ struct AlbumsView: View {
         )
     }
 
-    private func browsableAlbumCell(_ album: AlbumDTO, card: AlbumCard, store: AlbumStore) -> some View {
+    private func browsableAlbumCell(
+        _ album: AlbumDTO, card: some View, store: AlbumStore
+    ) -> some View {
         NavigationLink {
             AlbumDetailView(session: session, album: album, store: store)
         } label: {
@@ -1198,10 +1169,27 @@ private struct AlbumCard: View {
     let loader: ThumbnailLoader?
     /// What stands in for the cover while there's none.
     var placeholder = "rectangle.stack"
+    /// Marked in the corner of the Mac's card: two people on anything shared.
+    var badge: String?
 
     @State private var cover: PlatformImage?
 
     var body: some View {
+        #if os(macOS)
+        // Photos' card in a window: the name on the picture. See
+        // `MacCollectionTile`.
+        MacCollectionTile(title: title, detail: details, side: side, badge: badge) {
+            CollectionCover(
+                assetIDs: coverAssetID.map { [$0] } ?? [], loader: loader, size: 512
+            )
+            .overlay {
+                if coverAssetID == nil {
+                    Image(systemName: placeholder)
+                        .font(.largeTitle).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        #else
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(.quaternary)
@@ -1225,6 +1213,7 @@ private struct AlbumCard: View {
             guard let assetID = coverAssetID, let loader else { return }
             cover = await loader.thumbnail(assetID: assetID, size: 512)
         }
+        #endif
     }
 }
 
@@ -1240,7 +1229,8 @@ extension AlbumCard {
         self.init(
             title: album.name, details: with.map { "\($0) · \(count)" } ?? count,
             coverAssetID: album.coverAssetID, side: side, loader: loader,
-            placeholder: album.isSharedWithPeople ? "person.2" : "rectangle.stack"
+            placeholder: album.isSharedWithPeople ? "person.2" : "rectangle.stack",
+            badge: with == nil ? nil : "person.2.fill"
         )
     }
 
@@ -1253,7 +1243,7 @@ extension AlbumCard {
             title: space.name,
             details: summary.map { "\(people) · \(Self.count($0.itemCount))" } ?? people,
             coverAssetID: summary?.coverAssetID, side: side, loader: loader,
-            placeholder: "person.2"
+            placeholder: "person.2", badge: "person.2.fill"
         )
     }
 
@@ -1842,3 +1832,376 @@ struct LibrarySettingsSheet: View {
         }
     }
 }
+
+#if os(macOS)
+// MARK: - The Mac's page
+
+/// Photos' Collections, in a window.
+///
+/// The phone's page is one column of rows. A window has the width for what
+/// Photos does on a Mac instead: each section under a bold title that folds
+/// away, its things as square cards with their names on the picture, and the
+/// file-shaped things as compact rows with counts. The sections run in Photos'
+/// order — Memories, Pinned, Albums, Shared Albums, what the library noticed,
+/// Media Types, Utilities — and one with nothing in it says what will be there
+/// instead of vanishing, with the way to start it where there is one.
+///
+/// Ours in the details: a count on every pinned card, a mark on whatever is
+/// shared, Places and Recently Deleted drawn on tinted grounds, and the
+/// memories along the top keeping the line that says why each is there.
+extension AlbumsView {
+    fileprivate static let macMargin = MacCardLayout.margin
+    fileprivate static let macGap = MacCardLayout.gap
+    /// The memories along the top. Full width at five by four was a card
+    /// taller than the window on a large display.
+    fileprivate static let macMemoryWidth: CGFloat = 380
+
+    fileprivate func macPage(_ store: AlbumStore) -> some View {
+        GeometryReader { proxy in
+            let layout = MacCardLayout(width: proxy.size.width)
+            let across = layout.across
+            let side = layout.side
+            ScrollView {
+                VStack(alignment: .leading, spacing: 36) {
+                    let space = session.personalSpace
+                    let found = collections?.page
+                    if let space, let found {
+                        macMemories(found, space: space)
+                        macPinned(found, space: space, side: side, across: across)
+                    }
+                    macAlbums(store, side: side, across: across)
+                    macShared(store, side: side, across: across)
+                    if let space, let found {
+                        macCurated(
+                            "Trips", key: "trips", rows: found.trips, all: found.allTrips,
+                            seeAll: \.allTrips, space: space, side: side, across: across,
+                            empty: MacEmptySection(
+                                symbol: "suitcase", title: "No Trips Yet",
+                                message: "Time away from home appears here on its own, "
+                                    + "once there are photos from it."
+                            )
+                        )
+                        macCurated(
+                            "Holidays & Occasions", key: "occasions", rows: found.days,
+                            all: found.allOccasions, seeAll: \.allOccasions,
+                            space: space, side: side, across: across,
+                            empty: MacEmptySection(
+                                symbol: "calendar", title: "No Holidays or Occasions Yet",
+                                message: "Holidays, birthdays and the days you name "
+                                    + "appear here as your library grows."
+                            )
+                        )
+                        macMediaTypes(found, space: space)
+                        macUtilities(found, space: space)
+                    }
+                }
+                .padding(.vertical, 22)
+            }
+        }
+    }
+
+    // MARK: Sections
+
+    private var collapsedKeys: Set<String> {
+        Set(collapsedSections.split(separator: ",").map(String.init))
+    }
+
+    private func toggleSection(_ key: String) {
+        var keys = collapsedKeys
+        if keys.remove(key) == nil { keys.insert(key) }
+        withAnimation(.snappy(duration: 0.25)) {
+            collapsedSections = keys.sorted().joined(separator: ",")
+        }
+    }
+
+    /// A titled section that folds away. `inset` is off for a row that scrolls
+    /// sideways, which runs to the window's edges and insets its own cards.
+    private func macSection<Content: View>(
+        _ key: String, _ title: String, note: String? = nil,
+        destination: (() -> AnyView)? = nil, inset: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let collapsed = collapsedKeys.contains(key)
+        return VStack(alignment: .leading, spacing: 14) {
+            MacSectionHeader(
+                title: title, note: note, isCollapsed: collapsed, destination: destination
+            ) {
+                toggleSection(key)
+            }
+            .padding(.horizontal, Self.macMargin)
+            if !collapsed {
+                content()
+                    .padding(.horizontal, inset ? Self.macMargin : 0)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// Square cards in the page's columns.
+    private func macCards<Content: View>(
+        side: CGFloat, across: Int, @ViewBuilder content: () -> Content
+    ) -> some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.fixed(side), spacing: Self.macGap, alignment: .topLeading),
+                count: across
+            ),
+            alignment: .leading, spacing: Self.macGap
+        ) {
+            content()
+        }
+        // `side` and `across` come from one `MacCardLayout`; see `macPage`.
+    }
+
+    /// Compact rows, as many columns of them as fit.
+    private func macRows<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 360, maximum: 460), spacing: 24, alignment: .leading)],
+            alignment: .leading, spacing: 9
+        ) {
+            content()
+        }
+    }
+
+    /// The cards the server chose for today, along the top, several in view
+    /// at once — the way Photos lays out its memories in a window.
+    @ViewBuilder
+    private func macMemories(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        let cards = found.featured ?? found.hero.map { [$0] } ?? []
+        if !cards.isEmpty {
+            macSection("memories", "Memories", inset: false) {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: Self.macGap) {
+                        ForEach(cards, id: \.featuredID) { card in
+                            heroLink(card, space: space)
+                                .frame(width: Self.macMemoryWidth)
+                        }
+                    }
+                    .padding(.horizontal, Self.macMargin)
+                    // Room for the cards' shadows, which the row would clip.
+                    .padding(.vertical, 12)
+                }
+                .scrollIndicators(.hidden)
+                .padding(.vertical, -12)
+            }
+        }
+    }
+
+    /// What somebody comes to the page for, whatever the library has noticed:
+    /// Photos' pinned row, in Photos' order, with how much is in each.
+    private func macPinned(
+        _ found: CollectionsResponse, space: SpaceDTO, side: CGFloat, across: Int
+    ) -> some View {
+        let kinds = ["video", "screenshot"].compactMap { key in
+            found.mediaTypes.first { $0.key == key }
+        }
+        return macSection("pinned", "Pinned") {
+            macCards(side: side, across: across) {
+                if let favorites = found.favorites {
+                    macTile(
+                        favorites, space: space, side: side,
+                        detail: macItems(favorites.count), badge: "heart.fill"
+                    )
+                }
+                if let recent = found.recentlyAdded {
+                    macTile(recent, space: space, side: side, detail: macItems(recent.count))
+                }
+                ForEach(kinds) { kind in
+                    macTile(kind, space: space, side: side, detail: macItems(kind.count))
+                }
+                if placeTotal > 0 {
+                    NavigationLink {
+                        AllPlacesView(session: session, space: space, total: placeTotal) { name in
+                            pickedPlace = name
+                        }
+                    } label: {
+                        MacCollectionTile(
+                            title: "Places",
+                            detail: placeTotal == 1 ? "1 place" : "\(placeTotal.formatted()) places",
+                            side: side
+                        ) {
+                            MacSymbolCover(
+                                symbol: "map.fill",
+                                colors: [Color(red: 0.2, green: 0.55, blue: 0.55),
+                                         Color(red: 0.08, green: 0.25, blue: 0.38)]
+                            )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                NavigationLink {
+                    RecentlyDeletedView(session: session, space: space)
+                } label: {
+                    MacCollectionTile(
+                        title: "Recently Deleted",
+                        detail: macItems(found.recentlyDeleted?.count ?? 0),
+                        side: side
+                    ) {
+                        MacSymbolCover(symbol: "trash", colors: [Color(white: 0.45), Color(white: 0.22)])
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func macAlbums(_ store: AlbumStore, side: CGFloat, across: Int) -> some View {
+        let albums = store.personal
+        return macSection(
+            "albums", "Albums", note: albums.isEmpty ? nil : "Only you can see these."
+        ) {
+            if !albums.isEmpty {
+                macCards(side: side, across: across) {
+                    ForEach(albums) { album in
+                        albumCell(album, store: store, side: side)
+                    }
+                }
+            } else if store.hasLoaded {
+                MacEmptySection(
+                    symbol: "rectangle.stack", title: "No Albums Yet",
+                    message: "Make an album to keep photos together. Only you will see it.",
+                    actionTitle: "Create"
+                ) {
+                    showCreate = true
+                }
+            }
+        }
+    }
+
+    private func macShared(_ store: AlbumStore, side: CGFloat, across: Int) -> some View {
+        let cards = sharedCards(store)
+        return macSection("shared", "Shared Albums") {
+            if !cards.isEmpty {
+                macCards(side: side, across: across) {
+                    ForEach(cards) { card in
+                        switch card {
+                        case .library(let space):
+                            libraryCell(space, store: store, side: side)
+                        case .album(let album):
+                            albumCell(album, store: store, side: side)
+                        }
+                    }
+                }
+            } else if store.hasLoaded {
+                MacEmptySection(
+                    symbol: "person.2", title: "No Shared Albums Yet",
+                    message: "Share photos and videos with just the people you choose, "
+                        + "and let them add their own.",
+                    actionTitle: "Start Sharing"
+                ) {
+                    showCreate = true
+                }
+            }
+        }
+    }
+
+    /// Trips, or holidays and occasions: the few the server chose, as cards,
+    /// with the title leading to the rest when there are more.
+    private func macCurated(
+        _ title: String, key: String, rows: [CollectionSummary], all: [CollectionSummary]?,
+        seeAll: KeyPath<CollectionsResponse, [CollectionSummary]?>,
+        space: SpaceDTO, side: CGFloat, across: Int, empty: MacEmptySection
+    ) -> some View {
+        var destination: (() -> AnyView)?
+        if let all, all.count > rows.count, let collections {
+            destination = {
+                AnyView(CollectionListView(
+                    session: session, space: space, title: title,
+                    store: collections, list: seeAll
+                ))
+            }
+        }
+        return macSection(key, title, destination: destination) {
+            if rows.isEmpty {
+                empty
+            } else {
+                macCards(side: side, across: across) {
+                    ForEach(rows) { row in
+                        macTile(
+                            row, space: space, side: side,
+                            detail: row.subtitle ?? macItems(row.count)
+                        )
+                        .nameable(row) { naming = $0 }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every kind, each its own row with how many, as Photos lists them.
+    @ViewBuilder
+    private func macMediaTypes(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if !found.mediaTypes.isEmpty {
+            macSection("mediaTypes", "Media Types", destination: {
+                AnyView(MediaTypesView(session: session, space: space, types: found.mediaTypes))
+            }) {
+                macRows {
+                    ForEach(found.mediaTypes) { type in
+                        NavigationLink {
+                            CollectionDetailView(session: session, space: space, collection: type)
+                        } label: {
+                            MacUtilityRow(
+                                title: type.title, symbol: MacRootView.icon(for: type.key),
+                                count: type.count
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tools: Recently Deleted always, at zero too — a row that only
+    /// appears once you've deleted something is a place nobody knows to look
+    /// until they need it — then what arrived lately and where it was taken.
+    private func macUtilities(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        macSection("utilities", "Utilities") {
+            macRows {
+                NavigationLink {
+                    RecentlyDeletedView(session: session, space: space)
+                } label: {
+                    MacUtilityRow(
+                        title: "Recently Deleted", symbol: "trash",
+                        count: found.recentlyDeleted?.count ?? 0
+                    )
+                }
+                .buttonStyle(.plain)
+                if let recent = found.recentlyAdded {
+                    NavigationLink {
+                        CollectionDetailView(session: session, space: space, collection: recent)
+                    } label: {
+                        MacUtilityRow(title: recent.title, symbol: "clock", count: recent.count)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if placeTotal > 0 {
+                    NavigationLink {
+                        AllPlacesView(session: session, space: space, total: placeTotal) { name in
+                            pickedPlace = name
+                        }
+                    } label: {
+                        MacUtilityRow(title: "Places", symbol: "map", count: placeTotal)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    /// A collection as a card, opening its photos.
+    private func macTile(
+        _ collection: CollectionSummary, space: SpaceDTO, side: CGFloat,
+        detail: String?, badge: String? = nil
+    ) -> some View {
+        NavigationLink {
+            CollectionDetailView(session: session, space: space, collection: collection)
+        } label: {
+            MacCollectionTile(title: collection.title, detail: detail, side: side, badge: badge) {
+                CollectionCover(assetIDs: collection.coverAssetIDs, loader: session.loader, size: 512)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+#endif
