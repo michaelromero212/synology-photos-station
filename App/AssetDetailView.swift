@@ -1,5 +1,6 @@
 import FrameStationAPI
 import FrameStationKit
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -91,6 +92,65 @@ final class AssetDetailModel {
             hasLoadedPreview = true
             if image == nil { imageError = "Couldn't load this photo." }
         }
+    }
+
+    /// The original, for a photo zoomed past what the 2048 preview holds: the
+    /// detail Photos shows when you look closely. Fetched only then, and let go
+    /// of once the photo is no longer the one on screen. See
+    /// `MacZoomableImage`.
+    var fullImage: PlatformImage?
+    private var isLoadingFull = false
+    /// Above this a closer look makes do with the preview: a RAW original can
+    /// run to tens of megabytes.
+    static let fullResolutionLimit: Int64 = 60_000_000
+    /// Decoded no larger than this on its longer side: a twelve-megapixel
+    /// photo whole, and a forty-eight-megapixel one at a quarter of its
+    /// pixels, rather than nearly 200 MB of bitmap for one look.
+    nonisolated static let fullResolutionPixels = 4096
+
+    func loadFullResolution(client: FrameStationClient?) async {
+        guard item.mediaType == .photo, fullImage == nil, !isLoadingFull, let client else { return }
+        if let detail, detail.byteSize > Self.fullResolutionLimit { return }
+        isLoadingFull = true
+        defer { isLoadingFull = false }
+        guard let url = await client.originalURL(assetID: item.assetID) else { return }
+        var request = URLRequest(url: url)
+        if let header = await client.authorizationHeader() {
+            request.setValue(header, forHTTPHeaderField: "Authorization")
+        }
+        guard let fetched = try? await URLSession.shared.data(for: request),
+              (fetched.1 as? HTTPURLResponse)?.statusCode == 200 else { return }
+        let data = fetched.0
+        // Off the main thread: decoding a big HEIC on it is a visible stall.
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Self.decodeForZoom(data)
+        }.value
+        guard let decoded, !Task.isCancelled else { return }
+        fullImage = decoded
+    }
+
+    func dropFullResolution() {
+        fullImage = nil
+    }
+
+    /// The original, upright and at most `fullResolutionPixels` on a side.
+    nonisolated static func decodeForZoom(_ data: Data) -> PlatformImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            // The original carries its orientation as a tag; the preview was
+            // already turned upright on the NAS.
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: fullResolutionPixels,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        #if os(macOS)
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        #else
+        return UIImage(cgImage: image)
+        #endif
     }
 
     /// Fetched when the Information panel opens rather than with the photo, so
@@ -275,6 +335,11 @@ struct AssetDetailView: View {
     /// naming itself, so every page the scroll view built thought it was the
     /// one being watched, and opened a player of its own.
     @State private var macFocus: PagerFocus
+    /// Whether the photo on screen is zoomed in. While it is, two fingers pan
+    /// the photo rather than turn the page. See `MacZoomableImage`.
+    @State private var macZoomed = false
+    /// The zoom keys' way to the photo on screen.
+    @State private var macZoom = MacPhotoZoom()
     /// Whether the clip's controls are up. They come up as the pointer moves
     /// and go a moment after it stops, while the clip plays — as Photos does
     /// on a Mac. Paused, they stay. See `pokeControls`.
@@ -993,7 +1058,8 @@ struct AssetDetailView: View {
                         // ahead can finish off-screen, and `advanceToNextVideo`
                         // ignores it because its id isn't the one on screen.
                         onFinished: { advanceToNextVideo(after: page) },
-                        isZoomed: .constant(false)
+                        isZoomed: $macZoomed,
+                        macZoom: macZoom
                     )
                     // Beside the sidebar, inside the page. See below.
                     .padding(.leading, outer.safeAreaInsets.leading)
@@ -1008,6 +1074,9 @@ struct AssetDetailView: View {
         .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
+        // A zoomed photo keeps the swipe: it pans, and the page stays put
+        // until the photo is back to fit, as in Photos.
+        .scrollDisabled(macZoomed)
         // The whole window wide, under the sidebar too, and never resized by
         // it. Each page keeps its picture beside the sidebar with padding of
         // its own (above), which follows the sidebar as it slides.
@@ -1037,6 +1106,9 @@ struct AssetDetailView: View {
         .onChange(of: displayedItem.id) { _, new in
             if scrolledID != new { scrolledID = new }
             macFocus.currentID = new
+            // ⌘→ from a zoomed photo: the one you left drops back to fit, and
+            // the pager mustn't stay locked on its account.
+            macZoomed = false
             // Whatever you just left stops, as it does on the phone. Nil on a
             // photo, so moving from a clip to a still silences it too.
             preloader.playOnly(
@@ -1056,7 +1128,25 @@ struct AssetDetailView: View {
         // phone's reason: it reads whichever clip is current, so it follows
         // every advance — Next Video, auto-play, a swipe.
         .overlay { macVideoControls }
+        .background { macZoomKeys }
         .onContinuousHover { _ in pokeControls() }
+    }
+
+    /// Photos' zoom keys: ⌘+ (and ⌘=, the same key without Shift), ⌘− and ⌘0
+    /// to fit. They reach whichever photo is on screen; on a clip they do
+    /// nothing.
+    private var macZoomKeys: some View {
+        Group {
+            Button("Zoom In") { macZoom.zoomIn() }
+                .keyboardShortcut("+", modifiers: .command)
+            Button("Zoom In") { macZoom.zoomIn() }
+                .keyboardShortcut("=", modifiers: .command)
+            Button("Zoom Out") { macZoom.zoomOut() }
+                .keyboardShortcut("-", modifiers: .command)
+            Button("Zoom to Fit") { macZoom.fit() }
+                .keyboardShortcut("0", modifiers: .command)
+        }
+        .hidden()
     }
 
     @ViewBuilder
@@ -1605,6 +1695,11 @@ private struct AssetPage: View {
     /// the reason `focus` is.
     var stage: ViewerStage?
     #endif
+    #if os(macOS)
+    /// The viewer's zoom keys, which reach whichever page is on screen. Nil
+    /// where a photo is only shown, not looked into.
+    var macZoom: MacPhotoZoom?
+    #endif
 
     private var isCurrent: Bool { focus.currentID == model.item.id }
 
@@ -1802,10 +1897,32 @@ private struct AssetPage: View {
             onSingleTap: onSingleTap
         )
         .ignoresSafeArea()
-        #elseif canImport(UIKit)
-        Image(uiImage: platformImage).resizable().scaledToFit()
+        #elseif os(macOS)
+        if let macZoom {
+            // Pinch, double-click, ⌘+ and ⌘−, as in Photos. Zoomed past what
+            // the preview holds, the original takes its place where it stands.
+            MacZoomableImage(
+                image: model.fullImage ?? platformImage,
+                isCurrent: isCurrent,
+                zoom: macZoom,
+                onZoomChange: { zoomed in
+                    guard isCurrent else { return }
+                    isZoomed = zoomed
+                },
+                onWantsDetail: {
+                    Task { await model.loadFullResolution(client: session.client) }
+                }
+            )
+            // A photo you've moved on from goes back to its preview: the
+            // original is tens of megabytes of bitmap, held for one look.
+            .onChange(of: isCurrent) { _, current in
+                if !current { model.dropFullResolution() }
+            }
+        } else {
+            Image(nsImage: platformImage).resizable().scaledToFit()
+        }
         #else
-        Image(nsImage: platformImage).resizable().scaledToFit()
+        Image(uiImage: platformImage).resizable().scaledToFit()
         #endif
     }
 }
