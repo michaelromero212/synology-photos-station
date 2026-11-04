@@ -83,6 +83,14 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     /// Optional so a server that predates it, and a client that ignores it,
     /// both carry on.
     public let kicker: String?
+    /// The `Tradition.id` this card is a year of, where it's one: Christmas
+    /// 2023 is a year of "holiday:Christmas". A page that shows Over the
+    /// Years leaves these out of Holidays & Occasions, which then holds what
+    /// happened once, and the same photos aren't on the page twice.
+    ///
+    /// Optional, so an app that predates Over the Years ignores it and keeps
+    /// every card where it always was.
+    public let tradition: String?
 
     public var id: String { "\(kind.rawValue):\(key)" }
 
@@ -90,7 +98,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         kind: CollectionKind, key: String, title: String,
         subtitle: String?, count: Int, coverAssetIDs: [UUID],
         isNamed: Bool = false, recursAnnually: Bool = false,
-        kicker: String? = nil
+        kicker: String? = nil, tradition: String? = nil
     ) {
         self.kind = kind
         self.key = key
@@ -101,6 +109,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         self.isNamed = isNamed
         self.recursAnnually = recursAnnually
         self.kicker = kicker
+        self.tradition = tradition
     }
 
     /// The same card with a different line above its title.
@@ -108,7 +117,16 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
             coverAssetIDs: coverAssetIDs, isNamed: isNamed,
-            recursAnnually: recursAnnually, kicker: kicker
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
+        )
+    }
+
+    /// The same card, as a year of `tradition`.
+    public func inTradition(_ tradition: String?) -> CollectionSummary {
+        CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
         )
     }
 }
@@ -198,13 +216,24 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// nil and draws no section. Empty means the server looked and found
     /// nothing yet.
     public let traditions: [Tradition]?
+    /// The trips a page with room for a whole row of them shows, as the
+    /// Mac's: `trips` by the same rules, up to twelve, newest first.
+    ///
+    /// Optional, like `allTrips`: an older app ignores it, and a newer one
+    /// talking to an older server finds nil and shows `trips`.
+    public let wideTrips: [CollectionSummary]?
+    /// Holidays & Occasions for an app that shows Over the Years: what
+    /// happened once, chosen by `days`' rules but leaving out every year of a
+    /// tradition, up to twelve, newest first. The phone takes the first few,
+    /// the Mac a row. Nil from an older server; `days` is then the section.
+    public let wideDays: [CollectionSummary]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
-        case allTrips, allOccasions, featured, traditions
+        case allTrips, allOccasions, featured, traditions, wideTrips, wideDays
     }
 
     /// Read card by card, so a card this build can't read is left out instead
@@ -243,6 +272,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         // tradition and not the section.
         traditions = (try? container.decodeIfPresent([Skippable<Tradition>].self, forKey: .traditions))?
             .map { $0.compactMap(\.value) }
+        wideTrips = cards(.wideTrips)
+        wideDays = cards(.wideDays)
     }
 
     public init(
@@ -257,10 +288,14 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         allTrips: [CollectionSummary]? = nil,
         allOccasions: [CollectionSummary]? = nil,
         featured: [CollectionSummary]? = nil,
-        traditions: [Tradition]? = nil
+        traditions: [Tradition]? = nil,
+        wideTrips: [CollectionSummary]? = nil,
+        wideDays: [CollectionSummary]? = nil
     ) {
         self.featured = featured
         self.traditions = traditions
+        self.wideTrips = wideTrips
+        self.wideDays = wideDays
         self.hero = hero
         self.trips = trips
         self.days = days
@@ -271,6 +306,21 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         self.favorites = favorites
         self.allTrips = allTrips
         self.allOccasions = allOccasions
+    }
+
+    /// Holidays & Occasions' full list for an app that shows Over the Years:
+    /// `allOccasions` without the years of a tradition, which are under its
+    /// card. Everything, from a server that sends no traditions.
+    public var onceOccasions: [CollectionSummary]? {
+        guard traditions != nil else { return allOccasions }
+        return allOccasions?.filter { $0.tradition == nil }
+    }
+
+    /// Holidays & Occasions on the page: what happened once, newest first,
+    /// at most `limit`. A server that sends no traditions chose `days`.
+    public func onceDays(limit: Int) -> [CollectionSummary] {
+        guard traditions != nil, let wideDays else { return days }
+        return Array(wideDays.prefix(limit))
     }
 
     /// Whether the page has anything to *show* — as opposed to anything at all.

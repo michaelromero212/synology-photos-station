@@ -61,6 +61,9 @@ struct CollectionsController: RouteCollection {
     /// every year.
     static let allTripsLimit = 40
     static let allOccasionsLimit = 60
+    /// What a page with room for a whole row of cards gets of each, chosen by
+    /// the same rules: the Mac's page, which runs six to nine across.
+    static let wideLimit = 12
 
     // MARK: - The page
 
@@ -197,6 +200,20 @@ struct CollectionsController: RouteCollection {
             rows: found.rows, today: today, turn: turn,
             holidays: holidays, named: named, annual: annual, events: events
         )
+        // Which tradition each day is a year of, so Holidays & Occasions can
+        // leave Christmas 2023 to the Christmas card above it, in an app that
+        // shows one. See `CollectionSummary.tradition`.
+        var yearOf: [String: String] = [:]
+        for tradition in traditions {
+            for year in tradition.years {
+                for day in Self.days(inKey: year.key) { yearOf[day] = tradition.id }
+            }
+        }
+        func yearMarked(_ card: CollectionSummary) -> CollectionSummary {
+            guard let tradition = Self.days(inKey: card.key).lazy.compactMap({ yearOf[$0] }).first
+            else { return card }
+            return card.inTradition(tradition)
+        }
 
         // The row the page opens on, the way Photos opens on its featured
         // memories and photos: a handful of cards to swipe, each with its own
@@ -238,16 +255,16 @@ struct CollectionsController: RouteCollection {
         // just below it is the same photographs twice on one screen.
         let featuredKeys = Set(featured.map(\.key))
 
+        let unfeaturedTrips = trips.filter { !featuredKeys.contains($0.key) }
+        let unfeaturedOccasions = occasions.filter { !featuredKeys.contains($0.summary.key) }
         return CollectionsResponse(
             hero: hero,
             trips: Self.featuredTrips(
-                trips.filter { !featuredKeys.contains($0.key) },
-                today: today, heroPlace: hero.flatMap(Self.place(of:))
+                unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:))
             ),
             days: Self.featuredOccasions(
-                occasions.filter { !featuredKeys.contains($0.summary.key) },
-                today: today, comingUp: comingUp, heroOccasion: heroOccasion
-            ),
+                unfeaturedOccasions, today: today, comingUp: comingUp, heroOccasion: heroOccasion
+            ).map(yearMarked),
             // Somewhere you haven't been in years is a lovely thing to open on
             // and a list of four of them is a lot to scroll past, so they are
             // the hero some days and a row on none.
@@ -257,9 +274,19 @@ struct CollectionsController: RouteCollection {
             recentlyAdded: arrived,
             favorites: marked,
             allTrips: trips,
-            allOccasions: occasions.map(\.summary),
+            allOccasions: occasions.map { yearMarked($0.summary) },
             featured: featured,
-            traditions: traditions
+            traditions: traditions,
+            wideTrips: Self.featuredTrips(
+                unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:)),
+                limit: Self.wideLimit
+            ),
+            // What happened once: the years of a tradition are its card's.
+            wideDays: Self.featuredOccasions(
+                unfeaturedOccasions.filter { yearMarked($0.summary).tradition == nil },
+                today: today, comingUp: comingUp, heroOccasion: heroOccasion,
+                limit: Self.wideLimit
+            )
         )
     }
 
@@ -383,7 +410,7 @@ struct CollectionsController: RouteCollection {
     /// weekend in Bay Lake" are one fact said three times. Listed newest first
     /// once chosen.
     static func featuredTrips(
-        _ trips: [CollectionSummary], today: Date, heroPlace: String?
+        _ trips: [CollectionSummary], today: Date, heroPlace: String?, limit: Int = pageTrips
     ) -> [CollectionSummary] {
         let ranked = trips.sorted { a, b in
             let (wa, wb) = (weight(a, today: today), weight(b, today: today))
@@ -391,7 +418,7 @@ struct CollectionsController: RouteCollection {
         }
         var places = Set(heroPlace.map { [$0] } ?? [])
         var chosen: [CollectionSummary] = []
-        for trip in ranked where chosen.count < pageTrips {
+        for trip in ranked where chosen.count < limit {
             guard places.insert(place(of: trip) ?? trip.key).inserted else { continue }
             chosen.append(trip)
         }
@@ -410,7 +437,7 @@ struct CollectionsController: RouteCollection {
     /// most. Listed newest first once chosen.
     static func featuredOccasions(
         _ occasions: [Occasion], today: Date,
-        comingUp: CollectionSummary?, heroOccasion: String?
+        comingUp: CollectionSummary?, heroOccasion: String?, limit: Int = pageOccasions
     ) -> [CollectionSummary] {
         // What somebody named counts double: they said it mattered.
         func score(_ candidate: Occasion) -> Double {
@@ -426,7 +453,7 @@ struct CollectionsController: RouteCollection {
         }
         var seen = Set(heroOccasion.map { [$0] } ?? [])
         var chosen: [CollectionSummary] = []
-        for candidate in ranked where chosen.count < pageOccasions {
+        for candidate in ranked where chosen.count < limit {
             guard let name = candidate.occasion, seen.insert(name).inserted else { continue }
             chosen.append(candidate.summary)
         }
@@ -1398,9 +1425,10 @@ struct CollectionsController: RouteCollection {
     ) -> [String: CurationVocabulary.Event] {
         var found: [String: CurationVocabulary.Event] = [:]
         for (day, seen) in evidence where seen.isAnalyzed && holidays[day] == nil {
-            found[day] = CurationVocabulary.events.first { event in
-                seen.count(event.tag) >= event.minPhotos && seen.share(event.tag) >= event.minShare
-            }
+            found[day] = CurationVocabulary.event(
+                clearing: { seen.count($0.tag) >= $0.minPhotos && seen.share($0.tag) >= $0.minShare },
+                count: seen.count
+            )
         }
         return found
     }
@@ -1419,11 +1447,14 @@ struct CollectionsController: RouteCollection {
             whole.tags.merge(seen.tags, uniquingKeysWith: +)
         }
         guard whole.isAnalyzed else { return nil }
-        return CurationVocabulary.events.first { event in
-            event.tripTitle != nil
-                && whole.count(event.tag) >= event.minPhotos
-                && whole.share(event.tag) >= CurationVocabulary.tripShare
-        }
+        return CurationVocabulary.event(
+            clearing: { event in
+                event.tripTitle != nil
+                    && whole.count(event.tag) >= event.minPhotos
+                    && whole.share(event.tag) >= CurationVocabulary.tripShare
+            },
+            count: whole.count
+        )
     }
 
     /// The event a run of days was, if any of its days was one. After `split`

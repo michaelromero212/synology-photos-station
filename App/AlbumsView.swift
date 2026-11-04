@@ -708,10 +708,14 @@ struct AlbumsView: View {
                 seeAll: \.allTrips
             )
         }
-        if !found.days.isEmpty {
+        // What happened once. The years of what comes round every year are
+        // under Over the Years, and showing Christmas 2023 here too was the
+        // same photos twice on one page.
+        let occasions = found.onceDays(limit: 3)
+        if !occasions.isEmpty {
             curated(
-                "Holidays & Occasions", found.days, all: found.allOccasions, space: space,
-                seeAll: \.allOccasions
+                "Holidays & Occasions", occasions, all: found.onceOccasions, space: space,
+                seeAll: \.onceOccasions
             )
         }
     }
@@ -1920,8 +1924,13 @@ extension AlbumsView {
                     macAlbums(store, side: side, across: across)
                     macShared(store, side: side, across: across)
                     if let space, let found {
+                        // A whole row of each, as Over the Years has, where the
+                        // NAS has chosen that many. The phone's three were
+                        // half a row here, beside rows that ran across.
                         macCurated(
-                            "Trips", key: "trips", rows: found.trips, all: found.allTrips,
+                            "Trips", key: "trips",
+                            rows: Array((found.wideTrips ?? found.trips).prefix(across)),
+                            all: found.allTrips,
                             seeAll: \.allTrips, space: space, side: side, across: across,
                             empty: MacEmptySection(
                                 symbol: "suitcase", title: "No Trips Yet",
@@ -1929,15 +1938,25 @@ extension AlbumsView {
                                     + "once there are photos from it."
                             )
                         )
+                        // What happened once; the years of a tradition are
+                        // under Over the Years, not here as well.
                         macCurated(
-                            "Holidays & Occasions", key: "occasions", rows: found.days,
-                            all: found.allOccasions, seeAll: \.allOccasions,
+                            "Holidays & Occasions", key: "occasions",
+                            rows: found.onceDays(limit: across),
+                            all: found.onceOccasions, seeAll: \.onceOccasions,
                             space: space, side: side, across: across,
-                            empty: MacEmptySection(
-                                symbol: "calendar", title: "No Holidays or Occasions Yet",
-                                message: "Holidays, birthdays and the days you name "
-                                    + "appear here as your library grows."
-                            )
+                            empty: found.traditions?.isEmpty == false
+                                ? MacEmptySection(
+                                    symbol: "calendar", title: "Nothing That Happened Once Yet",
+                                    message: "Weddings, graduations and the days you name "
+                                        + "appear here. What comes round every year is under "
+                                        + "Over the Years."
+                                )
+                                : MacEmptySection(
+                                    symbol: "calendar", title: "No Holidays or Occasions Yet",
+                                    message: "Holidays, birthdays and the days you name "
+                                        + "appear here as your library grows."
+                                )
                         )
                         macTraditions(found, space: space, side: side, across: across)
                         macMediaTypes(found, space: space)

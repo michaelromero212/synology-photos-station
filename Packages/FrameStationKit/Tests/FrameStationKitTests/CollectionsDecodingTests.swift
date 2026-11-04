@@ -140,6 +140,50 @@ final class CollectionsDecodingTests: XCTestCase {
         XCTAssertNil(page.traditions?.first?.naming)
     }
 
+    /// The Mac's fuller rows: absent from an older server, read card by card
+    /// from a newer one.
+    func testWideRows() throws {
+        let older = try decode("""
+            {"trips":[\(card("trip", "2026-07-18", "Seven days in Duck"))],"days":[],"revisits":[],"mediaTypes":[]}
+            """)
+        XCTAssertNil(older.wideTrips)
+        XCTAssertNil(older.wideDays)
+
+        let newer = try decode("""
+            {"trips":[],"days":[],"revisits":[],"mediaTypes":[],
+             "wideTrips":[\(card("trip", "2026-07-18", "Seven days in Duck")),
+                          \(card("someFutureKind", "x", "Somewhere"))],
+             "wideDays":[\(card("day", "2025-12-25", "Christmas 2025"))]}
+            """)
+        XCTAssertEqual(newer.wideTrips?.map(\.title), ["Seven days in Duck"])
+        XCTAssertEqual(newer.wideDays?.map(\.title), ["Christmas 2025"])
+    }
+
+    /// With Over the Years on the page, Holidays & Occasions is what happened
+    /// once; from an older server it's everything, as it always was.
+    func testOccasionsLeaveTheYearsOfATraditionToIt() throws {
+        let christmas = """
+            {"kind":"day","key":"2024-12-25","title":"Christmas 2024","count":12,"coverAssetIDs":[],\
+            "isNamed":false,"recursAnnually":false,"tradition":"holiday:Christmas"}
+            """
+        let graduation = card("day", "2024-05-18", "Graduation in Harrisonburg")
+        let newer = try decode("""
+            {"trips":[],"days":[\(christmas),\(graduation)],"revisits":[],"mediaTypes":[],
+             "allOccasions":[\(christmas),\(graduation)],"traditions":[],
+             "wideDays":[\(graduation)]}
+            """)
+        XCTAssertEqual(newer.allOccasions?.first?.tradition, "holiday:Christmas")
+        XCTAssertEqual(newer.onceOccasions?.map(\.title), ["Graduation in Harrisonburg"])
+        XCTAssertEqual(newer.onceDays(limit: 3).map(\.title), ["Graduation in Harrisonburg"])
+
+        let older = try decode("""
+            {"trips":[],"days":[\(christmas),\(graduation)],"revisits":[],"mediaTypes":[],
+             "allOccasions":[\(christmas),\(graduation)]}
+            """)
+        XCTAssertEqual(older.onceOccasions?.count, 2)
+        XCTAssertEqual(older.onceDays(limit: 3).count, 2)
+    }
+
     func testTraditionsRoundTrip() throws {
         let year = CollectionSummary(
             kind: .day, key: "2025-04-05", title: "April 5, 2025", subtitle: "Saturday",

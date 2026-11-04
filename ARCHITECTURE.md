@@ -1378,7 +1378,17 @@ Four kinds, tried in order, each day belonging to one:
 tradition, since what the day is is already known; three for anything found in
 the photos. A holiday also has to be confirmed by its own photos in two years,
 or stand out from the weeks around it (0.02), so a Memorial Day that happened to
-have photos twice isn't one.
+have photos twice isn't one. A crowd alone doesn't confirm one when the photos
+show something else the crowd was there for: a Memorial Day volleyball
+tournament, a birthday party on Mother's Day. A wedding or a graduation that
+falls on a date is never a year of that date's pattern.
+
+**Each card once.** A card in Holidays & Occasions that is a year of a tradition
+carries that tradition's id (`CollectionSummary.tradition`), and an app showing
+Over the Years leaves it out there: Christmas 2023 is under Christmas, and
+Holidays & Occasions holds what happened once (`wideDays`, `onceOccasions`). An
+app from before Over the Years ignores the field and keeps every card where it
+was.
 
 **Every bar is the library's own:** its median day, its neighbors, its years.
 Nothing is tuned to one family. Holidays & Occasions asks to name a date only

@@ -216,6 +216,23 @@ check "in the order they were taken" "${H[14]}" \
   "$(echo "$HL" | python3 -c "import sys,json; print(json.load(sys.stdin)['items'][0]['assetID'])")"
 check "a small collection is shown whole" "4" "$(curl -s "$API/v1/spaces/$SP/collections/items?kind=day&key=2022-12-25&highlights=10" -H "$A" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['items']))")"
 
+echo "A cap and gown"
+# What a graduation looks like to Vision: the graduation itself, a gown, a
+# ceremony. The last two used to make it a wedding as well, and the wedding,
+# first in line, named the day.
+CAPGOWN='[{"id":"graduation","confidence":0.7},{"id":"gown","confidence":0.6},{"id":"ceremony","confidence":0.5}]'
+G=(); for i in 1 2 3 4; do G+=("$(upload "$SP" "$A" "grad$i" $((600 + i)) "2021-05-14T1${i}:00:00Z")"); done
+for g in "${G[@]}"; do observe "$SP" "$A" "$g" "$CAPGOWN" >/dev/null; done
+T=$(titles "$SP" "$A")
+has "a cap and gown is a graduation" "Graduation" "$T"
+lacks "not a wedding" "Wedding" "$T"
+# A day Vision called both, as often: the graduation, not the wedding first in
+# line.
+BOTH='[{"id":"graduation","confidence":0.7},{"id":"wedding","confidence":0.4}]'
+W=(); for i in 1 2 3 4; do W+=("$(upload "$SP" "$A" "both$i" $((700 + i)) "2020-06-06T1${i}:00:00Z")"); done
+for w in "${W[@]}"; do observe "$SP" "$A" "$w" "$BOTH" >/dev/null; done
+lacks "a day seen as both, as often, is the graduation" "Wedding" "$(titles "$SP" "$A")"
+
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"
 check "nothing is left" "404" "$(code "$API/v1/spaces/$SP/assets/${B[0]}/observation" -H "$A")"

@@ -68,10 +68,13 @@ photos(){ q "WITH made AS (
     FROM generate_series(1, $2) g RETURNING id)
   INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
   SELECT '$SPACE', id, '$USER_ID' FROM made" >/dev/null; }
-# observe <day> <how many show it> [what]: what the person's phone saw in that
-# day's photos, the first few a birthday cake (or `what`) and the rest sky.
+# observe <day> <how many show it> [what] [people]: what the person's phone saw
+# in that day's photos, the first few a birthday cake (or `what`, with
+# `people` in frame) and the rest sky.
 CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]'
 CONCERT='[{"id":"concert","confidence":0.9},{"id":"crowd","confidence":0.6}]'
+CAPGOWN='[{"id":"graduation","confidence":0.7},{"id":"gown","confidence":0.6},{"id":"ceremony","confidence":0.5}]'
+BASEBALL='[{"id":"baseball","confidence":0.9},{"id":"crowd","confidence":0.5}]'
 SKY='[{"id":"sky","confidence":0.9},{"id":"outdoor","confidence":0.8}]'
 observe(){
   local ids body
@@ -83,7 +86,7 @@ ids = [l.strip() for l in sys.stdin if l.strip()]
 seen, sky = json.loads('${3:-$CAKE}'), json.loads('$SKY')
 print(json.dumps({'analysisVersion': 1, 'modelVersion': 'smoke', 'observations': [
     {'assetID': i, 'labels': seen if n < $2 else sky, 'aesthetic': 0.4, 'isUtility': False,
-     'peopleCount': 0, 'animalCount': 0} for n, i in enumerate(ids)]}))")
+     'peopleCount': ${4:-0} if n < $2 else 0, 'animalCount': 0} for n, i in enumerate(ids)]}))")
   curl -s -o /dev/null -X POST "$API/v1/spaces/$SPACE/curation/observations" -H "$AUTH" \
     -H 'Content-Type: application/json' -d "$body"
 }
@@ -110,9 +113,17 @@ elif what == 'naming':
     n = by.get(args[0], {}).get('naming')
     print(None if n is None else f"{n['key']} {n['title']} {n['isNamed']} {n['recursAnnually']}")
 elif what == 'occasions': print('|'.join(c['title'] for c in d.get('allOccasions') or []))
+elif what == 'days': print('|'.join(c['title'] for c in d.get('days') or []))
+elif what == 'daysyearly': print(len(d.get('days') or []) == 3 and any(c.get('tradition') for c in d.get('days') or []))
 elif what == 'trips': print('|'.join(c['title'] for c in d.get('allTrips') or []))
 elif what == 'shape': print('|'.join(k for k in ['hero', 'trips', 'days', 'revisits', 'mediaTypes',
                                                  'allTrips', 'allOccasions', 'featured'] if k in d))
+elif what == 'wide':
+    wide = d.get('wideDays') or []
+    print(len(d.get('days') or []) == 3 and 3 < len(wide) <= 12 and all(c.get('tradition') is None for c in wide))
+elif what == 'widetitles': print('|'.join(c['title'] for c in d.get('wideDays') or []))
+elif what == 'marked':
+    print('|'.join(f"{c['title']}={c.get('tradition')}" for c in d.get('allOccasions') or [] if c['title'] == args[0]))
 PY
 T(){ python3 "$ROOT/read.py" "$ROOT/page.json" "$@"; }
 
@@ -152,6 +163,12 @@ for d in 2021-03-07 2022-03-12 2023-03-08 2024-03-11; do photos "$d" 6; done
 # the date isn't that birthday.
 for y in 2021 2022 2023 2024 2025; do photos "$y-09-20" 5; done
 for d in 2021-09-12 2022-09-13 2023-09-11 2024-09-14; do photos "$d" 6; done
+# October 20 every year with cake twice, and in 2024 a graduation that fell on
+# it: a year of something else, not of the birthday.
+for y in 2020 2021 2022 2023 2024 2025; do photos "$y-10-20" 6; done
+# Father's Day three years among those busy Junes, each a ball game with a
+# crowd: the crowd is the game's, and the day isn't kept as Father's Day.
+for d in 2021-06-20 2022-06-19 2023-06-18; do photos "$d" 6; done
 # The baseline out of the way of the days it's a baseline for.
 BASELINE_IN_THE_WAY="SELECT q.id FROM assets q WHERE q.sha256 LIKE 'TRADQ%' AND q.local_captured_at::date IN (
      SELECT local_captured_at::date FROM assets WHERE sha256 LIKE 'TRAD%' AND sha256 NOT LIKE 'TRADQ%')"
@@ -162,6 +179,10 @@ for d in 2019-04-05 2020-04-05 2021-04-05 2023-04-05 2025-04-05; do observe "$d"
 for d in 2022-05-14 2023-05-20 2024-05-18 2025-05-17; do observe "$d" 3; done
 for d in 2021-03-07 2022-03-12 2023-03-08 2024-03-11; do observe "$d" 4 "$CONCERT"; done
 for d in 2021-09-12 2022-09-13 2023-09-11 2024-09-14; do observe "$d" 3; done
+for d in 2021-10-20 2023-10-20; do observe "$d" 3; done
+for d in 2020-10-20 2022-10-20 2025-10-20; do observe "$d" 0; done
+observe 2024-10-20 4 "$CAPGOWN"
+for d in 2021-06-20 2022-06-19 2023-06-18; do observe "$d" 6 "$BASEBALL" 4; done
 
 echo "Over the Years"
 page
@@ -206,6 +227,19 @@ check "they're their own tradition" "Every March · 4 years · 2021–2024" "$(T
 check "nor do a week-earlier birthday's parties" "Every year on September 20" "$(T field date:09-20 title)"
 check "which are that birthday's own" "Every September · 4 years · 2021–2024" \
   "$(T field event:birthday:09 subtitle)"
+check "a graduation on a birthday's date isn't a year of it" "5 years · 2020–2025" \
+  "$(T field date:10-20 subtitle)"
+lacks "nor one of its cards" "October 20, 2024" "$(T years date:10-20)"
+check "it's still a birthday" "Birthday on October 20" "$(T field date:10-20 title)"
+has "and the graduation is a graduation" "Graduation" "$(T occasions)"
+lacks "a Father's Day that was a ball game isn't kept as Father's Day" "Father's Day" "$(T titles)"
+has "though Holidays & Occasions still calls the day that" "Father's Day 2023" "$(T occasions)"
+check "a card that's a year of a tradition says which" "Christmas 2024=holiday:Christmas" \
+  "$(T marked 'Christmas 2024')"
+check "Holidays & Occasions for an app with Over the Years: what happened once, a row of it" "True" "$(T wide)"
+has "the graduation among it" "Graduation" "$(T widetitles)"
+lacks "and no year of a tradition" "Christmas" "$(T widetitles)"
+check "while an older app's three still hold years of a tradition, as they always did" "True" "$(T daysyearly)"
 lacks "nor asked about any more" "June 10" "$(T occasions)"
 check "an older app finds everything it reads" "hero|trips|days|revisits|mediaTypes|allTrips|allOccasions|featured" \
   "$(T shape)"

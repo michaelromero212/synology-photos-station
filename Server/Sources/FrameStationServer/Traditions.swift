@@ -274,10 +274,7 @@ struct YearlyPatterns {
             let confirmed = Set(runs.filter { run in
                 run.contains { number in
                     let stamp = CivilDay.stamp(number)
-                    return holidays[stamp].map {
-                        CollectionsController.looksLike($0, on: stamp, by: evidence) == true
-                            && evidence[stamp]?.isAnalyzed == true
-                    } ?? false
+                    return holidays[stamp].map { confirms($0, on: stamp, by: evidence) } ?? false
                 }
             }.map(season(of:)))
             if confirmed.count < 2 {
@@ -373,6 +370,9 @@ struct YearlyPatterns {
             for year in ascending where CivilDay.isValid(year: year, month: month, day: day) {
                 let number = CivilDay.number(year: year, month: month, day: day)
                 guard number <= todayNumber else { continue }
+                // A wedding or a graduation that fell on the date was that,
+                // and once: not a year of a birthday, nor evidence of one.
+                if let event = events[CivilDay.stamp(number)], oneOffEvents.contains(event.tag) { continue }
                 let isHoliday = holidayNumbers.contains(number)
                 // December 25 is Christmas, which has its own card. A birthday
                 // on Easter Sunday is still that birthday, though, and stays a
@@ -478,6 +478,27 @@ struct YearlyPatterns {
             ))
         }
         return result
+    }
+
+    /// Whether a holiday's own photos say it was that holiday: they clear its
+    /// evidence, and not on the strength of a crowd alone when they show
+    /// something else that explains the crowd, such as the game or the party.
+    /// A Memorial Day that was a volleyball tournament was a volleyball
+    /// tournament, and a birthday party on Mother's Day was a birthday party,
+    /// as far as a tradition is concerned. Holidays & Occasions still calls
+    /// the day what the calendar does.
+    static func confirms(
+        _ holiday: String, on day: String, by evidence: [String: CollectionsController.DayEvidence]
+    ) -> Bool {
+        guard let rules = CurationVocabulary.holidayEvidence[holiday],
+              let seen = evidence[day], seen.isAnalyzed else { return false }
+        let met = rules.filter { seen.count($0.tag) >= $0.minPhotos && seen.share($0.tag) >= $0.minShare }
+        guard !met.isEmpty else { return false }
+        if met.contains(where: { $0.tag != "gathering" }) { return true }
+        return CurationVocabulary.event(
+            clearing: { seen.count($0.tag) >= $0.minPhotos && seen.share($0.tag) >= $0.minShare },
+            count: seen.count
+        ) == nil
     }
 
     /// The year a holiday's days belong to. New Year's Eve rings in the year

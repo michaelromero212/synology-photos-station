@@ -23,7 +23,10 @@ import Vapor
 enum CurationVocabulary {
     /// 2: search terms (`terms`) are derived and stored beside the tags.
     /// 3: and the single words inside them (`words`).
-    static let version = 3
+    /// 4: a gown and a ceremony no longer make a wedding, since a graduation
+    ///    has both, and nor does anything short of a wedding's own labels in a
+    ///    photo Vision also called a graduation.
+    static let version = 4
 
     // MARK: - Labels to tags
 
@@ -34,11 +37,19 @@ enum CurationVocabulary {
         let strong: [String: Float]
         /// Otherwise two of these together are.
         let supporting: [String: Float]
+        /// Unless the photo shows one of these, which explains the supporting
+        /// labels better: a cap and gown in a graduation photo is not a
+        /// wedding's gown.
+        let unless: [String: Float]
 
-        init(_ tag: String, strong: [String: Float], supporting: [String: Float] = [:]) {
+        init(
+            _ tag: String, strong: [String: Float], supporting: [String: Float] = [:],
+            unless: [String: Float] = [:]
+        ) {
             self.tag = tag
             self.strong = strong
             self.supporting = supporting
+            self.unless = unless
         }
     }
 
@@ -48,10 +59,12 @@ enum CurationVocabulary {
              strong: ["birthday_cake": 0.3],
              supporting: ["candle": 0.3, "balloon": 0.3, "cake": 0.4, "cupcake": 0.4,
                           "gift": 0.4, "celebration": 0.3]),
+        // Not "gown" or "ceremony": a graduation is both, and a cap-and-gown
+        // afternoon came out as "Wedding in Linton Hall".
         Rule("wedding",
              strong: ["wedding": 0.3, "wedding_dress": 0.3, "bride": 0.3, "wedding_cake": 0.3],
-             supporting: ["groom": 0.3, "bridesmaid": 0.3, "bouquet": 0.3, "tuxedo": 0.3,
-                          "gown": 0.3, "ceremony": 0.3]),
+             supporting: ["groom": 0.3, "bridesmaid": 0.3, "bouquet": 0.3, "tuxedo": 0.3],
+             unless: ["graduation": 0.3]),
         Rule("graduation", strong: ["graduation": 0.3]),
         Rule("concert",
              strong: ["concert": 0.3, "performance": 0.4],
@@ -152,7 +165,8 @@ enum CurationVocabulary {
             thresholds.filter { confidence[$0.key, default: 0] >= $0.value }.map(\.key)
         }
         var tags: [String] = []
-        for rule in rules where !meets(rule.strong).isEmpty || meets(rule.supporting).count >= 2 {
+        for rule in rules where !meets(rule.strong).isEmpty
+            || (meets(rule.supporting).count >= 2 && meets(rule.unless).isEmpty) {
             tags.append(rule.tag)
         }
         if peopleCount >= gatheringPeople { tags.append("gathering") }
@@ -344,6 +358,22 @@ enum CurationVocabulary {
         Event("pool", "Pool day", share: 0.3),
         Event("boating", "On the water", trip: "Boating trip", share: 0.3),
     ]
+
+    /// What a day, or a trip, was: the first of `events` its photos clear the
+    /// bars for, in their order, with one exception. A graduation and a
+    /// wedding both run to gowns, ceremonies and people in their best
+    /// clothes, and a day of one can clear the other's bar too. Where both
+    /// clear, the one more of the photos show is the one it was.
+    static func event(clearing: (Event) -> Bool, count: (String) -> Int) -> Event? {
+        let cleared = events.filter(clearing)
+        guard let first = cleared.first else { return nil }
+        if first.tag == "wedding",
+           let graduation = cleared.first(where: { $0.tag == "graduation" }),
+           count("graduation") >= count("wedding") {
+            return graduation
+        }
+        return first
+    }
 
     /// A trip takes a kind on a smaller share than a day: a week away is
     /// several things, and a beach trip still has its drives and dinners.
