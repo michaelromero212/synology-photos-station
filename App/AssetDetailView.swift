@@ -719,6 +719,27 @@ struct AssetDetailView: View {
         return formatter
     }()
 
+    /// The capture date and time in the title area, white on the viewer's
+    /// black bar: the day bright, the time a little softer beneath it.
+    private var macStampItem: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            let stamp = Self.macStamp(displayedItem.capturedAt)
+            VStack(spacing: 0) {
+                // Larger than a toolbar's usual caption pair: this is the one
+                // thing in the title area, and it's there to be read.
+                Text(stamp.day)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(stamp.time)
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            // Never cut short: the spelled-out date is long.
+            .fixedSize()
+            .help("Taken \(stamp.day) at \(stamp.time)")
+        }
+    }
+
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
         let model = cache.model(for: displayedItem, spaceID: space.id)
@@ -728,23 +749,11 @@ struct AssetDetailView: View {
         // shows it in the title area, which is what `.principal` is. Follows the
         // swipe because it reads `displayedItem`, and reads the item's own
         // stamp rather than waiting on the detail fetch.
-        ToolbarItem(placement: .principal) {
-            let stamp = Self.macStamp(displayedItem.capturedAt)
-            VStack(spacing: 0) {
-                // Larger than a toolbar's usual caption pair: this is the one
-                // thing in the title area, and it's there to be read.
-                Text(stamp.day)
-                    .font(.title3.weight(.semibold))
-                Text(stamp.time)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-            }
-            // Clear of the toolbar's capsule, which otherwise clips the first
-            // and last letters of the longer, spelled-out date.
-            .fixedSize()
-            .padding(.horizontal, 14)
-            .padding(.vertical, 2)
-            .help("Taken \(stamp.day) at \(stamp.time)")
+        // Straight on the bar, as Photos has it: no glass capsule around it.
+        if #available(macOS 26.0, *) {
+            macStampItem.sharedBackgroundVisibility(.hidden)
+        } else {
+            macStampItem
         }
 
         // Only while watching a video — on a photo they would have nothing to
