@@ -1070,7 +1070,7 @@ struct AssetDetailView: View {
             }
             .scrollTargetLayout()
         }
-        .modifier(OnePageAtATime())
+        .modifier(OnePageAtATime(gap: Self.pageGap))
         .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -2142,12 +2142,11 @@ private struct InformationSheet: View {
 /// Snaps to the start of a page, one page per swipe — what `.paging` does,
 /// but by the pages' own width rather than the window's. See `macPager`.
 private struct OnePageAtATime: ViewModifier {
+    /// The black between pages. See `SwipePaging`.
+    let gap: CGFloat
+
     func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
-        } else {
-            content.scrollTargetBehavior(.viewAligned)
-        }
+        content.scrollTargetBehavior(SwipePaging(gap: gap))
     }
 }
 #endif
