@@ -1369,7 +1369,10 @@ Four kinds, tried in order, each day belonging to one:
    in more of its years than its ±15-day neighbors were in the same years, by a
    binomial test at 0.001, from the first year it was photographed to the
    last. Cake in two of its years, or a birthday party within three days, makes
-   it "Birthday on April 5".
+   it "Birthday on April 5", and so do birthday parties held around it (their
+   middle within four days). Any other event names it only by happening on the
+   date itself in two of its years: concerts *around* August 10 don't make
+   August 10 a concert.
 
 **Minimums are about proof.** Two years make a holiday or a named day a
 tradition, since what the day is is already known; three for anything found in

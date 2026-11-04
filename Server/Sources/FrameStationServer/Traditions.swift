@@ -168,9 +168,11 @@ struct YearlyPatterns {
     static let eventSpread = 14
     /// A birthday party this close to a date is that date's party.
     static let partyReach = 3
-    /// Birthday parties this close to a date photographed every year are that
-    /// birthday's parties.
-    static let birthdayReach = 10
+    /// Birthday parties held around this close to a date photographed every
+    /// year are that birthday's parties: the middle of the weekends they fell
+    /// on. Ten days reached the next birthday over, and called an anniversary
+    /// a week after a child's parties a birthday.
+    static let birthdayReach = 4
     /// Events that don't come round: the next wedding is somebody else's.
     static let oneOffEvents: Set<String> = ["wedding", "graduation"]
     /// What one tradition sends, and how many the page gets. Bounded, like
@@ -365,6 +367,8 @@ struct YearlyPatterns {
             guard let (month, day) = CivilDay.monthDay(monthDay) else { continue }
             var members: [Int] = []
             var birthdays = Set<Int>()
+            // Each kind of event, and the years it happened on the date itself.
+            var onTheDay: [String: Set<Int>] = [:]
             var tests: [YearTest] = []
             for year in ascending where CivilDay.isValid(year: year, month: month, day: day) {
                 let number = CivilDay.number(year: year, month: month, day: day)
@@ -377,6 +381,7 @@ struct YearlyPatterns {
                 let count = countAt[number] ?? 0
                 if count >= minimum { members.append(number) }
                 if isBirthday(around: number, events: events, evidence: evidence) { birthdays.insert(year) }
+                if let tag = events[CivilDay.stamp(number)]?.tag { onTheDay[tag, default: []].insert(year) }
                 // Days away say nothing about the date, and nor does a
                 // holiday: a vacation or an Easter is busy whatever the date
                 // is.
@@ -410,12 +415,16 @@ struct YearlyPatterns {
             for index in parties {
                 for member in clusters[index].members { birthdays.insert(member.year) }
             }
-            // Another event that falls on it, most years: a parade every St.
-            // Patrick's Day.
+            // Another event that falls on the date itself in two of its years
+            // at least: a parade every St. Patrick's Day. Not one that merely
+            // happens around then. A summer of concerts near August 10 doesn't
+            // make August 10, a day of photos of the dog, a concert.
             let alike = clusters.indices.filter {
                 clusters[$0].event.tag != "birthday"
-                    && CivilDay.distance(clusters[$0].center, position) <= partyReach
+                    && (onTheDay[clusters[$0].event.tag]?.count ?? 0) >= 2
+                    && CivilDay.distance(clusters[$0].center, position) <= eventSpread
             }
+            let alikeEvent = alike.first.map { clusters[$0].event }
 
             let showsIt = birthdays.count >= 2
             guard significant(tests) || showsIt || !alike.isEmpty else { continue }
@@ -440,7 +449,7 @@ struct YearlyPatterns {
             let spoken = CivilDay.spoken(month: month, day: day)
             if !birthdays.isEmpty {
                 pattern.title = "Birthday on \(spoken)"
-            } else if let event = alike.isEmpty ? nil : pattern.eventDays.lazy.compactMap({ events[$0] }).first {
+            } else if let event = alikeEvent {
                 pattern.title = "\(event.title) on \(spoken)"
             } else {
                 pattern.title = "Every year on \(spoken)"

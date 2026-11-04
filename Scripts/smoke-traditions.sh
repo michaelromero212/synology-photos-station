@@ -68,9 +68,10 @@ photos(){ q "WITH made AS (
     FROM generate_series(1, $2) g RETURNING id)
   INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
   SELECT '$SPACE', id, '$USER_ID' FROM made" >/dev/null; }
-# observe <day> <how many show a cake>: what the person's phone saw in that
-# day's photos, the first few a birthday cake and the rest sky.
+# observe <day> <how many show it> [what]: what the person's phone saw in that
+# day's photos, the first few a birthday cake (or `what`) and the rest sky.
 CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]'
+CONCERT='[{"id":"concert","confidence":0.9},{"id":"crowd","confidence":0.6}]'
 SKY='[{"id":"sky","confidence":0.9},{"id":"outdoor","confidence":0.8}]'
 observe(){
   local ids body
@@ -79,9 +80,9 @@ observe(){
   body=$(echo "$ids" | python3 -c "
 import sys, json
 ids = [l.strip() for l in sys.stdin if l.strip()]
-cake, sky = json.loads('$CAKE'), json.loads('$SKY')
+seen, sky = json.loads('${3:-$CAKE}'), json.loads('$SKY')
 print(json.dumps({'analysisVersion': 1, 'modelVersion': 'smoke', 'observations': [
-    {'assetID': i, 'labels': cake if n < $2 else sky, 'aesthetic': 0.4, 'isUtility': False,
+    {'assetID': i, 'labels': seen if n < $2 else sky, 'aesthetic': 0.4, 'isUtility': False,
      'peopleCount': 0, 'animalCount': 0} for n, i in enumerate(ids)]}))")
   curl -s -o /dev/null -X POST "$API/v1/spaces/$SPACE/curation/observations" -H "$AUTH" \
     -H 'Content-Type: application/json' -d "$body"
@@ -143,6 +144,14 @@ for y in 2021 2022 2023; do for d in 01 03 05 07 09 11 13 15 17 19 21 23 25; do 
 # Memorial Day twice among those Junes: a few photos on a day off, not a
 # holiday this family keeps.
 photos 2021-05-31 5; photos 2023-05-29 5
+# March 10 every year, and a concert near it most years but never on it: the
+# date isn't a concert.
+for y in 2021 2022 2023 2024 2025; do photos "$y-03-10" 5; done
+for d in 2021-03-07 2022-03-12 2023-03-08 2024-03-11; do photos "$d" 6; done
+# September 20 every year, and a birthday party a week before it most years:
+# the date isn't that birthday.
+for y in 2021 2022 2023 2024 2025; do photos "$y-09-20" 5; done
+for d in 2021-09-12 2022-09-13 2023-09-11 2024-09-14; do photos "$d" 6; done
 # The baseline out of the way of the days it's a baseline for.
 BASELINE_IN_THE_WAY="SELECT q.id FROM assets q WHERE q.sha256 LIKE 'TRADQ%' AND q.local_captured_at::date IN (
      SELECT local_captured_at::date FROM assets WHERE sha256 LIKE 'TRAD%' AND sha256 NOT LIKE 'TRADQ%')"
@@ -151,12 +160,15 @@ q "DELETE FROM assets WHERE id IN ($BASELINE_IN_THE_WAY)" >/dev/null
 for d in 2022-04-05 2024-04-05; do observe "$d" 3; done
 for d in 2019-04-05 2020-04-05 2021-04-05 2023-04-05 2025-04-05; do observe "$d" 0; done
 for d in 2022-05-14 2023-05-20 2024-05-18 2025-05-17; do observe "$d" 3; done
+for d in 2021-03-07 2022-03-12 2023-03-08 2024-03-11; do observe "$d" 4 "$CONCERT"; done
+for d in 2021-09-12 2022-09-13 2023-09-11 2024-09-14; do observe "$d" 3; done
 
 echo "Over the Years"
 page
 check "the page carries them" "True" "$(T present)"
-check "the soonest first: Thanksgiving, then Christmas, then the rest by date" \
-  "Thanksgiving|Christmas|Birthday on April 5|Birthday party in Culpeper|Every year on August 14" "$(T titles)"
+check "the soonest first: Thanksgiving, then Christmas" "Thanksgiving|Christmas" "$(T titles | cut -d'|' -f1-2)"
+check "then the rest by date" "Birthday on April 5|Birthday party in Culpeper|Every year on August 14" \
+  "$(T titles | tr '|' '\n' | grep -E '^(Birthday on April 5|Birthday party in Culpeper|Every year on August 14)$' | head -3 | paste -sd'|' -)"
 check "every Christmas, home or away, Christmas Eve 2021 among them" "5 years · 2021–2025" \
   "$(T field holiday:Christmas subtitle)"
 check "each by the name Holidays & Occasions gives it" \
@@ -189,6 +201,11 @@ check "an event isn't named from here" "None" "$(T naming event:birthday:05)"
 check "a date photographed every year, quietly, is one too" "3 years · 2023–2025" \
   "$(T field date:08-14 subtitle)"
 lacks "a date busy three times among busy Junes isn't" "June" "$(T titles)"
+check "concerts around a date don't name it" "Every year on March 10" "$(T field date:03-10 title)"
+check "they're their own tradition" "Every March · 4 years · 2021–2024" "$(T field event:concert:03 subtitle)"
+check "nor do a week-earlier birthday's parties" "Every year on September 20" "$(T field date:09-20 title)"
+check "which are that birthday's own" "Every September · 4 years · 2021–2024" \
+  "$(T field event:birthday:09 subtitle)"
 lacks "nor asked about any more" "June 10" "$(T occasions)"
 check "an older app finds everything it reads" "hero|trips|days|revisits|mediaTypes|allTrips|allOccasions|featured" \
   "$(T shape)"
