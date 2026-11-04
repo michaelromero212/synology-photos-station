@@ -8,6 +8,7 @@ written. Implementation started 2026-10-05, after the answers recorded in §8.
 | `dd31905` | Phase 1. The Albums page drops cards it can't read instead of failing. |
 | `78616ea` | The NAS side of phases 2–3. `media_observations`, the curation endpoints and settings, `CurationVocabulary`, and in `CollectionsController`: event days, trip kinds and holiday evidence. |
 | `55eb718` | The phone side of phase 2. The `FrameStationAnalysis` target, `CurationRunner`, the Curated Albums settings, and "Detected on your device" in the Information panel. |
+| `1b2ab83` | Over the Years on the iPhone's and Mac's Albums pages: holidays across their years, days named for every year, the same event the same week yearly, and dates that stand out from the weeks around them ("Birthday on April 5"). Holidays & Occasions asks to name only those dates. See ARCHITECTURE.md, "Over the Years". |
 
 **Built differently from the sketch in §6.2:**
 - Observations are keyed by (person, file) alone. A newer analysis version
