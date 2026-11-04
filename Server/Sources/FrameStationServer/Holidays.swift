@@ -32,6 +32,11 @@ enum Holidays {
         ("12-31", "New Year's Eve"),
     ]
 
+    /// The dates of the holidays that never move, "12-25" and the rest: a
+    /// name somebody gives one of these every year is what they call that
+    /// holiday. See `YearlyPatterns`.
+    static let fixedMonthDays: Set<String> = Set(fixed.map(\.monthDay))
+
     /// Days that move, and the rule that finds them.
     ///
     /// Easter is the awkward one — it is neither a fixed date nor an nth

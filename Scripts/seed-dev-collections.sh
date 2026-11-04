@@ -116,6 +116,23 @@ SELECT 'DEVSEEDXMAS' || lpad(g::text, 53, '0'), 1000, 'photo', 'image/jpeg', 'jp
        'Culpeper, Virginia', 38.4716, -77.9967
 FROM generate_series(1, 34) g;
 
+-- Over the Years: three Christmases before last year's, so Christmas comes
+-- round, and a date photographed busily in each of the last four years — the
+-- shape of a birthday — which reads "Every year on …".
+INSERT INTO assets (sha256, byte_size, media_type, mime, blob_ext, local_captured_at, place_name, lat, lon)
+SELECT 'DEVSEEDYEARS' || lpad(g::text, 52, '0'), 1000, 'photo', 'image/jpeg', 'jpg',
+       (make_date(extract(year FROM CURRENT_DATE)::int - 2 - (g % 3), 12, 25)
+         + ((10 + (g % 9)) || ' hours')::interval)::timestamp,
+       'Culpeper, Virginia', 38.4716, -77.9967
+FROM generate_series(1, 30) g;
+
+INSERT INTO assets (sha256, byte_size, media_type, mime, blob_ext, local_captured_at, place_name, lat, lon)
+SELECT 'DEVSEEDDATE' || lpad(g::text, 53, '0'), 1000, 'photo', 'image/jpeg', 'jpg',
+       ((CURRENT_DATE - interval '50 days' - ((1 + g % 4) || ' years')::interval)
+         + ((10 + (g % 9)) || ' hours')::interval)::timestamp,
+       'Culpeper, Virginia', 38.4716, -77.9967
+FROM generate_series(1, 40) g;
+
 -- The baseline has to get out of the way of the days it is a baseline *for*.
 --
 -- It lays two photographs on every day going back, which is what keeps the

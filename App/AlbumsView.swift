@@ -577,6 +577,7 @@ struct AlbumsView: View {
                         hero(found, space: space, width: proxy.size.width)
                         standing(found, space: space)
                         automatic(found, space: space)
+                        overTheYears(found, space: space)
                     }
                     manual(store, side: side, columns: across)
                     shared(store, side: side, columns: across)
@@ -712,6 +713,53 @@ struct AlbumsView: View {
                 "Holidays & Occasions", found.days, all: found.allOccasions, space: space,
                 seeAll: \.allOccasions
             )
+        }
+    }
+
+    /// How many traditions the phone's page lists before See All: as many as
+    /// the trips and the occasions above it.
+    private static let pageTraditions = 3
+
+    /// What comes round every year, the soonest first: each Christmas
+    /// together, a birthday, a day you named. Each opens on its years.
+    ///
+    /// Absent rather than empty when there are none, like the sections above
+    /// it, and from a server that predates it.
+    @ViewBuilder
+    private func overTheYears(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if let traditions = found.traditions, !traditions.isEmpty, let collections {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    sectionHeader("Over the Years")
+                    Spacer(minLength: 8)
+                    if traditions.count > Self.pageTraditions {
+                        NavigationLink {
+                            TraditionListView(session: session, space: space, store: collections)
+                        } label: {
+                            Text("See All")
+                                .font(.body)
+                                .foregroundStyle(.tint)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, spacing)
+                        .padding(.bottom, 10)
+                    }
+                }
+                rowStack(spacing: 0) {
+                    ForEach(traditions.prefix(Self.pageTraditions)) { tradition in
+                        NavigationLink {
+                            TraditionView(
+                                session: session, space: space, store: collections, tradition: tradition
+                            )
+                        } label: {
+                            TraditionRow(tradition: tradition, loader: session.loader)
+                                .padding(.horizontal, spacing)
+                                .padding(.vertical, 9)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
         }
     }
 
@@ -1891,6 +1939,7 @@ extension AlbumsView {
                                     + "appear here as your library grows."
                             )
                         )
+                        macTraditions(found, space: space, side: side, across: across)
                         macMediaTypes(found, space: space)
                         macUtilities(found, space: space)
                     }
@@ -2122,6 +2171,46 @@ extension AlbumsView {
                             detail: row.subtitle ?? macItems(row.count)
                         )
                         .nameable(row) { naming = $0 }
+                    }
+                }
+            }
+        }
+    }
+
+    /// What comes round every year, the soonest first, a row of cards across
+    /// the window, the title leading to the rest when there are more.
+    ///
+    /// From a server that predates it there's no section at all, rather than
+    /// an empty one saying nothing is there.
+    @ViewBuilder
+    private func macTraditions(
+        _ found: CollectionsResponse, space: SpaceDTO, side: CGFloat, across: Int
+    ) -> some View {
+        if let traditions = found.traditions, let collections {
+            let shown = Array(traditions.prefix(across))
+            let destination: (() -> AnyView)? = traditions.count > shown.count
+                ? { AnyView(TraditionListView(session: session, space: space, store: collections)) }
+                : nil
+            macSection("traditions", "Over the Years", destination: destination) {
+                if shown.isEmpty {
+                    MacEmptySection(
+                        symbol: "calendar.badge.clock", title: "Nothing Over the Years Yet",
+                        message: "Holidays and the days you mark every year gather here, "
+                            + "each with all its years, once there are two years of them."
+                    )
+                } else {
+                    macCards(side: side, across: across) {
+                        ForEach(shown) { tradition in
+                            NavigationLink {
+                                TraditionView(
+                                    session: session, space: space, store: collections,
+                                    tradition: tradition
+                                )
+                            } label: {
+                                TraditionTile(tradition: tradition, side: side, loader: session.loader)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
             }

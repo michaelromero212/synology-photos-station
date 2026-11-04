@@ -129,11 +129,24 @@ struct CollectionsController: RouteCollection {
         let named = try await occasionNames(
             spaceID: spaceID, userID: device.userID, years: years, on: req.sql
         )
+
+        // What comes round every year, planned from the library's calendar
+        // before the occasions query, so that query brings back every year of
+        // each. See `YearlyPatterns`.
+        let library = try await libraryDays(spaceID: spaceID, on: req.sql)
+        let annual = try await annualNames(spaceID: spaceID, userID: device.userID, on: req.sql)
+        let yearly = YearlyPatterns.plan(
+            days: library, years: years, today: today,
+            holidays: holidays, calendar: calendar, named: named, annual: annual,
+            events: events, evidence: evidence, claimed: claimed
+        )
+        let found = try await occasions(
+            spaceID: spaceID, seed: seed, userID: device.userID, named: named,
+            holidays: holidays, events: events, excluding: claimed,
+            recurring: library.recurring, yearly: yearly, on: req.sql
+        )
         let occasions = await keeper.keep(
-            occasions: try await occasions(
-                spaceID: spaceID, seed: seed, userID: device.userID, named: named,
-                holidays: holidays, events: events, excluding: claimed, on: req.sql
-            ),
+            occasions: found.occasions,
             saved: saved, claimed: claimed,
             standing: CuratedAlbums.Standing(
                 named: named, showEvents: curation.enabled, showHolidays: curation.holidays,
@@ -179,6 +192,11 @@ struct CollectionsController: RouteCollection {
         let pool = ([trips.first, away.first, season, latestOccasion]).compactMap { $0 }
 
         let turn = Self.utc.ordinality(of: .day, in: .year, for: today) ?? 0
+
+        let traditions = yearly.traditions(
+            rows: found.rows, today: today, turn: turn,
+            holidays: holidays, named: named, annual: annual, events: events
+        )
 
         // The row the page opens on, the way Photos opens on its featured
         // memories and photos: a handful of cards to swipe, each with its own
@@ -240,7 +258,8 @@ struct CollectionsController: RouteCollection {
             favorites: marked,
             allTrips: trips,
             allOccasions: occasions.map(\.summary),
-            featured: featured
+            featured: featured,
+            traditions: traditions
         )
     }
 
@@ -1040,6 +1059,9 @@ struct CollectionsController: RouteCollection {
         let lastHour: Int
         let peopleCount: Int
         let coverAssetIDs: [UUID]
+        /// Whether the day clears the occasions query's busy bar. Optional so
+        /// a query that doesn't select it still decodes.
+        var busy: Bool?
     }
 
     /// Holidays, the days somebody named, and the dates that come round busy
@@ -1063,14 +1085,19 @@ struct CollectionsController: RouteCollection {
     /// one occasion rather than several — Christmas Eve into Christmas morning
     /// is one Christmas — so the grouping happens after the query and the limit
     /// applies to the *runs*.
+    ///
+    /// The same query brings back every year of what comes round every year
+    /// (`yearly`), for Over the Years: those days are among the rows, and only
+    /// the days this has always chosen become occasions. A date that comes
+    /// round is asked about only where `yearly` found it a pattern, by the
+    /// name it found for it.
     private func occasions(
         spaceID: UUID, seed: String, userID: UUID, named: [String: String],
         holidays: [String: String], events: [String: CurationVocabulary.Event] = [:],
-        excluding claimed: Set<String>,
+        excluding claimed: Set<String>, recurring: Set<String>, yearly: YearlyPatterns,
         on sql: any SQLDatabase
-    ) async throws -> [Occasion] {
+    ) async throws -> (occasions: [Occasion], rows: [DayRow]) {
         let local = TimelineController.localTime
-        let recurring = try await recurringDates(spaceID: spaceID, on: sql)
 
         // Joined and split rather than interpolated: these strings are
         // machine-generated dates, but a query that builds its own IN list is a
@@ -1078,9 +1105,10 @@ struct CollectionsController: RouteCollection {
         //
         // A day the person's devices saw an occasion in clears the same bar as
         // a holiday: it is something, however busy it was.
-        let special = Set(holidays.keys).union(named.keys).union(events.keys)
-            .sorted().joined(separator: ",")
+        let specialDays = Set(holidays.keys).union(named.keys).union(events.keys)
+        let special = specialDays.sorted().joined(separator: ",")
         let annual = recurring.sorted().joined(separator: ",")
+        let extra = yearly.extraDays.subtracting(specialDays).sorted().joined(separator: ",")
 
         let rows = try await sql.raw("""
             WITH per_day AS (
@@ -1106,32 +1134,49 @@ struct CollectionsController: RouteCollection {
                 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY count) AS median FROM per_day
             )
             SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
-                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs"
+                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs",
+                   p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2)) AS busy
             FROM per_day p, baseline b
             WHERE (p.day = ANY(string_to_array(\(bind: special), ','))
                    AND p.count >= \(bind: Self.minimumItems))
                OR (substr(p.day, 6) = ANY(string_to_array(\(bind: annual), ','))
                    AND p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2)))
+               OR (p.day = ANY(string_to_array(\(bind: extra), ','))
+                   AND p.count >= \(bind: Self.minimumItems))
             ORDER BY p.day DESC
-            LIMIT 600
+            LIMIT 5000
             """).all(decoding: DayRow.self)
 
+        // The days this has always chosen, and as many: holidays, named days
+        // and events, and dates that come round on a busy day. The rest of the
+        // rows are other years of what comes round, for Over the Years.
+        let chosen = rows
+            .filter { specialDays.contains($0.day) || (recurring.contains(Self.monthDay($0.day)) && $0.busy == true) }
+            .prefix(600)
+
         // A date that only recurs is offered once, in its latest year: what it
-        // is asking for is a name, and one name covers every year of it.
+        // is asking for is a name, and one name covers every year of it. Only a
+        // date that really does come round, though: one busy three times in
+        // twenty years is a coincidence, and asking to name it was a question
+        // with no answer.
         var offered = Set<String>()
-        return Self.split(Self.runs(from: rows.filter { !claimed.contains($0.day) }), by: events)
+        let found = Self.split(Self.runs(from: chosen.filter { !claimed.contains($0.day) }), by: events)
             .compactMap {
                 Self.occasion(
-                    $0, holidays: holidays, named: named, recurring: recurring, events: events
+                    $0, holidays: holidays, named: named, recurring: recurring, events: events,
+                    dates: yearly.dates
                 )
             }
             .filter { candidate in
                 guard candidate.occasion == nil else { return true }
-                return offered.insert(Self.monthDay(String(candidate.summary.key.prefix(10))))
-                    .inserted
+                guard let date = Self.days(inKey: candidate.summary.key).lazy
+                    .map(Self.monthDay).first(where: { yearly.dates[$0] != nil })
+                else { return false }
+                return offered.insert(date).inserted
             }
             .prefix(Self.allOccasionsLimit)
             .map { $0 }
+        return (found, rows)
     }
 
     /// A run as an occasion: its card, and what it is.
@@ -1140,7 +1185,8 @@ struct CollectionsController: RouteCollection {
         holidays: [String: String],
         named: [String: String],
         recurring: Set<String>,
-        events: [String: CurationVocabulary.Event] = [:]
+        events: [String: CurationVocabulary.Event] = [:],
+        dates: [String: String] = [:]
     ) -> Occasion? {
         guard var summary = describe(
             run, holidays: holidays, named: named, recurring: recurring, events: events
@@ -1157,10 +1203,15 @@ struct CollectionsController: RouteCollection {
         // always a birthday or an anniversary, and saying so is the whole
         // reason to show it. "A busy Tuesday" told you nothing about why it was
         // here; this tells you, and the card offers to name it every year.
-        if name == nil, summary.recursAnnually, let day = parseDate(run.first.day) {
+        //
+        // By what Over the Years found it to be — "Birthday on April 5" where
+        // its photos showed one — and by the date that comes round, which in
+        // a run of days isn't always the first.
+        if name == nil, summary.recursAnnually,
+           let title = run.days.reversed().lazy.compactMap({ dates[monthDay($0.day)] }).first {
             summary = CollectionSummary(
                 kind: summary.kind, key: summary.key,
-                title: "Every year on \(stampFormatter("MMMM d").string(from: day))",
+                title: title,
                 // The place back in: the old title carried it, this one doesn't.
                 subtitle: subtitle(run, place: run.place), count: summary.count,
                 coverAssetIDs: summary.coverAssetIDs, isNamed: summary.isNamed,
@@ -1593,7 +1644,7 @@ struct CollectionsController: RouteCollection {
     /// "An evening in Culpeper", or "at Walt Disney World" — and just "An
     /// evening" where there is no location to name, rather than a sentence
     /// with a hole in it.
-    private static func inPlace(_ phrase: String, _ place: String?) -> String {
+    static func inPlace(_ phrase: String, _ place: String?) -> String {
         guard let place else { return phrase }
         // The stored name is "Culpeper, Virginia"; a title wants the town.
         return "\(phrase) \(Whereabouts(label: place).locative)"
@@ -1684,35 +1735,9 @@ struct CollectionsController: RouteCollection {
         return table
     }
 
-    /// Dates that are busy in three or more separate years.
-    ///
-    /// The app cannot know a date is a birthday. It can notice that you have
-    /// photographs on it most years, which is the moment "name this, every year"
-    /// stops being a question out of nowhere and becomes an observation the
-    /// person will recognize. Three years rather than two: two is a coincidence
-    /// often enough to make the prompt feel wrong.
-    private func recurringDates(
-        spaceID: UUID, on sql: any SQLDatabase
-    ) async throws -> Set<String> {
-        struct Row: Decodable { let monthDay: String }
-        let local = TimelineController.localTime
-        let rows = try await sql.raw("""
-            WITH per_day AS (
-                SELECT to_char(\(unsafeRaw: local), 'MM-DD') AS "monthDay",
-                       EXTRACT(YEAR FROM \(unsafeRaw: local))::int AS year,
-                       count(*)::int AS count
-                FROM space_assets sa
-                JOIN assets a ON a.id = sa.asset_id
-                WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-                GROUP BY 1, 2
-            )
-            SELECT "monthDay" FROM per_day
-            WHERE count >= \(bind: Self.minimumItems)
-            GROUP BY "monthDay"
-            HAVING count(DISTINCT year) >= 3
-            """).all(decoding: Row.self)
-        return Set(rows.map(\.monthDay))
-    }
+    // Dates that come round — photographed in three or more years — are
+    // `LibraryDays.recurring`, worked out from the one pass of the library's
+    // days that Over the Years reads too. See `YearlyPatterns`.
 
     static func key(year: Int, month: Int, day: Int) -> String {
         String(format: "%04d-%02d-%02d", year, month, day)

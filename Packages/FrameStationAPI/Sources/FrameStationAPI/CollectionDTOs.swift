@@ -189,13 +189,22 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// today, a featured photo or two, then the day's highlights. `hero` is
     /// its first card, for apps that draw only one. Nil from an older server.
     public let featured: [CollectionSummary]?
+    /// What comes round every year, the soonest first: each Christmas
+    /// together, a day somebody named, a date photographed most years. The
+    /// page's Over the Years.
+    ///
+    /// Optional and its own field, like `allTrips`: an older app ignores a
+    /// key it doesn't know, and a newer one talking to an older server finds
+    /// nil and draws no section. Empty means the server looked and found
+    /// nothing yet.
+    public let traditions: [Tradition]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
-        case allTrips, allOccasions, featured
+        case allTrips, allOccasions, featured, traditions
     }
 
     /// Read card by card, so a card this build can't read is left out instead
@@ -230,6 +239,10 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         allTrips = cards(.allTrips)
         allOccasions = cards(.allOccasions)
         featured = cards(.featured)
+        // One by one too, so a tradition this build can't read costs that
+        // tradition and not the section.
+        traditions = (try? container.decodeIfPresent([Skippable<Tradition>].self, forKey: .traditions))?
+            .map { $0.compactMap(\.value) }
     }
 
     public init(
@@ -243,9 +256,11 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         favorites: CollectionSummary? = nil,
         allTrips: [CollectionSummary]? = nil,
         allOccasions: [CollectionSummary]? = nil,
-        featured: [CollectionSummary]? = nil
+        featured: [CollectionSummary]? = nil,
+        traditions: [Tradition]? = nil
     ) {
         self.featured = featured
+        self.traditions = traditions
         self.hero = hero
         self.trips = trips
         self.days = days
@@ -268,6 +283,76 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// be told so.
     public var isEmpty: Bool {
         hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
+    }
+}
+
+// MARK: - Over the Years
+
+/// Something that comes round every year, with each year of it: Christmas, a
+/// day somebody named, the date a library is photographed most years, the
+/// party held about the same week every spring.
+///
+/// Its own type rather than one more `CollectionSummary`, because it doesn't
+/// open onto photos. It opens onto its years, and each of those is an
+/// ordinary collection that opens the way every card on the page does.
+public struct Tradition: Codable, Sendable, Hashable, Identifiable {
+    /// Holds still while the tradition is found — "holiday:Christmas",
+    /// "date:04-05" — so a screen showing one finds it again after the page
+    /// refreshes, and still finds it once the date has been given a name.
+    public let id: String
+    public let title: String
+    /// "9 years · 2016–2025".
+    public let subtitle: String?
+    /// Every photo across its years.
+    public let count: Int
+    /// A photo from one of its years, a different year each day, best first.
+    public let coverAssetIDs: [UUID]
+    /// Each year of it, newest first. Kind `.day`, keyed by its days, so each
+    /// opens on its own photos.
+    public let years: [CollectionSummary]
+    /// When it next comes round, `YYYY-MM-DD`. The server already lists the
+    /// soonest first; this is for saying so.
+    public let next: String?
+    /// The card a Name or Rename sheet works on, where the tradition is a date
+    /// the person can call what it is: one the library found, or one they've
+    /// already named. Nil for a holiday or an event, which have their names.
+    public let naming: CollectionSummary?
+
+    /// The one to use where only one is wanted.
+    public var coverAssetID: UUID? { coverAssetIDs.first }
+
+    public init(
+        id: String, title: String, subtitle: String?, count: Int, coverAssetIDs: [UUID],
+        years: [CollectionSummary], next: String? = nil, naming: CollectionSummary? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.count = count
+        self.coverAssetIDs = coverAssetIDs
+        self.years = years
+        self.next = next
+        self.naming = naming
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, subtitle, count, coverAssetIDs, years, next, naming
+    }
+
+    /// Year by year, as the page reads its cards: a year this build can't
+    /// read is left out rather than the tradition, and anything optional that
+    /// isn't there reads as absent.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        subtitle = (try? container.decodeIfPresent(String.self, forKey: .subtitle)) ?? nil
+        count = ((try? container.decodeIfPresent(Int.self, forKey: .count)) ?? nil) ?? 0
+        coverAssetIDs = ((try? container.decodeIfPresent([UUID].self, forKey: .coverAssetIDs)) ?? nil) ?? []
+        years = ((try? container.decodeIfPresent([Skippable<CollectionSummary>].self, forKey: .years)) ?? nil)?
+            .compactMap(\.value) ?? []
+        next = (try? container.decodeIfPresent(String.self, forKey: .next)) ?? nil
+        naming = (try? container.decodeIfPresent(CollectionSummary.self, forKey: .naming)) ?? nil
     }
 }
 

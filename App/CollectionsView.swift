@@ -504,8 +504,28 @@ struct CollectionListView: View {
 /// of sideways in one screen, and a day has a date and a place worth reading
 /// rather than cropping.
 struct CollectionRowCard: View {
-    let collection: CollectionSummary
+    let title: String
+    let subtitle: String?
+    let count: Int
+    let coverAssetIDs: [UUID]
     let loader: ThumbnailLoader?
+
+    init(collection: CollectionSummary, loader: ThumbnailLoader?) {
+        self.init(
+            title: collection.title, subtitle: collection.subtitle, count: collection.count,
+            coverAssetIDs: collection.coverAssetIDs, loader: loader
+        )
+    }
+
+    /// Anything drawn as a row: a tradition, say, which isn't one collection
+    /// but all the years of one.
+    init(title: String, subtitle: String?, count: Int, coverAssetIDs: [UUID], loader: ThumbnailLoader?) {
+        self.title = title
+        self.subtitle = subtitle
+        self.count = count
+        self.coverAssetIDs = coverAssetIDs
+        self.loader = loader
+    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -513,7 +533,7 @@ struct CollectionRowCard: View {
             // it started out, every cover read as a colored square and the row
             // looked like a settings screen.
             CollectionCover(
-                assetIDs: collection.coverAssetIDs, loader: loader, size: 256
+                assetIDs: coverAssetIDs, loader: loader, size: 256
             )
             .frame(width: 76, height: 76)
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
@@ -524,12 +544,12 @@ struct CollectionRowCard: View {
             .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(collection.title)
+                Text(title)
                     .font(.system(.body, design: .default, weight: .semibold))
                     .tracking(-0.2)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                if let subtitle = collection.subtitle {
+                if let subtitle {
                     Text(subtitle)
                         .font(.footnote)
                         .monospacedDigit()
@@ -540,7 +560,7 @@ struct CollectionRowCard: View {
 
             Spacer(minLength: 10)
 
-            Text("\(collection.count)")
+            Text("\(count)")
                 .font(.footnote)
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
@@ -780,8 +800,12 @@ struct NameOccasionSheet: View {
     @State private var isSaving = false
     @State private var failure: String?
 
+    /// `everyYear` starts the switch where the caller knows it belongs: on,
+    /// from Over the Years, where the thing being named is a date that comes
+    /// round. Otherwise it's suggested from the card.
     init(
         session: AppSession, spaceID: UUID, collection: CollectionSummary,
+        everyYear: Bool? = nil,
         onFinished: @escaping (Bool) -> Void
     ) {
         self.session = session
@@ -793,7 +817,7 @@ struct NameOccasionSheet: View {
         // Suggested, not assumed. A date that comes round every year is usually
         // a birthday or an anniversary, and that is worth defaulting to — but a
         // party on the same date once is still a party, so it stays a switch.
-        _everyYear = State(initialValue: collection.recursAnnually && !collection.isNamed)
+        _everyYear = State(initialValue: everyYear ?? (collection.recursAnnually && !collection.isNamed))
     }
 
     /// The first day of the run, which is what the server keys a name to.

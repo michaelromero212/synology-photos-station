@@ -100,4 +100,63 @@ final class CollectionsDecodingTests: XCTestCase {
             "Favorites must keep the key it shipped as"
         )
     }
+
+    // MARK: - Over the Years
+
+    private func tradition(_ id: String, _ title: String, years: [String]) -> String {
+        """
+        {"id":"\(id)","title":"\(title)","subtitle":"2 years · 2024–2025","count":12,\
+        "coverAssetIDs":[],"years":[\(years.joined(separator: ","))],"next":"2026-12-24"}
+        """
+    }
+
+    /// A server from before Over the Years sends no such field, and the page
+    /// draws no section rather than an empty one.
+    func testAnOlderServerHasNoTraditions() throws {
+        let page = try decode("""
+            {"trips":[],"days":[\(card("day", "2025-12-25", "Christmas 2025"))],"revisits":[],"mediaTypes":[]}
+            """)
+
+        XCTAssertNil(page.traditions)
+        XCTAssertEqual(page.days.map(\.title), ["Christmas 2025"])
+    }
+
+    /// A year of a kind this build can't read costs that year, not the
+    /// tradition, and a tradition that can't be read costs only itself.
+    func testTraditionsAreReadOneByOne() throws {
+        let page = try decode("""
+            {"trips":[],"days":[],"revisits":[],"mediaTypes":[],
+             "traditions":[\(tradition("holiday:Christmas", "Christmas", years: [
+                card("someFutureKind", "x", "Christmas 2025"),
+                card("day", "2024-12-25", "Christmas 2024"),
+             ])),
+             {"title":"No id"},
+             \(tradition("date:04-05", "Birthday on April 5", years: [card("day", "2025-04-05", "April 5, 2025")]))]}
+            """)
+
+        XCTAssertEqual(page.traditions?.map(\.id), ["holiday:Christmas", "date:04-05"])
+        XCTAssertEqual(page.traditions?.first?.years.map(\.title), ["Christmas 2024"])
+        XCTAssertEqual(page.traditions?.first?.next, "2026-12-24")
+        XCTAssertNil(page.traditions?.first?.naming)
+    }
+
+    func testTraditionsRoundTrip() throws {
+        let year = CollectionSummary(
+            kind: .day, key: "2025-04-05", title: "April 5, 2025", subtitle: "Saturday",
+            count: 10, coverAssetIDs: [UUID()], recursAnnually: true
+        )
+        let original = CollectionsResponse(
+            hero: nil, trips: [], days: [], recentlyDeleted: nil,
+            traditions: [Tradition(
+                id: "date:04-05", title: "Birthday on April 5", subtitle: "7 years · 2019–2025",
+                count: 64, coverAssetIDs: [UUID()], years: [year], next: "2027-04-05",
+                naming: year
+            )]
+        )
+
+        let data = try FrameStationCoding.encoder.encode(original)
+        let decoded = try FrameStationCoding.decoder.decode(CollectionsResponse.self, from: data)
+
+        XCTAssertEqual(decoded, original)
+    }
 }

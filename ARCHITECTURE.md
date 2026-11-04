@@ -1347,6 +1347,47 @@ that. Changing how trips or occasions are keyed needs a migration of this
 table; otherwise every album would show twice. `Scripts/smoke-kept-albums.sh`
 plays rule changes against a library and checks nothing a person saw is lost.
 
+### Over the Years
+
+What comes round every year, each with all its years: every Christmas as one
+card, a day somebody named for every year, the date a library is photographed
+most years. The NAS sends `traditions`, the soonest to come round first, and
+each tradition's `years` are ordinary `.day` cards keyed by their days, so a
+year opens the way every card on the page does. `YearlyPatterns`
+(`Traditions.swift`) plans them from one pass over the library's day counts,
+before the occasions query, so that query also brings back every year of each.
+Four kinds, tried in order, each day belonging to one:
+
+1. **Holidays,** grouped into families: Christmas Eve and Christmas are one
+   Christmas, New Year's Eve and New Year's Day one New Year's.
+2. **A name for every year** (`occasion_names` with no year).
+3. **The same event about the same week every year,** such as a birthday party
+   held the weekend nearest a birthday: event days by kind, clustered on the
+   year as a circle (±14 days), about once a year. A season of pool days isn't
+   one.
+4. **A date that stands out from the weeks around it.** Photographed, or busy,
+   in more of its years than its ±15-day neighbors were in the same years, by a
+   binomial test at 0.001, from the first year it was photographed to the
+   last. Cake in two of its years, or a birthday party within three days, makes
+   it "Birthday on April 5".
+
+**Minimums are about proof.** Two years make a holiday or a named day a
+tradition, since what the day is is already known; three for anything found in
+the photos. A holiday also has to be confirmed by its own photos in two years,
+or stand out from the weeks around it (0.02), so a Memorial Day that happened to
+have photos twice isn't one.
+
+**Every bar is the library's own:** its median day, its neighbors, its years.
+Nothing is tuned to one family. Holidays & Occasions asks to name a date only
+where rule 4 found it, by the same name. Under the old rule (busy once, a few
+photos in three years) an 18-year, 41,000-photo library was asked about 53
+dates, 50 of them coincidences.
+
+**Worked out on every visit, never stored,** so next year joins as soon as its
+photos arrive, and nothing here can take a kept album's place. Optional on the
+wire: an older app ignores it, and a newer app talking to an older NAS draws no
+section. `Scripts/smoke-traditions.sh` covers it.
+
 ### The row the Albums page opens on
 
 Photos opens on a row of featured memories and photos to swipe through, a
