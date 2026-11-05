@@ -10,6 +10,7 @@ extension CurationSettings: @retroactive Content {}
 extension UpdateCurationSettingsRequest: @retroactive Content {}
 extension CurationStatus: @retroactive Content {}
 extension AssetObservationDetail: @retroactive Content {}
+extension NASObservationDetail: @retroactive Content {}
 
 /// What a person's devices saw in their photographs, and their say over it.
 ///
@@ -32,6 +33,7 @@ struct CurationController: RouteCollection {
         protected.get("spaces", ":spaceID", "curation", "pending", use: pending)
         protected.post("spaces", ":spaceID", "curation", "observations", use: submit)
         protected.get("spaces", ":spaceID", "assets", ":assetID", "observation", use: observation)
+        protected.get("spaces", ":spaceID", "assets", ":assetID", "nas-observation", use: nasObservation)
     }
 
     /// More than this in one request is a client bug, not a big library.
@@ -48,6 +50,21 @@ struct CurationController: RouteCollection {
         /// Whether the space is the caller's own personal library, the only
         /// kind curated for now.
         let isPersonal: Bool
+        /// `users.nas_analysis`: off, shadow or on.
+        var nas: String = "off"
+        /// Whether they're previewing the page built from the NAS's analysis.
+        var nasPreview = false
+
+        /// Where the page's tags and search's words come from.
+        var source: ObservationSource {
+            ObservationSource(nas: nas, preview: nasPreview)
+        }
+
+        /// Whether the page may save and refine kept albums. Not while
+        /// previewing; see `CuratedAlbums.persists`.
+        var persistsAlbums: Bool {
+            !(nasPreview && nas == "shadow")
+        }
     }
 
     /// The caller's settings, and whether this space is theirs to curate.
@@ -58,9 +75,12 @@ struct CurationController: RouteCollection {
             let enabled: Bool
             let holidays: Bool
             let isPersonal: Bool
+            let nas: String
+            let nasPreview: Bool
         }
         let row = try await sql.raw("""
             SELECT u.curation_enabled AS enabled, u.curation_holidays AS holidays,
+                   u.nas_analysis AS nas, u.nas_preview AS "nasPreview",
                    EXISTS (
                        SELECT 1 FROM spaces s
                        JOIN space_members m ON m.space_id = s.id
@@ -72,8 +92,22 @@ struct CurationController: RouteCollection {
         return Context(
             enabled: row?.enabled ?? true,
             holidays: row?.holidays ?? true,
-            isPersonal: row?.isPersonal ?? false
+            isPersonal: row?.isPersonal ?? false,
+            nas: row?.nas ?? "off",
+            nasPreview: row?.nasPreview ?? false
         )
+    }
+
+    /// Whether this person has curation on, and whose observations their
+    /// search reads. Nil when curation is off.
+    static func observations(userID: UUID, on sql: any SQLDatabase) async throws -> ObservationSource? {
+        struct Row: Decodable { let enabled: Bool; let nas: String; let nasPreview: Bool }
+        guard let row = try await sql.raw("""
+            SELECT curation_enabled AS enabled, nas_analysis AS nas, nas_preview AS "nasPreview"
+            FROM users WHERE id = \(bind: userID)
+            """).first(decoding: Row.self), row.enabled
+        else { return nil }
+        return ObservationSource(nas: row.nas, preview: row.nasPreview)
     }
 
     /// Whether this person has curation on. Everything built from what their
@@ -115,8 +149,28 @@ struct CurationController: RouteCollection {
         return CurationStatus(
             settings: try await settings(userID: device.userID, on: req.sql),
             analyzed: counts?.analyzed ?? 0,
-            total: counts?.total ?? 0
+            total: counts?.total ?? 0,
+            nas: try await nasStatus(userID: device.userID, total: counts?.total ?? 0, on: req.sql)
         )
+    }
+
+    /// For someone the NAS analyzes: how far it's got, and whether they're
+    /// previewing the page it would make. Nil for everyone else.
+    private func nasStatus(userID: UUID, total: Int, on sql: any SQLDatabase) async throws -> NASAnalysisStatus? {
+        struct Row: Decodable { let state: String; let preview: Bool; let analyzed: Int }
+        guard let row = try await sql.raw("""
+            SELECT u.nas_analysis AS state, u.nas_preview AS preview,
+                   (SELECT count(DISTINCT o.sha256)::int
+                    FROM spaces s
+                    JOIN space_members m ON m.space_id = s.id AND m.user_id = u.id
+                    JOIN space_assets sa ON sa.space_id = s.id AND sa.deleted_at IS NULL
+                    JOIN assets a ON a.id = sa.asset_id
+                    JOIN nas_observations o ON o.user_id = u.id AND o.sha256 = a.sha256
+                    WHERE s.kind = 'personal' AND \(unsafeRaw: TimelineController.visible)) AS analyzed
+            FROM users u WHERE u.id = \(bind: userID)
+            """).first(decoding: Row.self), row.state != "off"
+        else { return nil }
+        return NASAnalysisStatus(state: row.state, analyzed: row.analyzed, total: total, preview: row.preview)
     }
 
     /// Changes only what the request names. On every one of the person's
@@ -128,7 +182,11 @@ struct CurationController: RouteCollection {
         try await req.sql.raw("""
             UPDATE users
             SET curation_enabled = COALESCE(\(bind: body.enabled)::boolean, curation_enabled),
-                curation_holidays = COALESCE(\(bind: body.holidays)::boolean, curation_holidays)
+                curation_holidays = COALESCE(\(bind: body.holidays)::boolean, curation_holidays),
+                -- Only someone the NAS analyzes can preview what it makes.
+                nas_preview = CASE WHEN nas_analysis <> 'off'
+                                   THEN COALESCE(\(bind: body.nasPreview)::boolean, nas_preview)
+                                   ELSE false END
             WHERE id = \(bind: device.userID)
             """).run()
         return try await settings(userID: device.userID, on: req.sql)
@@ -351,5 +409,62 @@ struct CurationController: RouteCollection {
             labels: labels, aesthetic: row.aesthetic, isUtility: row.isUtility,
             peopleCount: row.peopleCount, animalCount: row.animalCount, tags: row.tags
         )
+    }
+
+    /// What the NAS's analyzer saw in one photo or video: the caller's own
+    /// analysis of the file, in the same words as their devices'. 404 when
+    /// there's none, which is also what anyone the NAS doesn't analyze gets.
+    /// Labels, tags and a count of people; never anything about faces.
+    @Sendable
+    func nasObservation(req: Request) async throws -> NASObservationDetail {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let assetID = try req.parameters.require("assetID", as: UUID.self)
+        try await SpaceAccess.requireMembership(spaceID: spaceID, userID: device.userID, on: req.sql)
+
+        struct Row: Decodable {
+            let labels: String
+            let tags: [String]
+            let peopleCount: Int
+            let frames: Int
+        }
+        guard let row = try await req.sql.raw("""
+            SELECT o.labels::text AS labels, o.tags, o.people_count::int AS "peopleCount",
+                   n.frames::int AS frames
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN nas_observations o ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
+            JOIN nas_analysis n ON n.user_id = o.user_id AND n.sha256 = o.sha256
+            WHERE sa.space_id = \(bind: spaceID) AND sa.asset_id = \(bind: assetID)
+              AND sa.deleted_at IS NULL
+            """).first(decoding: Row.self)
+        else { throw Abort(.notFound, reason: "Not analyzed by the NAS yet.") }
+
+        let labels = (try? JSONDecoder().decode([ObservedLabel].self, from: Data(row.labels.utf8))) ?? []
+        return NASObservationDetail(
+            labels: Array(labels.prefix(12)), tags: row.tags,
+            peopleCount: row.peopleCount, frames: row.frames
+        )
+    }
+}
+
+/// Whose observations a person's page and search read: their devices'
+/// (`media_observations`), or the NAS's (`nas_observations`, the same
+/// columns). The NAS's once they've switched to it, or while they preview it.
+/// Covers, highlights and featured photos always read the devices', for
+/// Vision's aesthetic scores.
+enum ObservationSource: Sendable, Equatable {
+    case devices, nas
+
+    init(nas: String, preview: Bool) {
+        self = nas == "on" || (preview && nas == "shadow") ? .nas : .devices
+    }
+
+    /// A constant, so safe to splice into a query.
+    var table: String {
+        switch self {
+        case .devices: return "media_observations"
+        case .nas: return "nas_observations"
+        }
     }
 }

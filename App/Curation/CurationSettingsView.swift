@@ -14,6 +14,8 @@ struct CurationSettingsView: View {
     let runner: CurationRunner?
 
     @State private var settings: CurationSettings?
+    /// The NAS's own analysis, for someone it analyzes. Nil hides its section.
+    @State private var nas: NASAnalysisStatus?
     @State private var isSaving = false
     @State private var confirmDelete = false
     @State private var failure: String?
@@ -38,6 +40,33 @@ struct CurationSettingsView: View {
                 Section("Your Library") {
                     progressRow
                 }
+            }
+
+            if let nas, settings?.enabled == true {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if nas.total > 0 {
+                            ProgressView(value: Double(min(nas.analyzed, nas.total)), total: Double(nas.total))
+                        }
+                        Text("\(nas.analyzed.formatted()) of \(nas.total.formatted()) photos and videos analyzed")
+                            .font(.subheadline)
+                    }
+                    .padding(.vertical, 4)
+                    Toggle("Preview Albums from Your NAS", isOn: Binding(
+                        get: { nas.preview },
+                        set: { value in Task { await setPreview(value) } }
+                    ))
+                } header: {
+                    Text("On Your NAS")
+                } footer: {
+                    Text(
+                        "Your NAS also looks at your photos and videos itself, with no "
+                        + "internet connection. Turn on the preview to see the Albums page "
+                        + "and search built from what it found. Nothing is saved while you "
+                        + "preview, and turning it off puts everything back as it was."
+                    )
+                }
+                .disabled(isSaving)
             }
 
             Section {
@@ -137,8 +166,10 @@ struct CurationSettingsView: View {
         await runner?.refreshStatus()
         if let status = runner?.status {
             settings = status.settings
-        } else if let client = session.client {
-            settings = try? await client.curationStatus().settings
+            nas = status.nas
+        } else if let client = session.client, let status = try? await client.curationStatus() {
+            settings = status.settings
+            nas = status.nas
         }
         if settings == nil {
             failure = "Your NAS needs updating before curated albums can be turned on."
@@ -156,6 +187,22 @@ struct CurationSettingsView: View {
             failure = nil
             await runner?.refreshStatus()
             if settings?.enabled == true { runner?.start() } else { runner?.stop() }
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
+    /// On every device at once, since the setting lives on the NAS. The
+    /// Albums page asks again on its next visit.
+    private func setPreview(_ on: Bool) async {
+        guard let client = session.client else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.updateCurationSettings(nasPreview: on)
+            nas = try await client.curationStatus().nas
+            session.albumsSourceChanged()
+            failure = nil
         } catch {
             failure = "Couldn't save: \(error.localizedDescription)"
         }

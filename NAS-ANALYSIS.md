@@ -1,7 +1,9 @@
 # NAS analysis and faces: design and security
 
-**Status:** shadow mode, built 2026-11-05. The NAS analyzes, the server stores
-the results, and nothing on the Albums page changes yet.
+**Status:** shadow mode, running on the NAS since 2026-11-05. The NAS analyzes
+and the server stores the results. Since phase 2 (§7), what the scenes mean can
+be judged on the phone, photo by photo and as a preview of the whole Albums
+page. Nothing changes for anyone until they switch it on.
 
 This is the "separate explicit product/security design" that
 [CURATED-ALBUMS-SPEC.md](CURATED-ALBUMS-SPEC.md) §36 requires before anything
@@ -166,6 +168,11 @@ checked by hash.
 - **`nas_faces`:** one row per face. It holds the frame, the time in the video,
   the box, landmarks, score, size and sharpness, and the embedding, sealed
   (§6).
+- **`nas_observations`:** what the scenes mean, in the phones' words. It has
+  the same columns as `media_observations`, so the page and search can read
+  either. Derived, and made again when the concepts, the calibration or the
+  vocabulary change. **`nas_calibration`:** a threshold per label, with the
+  overlap it was measured on. See §7, phase 2.
 - **`users.nas_analysis`:** `off`, `shadow` or `on`, off by default.
   - `shadow` analyzes and stores, and changes nothing anyone sees.
   - `on` is for when results start feeding the Albums page.
@@ -183,7 +190,8 @@ checked by hash.
 The rules:
 
 1. **It never leaves the NAS.** No endpoint returns a face embedding, now or
-   later. In shadow mode no endpoint returns anything about faces at all. When
+   later. In shadow mode no endpoint returns anything about faces, beyond the
+   count of people the Information panel shows (the phones send one too). When
    People ships, apps receive names, counts and which photos, never an
    embedding, and only for the person's own library.
 2. **Sealed at rest.** Every embedding is encrypted with AES-GCM under a key in
@@ -234,11 +242,52 @@ faces are used for anything.
 1. **Shadow (now).** The analyzer runs and the server stores; the page doesn't
    change. One library first. `FrameStationServer analysis status` shows
    progress.
-2. **Scenes into albums.** Concept vectors are computed once, at build time,
-   from SigLIP's text tower. The server scores stored embeddings against them
-   and feeds `CurationVocabulary`. Tuning stays a server update: it re-scores
-   what's stored without analyzing anything again. Each section switches over
-   only after its results are judged on the phone.
+2. **Scenes into albums (built).** What a scene means is put in the phones'
+   own words, so every rule, search word and suggestion works unchanged.
+   - **Concepts.** `Analyzer/concepts.json` holds the 224 Vision labels the
+     vocabulary and search use, each as a phrase SigLIP reads after "This is
+     a photo of". `Analyzer/tools/make_concepts.py` runs SigLIP 2's text side
+     on them once, on a Mac, into
+     `Server/Sources/FrameStationServer/Resources/scene-concepts.json`. It
+     uses the same pinned conversion as the vision tower, with Google's
+     original `logit_scale` and `logit_bias`, read from the checkpoint by
+     byte range. Before writing, it checks that its pieces give the full
+     model's logits: the worst difference was 6e-6 over 36 pairs.
+   - **Scores.** For each stored scene the server computes SigLIP's own
+     logit per label (`scale × cos + bias`). A video counts as showing what
+     its strongest keyframe shows. The labels then go through the same
+     `CurationVocabulary` rules into `nas_observations`, which has the same
+     columns as the phones' `media_observations`. `people_count` is the
+     faces in the frame with the most, counting only faces of at least 24 px.
+   - **Calibration.** The vocabulary's thresholds were written for Vision's
+     confidences, and SigLIP's are on another scale.
+     - Per label, the server finds the logit at which the NAS tags as many
+       photos as Vision did, on photos both a phone and the NAS analyzed. That
+       logit reads as 0.3. Vision decides how many; SigLIP decides which.
+     - It's held between SigLIP probabilities of 0.0005 and 0.02. A label too
+       rare to measure takes 0.002.
+     - Those numbers are low because SigLIP 2's are: on the dev library's 105
+       photos, the best probability per photo had a median of 0.002. At 0.002,
+       half the photos had a label, 1.2 on average and 7 at most.
+     - Calibration runs on the NAS once 300 photos overlap, and again as the
+       overlap grows by a quarter, at most every 6 hours.
+   - **Judging.**
+     - The Information panel shows "Seen by your NAS" under "Detected on your
+       device", for the person's own analysis only. It gives labels, tags and
+       a count of people, never anything about faces.
+     - Curated Albums settings show the NAS's progress and a **Preview Albums
+       from Your NAS** switch (`users.nas_preview`). While it's on, the Albums
+       page and search are built from the NAS's analysis, on every one of the
+       person's devices, and nothing is saved or renamed (`CuratedAlbums
+       .persists`). Off, the page is exactly as it was.
+     - Covers, highlights and featured photos keep Vision's aesthetic scores
+       throughout.
+   - **On.** `users.nas_analysis = 'on'` makes the NAS's analysis the page's
+     source for good, saving as usual. No switch in the app sets it yet.
+   - **Tests.** `Scripts/smoke-nas-scoring.sh`: 30 checks, with a stand-in
+     analyzer whose scene vectors are solved to match one concept each.
+     Scaling a concept's own vector instead would match dozens of others,
+     because the 224 share a median cosine of 0.84.
 3. **People.** This phase brings:
    - face groups per library;
    - naming on iPhone and iPad, shown everywhere;

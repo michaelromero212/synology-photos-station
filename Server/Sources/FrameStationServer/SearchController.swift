@@ -51,7 +51,7 @@ struct SearchController: RouteCollection {
         try await SpaceAccess.requireMembership(
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
-        guard try await CurationController.isEnabled(userID: device.userID, on: req.sql) else {
+        guard let source = try await CurationController.observations(userID: device.userID, on: req.sql) else {
             return ThingsResponse(things: [], total: 0)
         }
 
@@ -67,7 +67,7 @@ struct SearchController: RouteCollection {
             SELECT t.term, count(*)::int AS count
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            JOIN media_observations o
+            JOIN \(unsafeRaw: source.table) o
               ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
             CROSS JOIN LATERAL unnest(o.terms) AS t(term)
             WHERE sa.space_id = \(bind: spaceID)
@@ -86,7 +86,7 @@ struct SearchController: RouteCollection {
             SELECT count(DISTINCT t.term)::int AS total
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            JOIN media_observations o
+            JOIN \(unsafeRaw: source.table) o
               ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
             CROSS JOIN LATERAL unnest(o.terms) AS t(term)
             WHERE sa.space_id = \(bind: spaceID)
@@ -142,14 +142,14 @@ struct SearchController: RouteCollection {
         }
 
         // What's in the photos, for someone whose devices look.
-        let recognizes = try await CurationController.isEnabled(userID: device.userID, on: req.sql)
-        if recognizes {
+        let source = try await CurationController.observations(userID: device.userID, on: req.sql)
+        if let source {
             struct ThingRow: Decodable { let term: String; let count: Int }
             let counted = try await req.sql.raw("""
                 SELECT t.term, count(*)::int AS count
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
-                JOIN media_observations o
+                JOIN \(unsafeRaw: source.table) o
                   ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
                 CROSS JOIN LATERAL unnest(o.terms) AS t(term)
                 WHERE sa.space_id = \(bind: spaceID)
@@ -187,7 +187,7 @@ struct SearchController: RouteCollection {
             suggestions.append(SearchSuggestion(kind: .year, title: text, query: text))
         }
 
-        return SearchSuggestionsResponse(suggestions: suggestions, recognizesContent: recognizes)
+        return SearchSuggestionsResponse(suggestions: suggestions, recognizesContent: source != nil)
     }
 
     static let suggestedPlaces = 2
@@ -319,9 +319,15 @@ struct SearchController: RouteCollection {
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
 
+        // Whose observations a word is matched against: the person's devices',
+        // or the NAS's. Nil with curation off, when a word means a place or a
+        // month and nothing more.
+        let source = try await CurationController.observations(userID: device.userID, on: req.sql)
+        let table = (source ?? .devices).table
+
         let filters: SQLQueryString
         if !text.isEmpty {
-            guard let planned = try await plan(text, userID: device.userID, on: req.sql) else {
+            guard let planned = try await plan(text, userID: device.userID, source: source, on: req.sql) else {
                 return SearchResults(items: [], total: 0, nextOffset: nil)
             }
             filters = planned
@@ -344,7 +350,7 @@ struct SearchController: RouteCollection {
             SELECT count(*)::int AS total
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            LEFT JOIN media_observations o
+            LEFT JOIN \(unsafeRaw: table) o
                    ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
@@ -361,7 +367,7 @@ struct SearchController: RouteCollection {
                    ) AS "isFavorite"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            LEFT JOIN media_observations o
+            LEFT JOIN \(unsafeRaw: table) o
                    ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
@@ -396,7 +402,7 @@ struct SearchController: RouteCollection {
     ///
     /// Nil when nothing usable was typed.
     private func plan(
-        _ text: String, userID: UUID, on sql: any SQLDatabase
+        _ text: String, userID: UUID, source: ObservationSource?, on sql: any SQLDatabase
     ) async throws -> SQLQueryString? {
         var words = Self.words(in: text)
         var years: [Int] = []
@@ -410,7 +416,7 @@ struct SearchController: RouteCollection {
         guard !words.isEmpty || !years.isEmpty else { return nil }
 
         // With curation off, a word means a place or a month and nothing more.
-        let curated = try await CurationController.isEnabled(userID: userID, on: sql)
+        let curated = source != nil
         let local = TimelineController.localTime
         var filters: SQLQueryString = ""
         var index = 0
@@ -426,7 +432,7 @@ struct SearchController: RouteCollection {
             // photos hold the pair as one term.
             if curated, index + 1 < words.count {
                 let compound = Self.termForm(words[index]) + "_" + Self.termForm(words[index + 1])
-                if try await hasTerm(compound, userID: userID, on: sql) {
+                if try await hasTerm(compound, userID: userID, source: source ?? .devices, on: sql) {
                     phrase = words[index] + " " + words[index + 1]
                     shown = "o.terms && ARRAY[\(bind: compound)]::text[]"
                     index += 1
@@ -497,9 +503,11 @@ struct SearchController: RouteCollection {
     ]
 
     /// Whether any of this person's photos carry a term. An index lookup.
-    private func hasTerm(_ term: String, userID: UUID, on sql: any SQLDatabase) async throws -> Bool {
+    private func hasTerm(
+        _ term: String, userID: UUID, source: ObservationSource, on sql: any SQLDatabase
+    ) async throws -> Bool {
         try await sql.raw("""
-            SELECT 1 AS found FROM media_observations
+            SELECT 1 AS found FROM \(unsafeRaw: source.table)
             WHERE user_id = \(bind: userID) AND terms @> ARRAY[\(bind: term)]::text[]
             LIMIT 1
             """).first() != nil

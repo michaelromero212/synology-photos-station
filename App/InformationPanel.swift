@@ -23,6 +23,9 @@ struct InformationPanel: View {
     /// What the person's own devices recognized in the photo. Nil until it has
     /// been analyzed, and then there's no section at all.
     var observation: AssetObservationDetail?
+    /// What the NAS's own analyzer saw, for someone it analyzes. Shown beside
+    /// the device's so the two can be compared photo by photo.
+    var nasObservation: NASObservationDetail?
 
     var body: some View {
         ScrollView {
@@ -42,6 +45,7 @@ struct InformationPanel: View {
                 #endif
                 storageRow
                 detectedSection
+                nasSection
                 // Everything the file itself records, below the curated card:
                 // grouped, filtered and formatted by the server so this is a
                 // plain column of sections rather than a wall of tags.
@@ -138,12 +142,61 @@ struct InformationPanel: View {
         }
     }
 
+    /// What the NAS's analyzer saw, in the same words, for judging it against
+    /// the device's: "Birthday" on the cake shot from both is agreement; the
+    /// NAS seeing more, or something else, is what the preview is for. A video
+    /// is read across its keyframes.
+    @ViewBuilder
+    private var nasSection: some View {
+        if let nas = nasObservation {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("SEEN BY YOUR NAS")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .kerning(0.5)
+
+                let seenAs = Self.seenAs(tags: nas.tags, isUtility: false, peopleCount: nas.peopleCount)
+                if !seenAs.isEmpty {
+                    Text(seenAs.joined(separator: " · "))
+                        .font(.subheadline.weight(.medium))
+                } else if nas.labels.isEmpty {
+                    Text("Nothing it has a word for")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !nas.labels.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(nas.labels.prefix(10), id: \.id) { label in
+                                Text("\(Self.spoken(label.id)) \(Int((label.confidence * 100).rounded()))%")
+                                    .font(.caption)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                        }
+                    }
+                }
+                if nas.frames > 1 {
+                    Text("Across \(nas.frames) moments in the video")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     /// The tags in words, plus what the counts say. "Screenshot or document"
     /// stands in for both kinds of utility; nobody needs to know there are two.
     static func seenAs(_ observation: AssetObservationDetail) -> [String] {
+        seenAs(tags: observation.tags, isUtility: observation.isUtility, peopleCount: observation.peopleCount)
+    }
+
+    static func seenAs(tags: [String], isUtility: Bool, peopleCount: Int) -> [String] {
         var words: [String] = []
-        var utility = observation.isUtility
-        for tag in observation.tags {
+        var utility = isUtility
+        for tag in tags {
             switch tag {
             case "utility": utility = true
             case "gathering": continue   // said by the people count below
@@ -151,10 +204,10 @@ struct InformationPanel: View {
             }
         }
         if utility { words.append("Screenshot or document") }
-        switch observation.peopleCount {
+        switch peopleCount {
         case 0: break
         case 1: words.append("1 person")
-        default: words.append("\(observation.peopleCount) people")
+        default: words.append("\(peopleCount) people")
         }
         return words
     }

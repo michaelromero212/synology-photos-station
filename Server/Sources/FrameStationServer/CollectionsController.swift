@@ -91,7 +91,9 @@ struct CollectionsController: RouteCollection {
             userID: device.userID, spaceID: spaceID, on: req.sql
         )
         let evidence = curation.enabled && curation.isPersonal
-            ? try await dayEvidence(spaceID: spaceID, userID: device.userID, on: req.sql)
+            ? try await dayEvidence(
+                spaceID: spaceID, userID: device.userID, source: curation.source, on: req.sql
+            )
             : [:]
 
         // The holiday table is built for the years the library actually holds
@@ -111,7 +113,8 @@ struct CollectionsController: RouteCollection {
         // Kept as they were shown, so improving the rules below never makes
         // an album someone knows disappear. See `CuratedAlbums`.
         let keeper = CuratedAlbums(
-            spaceID: spaceID, userID: device.userID, sql: req.sql, logger: req.logger
+            spaceID: spaceID, userID: device.userID, sql: req.sql, logger: req.logger,
+            persists: curation.persistsAlbums
         )
         let saved = await keeper.load()
 
@@ -1343,7 +1346,7 @@ struct CollectionsController: RouteCollection {
     /// it. Utility photos (screenshots, receipts, documents) count toward how
     /// much of a day was analyzed but are never evidence of an occasion.
     private func dayEvidence(
-        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, source: ObservationSource, on sql: any SQLDatabase
     ) async throws -> [String: DayEvidence] {
         struct TotalRow: Decodable { let day: String; let total: Int; let analyzed: Int; let usable: Int }
         struct TagRow: Decodable { let day: String; let tag: String; let n: Int }
@@ -1358,7 +1361,7 @@ struct CollectionsController: RouteCollection {
                    )::int AS usable
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            LEFT JOIN media_observations o
+            LEFT JOIN \(unsafeRaw: source.table) o
                    ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
@@ -1371,7 +1374,7 @@ struct CollectionsController: RouteCollection {
             SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day, t.tag, count(*)::int AS n
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
-            JOIN media_observations o ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
+            JOIN \(unsafeRaw: source.table) o ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
             CROSS JOIN LATERAL unnest(o.tags) AS t(tag)
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)

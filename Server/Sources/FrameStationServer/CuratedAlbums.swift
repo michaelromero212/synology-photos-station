@@ -39,6 +39,11 @@ struct CuratedAlbums {
     let userID: UUID
     let sql: any SQLDatabase
     let logger: Logger
+    /// False while the person previews the page built from the NAS's
+    /// analysis: kept albums show as usual, but nothing new is saved and
+    /// nothing kept is renamed or let go, so turning the preview off leaves
+    /// the page exactly as it was.
+    var persists = true
 
     struct Saved: Decodable {
         let id: UUID
@@ -442,6 +447,7 @@ struct CuratedAlbums {
     /// page's expense: a failed write is logged, the page shows what it found,
     /// and the next visit tries again.
     private func write(_ changes: Changes) async {
+        guard persists else { return }
         // Letting go first frees the dates an update may move onto.
         if !changes.deletes.isEmpty {
             await run("let go of albums", """

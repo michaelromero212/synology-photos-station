@@ -115,10 +115,33 @@ public struct CurationSettings: Codable, Sendable, Hashable {
 public struct UpdateCurationSettingsRequest: Codable, Sendable, Hashable {
     public let enabled: Bool?
     public let holidays: Bool?
+    /// Preview the Albums page built from the NAS's analysis. Only for a
+    /// person the NAS analyzes; a server from before ignores it.
+    public let nasPreview: Bool?
 
-    public init(enabled: Bool? = nil, holidays: Bool? = nil) {
+    public init(enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil) {
         self.enabled = enabled
         self.holidays = holidays
+        self.nasPreview = nasPreview
+    }
+}
+
+/// How far the NAS's own analysis of a person's library has got, for someone
+/// it analyzes. See NAS-ANALYSIS.md.
+public struct NASAnalysisStatus: Codable, Sendable, Hashable {
+    /// "shadow" while it's being judged, "on" once the page uses it.
+    public let state: String
+    /// Files the NAS has analyzed and scored.
+    public let analyzed: Int
+    public let total: Int
+    /// Whether the Albums page is currently built from it as a preview.
+    public let preview: Bool
+
+    public init(state: String, analyzed: Int, total: Int, preview: Bool) {
+        self.state = state
+        self.analyzed = analyzed
+        self.total = total
+        self.preview = preview
     }
 }
 
@@ -129,11 +152,14 @@ public struct CurationStatus: Codable, Sendable, Hashable {
     /// Everything that can be analyzed: photos, and videos by their poster
     /// frame, once the NAS has made a thumbnail.
     public let total: Int
+    /// Present only for a person the NAS analyzes, from a server that does.
+    public let nas: NASAnalysisStatus?
 
-    public init(settings: CurationSettings, analyzed: Int, total: Int) {
+    public init(settings: CurationSettings, analyzed: Int, total: Int, nas: NASAnalysisStatus? = nil) {
         self.settings = settings
         self.analyzed = analyzed
         self.total = total
+        self.nas = nas
     }
 }
 
@@ -157,5 +183,24 @@ public struct AssetObservationDetail: Codable, Sendable, Hashable {
         self.peopleCount = peopleCount
         self.animalCount = animalCount
         self.tags = tags
+    }
+}
+
+/// What the NAS itself saw in one photo or video, for the Information panel:
+/// labels in the same words as the device's, and what the server made of
+/// them. Never anything about who is in it.
+public struct NASObservationDetail: Codable, Sendable, Hashable {
+    public let labels: [ObservedLabel]
+    public let tags: [String]
+    /// Faces in the frame with the most. A count only.
+    public let peopleCount: Int
+    /// 1 for a photo; the keyframes sampled from a video.
+    public let frames: Int
+
+    public init(labels: [ObservedLabel], tags: [String], peopleCount: Int, frames: Int) {
+        self.labels = labels
+        self.tags = tags
+        self.peopleCount = peopleCount
+        self.frames = frames
     }
 }

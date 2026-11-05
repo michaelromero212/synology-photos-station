@@ -1,0 +1,902 @@
+{
+ "_comment": "Vision's label ids the server scores NAS scene embeddings against, and the words SigLIP 2 reads for each (after 'This is a photo of'). Generated vectors: Server/Sources/FrameStationServer/Resources/scene-concepts.json, by Analyzer/tools/make_concepts.py. Add a label here when CurationVocabulary starts using one.",
+ "template": "This is a photo of {}.",
+ "concepts": [
+  {
+   "id": "airplane",
+   "phrase": "an airplane"
+  },
+  {
+   "id": "amusement_park",
+   "phrase": "an amusement park"
+  },
+  {
+   "id": "aquarium",
+   "phrase": "an aquarium"
+  },
+  {
+   "id": "athletics",
+   "phrase": "track and field athletics"
+  },
+  {
+   "id": "aurora",
+   "phrase": "an aurora"
+  },
+  {
+   "id": "backpack",
+   "phrase": "a backpack"
+  },
+  {
+   "id": "ball",
+   "phrase": "a ball"
+  },
+  {
+   "id": "ballet",
+   "phrase": "ballet dancers"
+  },
+  {
+   "id": "ballgames",
+   "phrase": "a ball game"
+  },
+  {
+   "id": "balloon",
+   "phrase": "balloons"
+  },
+  {
+   "id": "baseball",
+   "phrase": "a baseball game"
+  },
+  {
+   "id": "baseball_bat",
+   "phrase": "a baseball bat"
+  },
+  {
+   "id": "basketball",
+   "phrase": "a basketball game"
+  },
+  {
+   "id": "beach",
+   "phrase": "a beach"
+  },
+  {
+   "id": "bear",
+   "phrase": "a bear"
+  },
+  {
+   "id": "beer",
+   "phrase": "a beer"
+  },
+  {
+   "id": "bicycle",
+   "phrase": "a bicycle"
+  },
+  {
+   "id": "bird",
+   "phrase": "a bird"
+  },
+  {
+   "id": "birthday_cake",
+   "phrase": "a birthday cake with candles"
+  },
+  {
+   "id": "boat",
+   "phrase": "a boat"
+  },
+  {
+   "id": "bouquet",
+   "phrase": "a bouquet of flowers"
+  },
+  {
+   "id": "bread",
+   "phrase": "a bread"
+  },
+  {
+   "id": "bride",
+   "phrase": "a bride"
+  },
+  {
+   "id": "bridesmaid",
+   "phrase": "bridesmaids"
+  },
+  {
+   "id": "bridge",
+   "phrase": "a bridge"
+  },
+  {
+   "id": "bus",
+   "phrase": "a bus"
+  },
+  {
+   "id": "butterfly",
+   "phrase": "a butterfly"
+  },
+  {
+   "id": "cake",
+   "phrase": "a cake"
+  },
+  {
+   "id": "camping",
+   "phrase": "a campsite"
+  },
+  {
+   "id": "candle",
+   "phrase": "candles"
+  },
+  {
+   "id": "canoe",
+   "phrase": "a canoe"
+  },
+  {
+   "id": "canyon",
+   "phrase": "a canyon"
+  },
+  {
+   "id": "car",
+   "phrase": "a car"
+  },
+  {
+   "id": "carnival",
+   "phrase": "a carnival"
+  },
+  {
+   "id": "carousel",
+   "phrase": "a carousel"
+  },
+  {
+   "id": "castle",
+   "phrase": "a castle"
+  },
+  {
+   "id": "cat",
+   "phrase": "a cat"
+  },
+  {
+   "id": "cave",
+   "phrase": "a cave"
+  },
+  {
+   "id": "celebration",
+   "phrase": "a celebration"
+  },
+  {
+   "id": "ceremony",
+   "phrase": "a ceremony"
+  },
+  {
+   "id": "christmas_decoration",
+   "phrase": "Christmas decorations"
+  },
+  {
+   "id": "christmas_tree",
+   "phrase": "a Christmas tree"
+  },
+  {
+   "id": "circus",
+   "phrase": "a circus"
+  },
+  {
+   "id": "cityscape",
+   "phrase": "a city skyline"
+  },
+  {
+   "id": "cliff",
+   "phrase": "a cliff"
+  },
+  {
+   "id": "cocktail",
+   "phrase": "a cocktail"
+  },
+  {
+   "id": "coffee",
+   "phrase": "a coffee"
+  },
+  {
+   "id": "concert",
+   "phrase": "a concert"
+  },
+  {
+   "id": "cookie",
+   "phrase": "a cookie"
+  },
+  {
+   "id": "costume",
+   "phrase": "people in costumes"
+  },
+  {
+   "id": "cow",
+   "phrase": "a cow"
+  },
+  {
+   "id": "crowd",
+   "phrase": "a crowd of people"
+  },
+  {
+   "id": "cruise_ship",
+   "phrase": "a cruise ship"
+  },
+  {
+   "id": "cupcake",
+   "phrase": "cupcakes"
+  },
+  {
+   "id": "cycling",
+   "phrase": "people cycling"
+  },
+  {
+   "id": "dancing",
+   "phrase": "people dancing"
+  },
+  {
+   "id": "deer",
+   "phrase": "a deer"
+  },
+  {
+   "id": "desert",
+   "phrase": "a desert"
+  },
+  {
+   "id": "dessert",
+   "phrase": "a dessert"
+  },
+  {
+   "id": "dining_room",
+   "phrase": "a dining room"
+  },
+  {
+   "id": "document",
+   "phrase": "a document"
+  },
+  {
+   "id": "dog",
+   "phrase": "a dog"
+  },
+  {
+   "id": "dolphin",
+   "phrase": "a dolphin"
+  },
+  {
+   "id": "donut",
+   "phrase": "a donut"
+  },
+  {
+   "id": "drum",
+   "phrase": "drums"
+  },
+  {
+   "id": "eagle",
+   "phrase": "an eagle"
+  },
+  {
+   "id": "easter_egg",
+   "phrase": "Easter eggs"
+  },
+  {
+   "id": "egg",
+   "phrase": "eggs"
+  },
+  {
+   "id": "elephant",
+   "phrase": "an elephant"
+  },
+  {
+   "id": "fairground",
+   "phrase": "a fairground"
+  },
+  {
+   "id": "farm",
+   "phrase": "a farm"
+  },
+  {
+   "id": "ferris_wheel",
+   "phrase": "a Ferris wheel"
+  },
+  {
+   "id": "fire",
+   "phrase": "a fire"
+  },
+  {
+   "id": "firecracker",
+   "phrase": "firecrackers"
+  },
+  {
+   "id": "fireplace",
+   "phrase": "a fireplace"
+  },
+  {
+   "id": "firetruck",
+   "phrase": "a fire truck"
+  },
+  {
+   "id": "fireworks",
+   "phrase": "fireworks"
+  },
+  {
+   "id": "fish",
+   "phrase": "a fish"
+  },
+  {
+   "id": "fishing",
+   "phrase": "people fishing"
+  },
+  {
+   "id": "flag",
+   "phrase": "a flag"
+  },
+  {
+   "id": "flamingo",
+   "phrase": "a flamingo"
+  },
+  {
+   "id": "flower",
+   "phrase": "flowers"
+  },
+  {
+   "id": "food",
+   "phrase": "food"
+  },
+  {
+   "id": "football",
+   "phrase": "American football"
+  },
+  {
+   "id": "forest",
+   "phrase": "a forest"
+  },
+  {
+   "id": "fountain",
+   "phrase": "a fountain"
+  },
+  {
+   "id": "frog",
+   "phrase": "a frog"
+  },
+  {
+   "id": "fruit",
+   "phrase": "a fruit"
+  },
+  {
+   "id": "garden",
+   "phrase": "a garden"
+  },
+  {
+   "id": "gift",
+   "phrase": "wrapped gifts"
+  },
+  {
+   "id": "gingerbread",
+   "phrase": "a gingerbread house"
+  },
+  {
+   "id": "giraffe",
+   "phrase": "a giraffe"
+  },
+  {
+   "id": "glacier",
+   "phrase": "a glacier"
+  },
+  {
+   "id": "goat",
+   "phrase": "a goat"
+  },
+  {
+   "id": "golf",
+   "phrase": "people playing golf"
+  },
+  {
+   "id": "golf_course",
+   "phrase": "a golf course"
+  },
+  {
+   "id": "graduation",
+   "phrase": "a graduation ceremony"
+  },
+  {
+   "id": "groom",
+   "phrase": "a groom"
+  },
+  {
+   "id": "guitar",
+   "phrase": "a guitar"
+  },
+  {
+   "id": "gymnastics",
+   "phrase": "gymnastics"
+  },
+  {
+   "id": "hamburger",
+   "phrase": "a hamburger"
+  },
+  {
+   "id": "handwriting",
+   "phrase": "handwriting on paper"
+  },
+  {
+   "id": "helicopter",
+   "phrase": "a helicopter"
+  },
+  {
+   "id": "hiking",
+   "phrase": "people hiking"
+  },
+  {
+   "id": "hockey",
+   "phrase": "ice hockey"
+  },
+  {
+   "id": "horse",
+   "phrase": "a horse"
+  },
+  {
+   "id": "ice_cream",
+   "phrase": "ice cream"
+  },
+  {
+   "id": "ice_skating",
+   "phrase": "people ice skating"
+  },
+  {
+   "id": "island",
+   "phrase": "an island"
+  },
+  {
+   "id": "jack_o_lantern",
+   "phrase": "a jack-o'-lantern"
+  },
+  {
+   "id": "kayak",
+   "phrase": "a kayak"
+  },
+  {
+   "id": "lake",
+   "phrase": "a lake"
+  },
+  {
+   "id": "lantern",
+   "phrase": "a lantern"
+  },
+  {
+   "id": "lighthouse",
+   "phrase": "a lighthouse"
+  },
+  {
+   "id": "lion",
+   "phrase": "a lion"
+  },
+  {
+   "id": "lizard",
+   "phrase": "a lizard"
+  },
+  {
+   "id": "llama",
+   "phrase": "a llama"
+  },
+  {
+   "id": "martial_arts",
+   "phrase": "martial arts"
+  },
+  {
+   "id": "mask",
+   "phrase": "a mask"
+  },
+  {
+   "id": "microphone",
+   "phrase": "a microphone"
+  },
+  {
+   "id": "monument",
+   "phrase": "a monument"
+  },
+  {
+   "id": "moon",
+   "phrase": "a moon"
+  },
+  {
+   "id": "motorcycle",
+   "phrase": "a motorcycle"
+  },
+  {
+   "id": "mountain",
+   "phrase": "mountains"
+  },
+  {
+   "id": "museum",
+   "phrase": "a museum"
+  },
+  {
+   "id": "music",
+   "phrase": "people playing music"
+  },
+  {
+   "id": "musical_instrument",
+   "phrase": "a musical instrument"
+  },
+  {
+   "id": "newspaper",
+   "phrase": "a newspaper"
+  },
+  {
+   "id": "night_sky",
+   "phrase": "the night sky"
+  },
+  {
+   "id": "ocean",
+   "phrase": "the ocean"
+  },
+  {
+   "id": "owl",
+   "phrase": "an owl"
+  },
+  {
+   "id": "palm_tree",
+   "phrase": "palm trees"
+  },
+  {
+   "id": "pancake",
+   "phrase": "a pancake"
+  },
+  {
+   "id": "parade",
+   "phrase": "a parade"
+  },
+  {
+   "id": "parasailing",
+   "phrase": "parasailing"
+  },
+  {
+   "id": "park",
+   "phrase": "a park"
+  },
+  {
+   "id": "pasta",
+   "phrase": "a pasta"
+  },
+  {
+   "id": "penguin",
+   "phrase": "a penguin"
+  },
+  {
+   "id": "performance",
+   "phrase": "a performance on stage"
+  },
+  {
+   "id": "piano",
+   "phrase": "a piano"
+  },
+  {
+   "id": "pie",
+   "phrase": "a pie"
+  },
+  {
+   "id": "pier",
+   "phrase": "a pier"
+  },
+  {
+   "id": "pig",
+   "phrase": "a pig"
+  },
+  {
+   "id": "pizza",
+   "phrase": "a pizza"
+  },
+  {
+   "id": "playground",
+   "phrase": "a playground"
+  },
+  {
+   "id": "pool",
+   "phrase": "a swimming pool"
+  },
+  {
+   "id": "printed_page",
+   "phrase": "a printed page"
+  },
+  {
+   "id": "pumpkin",
+   "phrase": "pumpkins"
+  },
+  {
+   "id": "rabbit",
+   "phrase": "a rabbit"
+  },
+  {
+   "id": "rainbow",
+   "phrase": "a rainbow"
+  },
+  {
+   "id": "receipt",
+   "phrase": "a receipt"
+  },
+  {
+   "id": "restaurant",
+   "phrase": "a restaurant"
+  },
+  {
+   "id": "river",
+   "phrase": "a river"
+  },
+  {
+   "id": "rollercoaster",
+   "phrase": "a roller coaster"
+  },
+  {
+   "id": "rose",
+   "phrase": "roses"
+  },
+  {
+   "id": "rowboat",
+   "phrase": "a rowboat"
+  },
+  {
+   "id": "ruins",
+   "phrase": "ancient ruins"
+  },
+  {
+   "id": "sailboat",
+   "phrase": "a sailboat"
+  },
+  {
+   "id": "salad",
+   "phrase": "a salad"
+  },
+  {
+   "id": "sand",
+   "phrase": "sand"
+  },
+  {
+   "id": "sandcastle",
+   "phrase": "a sandcastle"
+  },
+  {
+   "id": "santa_claus",
+   "phrase": "Santa Claus"
+  },
+  {
+   "id": "scoreboard",
+   "phrase": "a scoreboard"
+  },
+  {
+   "id": "screenshot",
+   "phrase": "a screenshot of a phone screen"
+  },
+  {
+   "id": "seafood",
+   "phrase": "a seafood"
+  },
+  {
+   "id": "seashell",
+   "phrase": "seashells"
+  },
+  {
+   "id": "sheep",
+   "phrase": "a sheep"
+  },
+  {
+   "id": "shore",
+   "phrase": "a shoreline"
+  },
+  {
+   "id": "skateboarding",
+   "phrase": "skateboarding"
+  },
+  {
+   "id": "skeleton",
+   "phrase": "a skeleton"
+  },
+  {
+   "id": "ski_equipment",
+   "phrase": "ski equipment"
+  },
+  {
+   "id": "skiing",
+   "phrase": "people skiing"
+  },
+  {
+   "id": "skyscraper",
+   "phrase": "a skyscraper"
+  },
+  {
+   "id": "sled",
+   "phrase": "a sled"
+  },
+  {
+   "id": "sledding",
+   "phrase": "people sledding"
+  },
+  {
+   "id": "snake",
+   "phrase": "a snake"
+  },
+  {
+   "id": "snow",
+   "phrase": "snow"
+  },
+  {
+   "id": "snowball",
+   "phrase": "a snowball"
+  },
+  {
+   "id": "snowboard",
+   "phrase": "a snowboard"
+  },
+  {
+   "id": "snowboarding",
+   "phrase": "snowboarding"
+  },
+  {
+   "id": "snowman",
+   "phrase": "a snowman"
+  },
+  {
+   "id": "soccer",
+   "phrase": "a soccer game"
+  },
+  {
+   "id": "softball",
+   "phrase": "a softball game"
+  },
+  {
+   "id": "sparkler",
+   "phrase": "sparklers"
+  },
+  {
+   "id": "speakers_music",
+   "phrase": "music speakers"
+  },
+  {
+   "id": "speedboat",
+   "phrase": "a speedboat"
+  },
+  {
+   "id": "sport",
+   "phrase": "a sport"
+  },
+  {
+   "id": "sports_equipment",
+   "phrase": "sports equipment"
+  },
+  {
+   "id": "squirrel",
+   "phrase": "a squirrel"
+  },
+  {
+   "id": "stadium",
+   "phrase": "a stadium"
+  },
+  {
+   "id": "statue",
+   "phrase": "a statue"
+  },
+  {
+   "id": "sunset_sunrise",
+   "phrase": "a sunset"
+  },
+  {
+   "id": "surfboard",
+   "phrase": "a surfboard"
+  },
+  {
+   "id": "surfing",
+   "phrase": "people surfing"
+  },
+  {
+   "id": "sushi",
+   "phrase": "a sushi"
+  },
+  {
+   "id": "swimming",
+   "phrase": "people swimming"
+  },
+  {
+   "id": "swimsuit",
+   "phrase": "people in swimsuits"
+  },
+  {
+   "id": "table",
+   "phrase": "a table"
+  },
+  {
+   "id": "tableware",
+   "phrase": "plates and tableware"
+  },
+  {
+   "id": "taco",
+   "phrase": "a taco"
+  },
+  {
+   "id": "tennis",
+   "phrase": "people playing tennis"
+  },
+  {
+   "id": "tent",
+   "phrase": "a tent"
+  },
+  {
+   "id": "theater",
+   "phrase": "a theater"
+  },
+  {
+   "id": "tiger",
+   "phrase": "a tiger"
+  },
+  {
+   "id": "tractor",
+   "phrase": "a tractor"
+  },
+  {
+   "id": "trail",
+   "phrase": "a hiking trail"
+  },
+  {
+   "id": "train",
+   "phrase": "a train"
+  },
+  {
+   "id": "turtle",
+   "phrase": "a turtle"
+  },
+  {
+   "id": "tuxedo",
+   "phrase": "a man in a tuxedo"
+  },
+  {
+   "id": "violin",
+   "phrase": "a violin"
+  },
+  {
+   "id": "volcano",
+   "phrase": "a volcano"
+  },
+  {
+   "id": "volleyball",
+   "phrase": "people playing volleyball"
+  },
+  {
+   "id": "waterfall",
+   "phrase": "a waterfall"
+  },
+  {
+   "id": "wedding",
+   "phrase": "a wedding"
+  },
+  {
+   "id": "wedding_cake",
+   "phrase": "a wedding cake"
+  },
+  {
+   "id": "wedding_dress",
+   "phrase": "a wedding dress"
+  },
+  {
+   "id": "whale",
+   "phrase": "a whale"
+  },
+  {
+   "id": "whiteboard",
+   "phrase": "a whiteboard"
+  },
+  {
+   "id": "windsurfing",
+   "phrase": "windsurfing"
+  },
+  {
+   "id": "wine",
+   "phrase": "a wine"
+  },
+  {
+   "id": "winter_sport",
+   "phrase": "a winter sport"
+  },
+  {
+   "id": "wreath",
+   "phrase": "a wreath"
+  },
+  {
+   "id": "zebra",
+   "phrase": "a zebra"
+  },
+  {
+   "id": "zoo",
+   "phrase": "a zoo"
+  }
+ ]
+}

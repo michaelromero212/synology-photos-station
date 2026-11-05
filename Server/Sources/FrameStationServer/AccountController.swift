@@ -128,7 +128,7 @@ struct AccountController: RouteCollection {
                     UPDATE users
                     SET display_name = 'Former member', avatar_sha256 = NULL,
                         dsm_username = NULL, dsm_uid = NULL, dsm_home = NULL,
-                        activity_read_at = NULL, nas_analysis = 'off', deleted_at = now()
+                        activity_read_at = NULL, nas_analysis = 'off', nas_preview = false, deleted_at = now()
                     WHERE id = \(bind: userID)
                     """).run()
 

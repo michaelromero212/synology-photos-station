@@ -58,7 +58,7 @@ struct AnalysisCommand: AsyncCommandGroup {
         func run(using context: CommandContext, signature: Signature) async throws {
             let sql = context.application.sql
             let person = try await AnalysisCommand.find(signature.person, sql: sql)
-            try await sql.raw("UPDATE users SET nas_analysis = 'off' WHERE id = \(bind: person.id)").run()
+            try await sql.raw("UPDATE users SET nas_analysis = 'off', nas_preview = false WHERE id = \(bind: person.id)").run()
             struct Count: Decodable { let count: Int }
             let removed = try await sql.raw("""
                 WITH gone AS (DELETE FROM nas_analysis WHERE user_id = \(bind: person.id) RETURNING 1)
@@ -172,6 +172,19 @@ struct AnalysisCommand: AsyncCommandGroup {
               AND (u.nas_analysis <> 'off' OR EXISTS (SELECT 1 FROM nas_analysis n WHERE n.user_id = u.id))
             ORDER BY u.display_name
             """).all(decoding: Row.self)
+
+        // What the scenes mean: how much is scored, and how many labels are
+        // calibrated against what the phones found. Counts only.
+        struct Scoring: Decodable { let scored: Int; let calibrated: Int; let overlap: Int?; let previewing: Int }
+        if let scoring = try await sql.raw("""
+            SELECT (SELECT count(*)::int FROM nas_observations) AS scored,
+                   (SELECT count(*)::int FROM nas_calibration) AS calibrated,
+                   (SELECT max(overlap)::int FROM nas_calibration) AS overlap,
+                   (SELECT count(*)::int FROM users WHERE nas_preview AND deleted_at IS NULL) AS previewing
+            """).first(decoding: Scoring.self) {
+            let against = scoring.overlap.map { " against \($0) photos a phone also analyzed" } ?? ", none yet (it needs 300 photos a phone also analyzed)"
+            console.info("Scenes: \(scoring.scored) files scored; \(scoring.calibrated) labels calibrated\(against); \(scoring.previewing) previewing")
+        }
 
         console.info("")
         if rows.isEmpty {

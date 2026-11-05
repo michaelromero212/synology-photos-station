@@ -27,6 +27,8 @@ actor AnalysisWorker {
     private let app: Application
     private let client: AnalyzerClient
     private let seal: FaceSeal
+    /// Turns each file's scene into labels and tags as soon as it's stored.
+    private let scorer: NASScorer?
     private let startDelay: Duration
     private let idle: Duration
     private var task: Task<Void, Never>?
@@ -55,12 +57,13 @@ actor AnalysisWorker {
     /// `startDelay` lets a booting server settle first; `idle` is how often
     /// it looks again when there's nothing to do. The smoke tests shorten both.
     init(
-        app: Application, client: AnalyzerClient, seal: FaceSeal,
+        app: Application, client: AnalyzerClient, seal: FaceSeal, scorer: NASScorer? = nil,
         startDelay: Duration = .seconds(30), idle: Duration = .seconds(30)
     ) {
         self.app = app
         self.client = client
         self.seal = seal
+        self.scorer = scorer
         self.startDelay = startDelay
         self.idle = idle
     }
@@ -192,6 +195,7 @@ actor AnalysisWorker {
             }
             missesInARow = 0
             window.analyzed += 1
+            await scorer?.score(userID: item.userID, sha256: item.sha256)
             app.logger.debug("analysis: \(item.sha256.prefix(8)) \(kind.rawValue), \(analysis.frames) frame(s), \(analysis.durationMS) ms")
         } catch AnalyzerClient.Failure.rejected(let code) {
             switch code {
@@ -417,5 +421,6 @@ struct AnalysisWorkerKey: StorageKey {
 struct AnalysisWorkerLifecycle: LifecycleHandler {
     func shutdownAsync(_ application: Application) async {
         await application.storage[AnalysisWorkerKey.self]?.stop()
+        await application.storage[NASScorerKey.self]?.stop()
     }
 }

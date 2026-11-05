@@ -41,6 +41,8 @@ final class AssetDetailModel {
     /// What this person's devices recognized in the photo, for the Information
     /// panel. See `loadObservation`.
     var observation: AssetObservationDetail?
+    /// What the NAS's analyzer saw, for someone it analyzes. Nil otherwise.
+    var nasObservation: NASObservationDetail?
     private var hasLoadedObservation = false
 
     let item: TimelineItem
@@ -160,7 +162,9 @@ final class AssetDetailModel {
     func loadObservation(_ client: FrameStationClient) async {
         guard !hasLoadedObservation else { return }
         hasLoadedObservation = true
-        observation = try? await client.observation(spaceID: spaceID, assetID: item.assetID)
+        async let device = try? await client.observation(spaceID: spaceID, assetID: item.assetID)
+        async let nas = try? await client.nasObservation(spaceID: spaceID, assetID: item.assetID)
+        (observation, nasObservation) = await (device, nas)
     }
 
     /// Never swallow the error here. An earlier version caught and ignored it,
@@ -2087,7 +2091,8 @@ private struct InformationSheet: View {
                 detail: detail,
                 onEditCredit: mayEditCredit(detail) ? { showCreditEditor = true } : nil,
                 onEditLocation: { showLocationEditor = true },
-                observation: model.observation
+                observation: model.observation,
+                nasObservation: model.nasObservation
             )
             .task {
                 if let client = session.client { await model.loadObservation(client) }

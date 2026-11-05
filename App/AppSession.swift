@@ -692,6 +692,14 @@ final class AppSession {
         for store in collectionsStores.values { store.expire() }
     }
 
+    /// Whose analysis the Albums page and search are built from changed:
+    /// the NAS preview went on or off. The library didn't change, so nothing
+    /// in its change log says so; the Albums page asks again on its next
+    /// visit.
+    func albumsSourceChanged() {
+        for store in collectionsStores.values { store.expire() }
+    }
+
     /// A shared library, or an album shared with you, that a tapped
     /// notification asked to open. `RootTabView` opens it, in Albums where
     /// both live, and clears this.

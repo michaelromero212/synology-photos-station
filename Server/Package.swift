@@ -28,7 +28,12 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
-            resources: [.copy("Migrations/SQL")]
+            resources: [
+                .copy("Migrations/SQL"),
+                // What NAS scene embeddings are scored against; made by
+                // Analyzer/tools/make_concepts.py. See NASScoring.
+                .copy("Resources/scene-concepts.json"),
+            ]
         ),
     ]
 )

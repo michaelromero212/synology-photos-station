@@ -16,11 +16,11 @@ extension FrameStationClient {
     /// devices, since the setting lives on the NAS.
     @discardableResult
     public func updateCurationSettings(
-        enabled: Bool? = nil, holidays: Bool? = nil
+        enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil
     ) async throws -> CurationSettings {
         try await put(
             "v1/curation/settings",
-            body: UpdateCurationSettingsRequest(enabled: enabled, holidays: holidays)
+            body: UpdateCurationSettingsRequest(enabled: enabled, holidays: holidays, nasPreview: nasPreview)
         )
     }
 
@@ -53,6 +53,17 @@ extension FrameStationClient {
     public func observation(spaceID: UUID, assetID: UUID) async throws -> AssetObservationDetail? {
         do {
             return try await get("v1/spaces/\(spaceID)/assets/\(assetID)/observation")
+        } catch FrameStationClientError.http(status: 404, reason: _) {
+            return nil
+        }
+    }
+
+    /// What the NAS's own analyzer saw in one photo or video. Nil when it
+    /// hasn't, for anyone it doesn't analyze, and from a server that predates
+    /// it.
+    public func nasObservation(spaceID: UUID, assetID: UUID) async throws -> NASObservationDetail? {
+        do {
+            return try await get("v1/spaces/\(spaceID)/assets/\(assetID)/nas-observation")
         } catch FrameStationClientError.http(status: 404, reason: _) {
             return nil
         }

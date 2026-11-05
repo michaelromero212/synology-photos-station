@@ -162,11 +162,20 @@ func configure(_ app: Application) async throws {
             do {
                 let seal = try FaceSeal.load(secretsDirectory: secrets)
                 let client = AnalyzerClient(socketPath: socket, http: app.http.client.shared)
+                // What the scenes mean, in the phones' words. Without the
+                // concept file the NAS still analyzes; nothing is scored.
+                var scorer: NASScorer?
+                do {
+                    scorer = NASScorer(app: app, concepts: try SceneConcepts.load())
+                    app.storage[NASScorerKey.self] = scorer
+                } catch {
+                    app.logger.error("analysis: scenes won't be scored: \(error)")
+                }
                 let seconds = { (name: String, fallback: Int) -> Duration in
                     .seconds(Environment.get(name).flatMap(Int.init) ?? fallback)
                 }
                 app.storage[AnalysisWorkerKey.self] = AnalysisWorker(
-                    app: app, client: client, seal: seal,
+                    app: app, client: client, seal: seal, scorer: scorer,
                     startDelay: seconds("FRAMESTATION_ANALYSIS_START_DELAY", 30),
                     idle: seconds("FRAMESTATION_ANALYSIS_IDLE", 30)
                 )
@@ -225,6 +234,7 @@ func startBackgroundWork(_ app: Application) async {
     await app.storage[BackupNudgerKey.self]?.start()
     await app.storage[RetentionWorkerKey.self]?.start()
     await app.storage[AnalysisWorkerKey.self]?.start()
+    await app.storage[NASScorerKey.self]?.start()
 
     // Ready before the first upload rather than started by it. See
     // `ExifToolDaemon.warm`.

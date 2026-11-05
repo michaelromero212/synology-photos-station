@@ -1257,7 +1257,10 @@ remote inference and is never used.
 Since November 2026 the NAS also looks for itself, because faces need more
 pixels than a thumbnail and videos need the file. Pinned open models run in a
 container of their own that has no network. It's in shadow mode for now: it
-stores what it sees without changing the page. See
+stores what it sees without changing the page. Its scenes are scored into the
+same labels and tags the phones send (`nas_observations`). A person can
+preview the Albums page and search built from them, with nothing saved, and
+can compare the two readings in the Information panel. See
 [NAS-ANALYSIS.md](NAS-ANALYSIS.md), which is also the security design for face
 data.
 
