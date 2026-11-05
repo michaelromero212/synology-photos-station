@@ -44,6 +44,8 @@ setup() {
 env_for() {
   export PYTHONPATH="$HERE" ANALYZER_MODELS="$MODELS" ANALYZER_MANIFEST="$HERE/models.json"
   export ANALYZER_THREADS="${ANALYZER_THREADS:-2}" PYTHONDONTWRITEBYTECODE=1
+  # ONNX Runtime's telemetry, off; see analyzer/__init__.py.
+  export ORT_DISABLE_TELEMETRY=1
 }
 
 case "${1:-}" in

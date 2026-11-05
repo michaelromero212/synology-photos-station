@@ -68,7 +68,7 @@ start_server(){
 stop_server(){ [ -n "$SERVER" ] && kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null; SERVER=""; }
 # The logs stay for a look after a failure; the files made for the run go,
 # and so does the database.
-trap 'stop_server; stop_analyzer; rm -rf "$ROOT/files" "$ROOT/blobroot" "$ROOT/fake.py" "$SOCK"; admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1' EXIT
+trap 'touch "$ROOT/stop-crash"; pkill -f "$ROOT/fake.py" 2>/dev/null; stop_server; stop_analyzer; rm -rf "$ROOT/files" "$ROOT/blobroot" "$ROOT/fake.py" "$ROOT/stop-crash" "$SOCK"; admin "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1' EXIT
 start_analyzer
 start_server
 
@@ -101,8 +101,8 @@ mime_of(){ case "$(echo "${1##*.}" | tr 'A-Z' 'a-z')" in heic|heif) echo image/h
 DEV_ROOT=$(sed -n 's/^export //; s/^FRAMESTATION_BLOB_ROOT=//p' "$HOME/.framestation-dev/env" 2>/dev/null | tr -d '"' | head -1)
 DEV_ROOT="${DEV_ROOT:-$HOME/.framestation-dev}"
 PHOTOS=()
-while IFS= read -r f; do PHOTOS+=("$f"); done < <(find "$DEV_ROOT/blobs" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) -size -15M 2>/dev/null | sort | head -28)
-[ "${#PHOTOS[@]}" -ge 28 ] || { echo "the dev library has too few photos (${#PHOTOS[@]})"; exit 1; }
+while IFS= read -r f; do PHOTOS+=("$f"); done < <(find "$DEV_ROOT/blobs" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) -size -15M 2>/dev/null | sort | head -29)
+[ "${#PHOTOS[@]}" -ge 29 ] || { echo "the dev library has too few photos (${#PHOTOS[@]})"; exit 1; }
 
 echo "Uploads"
 OWNER_IDS=(); i=0
@@ -190,7 +190,8 @@ stop_analyzer
 cat > "$ROOT/fake.py" <<'PY'
 # A stand-in analyzer. "lie": a scene vector of NaNs. "faces": a valid answer
 # with two made-up faces, so storing and sealing is tested without anyone's.
-import http.server, json, socketserver, sys, base64, struct, random
+# "crash": healthy, then dies on every file, as a decoder crash would.
+import http.server, json, os, socketserver, sys, base64, struct, random
 mode = sys.argv[2]
 def vec(n, value=None):
     rng = random.Random(n)
@@ -208,6 +209,8 @@ class H(http.server.BaseHTTPRequestHandler):
         self.reply({"status": "ok", "protocol": 1, "analyzer": 1, "models": {"scene": "fake@0"}, "threads": 1})
     def do_POST(self):
         self.rfile.read(int(self.headers["Content-Length"]))
+        if mode == "crash":
+            os._exit(1)
         frame = {"ms": None, "width": 1280, "height": 960, "faces": []}
         if mode == "lie":
             frame["scene"] = vec(768, float("nan"))
@@ -239,7 +242,22 @@ check "box, landmarks, score and size kept" "{0.1,0.2,0.1,0.15}:10:0.93:120:" \
 has "the stored faces open with the server's key" "Owner: 2 of 2 faces open" "$(cli analysis verify Owner)"
 q "UPDATE nas_faces SET embedding = (SELECT embedding FROM nas_faces WHERE sha256 = '$FACED_SHA' AND ordinal = 0) WHERE sha256 = '$FACED_SHA' AND ordinal = 1" >/dev/null
 has "a sealed face moved to another row won't open" "Owner: 1 of 2 faces open" "$(cli analysis verify Owner)"
-stop_analyzer; start_analyzer
+
+echo "A file that keeps crashing the analyzer is set aside"
+stop_analyzer; rm -f "$SOCK" "$ROOT/stop-crash"
+# Restarted after every crash, as Docker restarts the real one.
+( while [ ! -f "$ROOT/stop-crash" ]; do rm -f "$SOCK"; python3 "$ROOT/fake.py" "$SOCK" crash >> "$ROOT/analyzer.log" 2>&1; sleep 0.5; done ) &
+CRASHER=$!
+cp "${PHOTOS[28]}" "$ROOT/files/crash.${PHOTOS[28]##*.}"
+CRASH=$(upload "$ROOT/files/crash.${PHOTOS[28]##*.}" "$P1" "$A1" photo "$(mime_of "${PHOTOS[28]}")" "2025-11-04T12:00:00Z")
+CRASH_SHA=$(q "SELECT sha256 FROM assets WHERE id = '$CRASH'")
+until_true 150 '[ -n "$(q "SELECT 1 FROM nas_analysis WHERE sha256 = '"'$CRASH_SHA'"' AND user_id = '"'$U1'"'")" ]'
+check "three crashes in a row and it's set aside" "failed:analyzer-stopped" \
+  "$(q "SELECT status || ':' || error FROM nas_analysis WHERE sha256 = '$CRASH_SHA' AND user_id = '$U1'")"
+has "and the log says so" "set aside" "$(grep "set aside" "$ROOT/server.log")"
+touch "$ROOT/stop-crash"; pkill -f "$ROOT/fake.py" 2>/dev/null; wait "$CRASHER" 2>/dev/null
+start_analyzer
+check "the server answered throughout" "200" "$(code "$API/health")"
 
 echo "Switches and deletion"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
@@ -260,7 +278,7 @@ curl -s -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: applicatio
 
 # Deleted for good: removed, purged, and then the next sweep (one runs as
 # the server starts) takes its analysis.
-until_true 120 '[ "$(q "SELECT count(*) FROM nas_analysis WHERE user_id = '"'$U1'"' AND status = '"'done'"'")" -ge 27 ]'
+until_true 120 '[ "$(q "SELECT count(*) FROM nas_analysis WHERE user_id = '"'$U1'"' AND status = '"'done'"'")" -ge 28 ]'
 GONE_SHA=$(q "SELECT sha256 FROM assets WHERE id = '${OWNER_IDS[1]}'")
 check "a photo can be removed" "204" "$(code -X DELETE "$API/v1/spaces/$P1/assets/${OWNER_IDS[1]}" -H "$A1")"
 curl -s -X POST "$API/v1/spaces/$P1/collections/deleted/purge" -H "$A1" -H 'Content-Type: application/json' \

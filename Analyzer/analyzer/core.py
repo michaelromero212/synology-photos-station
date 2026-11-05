@@ -17,6 +17,8 @@ import time
 # OpenCV's new DNN engine warns on every model load about a setting this code
 # doesn't use; errors still come through.
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+# No telemetry from ONNX Runtime; see __init__.py. Forced, not defaulted.
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 
 import av
 import cv2
@@ -57,6 +59,7 @@ MAX_FILE_BYTES = 64 * 1024 ** 3
 PHOTO_FORMATS = ("JPEG", "MPO", "HEIF", "PNG", "TIFF", "WEBP", "GIF", "BMP")  # MPO opens as JPEG
 VIDEO_FORMATS = {"mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi", "mpegts"}
 
+ort.disable_telemetry_events()
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 pillow_heif.register_heif_opener()
 Image.init()

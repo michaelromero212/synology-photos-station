@@ -22,11 +22,17 @@ import sys
 import tempfile
 import time
 
-import av
-import numpy as np
-from PIL import Image
+# A home of its own, so anything a library writes there can be seen: ONNX
+# Runtime's telemetry, when it runs, keeps a store under the home folder.
+_HOME = tempfile.mkdtemp(prefix="analyzer-selftest-home-")
+os.environ["HOME"] = _HOME
+os.environ["XDG_CACHE_HOME"] = os.path.join(_HOME, ".cache")
 
-from . import core
+import av  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
+
+from . import core  # noqa: E402
 
 FIXTURE = os.path.abspath(os.environ.get("ANALYZER_FIXTURE", "/opt/analyzer/fixtures/hdr-gain-map.heic"))
 failures = []
@@ -181,6 +187,14 @@ def main():
         check("an unknown kind is refused", rejected(jpeg, "audio") == "bad-request")
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+    left = sorted(
+        os.path.relpath(os.path.join(d, n), _HOME)
+        for d, dirs, files in os.walk(_HOME) for n in dirs + files
+        if any(k in n.lower() for k in ("microsoft", "onnxruntime", "telemetry", "1ds"))
+    )
+    check("ONNX Runtime keeps no telemetry", not left, ", ".join(left))
+    shutil.rmtree(_HOME, ignore_errors=True)
 
     if failures:
         print("selftest FAILED: %d check(s)" % len(failures))

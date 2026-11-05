@@ -125,6 +125,15 @@ checked by hash.
   read-only root filesystem, a small tmpfs, a 2 GB memory cap, two threads,
   and nice 19, so the app, thumbnails and the stream ladder all come first.
 - **Writes nothing.** Photos and frames are decoded in memory.
+- **No telemetry.** ONNX Runtime ships Microsoft's telemetry, on by default:
+  process, device and model details sent to
+  `mobile.events.data.microsoft.com`. The analyzer switches it off before
+  ONNX Runtime loads (`ORT_DISABLE_TELEMETRY`). The self-test fails if it
+  keeps anything, and CI checks the container's log for it. On the NAS the
+  container has no network to send on anyway. Found 2026-11-05 on the first
+  deploy, from a line in the analyzer's log. The test runs before that fix, on
+  the Mac and on the NAS host, had network, so they may have sent those
+  details. Never photos or results: ONNX Runtime only ever sees tensors.
 - **Fails closed.** If it crashes or is stopped, the server keeps serving, logs
   once that the analyzer is unreachable, and tries again with backoff.
 
@@ -164,6 +173,8 @@ checked by hash.
   new uploads first, then the library from newest to oldest. A file waits until
   its thumbnails are made, and the video half of a Live Photo is skipped like
   everywhere else. A file that fails is tried three times, six hours apart.
+  A file the analyzer stops on three times in a row is set aside
+  (`analyzer-stopped`), so a crash can't hold up the rest of the library.
 - **Keyed by the file's hash**, which the server reads from the asset row. The
   hash survives `rebuild`, and a client never supplies one.
 
@@ -273,7 +284,10 @@ faces are used for anything.
    devices.
 9. **Does a third-party SDK receive media?** No. ONNX Runtime, OpenCV, PyAV and
    Pillow run inside the container, offline.
-10. **Does an analytics framework receive anything?** There is none.
+10. **Does an analytics framework receive anything?** ONNX Runtime has one,
+    Microsoft's telemetry, and it's switched off before it loads. The
+    self-test proves it keeps nothing, and the container has no network
+    besides. See §4.
 11. **Does inference need the internet?** No. The container has no network.
 12. **Does it work with networking disabled?** That's the only way it runs. CI
     runs its self-test with `--network none`.

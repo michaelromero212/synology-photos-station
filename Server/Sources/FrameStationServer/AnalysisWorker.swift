@@ -41,6 +41,9 @@ actor AnalysisWorker {
     /// whole library failed.
     private var missesInARow = 0
     static let missesBeforePausing = 10
+    /// The file the analyzer last went quiet on, and how many times in a row.
+    private var strikes: (key: String, count: Int)?
+    static let crashesBeforeSettingAside = 3
 
     private struct Window {
         var analyzed = 0
@@ -153,8 +156,28 @@ actor AnalysisWorker {
             return
         }
 
+        let key = "\(item.userID)|\(item.sha256)"
         do {
-            let analysis = try await client.analyze(path: path, kind: kind, faces: true)
+            let analysis: AnalyzerClient.Analysis
+            do {
+                analysis = try await client.analyze(path: path, kind: kind, faces: true)
+            } catch AnalyzerClient.Failure.unreachable(let why) {
+                // The analyzer answered its health check as this batch began,
+                // so going quiet on this file may mean the file took it down:
+                // a decoder crash, or more memory than its cap. Asked for again
+                // after every restart, such a file would come first forever.
+                // Three times in a row and it's set aside.
+                let count = (strikes?.key == key ? strikes?.count ?? 0 : 0) + 1
+                strikes = (key, count)
+                guard count >= Self.crashesBeforeSettingAside else {
+                    throw AnalyzerClient.Failure.unreachable(why)
+                }
+                strikes = nil
+                app.logger.notice("analysis: set aside \(item.sha256.prefix(8)), which the analyzer stopped on \(count) times in a row")
+                try await record(item, status: "failed", code: "analyzer-stopped", health: health)
+                return
+            }
+            if strikes?.key == key { strikes = nil }
             // A long analysis can outlast the server: once it's shutting down,
             // the database is no longer there to write to.
             try Task.checkCancellation()

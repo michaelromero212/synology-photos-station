@@ -23,10 +23,13 @@ RUN python /build/fetch_models.py /build/models.json /models
 # ==============================================================================
 FROM python:${PYTHON_VERSION}-slim-bookworm
 
+# ORT_DISABLE_TELEMETRY: ONNX Runtime ships Microsoft's telemetry, on by
+# default. Off, here and in the code (analyzer/__init__.py).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    ORT_DISABLE_TELEMETRY=1
 
 # Every package pinned and checked by hash, and nothing pip would pull in on
 # its own: the lock is the whole closure, so `--no-deps` loses nothing.

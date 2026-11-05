@@ -67,6 +67,10 @@ check "refuses a path outside its roots" '422 {"error":"outside-roots"}' "$OUTSI
 check "can't write to its own filesystem" "refused" \
   "$(docker exec "$NAME" sh -c 'touch /opt/analyzer/x 2>/dev/null && echo written || echo refused')"
 
+case "$(docker logs "$NAME" 2>&1)" in
+  *elemetry*) bad "no telemetry from ONNX Runtime" "nothing about telemetry in the log" "$(docker logs "$NAME" 2>&1 | grep -i telemetry | head -1)";;
+  *) ok "no telemetry from ONNX Runtime";;
+esac
 START=$(date +%s); docker stop -t 20 "$NAME" >/dev/null; STOP=$(( $(date +%s) - START ))
 [ "$STOP" -le 5 ] && ok "stops promptly (${STOP} s)" || bad "stops promptly" "≤ 5 s" "${STOP} s"
 
