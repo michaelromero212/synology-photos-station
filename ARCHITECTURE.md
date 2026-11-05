@@ -1248,11 +1248,18 @@ coordinates alone. In a person's own library they now also use what that
 person's devices saw in the photographs: a birthday party, a beach day,
 whether Christmas looked like Christmas.
 
-**Inference happens on the device, never on the NAS and never in a cloud.** The
-phone runs Apple's Vision framework on each photo's 512-pixel thumbnail and
+**Inference happens on the family's own devices and NAS, never in a cloud.**
+The phone runs Apple's Vision framework on each photo's 512-pixel thumbnail and
 sends back what Vision named, with confidences: `birthday_cake 0.92`. It sends
-nothing else. The NAS has no ML runtime and still doesn't. Apple's Private Cloud
-Compute model, new in the iOS 27 SDK, is remote inference and is never used.
+nothing else. Apple's Private Cloud Compute model, new in the iOS 27 SDK, is
+remote inference and is never used.
+
+Since November 2026 the NAS also looks for itself, because faces need more
+pixels than a thumbnail and videos need the file. Pinned open models run in a
+container of their own that has no network. It's in shadow mode for now: it
+stores what it sees without changing the page. See
+[NAS-ANALYSIS.md](NAS-ANALYSIS.md), which is also the security design for face
+data.
 
 **Meaning is decided on the NAS, in one table.** `CurationVocabulary` maps
 labels to tags (cake and candles → `birthday`) and tags to occasions, with a
@@ -1626,7 +1633,9 @@ item, which no grid shows on their own (`ImportGrouping`).
 ## 10. Deployment
 
 `docker-compose.yml` in Container Manager: `framestation` (Swift/Vapor) +
-`postgres:16`. The service binds to `127.0.0.1:8080` only.
+`postgres:16` + `analyzer` (Python and ONNX Runtime, no network, reached only
+over a Unix socket; see [NAS-ANALYSIS.md](NAS-ANALYSIS.md)). The service binds
+to `127.0.0.1:8080` only.
 
 The server is built for **linux/amd64** (the DS920+ is x86-64) via a multi-stage
 Dockerfile, from an arm64 Mac. Buildx handles the cross-compile; expect the
@@ -1712,10 +1721,11 @@ of watching progress bars before anything is evaluable.
 
 ## 12. Deferred
 
-- Face recognition and grouping — the sharpest regression from replacing
-  Synology Photos. Revisit as a setting; on-device Vision is cheap, CLIP
-  embeddings on the NAS enable natural-language search but add an ML runtime.
-- Semantic/object search.
+- ~~Face recognition and grouping~~ is under way since 2026-11-05. The NAS
+  analyzes faces, scenes and video keyframes in shadow mode, and People comes
+  after. See [NAS-ANALYSIS.md](NAS-ANALYSIS.md).
+- Semantic/object search. The NAS's scene embeddings would make
+  natural-language search possible; nothing uses them for that yet.
 - Tag search — blocked on the importer keeping IPTC keywords, see §9.
 - Memories / on-this-day.
 - Sharing outside the household (public links).

@@ -195,6 +195,7 @@ Work out which row applies **before** step 3.
 | `docker-compose.yml` or `.env.example` | copy the file up **before** pulling — see below |
 | A new bind mount in compose | create the directory on the NAS first; Synology's Docker fails rather than creating it |
 | App or `Packages/` only | nothing. That ships through Xcode, not the NAS |
+| `Analyzer/` | none: CI publishes `framestation-analyzer`, and the same pull and `up -d` update it |
 
 `0025_placement_lookup` is a data migration as well as an index: it marks the
 video half of every Live Photo that was deleted before deletions took both
@@ -220,6 +221,61 @@ com.michaelromero.FrameStation`. Debug builds are a separate app
 (`….FrameStation.dev`) and register sandbox tokens; those are sent under the
 `.dev` topic automatically. A key that can't be read turns push off — it is
 logged — and never stops the server starting.
+
+### Turning on NAS analysis
+
+The NAS's own look at photos and videos (faces, scenes, video keyframes) runs
+in a second container, `analyzer`, with no network at all. See
+[NAS-ANALYSIS.md](NAS-ANALYSIS.md). It changes nothing anyone sees: shadow
+mode stores what it finds, and only for a library that's been enrolled.
+
+The first deploy carries migration `0036_nas_analysis` and a changed compose
+file, so snapshot `pgdata` first, then copy the compose file up:
+
+```bash
+cat docker-compose.yml | ssh nas 'cat > /volume1/docker/framestation/docker-compose.yml'
+```
+
+Pull both images and start them. The analyzer image is about 600 MB the first
+time, most of it the three model files:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose up -d'
+```
+
+Check that both containers came up and found each other:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose logs --tail 3 analyzer && sudo /usr/local/bin/docker compose logs server | grep "analysis" | tail -3'
+```
+
+- **Analyzer log:** expect `models verified and loaded in … s`, then
+  `ready: version 1, protocol 1, 2 threads, 3 roots`.
+- **Server log:** expect `analysis: analyzer ready, version 1, 2 threads, …`.
+  If it says the analyzer `isn't answering`, the analyzer is still loading or
+  stopped. The server is fine either way.
+- **If the analyzer pull says `unauthorized`:** the package is new, and GHCR
+  makes new packages private. Either log the NAS in again (see "When the pull
+  says `unauthorized`" below) or set `framestation-analyzer` to public under
+  the GitHub profile's Packages → Package settings.
+
+Then enroll one library. Use the person's FrameStation name or their DSM
+account name:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec server ./FrameStationServer analysis enroll "<name>"'
+```
+
+Progress, failures by reason, and the analyzer's models:
+
+```bash
+ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose exec server ./FrameStationServer analysis status'
+```
+
+To take a library out again and delete what was stored, faces included, use
+`analysis remove "<name>"`. `docker compose stop analyzer` pauses everything;
+the server logs once and waits. After restoring a database, `analysis verify
+"<name>"` says whether the faces still open with the key in `secrets/`.
 
 ### The old `browse/` tree
 

@@ -250,3 +250,79 @@ jobs:
           for index, layer in enumerate(sorted(layers, key=lambda l: -l["size"]), 1):
               print(f"| {index} | {layer['size'] / 1e6:.1f} MB |")
           REPORT
+
+  # The analyzer (Analyzer/, NAS-ANALYSIS.md): what the NAS sees in photos and
+  # videos. An image of its own, so a change to either never rebuilds the
+  # other, with a cache scope of its own for the same reason.
+  analyzer-image:
+    name: Analyzer image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+      ANALYZER_IMAGE: ${{ github.repository_owner }}/framestation-analyzer
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.ANALYZER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # The build runs the self-test too: models by hash, HEIC with a gain map,
+      # rotation, video, the same bytes twice, and the path rules.
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Analyzer/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: framestation-analyzer:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: FRAMESTATION_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=analyzer
+          cache-to: type=gha,mode=max,scope=analyzer
+
+      # Again, with no network, as it runs on the NAS: it must work and must
+      # reach nothing.
+      - name: Self-test with no network
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -e SELFTEST_REQUIRE_NO_NETWORK=1 -e SELFTEST_REQUIRE_FIXTURE=1 \
+            --entrypoint python framestation-analyzer:ci -m analyzer.selftest
+
+      - name: Serve on a socket, as on the NAS
+        run: Scripts/smoke-analyzer-image.sh framestation-analyzer:ci
+
+      - name: Push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Analyzer/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: FRAMESTATION_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=analyzer

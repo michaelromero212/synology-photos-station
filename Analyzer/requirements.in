@@ -1,0 +1,14 @@
+# What the analyzer imports. Exact versions, so the same image always gives the
+# same answers. Regenerate the lock after changing anything here:
+#
+#   uv pip compile Analyzer/requirements.in --universal --python-version 3.12 \
+#     --generate-hashes -o Analyzer/requirements.lock
+#
+# Check a new set on the NAS's own CPU before shipping it (no AVX there): see
+# NAS-ANALYSIS.md, section 8.
+numpy==2.5.4
+onnxruntime==1.31.1
+opencv-python-headless==5.0.0.93
+av==19.0.2
+pillow==13.0.0
+pillow-heif==1.8.1

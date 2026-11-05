@@ -73,6 +73,7 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")
     app.asyncCommands.use(RepairDimensionsCommand(), as: "repair-dimensions")
     app.asyncCommands.use(RetireLegacyBrowseCommand(), as: "retire-legacy-browse")
+    app.asyncCommands.use(AnalysisCommand(), as: "analysis")
 
     try app.register(collection: HealthController())
     try app.grouped("v1").register(collection: AuthController())
@@ -152,6 +153,29 @@ func configure(_ app: Application) async throws {
 
         let retention = RetentionWorker(app: app)
         app.storage[RetentionWorkerKey.self] = retention
+
+        // What the NAS sees in photos and videos, from the analyzer container
+        // beside this one (NAS-ANALYSIS.md). Off unless its socket is named,
+        // and a missing or broken analyzer never stops the server: the worker
+        // logs once and waits for it.
+        if let socket = Environment.get("FRAMESTATION_ANALYZER_SOCKET"), !socket.isEmpty {
+            do {
+                let seal = try FaceSeal.load(secretsDirectory: secrets)
+                let client = AnalyzerClient(socketPath: socket, http: app.http.client.shared)
+                let seconds = { (name: String, fallback: Int) -> Duration in
+                    .seconds(Environment.get(name).flatMap(Int.init) ?? fallback)
+                }
+                app.storage[AnalysisWorkerKey.self] = AnalysisWorker(
+                    app: app, client: client, seal: seal,
+                    startDelay: seconds("FRAMESTATION_ANALYSIS_START_DELAY", 30),
+                    idle: seconds("FRAMESTATION_ANALYSIS_IDLE", 30)
+                )
+                app.lifecycle.use(AnalysisWorkerLifecycle())
+                app.logger.info("analysis: expecting the analyzer at \(socket)")
+            } catch {
+                app.logger.error("analysis disabled — the face key in \(secrets) could not be read or made: \(error)")
+            }
+        }
     }
 
     app.logger.info("framestation \(Build.version) configured")
@@ -200,6 +224,7 @@ func startBackgroundWork(_ app: Application) async {
     await app.storage[ActivitySweeperKey.self]?.start()
     await app.storage[BackupNudgerKey.self]?.start()
     await app.storage[RetentionWorkerKey.self]?.start()
+    await app.storage[AnalysisWorkerKey.self]?.start()
 
     // Ready before the first upload rather than started by it. See
     // `ExifToolDaemon.warm`.

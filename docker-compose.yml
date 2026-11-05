@@ -75,6 +75,10 @@ services:
       FRAMESTATION_APNS_TOPIC: ${FRAMESTATION_APNS_TOPIC:-}
       FRAMESTATION_APNS_KEY_PATH: ${FRAMESTATION_APNS_KEY_PATH:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The analyzer beside this container (NAS-ANALYSIS.md). Unset, the server
+      # doesn't analyze; with the analyzer stopped or missing, it carries on and
+      # waits for it.
+      FRAMESTATION_ANALYZER_SOCKET: /run/framestation-analyzer/analyzer.sock
     # Root, because the layout above writes into each person's DSM home and
     # hands the file to them with chown — both of which a non-root container
     # cannot do. The image itself runs as vapor:vapor and is happy to; this
@@ -110,7 +114,53 @@ services:
       # FRAMESTATION_CLONE_*). It also lets the import read a Synology library
       # where it lies: `import --path /volume1/photo`.
       - ${FRAMESTATION_VOLUME:-/volume1}:${FRAMESTATION_VOLUME:-/volume1}
+      # The analyzer's socket: the only way into that container.
+      - analyzer-run:/run/framestation-analyzer
     ports:
       # Loopback only. DSM's reverse proxy is the sole entry point, so the
       # container is never directly reachable from the LAN or the internet.
       - "127.0.0.1:8080:8080"
+
+  analyzer:
+    # What the NAS sees in photos and videos: pinned open models (SigLIP 2,
+    # YuNet, SFace), checked by hash at every start. See NAS-ANALYSIS.md.
+    # Built by CI for linux/amd64 and pulled like the server.
+    image: ${FRAMESTATION_ANALYZER_IMAGE:-ghcr.io/michaelromero212/framestation-analyzer:latest}
+    build:
+      context: .
+      dockerfile: Analyzer/Dockerfile
+    restart: unless-stopped
+    # No network at all: not the internet, not the LAN, not the database, not
+    # the server's port. The socket in analyzer-run is the one way in, and
+    # nothing this container reads can leave it except as numbers the server
+    # checks.
+    network_mode: none
+    # Root, as for the server, because each DSM home is private to its person,
+    # but with every capability dropped except the two that read files, no way
+    # to gain more, and a read-only root filesystem. Every media mount is
+    # read-only too, so nothing here can change a photo.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # Measured at 1.2 GB on the NAS; a runaway file is stopped here rather
+    # than taking memory from the server and Postgres.
+    mem_limit: 2g
+    environment:
+      ANALYZER_THREADS: ${FRAMESTATION_ANALYZER_THREADS:-2}
+      # Where the server's paths point, mounted at the same places. A path
+      # anywhere else is refused.
+      ANALYZER_ROOTS: /homes:/shared:/data/blobs
+    volumes:
+      - analyzer-run:/run/framestation-analyzer
+      - ${FRAMESTATION_HOMES:-/volume1/homes}:/homes:ro
+      - ${FRAMESTATION_MEDIA:-/volume1/FrameStation}:/shared:ro
+      # The blob store only: not secrets/, .env or pgdata beside it.
+      - ${FRAMESTATION_DATA:-/volume1/docker/framestation}/blobs:/data/blobs:ro
+
+volumes:
+  # A Docker volume, so there's no folder to create on the NAS first.
+  analyzer-run:

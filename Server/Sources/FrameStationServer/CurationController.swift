@@ -147,6 +147,11 @@ struct CurationController: RouteCollection {
         try await req.sql.raw("""
             DELETE FROM curated_albums WHERE user_id = \(bind: device.userID) AND is_event
             """).run()
+        // And what the NAS's own analyzer saw, faces included (they go with
+        // their rows). See NAS-ANALYSIS.md §6.
+        try await req.sql.raw("""
+            DELETE FROM nas_analysis WHERE user_id = \(bind: device.userID)
+            """).run()
         req.logger.info("curation: deleted a person's analysis data")
         return .noContent
     }

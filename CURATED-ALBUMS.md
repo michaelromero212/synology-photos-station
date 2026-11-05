@@ -17,7 +17,9 @@ written. Implementation started 2026-10-05, after the answers recorded in §8.
   trip cards, which keeps every older app able to open them.
 - Saved albums with per-photo edits are the next phase (phase 4).
 
-The current design is in ARCHITECTURE.md, "Curated albums".
+The current design is in ARCHITECTURE.md, "Curated albums". Faces, videos
+and the NAS's own analyzer, in shadow mode since 2026-11-05, are in
+[NAS-ANALYSIS.md](NAS-ANALYSIS.md).
 
 The product spec is [CURATED-ALBUMS-SPEC.md](CURATED-ALBUMS-SPEC.md), cited
 here as "spec §N". This document answers its first task (spec §61) against the

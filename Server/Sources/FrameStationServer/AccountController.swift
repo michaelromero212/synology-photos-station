@@ -103,6 +103,8 @@ struct AccountController: RouteCollection {
                     "DELETE FROM space_asset_favorites WHERE user_id = \(bind: userID)",
                     "DELETE FROM occasion_names WHERE user_id = \(bind: userID)",
                     "DELETE FROM media_observations WHERE user_id = \(bind: userID)",
+                    // What the NAS saw in their photos, faces included.
+                    "DELETE FROM nas_analysis WHERE user_id = \(bind: userID)",
                     "DELETE FROM curated_albums WHERE user_id = \(bind: userID)",
                     "DELETE FROM content_reports WHERE reporter_id = \(bind: userID)",
                     """
@@ -126,7 +128,7 @@ struct AccountController: RouteCollection {
                     UPDATE users
                     SET display_name = 'Former member', avatar_sha256 = NULL,
                         dsm_username = NULL, dsm_uid = NULL, dsm_home = NULL,
-                        activity_read_at = NULL, deleted_at = now()
+                        activity_read_at = NULL, nas_analysis = 'off', deleted_at = now()
                     WHERE id = \(bind: userID)
                     """).run()
 

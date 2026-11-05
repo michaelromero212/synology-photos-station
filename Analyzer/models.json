@@ -1,0 +1,39 @@
+{
+  "_comment": "The analyzer's models, each pinned to a commit and checked by SHA-256 at build and at every start. See NAS-ANALYSIS.md section 3.",
+  "models": [
+    {
+      "role": "scene",
+      "name": "siglip2-base-patch32-256",
+      "repo": "onnx-community/siglip2-base-patch32-256-ONNX",
+      "revision": "7efccb86b5b6601bfe9e14326e1c11b40b68d44c",
+      "path": "onnx/vision_model.onnx",
+      "file": "siglip2-base-patch32-256-vision.onnx",
+      "sha256": "0ddb7507cfcb54c2cd503029949add9dc6586de67164bb69c2c09588cdcc9719",
+      "bytes": 378478689,
+      "license": "Apache-2.0",
+      "upstream": "google/siglip2-base-patch32-256@94dffa8cb1179de3e03f091dbc3917e5d5a9ae84"
+    },
+    {
+      "role": "face-detector",
+      "name": "yunet-2023mar",
+      "repo": "opencv/face_detection_yunet",
+      "revision": "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+      "path": "face_detection_yunet_2023mar.onnx",
+      "file": "face_detection_yunet_2023mar.onnx",
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "bytes": 232589,
+      "license": "MIT"
+    },
+    {
+      "role": "face-recognizer",
+      "name": "sface-2021dec",
+      "repo": "opencv/face_recognition_sface",
+      "revision": "3d7082438a6e4551e840c9b2bb60b71e8da4b524",
+      "path": "face_recognition_sface_2021dec.onnx",
+      "file": "face_recognition_sface_2021dec.onnx",
+      "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "bytes": 38696353,
+      "license": "Apache-2.0"
+    }
+  ]
+}
