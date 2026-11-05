@@ -1260,9 +1260,10 @@ container of their own that has no network. It's in shadow mode for now: it
 stores what it sees without changing the page. Its scenes are scored into the
 same labels and tags the phones send (`nas_observations`). A person can
 preview the Albums page and search built from them, with nothing saved, and
-can compare the two readings in the Information panel. See
-[NAS-ANALYSIS.md](NAS-ANALYSIS.md), which is also the security design for face
-data.
+can compare the two readings in the Information panel. The faces it finds are
+grouped into People on the Albums page, which the person names and corrects
+on their iPhone, iPad or Mac. See [NAS-ANALYSIS.md](NAS-ANALYSIS.md), which is
+also the security design for face data.
 
 **Meaning is decided on the NAS, in one table.** `CurationVocabulary` maps
 labels to tags (cake and candles → `birthday`) and tags to occasions, with a
@@ -1725,8 +1726,10 @@ of watching progress bars before anything is evaluable.
 ## 12. Deferred
 
 - ~~Face recognition and grouping~~ is under way since 2026-11-05. The NAS
-  analyzes faces, scenes and video keyframes in shadow mode, and People comes
-  after. See [NAS-ANALYSIS.md](NAS-ANALYSIS.md).
+  analyzes faces, scenes and video keyframes in shadow mode, and People
+  (grouping, naming, "Is this Emma?") is built. Titles that know who was
+  there, and albums from who's often together, come next. See
+  [NAS-ANALYSIS.md](NAS-ANALYSIS.md).
 - Semantic/object search. The NAS's scene embeddings would make
   natural-language search possible; nothing uses them for that yet.
 - Tag search — blocked on the importer keeping IPTC keywords, see §9.

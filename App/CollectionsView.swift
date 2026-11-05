@@ -407,6 +407,7 @@ struct CollectionHeroCard: View {
         case .recentlyDeleted: return "REMOVED"
         case .recentlyAdded: return "JUST ARRIVED"
         case .favorites: return "YOUR FAVORITES"
+        case .person: return "SOMEONE YOU KNOW"
         }
     }
 }
@@ -578,8 +579,21 @@ struct CollectionDetailView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
     let collection: CollectionSummary
+    /// Drawn above the photos, for a page with more to say than a subtitle:
+    /// a person's face, name and questions.
+    var header: AnyView? = nil
+    /// What a long press on one photo offers, for a page with something to
+    /// offer: "Not Emma" on hers.
+    var photoActions: ((TimelineItem) -> AnyView)? = nil
+    /// Moved by the page above to load again, for a change this device made
+    /// that `FollowsOwnChanges` doesn't hear about.
+    var revision = 0
 
     @State private var items: [TimelineItem] = []
+    /// Where the next page starts, for a collection that comes a page at a
+    /// time: a person's photos. Nil once everything is here.
+    @State private var nextOffset: Int?
+    @State private var isLoadingMore = false
     @State private var isLoading = true
     @State private var failure: String?
     /// Everything, rather than the highlights. Off whenever a collection
@@ -640,7 +654,7 @@ struct CollectionDetailView: View {
         // rebuilt the view. Keying the load to the collection restarts it the
         // moment the row changes. The highlights switch is part of the key, so
         // flipping it loads the other set.
-        .task(id: "\(collection.key)#\(showAll)") { await load() }
+        .task(id: "\(collection.key)#\(showAll)#\(revision)") { await load() }
         // A photo deleted from the viewer drops out of the trip it was in, and
         // one restored comes back to it. See `FollowsOwnChanges`.
         .modifier(FollowsOwnChanges(session: session) { await load() })
@@ -670,6 +684,9 @@ struct CollectionDetailView: View {
 
     private func stack(width: CGFloat) -> some View {
         LazyVStack(alignment: .leading, spacing: 0) {
+            if let header {
+                header
+            }
             if let subtitle = collection.subtitle {
                 Text(subtitle)
                     .font(.subheadline)
@@ -698,9 +715,18 @@ struct CollectionDetailView: View {
             ) { entry, size in
                 if case .item(let item) = entry {
                     tile(item, size: size)
+                        .modifier(PhotoActions(item: item, actions: photoActions))
                 }
             }
             .padding(.horizontal, spacing)
+
+            // The next page, asked for as the end comes into view.
+            if nextOffset != nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .onAppear { Task { await loadMore() } }
+            }
         }
     }
 
@@ -758,21 +784,64 @@ struct CollectionDetailView: View {
         // one's grid sitting under the new title for a beat. On first appearance
         // `items` is already empty, so this is a no-op there. Switching between
         // highlights and everything keeps the grid up until the other arrives.
-        if loadedKey != collection.key { items = [] }
+        if loadedKey != collection.key {
+            items = []
+            nextOffset = nil
+        }
         failure = nil
         defer { isLoading = false }
         let wantHighlights = offersHighlights && !showAll
+        // Coming back to the same collection — a photo taken out of it, say —
+        // brings back as many pages as were showing, so the grid doesn't
+        // shrink to its first page under someone halfway down it.
+        let showing = loadedKey == collection.key ? items.count : 0
         do {
-            let page = try await client.collectionItems(
+            var page = try await client.collectionItems(
                 spaceID: space.id, kind: collection.kind, key: collection.key,
                 highlights: wantHighlights ? Self.highlightCount : nil
             )
-            items = page.items
+            var fetched = page.items
+            while fetched.count < showing, let offset = page.nextOffset {
+                page = try await client.collectionItems(
+                    spaceID: space.id, kind: collection.kind, key: collection.key, offset: offset
+                )
+                fetched += page.items
+            }
+            items = fetched
             total = page.total
+            nextOffset = page.nextOffset
             loadedKey = collection.key
             if wantHighlights { highlightsAvailable = page.items.count < page.total }
         } catch {
             failure = ConnectionMonitor.mediaMessage(for: error, state: nil)
+        }
+    }
+
+    private func loadMore() async {
+        guard let client = session.client, let offset = nextOffset, !isLoadingMore else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        let key = collection.key
+        guard let page = try? await client.collectionItems(
+            spaceID: space.id, kind: collection.kind, key: key, offset: offset
+        ), key == collection.key, offset == nextOffset else { return }
+        // A photo can move between pages while they're read; never twice.
+        let seen = Set(items.map(\.id))
+        items += page.items.filter { !seen.contains($0.id) }
+        nextOffset = page.nextOffset
+    }
+}
+
+/// A page's long-press actions on one photo, where it has any.
+private struct PhotoActions: ViewModifier {
+    let item: TimelineItem
+    let actions: ((TimelineItem) -> AnyView)?
+
+    func body(content: Content) -> some View {
+        if let actions {
+            content.contextMenu { actions(item) }
+        } else {
+            content
         }
     }
 }

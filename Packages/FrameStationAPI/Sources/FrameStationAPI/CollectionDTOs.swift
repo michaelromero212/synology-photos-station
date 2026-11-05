@@ -38,6 +38,9 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     /// lets the Swift read like the rest of the codebase without that mattering.
     /// It becomes a one-word change the day the server and the app ship together.
     case favorites = "favourites"
+    /// Everyone the NAS found as one person in the owner's library, keyed by
+    /// the person's id. Older apps skip a kind they don't know.
+    case person
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -227,13 +230,19 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// tradition, up to twelve, newest first. The phone takes the first few,
     /// the Mac a row. Nil from an older server; `days` is then the section.
     public let wideDays: [CollectionSummary]?
+    /// The people in the owner's library, for someone the NAS analyzes: the
+    /// named first, then the rest by how many photos they're in. Optional
+    /// and its own field, like `traditions`: older apps ignore it, and a
+    /// newer one talking to an older server, or anyone else's library, finds
+    /// nil and draws no People row.
+    public let people: [PersonSummary]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
-        case allTrips, allOccasions, featured, traditions, wideTrips, wideDays
+        case allTrips, allOccasions, featured, traditions, wideTrips, wideDays, people
     }
 
     /// Read card by card, so a card this build can't read is left out instead
@@ -274,6 +283,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
             .map { $0.compactMap(\.value) }
         wideTrips = cards(.wideTrips)
         wideDays = cards(.wideDays)
+        people = (try? container.decodeIfPresent([Skippable<PersonSummary>].self, forKey: .people))?
+            .map { $0.compactMap(\.value) }
     }
 
     public init(
@@ -290,8 +301,10 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         featured: [CollectionSummary]? = nil,
         traditions: [Tradition]? = nil,
         wideTrips: [CollectionSummary]? = nil,
-        wideDays: [CollectionSummary]? = nil
+        wideDays: [CollectionSummary]? = nil,
+        people: [PersonSummary]? = nil
     ) {
+        self.people = people
         self.featured = featured
         self.traditions = traditions
         self.wideTrips = wideTrips
@@ -331,8 +344,12 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// while the page insisted it wasn't empty. A library of scans with no
     /// dates and no coordinates legitimately has none of this, and deserves to
     /// be told so.
+    ///
+    /// People count. They're something the library found, like a trip, and
+    /// a library young enough to have no trips yet may well have people.
     public var isEmpty: Bool {
         hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
+            && (people?.isEmpty ?? true)
     }
 }
 

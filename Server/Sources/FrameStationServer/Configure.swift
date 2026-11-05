@@ -95,6 +95,7 @@ func configure(_ app: Application) async throws {
     try app.grouped("v1").register(collection: CurationController())
     try app.grouped("v1").register(collection: SafetyController())
     try app.grouped("v1").register(collection: AccountController())
+    try app.grouped("v1").register(collection: PeopleController())
 
     // What only the long-running server needs. Built here, before anything is
     // served, since requests find some of it in `app.storage`, and started by
@@ -179,6 +180,13 @@ func configure(_ app: Application) async throws {
                     startDelay: seconds("FRAMESTATION_ANALYSIS_START_DELAY", 30),
                     idle: seconds("FRAMESTATION_ANALYSIS_IDLE", 30)
                 )
+                // Who is who, in each enrolled library. See PeopleClusterer.
+                app.storage[PeopleClustererKey.self] = PeopleClusterer(
+                    app: app, seal: seal,
+                    startDelay: seconds("FRAMESTATION_PEOPLE_START_DELAY", 45),
+                    interval: seconds("FRAMESTATION_PEOPLE_INTERVAL", 60),
+                    settle: seconds("FRAMESTATION_PEOPLE_SETTLE", 900)
+                )
                 app.lifecycle.use(AnalysisWorkerLifecycle())
                 app.logger.info("analysis: expecting the analyzer at \(socket)")
             } catch {
@@ -235,6 +243,7 @@ func startBackgroundWork(_ app: Application) async {
     await app.storage[RetentionWorkerKey.self]?.start()
     await app.storage[AnalysisWorkerKey.self]?.start()
     await app.storage[NASScorerKey.self]?.start()
+    await app.storage[PeopleClustererKey.self]?.start()
 
     // Ready before the first upload rather than started by it. See
     // `ExifToolDaemon.warm`.

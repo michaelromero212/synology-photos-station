@@ -422,5 +422,6 @@ struct AnalysisWorkerLifecycle: LifecycleHandler {
     func shutdownAsync(_ application: Application) async {
         await application.storage[AnalysisWorkerKey.self]?.stop()
         await application.storage[NASScorerKey.self]?.stop()
+        await application.storage[PeopleClustererKey.self]?.stop()
     }
 }

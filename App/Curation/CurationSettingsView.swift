@@ -61,7 +61,8 @@ struct CurationSettingsView: View {
                 } footer: {
                     Text(
                         "Your NAS also looks at your photos and videos itself, with no "
-                        + "internet connection. Turn on the preview to see the Albums page "
+                        + "internet connection, and puts the people it finds under People "
+                        + "on the Albums page. Turn on the preview to see the Albums page "
                         + "and search built from what it found. Nothing is saved while you "
                         + "preview, and turning it off puts everything back as it was."
                     )
@@ -75,11 +76,7 @@ struct CurationSettingsView: View {
                 }
                 .disabled(settings == nil || isSaving)
             } footer: {
-                Text(
-                    "Removes everything your devices recognized and turns Curate "
-                    + "Albums off. Your photos, your albums and any names you gave "
-                    + "occasions stay as they are."
-                )
+                Text(deleteFooter)
             }
 
             if let failure {
@@ -99,11 +96,33 @@ struct CurationSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "Everything your devices recognized in your photos will be removed, "
-                + "and Curate Albums will be turned off."
-            )
+            Text(deleteMessage)
         }
+    }
+
+    /// What Delete AI Data takes, said for whoever is reading. Someone the
+    /// NAS analyzes loses the people it found too, and the names they gave
+    /// them, so the screen says so.
+    private var deleteFooter: String {
+        if nas != nil {
+            return "Removes everything your devices and your NAS recognized, including "
+                + "People and the names you gave them, and turns Curate Albums off. "
+                + "Your photos, your albums and any names you gave occasions stay "
+                + "as they are."
+        }
+        return "Removes everything your devices recognized and turns Curate "
+            + "Albums off. Your photos, your albums and any names you gave "
+            + "occasions stay as they are."
+    }
+
+    private var deleteMessage: String {
+        if nas != nil {
+            return "Everything your devices and your NAS recognized in your photos will "
+                + "be removed, including People and the names you gave them, and "
+                + "Curate Albums will be turned off."
+        }
+        return "Everything your devices recognized in your photos will be removed, "
+            + "and Curate Albums will be turned off."
     }
 
     @ViewBuilder
@@ -218,6 +237,8 @@ struct CurationSettingsView: View {
             settings = try await client.updateCurationSettings(enabled: false)
             try await client.deleteCurationData()
             failure = nil
+            // People go with it; the Albums page asks again on its next visit.
+            session.albumsSourceChanged()
             await runner?.refreshStatus()
         } catch {
             failure = "Couldn't delete: \(error.localizedDescription)"

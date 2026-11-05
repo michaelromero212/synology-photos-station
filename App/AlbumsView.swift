@@ -576,6 +576,7 @@ struct AlbumsView: View {
                         // has to be the thing you see without looking.
                         hero(found, space: space, width: proxy.size.width)
                         standing(found, space: space)
+                        people(found, space: space)
                         automatic(found, space: space)
                         overTheYears(found, space: space)
                     }
@@ -626,6 +627,59 @@ struct AlbumsView: View {
                 }
             }
             .padding(.horizontal, spacing)
+        }
+    }
+
+    /// The people the NAS found in this library, the named first, along a row
+    /// of faces the way Photos draws People. Absent for a library the NAS
+    /// doesn't analyze, from a server that predates it, and until someone has
+    /// been found in three photos.
+    ///
+    /// Right under the standing shelves: who's in the photos is the next thing
+    /// people come to the page for, ahead of anything the library noticed.
+    @ViewBuilder
+    private func people(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if let people = found.people, !people.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    sectionHeader("People")
+                    Spacer(minLength: 8)
+                    // Only when there may be more than the row holds.
+                    if people.count >= PeopleMetrics.pageLimit {
+                        NavigationLink {
+                            PeopleListView(session: session, space: space, initial: people)
+                        } label: {
+                            Text("See All")
+                                .font(.body)
+                                .foregroundStyle(.tint)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, spacing)
+                        .padding(.bottom, 10)
+                    }
+                }
+                ScrollView(.horizontal) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        ForEach(people) { person in
+                            NavigationLink {
+                                PersonView(session: session, space: space, person: person)
+                            } label: {
+                                PersonBubble(session: session, spaceID: space.id, person: person)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, spacing)
+                    #if os(tvOS)
+                    // Room for a focused face to grow.
+                    .padding(.vertical, 20)
+                    #endif
+                }
+                .scrollIndicators(.hidden)
+                #if os(tvOS)
+                .scrollClipDisabled()
+                #endif
+            }
         }
     }
 
@@ -1920,6 +1974,7 @@ extension AlbumsView {
                     if let space, let found {
                         macMemories(found, space: space)
                         macPinned(found, space: space, side: side, across: across)
+                        macPeople(found, space: space)
                     }
                     macAlbums(store, side: side, across: across)
                     macShared(store, side: side, across: across)
@@ -2109,6 +2164,46 @@ extension AlbumsView {
                     }
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// The people the NAS found, along a row of faces under Pinned, as the
+    /// phone has them under its shelves. A library the NAS analyzes always
+    /// has the section, saying what will be there until someone is; any other
+    /// has none.
+    @ViewBuilder
+    private func macPeople(_ found: CollectionsResponse, space: SpaceDTO) -> some View {
+        if let people = found.people {
+            macSection(
+                "people", "People",
+                destination: people.count >= PeopleMetrics.pageLimit
+                    ? { AnyView(PeopleListView(session: session, space: space, initial: people)) }
+                    : nil,
+                inset: people.isEmpty
+            ) {
+                if people.isEmpty {
+                    MacEmptySection(
+                        symbol: "person.2", title: "No People Yet",
+                        message: "As your NAS looks through your photos and videos, the "
+                            + "people in them appear here, once they're in three or more."
+                    )
+                } else {
+                    ScrollView(.horizontal) {
+                        LazyHStack(alignment: .top, spacing: Self.macGap) {
+                            ForEach(people) { person in
+                                NavigationLink {
+                                    PersonView(session: session, space: space, person: person)
+                                } label: {
+                                    PersonBubble(session: session, spaceID: space.id, person: person)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, Self.macMargin)
+                    }
+                    .scrollIndicators(.hidden)
+                }
             }
         }
     }

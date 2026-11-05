@@ -624,8 +624,13 @@ final class AppSession {
     /// upload once committed, but not what a curation pass reports about the
     /// photos it looked at: that arrives in batches all the time it runs, and
     /// changes nothing on the page until the NAS has decided something.
+    ///
+    /// Nor an answer to "Is this Emma?". Those come a second or two apart,
+    /// and each one reloaded the page underneath; that page asks again once,
+    /// when the questions close (`PersonView`).
     private func noteWrite(_ path: String) {
-        let changesLibrary = (path.contains("/v1/spaces") && !path.contains("/curation/"))
+        let changesLibrary = (path.contains("/v1/spaces") && !path.contains("/curation/")
+                && !(path.contains("/people/") && path.hasSuffix("/suggestions")))
             || path.contains("/v1/albums")
             || (path.contains("/v1/uploads/") && path.hasSuffix("/commit"))
         guard changesLibrary else { return }

@@ -131,9 +131,12 @@ extension FrameStationClient {
     /// taken, with `total` still counting them all. The answer holds
     /// everything when the server can't choose: the collection isn't analyzed
     /// enough, it's small, or the server predates highlights.
+    ///
+    /// A person's photos come a page at a time, newest first: `nextOffset`
+    /// is where the next page starts, passed back as `offset`.
     public func collectionItems(
         spaceID: UUID, kind: CollectionKind, key: String, on date: Date = Date(),
-        highlights: Int? = nil
+        highlights: Int? = nil, offset: Int? = nil
     ) async throws -> SearchResults {
         let encodedKey = key.addingPercentEncoding(
             withAllowedCharacters: .urlQueryValue
@@ -142,6 +145,7 @@ extension FrameStationClient {
             "v1/spaces/\(spaceID)/collections/items"
             + "?kind=\(kind.rawValue)&key=\(encodedKey)&date=\(Self.dayStamp(date))"
             + (highlights.map { "&highlights=\($0)" } ?? "")
+            + (offset.map { "&offset=\($0)" } ?? "")
         )
     }
 

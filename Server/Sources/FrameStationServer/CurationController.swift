@@ -210,6 +210,11 @@ struct CurationController: RouteCollection {
         try await req.sql.raw("""
             DELETE FROM nas_analysis WHERE user_id = \(bind: device.userID)
             """).run()
+        // And the people it found, names included: a name only ever meant
+        // the faces it was given to, and those are gone.
+        try await req.sql.raw("""
+            DELETE FROM people WHERE user_id = \(bind: device.userID)
+            """).run()
         req.logger.info("curation: deleted a person's analysis data")
         return .noContent
     }

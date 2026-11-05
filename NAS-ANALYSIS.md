@@ -3,7 +3,8 @@
 **Status:** shadow mode, running on the NAS since 2026-11-05. The NAS analyzes
 and the server stores the results. Since phase 2 (§7), what the scenes mean can
 be judged on the phone, photo by photo and as a preview of the whole Albums
-page. Nothing changes for anyone until they switch it on.
+page. Since phase 3, the people it finds are on the Albums page, to name and
+correct. Nothing else changes for anyone until they switch it on.
 
 This is the "separate explicit product/security design" that
 [CURATED-ALBUMS-SPEC.md](CURATED-ALBUMS-SPEC.md) §36 requires before anything
@@ -190,10 +191,9 @@ checked by hash.
 The rules:
 
 1. **It never leaves the NAS.** No endpoint returns a face embedding, now or
-   later. In shadow mode no endpoint returns anything about faces, beyond the
-   count of people the Information panel shows (the phones send one too). When
-   People ships, apps receive names, counts and which photos, never an
-   embedding, and only for the person's own library.
+   later. Apps receive names, counts, which photos, and pictures of faces
+   cropped from the person's own photos, and only for the person's own
+   library.
 2. **Sealed at rest.** Every embedding is encrypted with AES-GCM under a key in
    `secrets/` (root-only, like the push key) and bound to its own row. A
    database dump, or a copy of `pgdata`, doesn't carry usable face templates.
@@ -288,15 +288,67 @@ faces are used for anything.
      analyzer whose scene vectors are solved to match one concept each.
      Scaling a concept's own vector instead would match dozens of others,
      because the 224 share a median cosine of 0.84.
-3. **People.** This phase brings:
-   - face groups per library;
-   - naming on iPhone and iPad, shown everywhere;
-   - an occasional "Is this Emma?";
-   - titles that know who was there;
-   - albums from patterns, such as two people often together.
+3. **People (first part built).** Faces grouped per library, named by the
+   person, and an occasional "Is this Emma?". Still to come in this phase:
+   titles that know who was there, albums from patterns such as two people
+   often together, and the People switch (§6, rule 7) before anyone else's
+   library is analyzed.
+   - **Grouping.** `PeopleClusterer` compares each face with each person's
+     average face (cosine on SFace's numbers), within one library only.
+     - At 0.50 or closer, a face joins that person (0.56 for a face under
+       40 px, which is blurrier).
+     - At 0.40 to someone named, it becomes a question for them, at most 60
+       each.
+     - The rest wait. Four alike in three files become a new, unnamed
+       person, and unnamed people at 0.62 become one.
+     - Only faces with a detection score of 0.85 and at least 24 px count.
+     - The person's word is final: two faces in one frame are never one
+       person, a "no" is never asked again, the NAS never merges two named
+       people, and nothing confirmed is undone.
+     - Names are in `people` and who is whose in `person_faces` (migration
+       0038), keyed by file and face rather than by a face row, so a name
+       outlives a model upgrade.
+   - **Cost.** A pass grows with the square of the faces waiting, since most
+     strangers are a group of one.
+     - On a Mac, release build, stand-in faces with four in ten strangers: a
+       first pass took 0.26 s for 10,000 faces, 1.6 s for 25,000 and 4.1 s
+       for 40,000. Once people are known, a pass takes about 40% of that.
+     - Before the faces sat in one buffer, with each average's length kept
+       and the same-frame check made only for a winner, 10,000 took 5.6 s.
+     - It runs on a utility queue, off the clusterer's actor, so naming
+       someone never waits on it.
+     - It regroups at most every 15 minutes while the NAS is still working
+       through a library, and within a minute of anything the person
+       decides.
+     - `analysis time-grouping <faces>` times it on the NAS itself (§8).
+   - **Endpoints.** All are for the caller's own personal library, with a 404
+     for anyone else's:
+     - `GET people`;
+     - `PUT people/:id` names someone;
+     - `POST people/:id/merge`;
+     - `POST people/:id/remove`, which is "Not Emma";
+     - `GET` and `POST people/:id/suggestions`, the questions and the answers;
+     - face pictures at `people/:id/face` and `assets/:id/faces/:ordinal`,
+       cropped on the NAS from the person's own photo at 256 px and kept
+       beside the thumbnails.
 
-   It arrives as a new optional section, the way Over the Years did, so older
-   apps ignore it.
+     A person's photos are the collection kind `person`, newest first, 300 to
+     a page.
+   - **Apps.** The People row sits on the Albums page under Recently Added
+     and Favorites (on the Mac, under Pinned). It comes from
+     `CollectionsResponse.people`, which older apps ignore.
+     - A person's page is the collection grid, with their face and count,
+       and "Add Name" or "Is This Emma?".
+     - On iPhone, iPad and Mac it also has Rename, Merge With…, and
+       "Not Emma" on a long press.
+     - Typing a name someone already has asks whether they're the same
+       person.
+     - The Apple TV shows the people and their names, without editing.
+   - **Shadow mode included.** People shows for anyone the NAS analyzes,
+     shadow or on. It replaces nothing the phones do, so there's nothing to
+     preview it against.
+   - **Tests.** `Scripts/smoke-people.sh` runs 32 checks with a stand-in
+     analyzer whose faces are made-up vectors around known people.
 4. **Phones stop.** Once the NAS covers a library, the server stops handing
    that person's phones analysis work. No app update is needed.
 
@@ -312,6 +364,11 @@ faces are used for anything.
   - `analysis remove <person>`: stops it and deletes what was stored.
   - `analysis verify <person>`: counts how many of the person's faces open
     with the key in `secrets/`, for after a restore.
+  - `analysis time-grouping <faces>`: times People's grouping on made-up
+    faces, a first pass and the one after. Reads and writes nothing.
+- **People** regroup at most every 15 minutes while a library's faces are
+  still coming in (`FRAMESTATION_PEOPLE_SETTLE`, in seconds), and within a
+  minute of a decision.
 - **Stopping it:** `docker compose stop analyzer`. The server waits for it.
 - **A model change:** bump `ANALYZER_VERSION` in `Analyzer/analyzer/core.py`.
   The server re-analyzes older rows in the background, newest first.
@@ -323,8 +380,10 @@ faces are used for anything.
 2. **Can a video frame leave?** No. Frames are decoded in memory inside the
    analyzer.
 3. **Can OCR text leave?** There is no OCR.
-4. **Can face information leave?** No endpoint returns it, it's sealed at
-   rest, and it's never logged.
+4. **Can face information leave?** No endpoint returns a face's numbers,
+   they're sealed at rest, and they're never logged. The person's own devices
+   get pictures of faces cropped from their own photos, which those devices
+   could already see whole, and the names they gave.
 5. **Can GPS leave?** The analyzer never reads location. Nothing changes for
    GPS.
 6. **Can embeddings leave?** No endpoint returns one.
@@ -342,8 +401,8 @@ faces are used for anything.
     runs its self-test with `--network none`.
 13. **Are temporary files handled safely?** None are written. The root
     filesystem is read-only, with a small tmpfs.
-14. **Can people disable it?** The curation switch today, the People switch in
-    the People phase, and `analysis remove` during rollout.
+14. **Can people disable it?** The curation switch and `analysis remove`
+    today. The People switch comes before anyone else's library is analyzed.
 15. **Can people delete it?** Yes: "Delete AI data", account deletion, and the
     hourly sweep after a permanent delete.
 16. **Are user overrides preserved?** Shadow mode changes nothing. Later,

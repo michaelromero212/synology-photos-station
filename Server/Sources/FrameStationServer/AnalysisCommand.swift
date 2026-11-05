@@ -17,7 +17,10 @@ struct AnalysisCommand: AsyncCommandGroup {
     var help: String { "Show NAS analysis progress, or start or stop it for one person's library." }
 
     var commands: [String: any AnyAsyncCommand] {
-        ["status": Status(), "enroll": Enroll(), "remove": Remove(), "verify": Verify()]
+        [
+            "status": Status(), "enroll": Enroll(), "remove": Remove(), "verify": Verify(),
+            "time-grouping": TimeGrouping(),
+        ]
     }
 
     struct Status: AsyncCommand {
@@ -64,7 +67,8 @@ struct AnalysisCommand: AsyncCommandGroup {
                 WITH gone AS (DELETE FROM nas_analysis WHERE user_id = \(bind: person.id) RETURNING 1)
                 SELECT count(*)::int AS count FROM gone
                 """).first(decoding: Count.self)?.count ?? 0
-            context.console.info("\(person.name): no longer analyzed by the NAS; \(removed) analyses deleted, faces included.")
+            try await sql.raw("DELETE FROM people WHERE user_id = \(bind: person.id)").run()
+            context.console.info("\(person.name): no longer analyzed by the NAS; \(removed) analyses deleted, faces and people included.")
         }
     }
 
@@ -96,6 +100,40 @@ struct AnalysisCommand: AsyncCommandGroup {
                     .count == AnalyzerClient.faceDimensions * 4
             }.count
             context.console.info("\(person.name): \(opened) of \(rows.count) faces open with this server's key.")
+        }
+    }
+
+    /// Times People's grouping on this machine, on made-up faces: a first
+    /// pass, when nobody is known yet, and a second, once the first pass's
+    /// people are. Reads nothing and writes nothing.
+    ///
+    ///     sudo docker compose exec server ./FrameStationServer analysis time-grouping 30000
+    struct TimeGrouping: AsyncCommand {
+        struct Signature: CommandSignature {
+            @Argument(name: "faces", help: "How many faces, such as 30000")
+            var faces: Int
+        }
+        var help: String { "Time People's grouping on made-up faces. Reads and writes nothing." }
+
+        func run(using context: CommandContext, signature: Signature) async throws {
+            guard signature.faces > 0, signature.faces <= 500_000 else {
+                throw Abort(.badRequest, reason: "Between 1 and 500,000 faces.")
+            }
+            var library = PeopleClusterer.standIn(faces: signature.faces)
+            let first = ContinuousClock.now
+            let plan = PeopleClusterer.plan(library)
+            let firstTook = ContinuousClock.now - first
+            // The second pass starts from the people the first one found.
+            library.people = plan.created.map(\.id).sorted { $0.uuidString < $1.uuidString }
+            let index = Dictionary(uniqueKeysWithValues: library.people.enumerated().map { ($1, $0) })
+            library.members = plan.created.flatMap { id, faces in faces.map { ($0, index[id]!) } }
+            let second = ContinuousClock.now
+            let again = PeopleClusterer.plan(library)
+            let secondTook = ContinuousClock.now - second
+            context.console.info(
+                "\(signature.faces) faces: the first pass found \(plan.created.count) people in \(firstTook); "
+                + "the next placed \(again.newAuto.count) more faces in \(secondTook)."
+            )
         }
     }
 

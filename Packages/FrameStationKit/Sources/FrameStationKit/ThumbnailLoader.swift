@@ -174,6 +174,24 @@ public actor ThumbnailLoader {
         return await image(at: url, key: "\(assetID)-preview", targetPixels: targetPixels)
     }
 
+    // MARK: - Faces
+
+    /// A picture of one face, from the NAS's People. `key` names it in the
+    /// caches, so it has to change when the face does: see
+    /// `PersonSummary.face`.
+    ///
+    /// Through here so face pictures wait in the same line as thumbnails, and
+    /// the People row's circles are there the moment the page is. `persist`
+    /// is off for a face asked about once, in "Is this Emma?".
+    public func face(at url: URL, key: String, persist: Bool = true) async -> PlatformImage? {
+        await image(at: url, key: "face-\(key)", targetPixels: 256, persist: persist)
+    }
+
+    /// An already-decoded face, without suspending. See `cachedThumbnail`.
+    nonisolated public func cachedFace(key: String) -> PlatformImage? {
+        memory.object(forKey: "face-\(key)" as NSString)?.image
+    }
+
     // MARK: - Prefetching
 
     /// Warms the cache for photos the user is about to reach.
@@ -263,8 +281,10 @@ public actor ThumbnailLoader {
         active -= 1
     }
 
+    /// `persist` off keeps it out of the disk tier, both ways: for a picture
+    /// only ever wanted once.
     private func image(
-        at url: URL, key: String, targetPixels: Int, isPrefetch: Bool = false
+        at url: URL, key: String, targetPixels: Int, isPrefetch: Bool = false, persist: Bool = true
     ) async -> PlatformImage? {
         if let entry = memory.object(forKey: key as NSString) { return entry.image }
 
@@ -279,7 +299,7 @@ public actor ThumbnailLoader {
         let task = Task<Fetched, Never> { [diskRoot, session, client] in
             let diskPath = diskRoot.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
 
-            if let data = try? Data(contentsOf: diskPath),
+            if persist, let data = try? Data(contentsOf: diskPath),
                let image = Self.decode(data, targetPixels: targetPixels) {
                 // Stamp it as used. The modification date is what eviction
                 // sorts on, so without this the cache would evict by age
@@ -305,7 +325,7 @@ public actor ThumbnailLoader {
             // next scroll pass will pick it up.
             guard http.statusCode == 200 else { return Fetched(image: nil, bytesWritten: 0) }
 
-            let wrote = (try? data.write(to: diskPath, options: .atomic)) != nil
+            let wrote = persist && (try? data.write(to: diskPath, options: .atomic)) != nil
             return Fetched(
                 image: Self.decode(data, targetPixels: targetPixels),
                 bytesWritten: wrote ? Int64(data.count) : 0

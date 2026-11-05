@@ -260,6 +260,14 @@ struct CollectionsController: RouteCollection {
 
         let unfeaturedTrips = trips.filter { !featuredKeys.contains($0.key) }
         let unfeaturedOccasions = occasions.filter { !featuredKeys.contains($0.summary.key) }
+
+        // The people in the owner's own library, for someone the NAS
+        // analyzes. Nil for anyone else and any other library, so no row.
+        let people = curation.isPersonal && curation.nas != "off"
+            ? try await PeopleController.summaries(
+                userID: device.userID, spaceID: spaceID, limit: PeopleController.pageLimit, on: req.sql
+            )
+            : nil
         return CollectionsResponse(
             hero: hero,
             trips: Self.featuredTrips(
@@ -289,7 +297,8 @@ struct CollectionsController: RouteCollection {
                 unfeaturedOccasions.filter { yearMarked($0.summary).tradition == nil },
                 today: today, comingUp: comingUp, heroOccasion: heroOccasion,
                 limit: Self.wideLimit
-            )
+            ),
+            people: people
         )
     }
 
@@ -2624,6 +2633,21 @@ struct CollectionsController: RouteCollection {
                 """
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
+        case .person:
+            // Someone the NAS found in the caller's own library. Another
+            // person's id simply finds nothing.
+            guard let personID = UUID(uuidString: key) else {
+                throw Abort(.badRequest, reason: "A person needs an id.")
+            }
+            filter = """
+                AND EXISTS (
+                    SELECT 1 FROM person_faces pf
+                    JOIN people p ON p.id = pf.person_id
+                    WHERE pf.person_id = \(bind: personID) AND p.user_id = \(bind: device.userID)
+                      AND pf.user_id = \(bind: device.userID) AND pf.sha256 = a.sha256
+                      AND pf.state IN ('auto', 'confirmed')
+                )
+                """
         }
 
         if let wanted = req.query[Int.self, at: "highlights"],
@@ -2634,6 +2658,12 @@ struct CollectionsController: RouteCollection {
             return best
         }
 
+        // Someone can be in thousands of photos, where a trip is a few
+        // hundred: a person's come newest first, a page at a time, with
+        // `nextOffset` saying there's more. Every other kind is one answer in
+        // the order things happened, as it always was.
+        let byPage = kind == .person
+        let offset = byPage ? max(0, req.query[Int.self, at: "offset"] ?? 0) : 0
         let rows = try await req.sql.raw("""
             SELECT \(unsafeRaw: TimelineController.itemColumns),
                    EXISTS (
@@ -2645,13 +2675,35 @@ struct CollectionsController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID)
               AND sa.deleted_at IS NULL
               \(filter)
-            ORDER BY \(unsafeRaw: TimelineController.localTime) ASC, sa.id
-            LIMIT 500
+            ORDER BY \(unsafeRaw: TimelineController.localTime) \(unsafeRaw: byPage ? "DESC" : "ASC"), sa.id
+            LIMIT \(bind: byPage ? Self.personPage + 1 : 500) OFFSET \(bind: offset)
             """).all(decoding: TimelineController.ItemRow.self)
 
+        if byPage {
+            // Counted whole, so a page can say how many there are in all.
+            struct Count: Decodable { let n: Int }
+            let total = try await req.sql.raw("""
+                SELECT count(*)::int AS n
+                FROM space_assets sa
+                JOIN assets a ON a.id = sa.asset_id
+                WHERE sa.space_id = \(bind: spaceID)
+                  AND sa.deleted_at IS NULL
+                  \(filter)
+                """).first(decoding: Count.self)?.n ?? 0
+            let more = rows.count > Self.personPage
+            let items = rows.prefix(Self.personPage).map { $0.toItem() }
+            return SearchResults(
+                items: items, total: total,
+                nextOffset: more ? offset + items.count : nil
+            )
+        }
         let items = rows.map { $0.toItem() }
         return SearchResults(items: items, total: items.count, nextOffset: nil)
     }
+
+    /// How many of someone's photos one answer carries. Smaller in the smoke
+    /// tests, so a few photos make more than a page.
+    static let personPage = Environment.get("FRAMESTATION_PERSON_PAGE").flatMap(Int.init) ?? 300
 
     // MARK: - Choosing a cover
 
