@@ -95,9 +95,10 @@ actor PeopleClusterer {
             do {
                 struct Row: Decodable { let id: UUID; let faces: Int }
                 let rows = try await app.sql.raw("""
-                    SELECT u.id, (SELECT count(*)::int FROM nas_faces f WHERE f.user_id = u.id) AS faces
+                    SELECT u.id, (SELECT count(*)::int FROM nas_faces f
+                                  WHERE f.user_id = u.id AND f.embedding IS NOT NULL) AS faces
                     FROM users u
-                    WHERE u.nas_analysis <> 'off' AND u.deleted_at IS NULL
+                    WHERE u.nas_analysis <> 'off' AND u.people_enabled AND u.deleted_at IS NULL
                     """).all(decoding: Row.self)
                 for row in rows where Task.isCancelled == false {
                     // New faces arrive all day while the NAS works through a
@@ -480,7 +481,7 @@ actor PeopleClusterer {
                    f.size_px::int AS pixels, f.embedding
             FROM nas_faces f
             JOIN nas_analysis n ON n.user_id = f.user_id AND n.sha256 = f.sha256
-            WHERE f.user_id = \(bind: userID) AND n.status = 'done'
+            WHERE f.user_id = \(bind: userID) AND n.status = 'done' AND f.embedding IS NOT NULL
               AND f.score >= \(bind: Self.minScore) AND f.size_px >= \(bind: Self.minPixels)
             ORDER BY f.sha256, f.ordinal
             """).all(decoding: Row.self)

@@ -41,6 +41,9 @@ public enum CollectionKind: String, Codable, Sendable, Hashable {
     /// Everyone the NAS found as one person in the owner's library, keyed by
     /// the person's id. Older apps skip a kind they don't know.
     case person
+    /// The photos two people are both in, keyed "id,id". See
+    /// `PeopleTogether`.
+    case together
 }
 
 /// One entry on the Albums page: enough to draw a card, and a key to open it.
@@ -126,6 +129,24 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
 
     /// The same card, as a year of `tradition`.
     public func inTradition(_ tradition: String?) -> CollectionSummary {
+        CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
+        )
+    }
+
+    /// The same card under another title: whose birthday it was, say.
+    public func withTitle(_ title: String) -> CollectionSummary {
+        CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
+        )
+    }
+
+    /// The same card with another line under its title: who was there, say.
+    public func withSubtitle(_ subtitle: String?) -> CollectionSummary {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
             coverAssetIDs: coverAssetIDs, isNamed: isNamed,
@@ -236,13 +257,16 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
     /// newer one talking to an older server, or anyone else's library, finds
     /// nil and draws no People row.
     public let people: [PersonSummary]?
+    /// People often in the same photos, the most first. Optional and its own
+    /// field, like `people`.
+    public let together: [PeopleTogether]?
 
     /// Spelled out only to hold `favorites` to the key it shipped as — see
     /// `CollectionKind.favorites`. Everything else is its own name.
     enum CodingKeys: String, CodingKey {
         case hero, trips, days, revisits, mediaTypes, recentlyDeleted, recentlyAdded
         case favorites = "favourites"
-        case allTrips, allOccasions, featured, traditions, wideTrips, wideDays, people
+        case allTrips, allOccasions, featured, traditions, wideTrips, wideDays, people, together
     }
 
     /// Read card by card, so a card this build can't read is left out instead
@@ -285,6 +309,8 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         wideDays = cards(.wideDays)
         people = (try? container.decodeIfPresent([Skippable<PersonSummary>].self, forKey: .people))?
             .map { $0.compactMap(\.value) }
+        together = (try? container.decodeIfPresent([Skippable<PeopleTogether>].self, forKey: .together))?
+            .map { $0.compactMap(\.value) }
     }
 
     public init(
@@ -302,9 +328,11 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         traditions: [Tradition]? = nil,
         wideTrips: [CollectionSummary]? = nil,
         wideDays: [CollectionSummary]? = nil,
-        people: [PersonSummary]? = nil
+        people: [PersonSummary]? = nil,
+        together: [PeopleTogether]? = nil
     ) {
         self.people = people
+        self.together = together
         self.featured = featured
         self.traditions = traditions
         self.wideTrips = wideTrips

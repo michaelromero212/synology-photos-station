@@ -26,6 +26,9 @@ struct InformationPanel: View {
     /// What the NAS's own analyzer saw, for someone it analyzes. Shown beside
     /// the device's so the two can be compared photo by photo.
     var nasObservation: NASObservationDetail?
+    /// Who's in the photo, built by the host, which can fetch faces and say
+    /// who they are. Nil, and there's no People section.
+    var peopleSection: AnyView?
 
     var body: some View {
         ScrollView {
@@ -33,6 +36,8 @@ struct InformationPanel: View {
                 caption
                 dateBlock
                 tagRow
+                // Who's in it, near the top, as Photos has it.
+                if let peopleSection { peopleSection }
                 // Suppressed in a personal space — "added by me" is noise.
                 if detail.isSharedSpace { addedBy }
                 cameraCard

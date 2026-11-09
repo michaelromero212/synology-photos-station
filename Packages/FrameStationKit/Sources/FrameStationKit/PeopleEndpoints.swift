@@ -70,6 +70,41 @@ extension FrameStationClient {
         )
     }
 
+    /// Who someone is to the owner, or nil to take it back.
+    public func setRelationship(
+        spaceID: UUID, personID: UUID, _ relationship: Relationship?
+    ) async throws -> PersonSummary {
+        try await put(
+            "v1/spaces/\(spaceID)/people/\(personID)/relation",
+            body: PersonRelationRequest(relation: relationship)
+        )
+    }
+
+    /// "This is me", or not. Saying it of someone moves it to them.
+    public func setIsMe(spaceID: UUID, personID: UUID, _ isMe: Bool) async throws -> PersonSummary {
+        try await put("v1/spaces/\(spaceID)/people/\(personID)/me", body: PersonIsMeRequest(isMe: isMe))
+    }
+
+    // MARK: The people in one photo
+
+    /// Who the NAS found in one photo or video. Nil where there's no People:
+    /// anyone else's library, People off, or a server from before.
+    public func photoPeople(spaceID: UUID, assetID: UUID) async throws -> PhotoPeopleResponse? {
+        do {
+            return try await get("v1/spaces/\(spaceID)/assets/\(assetID)/people")
+        } catch FrameStationClientError.http(status: 404, reason: _) {
+            return nil
+        }
+    }
+
+    /// Says who a face is: someone in People, someone new by name, or
+    /// nobody (`AssignFaceRequest()`). Answers with who's in the photo now.
+    public func assignFace(
+        spaceID: UUID, assetID: UUID, ordinal: Int, _ request: AssignFaceRequest
+    ) async throws -> PhotoPeopleResponse {
+        try await put("v1/spaces/\(spaceID)/assets/\(assetID)/faces/\(ordinal)/person", body: request)
+    }
+
     // MARK: Faces
 
     /// The face that stands for someone. `face` is only there to change the

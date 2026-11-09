@@ -142,6 +142,9 @@ actor AnalysisWorker {
         let mediaType: String
         let blobExt: String
         let storagePath: String?
+        /// People on: faces are kept with their templates. Off, only where
+        /// they are. See `CurationController.setPeople`.
+        let peopleEnabled: Bool
     }
 
     private func process(_ item: Candidate, health: AnalyzerClient.Health) async throws {
@@ -220,9 +223,12 @@ actor AnalysisWorker {
 
     private func save(_ item: Candidate, _ analysis: AnalyzerClient.Analysis) async throws {
         // Sealed before the transaction, so nothing slow happens inside it.
-        var faces: [(ordinal: Int, face: AnalyzerClient.Face, sealed: Data)] = []
+        // With People off, no template is kept: only where each face is.
+        var faces: [(ordinal: Int, face: AnalyzerClient.Face, sealed: Data?)] = []
         for (ordinal, face) in analysis.faces.enumerated() {
-            let sealed = try seal.seal(face.embedding, userID: item.userID, sha256: item.sha256, ordinal: ordinal)
+            let sealed = item.peopleEnabled
+                ? try seal.seal(face.embedding, userID: item.userID, sha256: item.sha256, ordinal: ordinal)
+                : nil
             faces.append((ordinal, face, sealed))
         }
         let userID = item.userID, sha256 = item.sha256, sealedFaces = faces
@@ -313,7 +319,8 @@ actor AnalysisWorker {
     private func candidates(version: Int) async throws -> [Candidate] {
         let rows = try await app.sql.raw("""
             SELECT m.user_id AS "userID", a.sha256, a.media_type AS "mediaType",
-                   a.blob_ext AS "blobExt", a.storage_path AS "storagePath"
+                   a.blob_ext AS "blobExt", a.storage_path AS "storagePath",
+                   u.people_enabled AS "peopleEnabled"
             FROM users u
             JOIN space_members m ON m.user_id = u.id
             JOIN spaces s ON s.id = m.space_id AND s.kind = 'personal'

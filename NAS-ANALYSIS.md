@@ -215,9 +215,15 @@ The rules:
    - Two people the user named are never merged automatically.
 7. **Consent before analysis.** Shadow mode starts with one library, the NAS
    owner's, switched on from the command line. No one else's library is read
-   until the People switch is in the apps, so each person can turn it off
-   before anything of theirs is analyzed. From then on it's on by default,
-   like holidays.
+   until the People switch is in the apps (build 22), so each person can turn
+   it off before anything of theirs is analyzed. From then on it's on by
+   default, like holidays.
+   - **People off** forgets who anyone is: the person's people, names and
+     relationships are deleted, and so is every face template. Each face
+     keeps only its box, which is how many people a photo has, not who.
+     Nothing analyzed while it's off keeps a template.
+   - **People on** again has the NAS read the library for faces once more,
+     newest first.
 
 **What this raises.** The `/volume1/docker` share gives Everyone read access
 (found 2026-10-23). `pgdata`, `.env` and `secrets/` are private, but database
@@ -288,11 +294,35 @@ faces are used for anything.
      analyzer whose scene vectors are solved to match one concept each.
      Scaling a concept's own vector instead would match dozens of others,
      because the 224 share a median cosine of 0.84.
-3. **People (first part built).** Faces grouped per library, named by the
-   person, and an occasional "Is this Emma?". Still to come in this phase:
-   titles that know who was there, albums from patterns such as two people
-   often together, and the People switch (§6, rule 7) before anyone else's
-   library is analyzed.
+3. **People (built).** Faces grouped per library, named by the person, and an
+   occasional "Is this Emma?" (shipped 2026-11-05, build 21). Then, from
+   2026-11-09:
+   - **Who they are.** A relationship per person, in the word the owner picks:
+     Partner, Child, Parent, Sibling, Grandparent, Grandchild, Aunt or Uncle,
+     Niece or Nephew, Cousin, In-Law, Family, Friend, each in its usual words
+     (Mom, Dad or Parent). And "This Is Me", for one person at most. Never
+     guessed. Family and the owner come first on the People row.
+   - **Who's in a photo.** The Information panel lists the people in a photo
+     or video, left to right, and "Who Is This?" corrects a face: someone in
+     People, someone new, or nobody ("Not Emma"). In a video, the NAS keeps
+     a person's faces in every frame together, so they all move. Every
+     answer is learned from: the face joins who the person is to the NAS,
+     and is never put back with someone the owner said it isn't.
+   - **Together.** Two named people in at least 5 of the same photos get an
+     album of those photos, under the People row, as Photos keeps groups.
+   - **Who was there.** Trips and occasions say "with Emma and Jack" under
+     their titles, for named people in two of the photos and one in twenty.
+     A birthday party is named for whose it plainly was: one person in at
+     least half the day's photos and twice as many as anyone else ("Emma's
+     birthday party in Culpeper"). Both are added as the page is drawn and
+     never saved, so they follow names as they change and go when People
+     does.
+   - **Level faces.** A face tilted in its photo (someone lying down, a baby
+     held, a selfie from above) is turned upright in its circle by the line
+     between its eyes, to the nearest quarter turn. Covers prefer a level
+     face after one the owner confirmed. Crops are version 2, so neither the
+     NAS nor a device keeps serving the old ones.
+   - **The People switch** (§6, rule 7), in Curated Albums settings.
    - **Grouping.** `PeopleClusterer` compares each face with each person's
      average face (cosine on SFace's numbers), within one library only.
      - At 0.50 or closer, a face joins that person (0.56 for a face under
@@ -347,8 +377,10 @@ faces are used for anything.
    - **Shadow mode included.** People shows for anyone the NAS analyzes,
      shadow or on. It replaces nothing the phones do, so there's nothing to
      preview it against.
-   - **Tests.** `Scripts/smoke-people.sh` runs 32 checks with a stand-in
-     analyzer whose faces are made-up vectors around known people.
+   - **Tests.** `Scripts/smoke-people.sh` runs 62 checks with a stand-in
+     analyzer whose faces are made-up vectors around known people. A face
+     cut from a gradient photo, where color follows position, proves which
+     way a crop was turned.
 4. **Phones stop.** Once the NAS covers a library, the server stops handing
    that person's phones analysis work. No app update is needed.
 
@@ -401,8 +433,9 @@ faces are used for anything.
     runs its self-test with `--network none`.
 13. **Are temporary files handled safely?** None are written. The root
     filesystem is read-only, with a small tmpfs.
-14. **Can people disable it?** The curation switch and `analysis remove`
-    today. The People switch comes before anyone else's library is analyzed.
+14. **Can people disable it?** Yes. The People switch forgets everyone and
+    keeps no face template; the curation switch stops analysis; and there's
+    `analysis remove`.
 15. **Can people delete it?** Yes: "Delete AI data", account deletion, and the
     hourly sweep after a permanent delete.
 16. **Are user overrides preserved?** Shadow mode changes nothing. Later,

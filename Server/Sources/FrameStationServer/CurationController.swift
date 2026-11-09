@@ -54,6 +54,12 @@ struct CurationController: RouteCollection {
         var nas: String = "off"
         /// Whether they're previewing the page built from the NAS's analysis.
         var nasPreview = false
+        /// `users.people_enabled`: People, on or off.
+        var people = true
+
+        /// Whether this space has People: the caller's own library, analyzed
+        /// by the NAS, with People on.
+        var showsPeople: Bool { isPersonal && nas != "off" && people }
 
         /// Where the page's tags and search's words come from.
         var source: ObservationSource {
@@ -77,10 +83,11 @@ struct CurationController: RouteCollection {
             let isPersonal: Bool
             let nas: String
             let nasPreview: Bool
+            let people: Bool
         }
         let row = try await sql.raw("""
             SELECT u.curation_enabled AS enabled, u.curation_holidays AS holidays,
-                   u.nas_analysis AS nas, u.nas_preview AS "nasPreview",
+                   u.nas_analysis AS nas, u.nas_preview AS "nasPreview", u.people_enabled AS people,
                    EXISTS (
                        SELECT 1 FROM spaces s
                        JOIN space_members m ON m.space_id = s.id
@@ -94,7 +101,8 @@ struct CurationController: RouteCollection {
             holidays: row?.holidays ?? true,
             isPersonal: row?.isPersonal ?? false,
             nas: row?.nas ?? "off",
-            nasPreview: row?.nasPreview ?? false
+            nasPreview: row?.nasPreview ?? false,
+            people: row?.people ?? true
         )
     }
 
@@ -157,9 +165,9 @@ struct CurationController: RouteCollection {
     /// For someone the NAS analyzes: how far it's got, and whether they're
     /// previewing the page it would make. Nil for everyone else.
     private func nasStatus(userID: UUID, total: Int, on sql: any SQLDatabase) async throws -> NASAnalysisStatus? {
-        struct Row: Decodable { let state: String; let preview: Bool; let analyzed: Int }
+        struct Row: Decodable { let state: String; let preview: Bool; let people: Bool; let analyzed: Int }
         guard let row = try await sql.raw("""
-            SELECT u.nas_analysis AS state, u.nas_preview AS preview,
+            SELECT u.nas_analysis AS state, u.nas_preview AS preview, u.people_enabled AS people,
                    (SELECT count(DISTINCT o.sha256)::int
                     FROM spaces s
                     JOIN space_members m ON m.space_id = s.id AND m.user_id = u.id
@@ -170,7 +178,9 @@ struct CurationController: RouteCollection {
             FROM users u WHERE u.id = \(bind: userID)
             """).first(decoding: Row.self), row.state != "off"
         else { return nil }
-        return NASAnalysisStatus(state: row.state, analyzed: row.analyzed, total: total, preview: row.preview)
+        return NASAnalysisStatus(
+            state: row.state, analyzed: row.analyzed, total: total, preview: row.preview, people: row.people
+        )
     }
 
     /// Changes only what the request names. On every one of the person's
@@ -189,7 +199,51 @@ struct CurationController: RouteCollection {
                                    ELSE false END
             WHERE id = \(bind: device.userID)
             """).run()
+        if let people = body.people {
+            try await Self.setPeople(people, userID: device.userID, app: req.application)
+        }
         return try await settings(userID: device.userID, on: req.sql)
+    }
+
+    /// People off: the NAS forgets who anyone is. Their people, names and
+    /// relationships go, and so does every face template, while each face
+    /// keeps its box: how many people a photo has, not who they are. Nothing
+    /// new is kept either (`AnalysisWorker`).
+    ///
+    /// On again: the NAS reads the library again for faces, newest first,
+    /// and People fills in as it goes.
+    static func setPeople(_ on: Bool, userID: UUID, app: Application) async throws {
+        struct Row: Decodable { let people: Bool }
+        guard let was = try await app.sql.raw("""
+            SELECT people_enabled AS people FROM users WHERE id = \(bind: userID)
+            """).first(decoding: Row.self)?.people, was != on
+        else { return }
+        try await app.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                try await sql.raw("""
+                    UPDATE users SET people_enabled = \(bind: on) WHERE id = \(bind: userID)
+                    """).run()
+                if on {
+                    try await sql.raw("""
+                        UPDATE nas_analysis SET analyzer_version = 0 WHERE user_id = \(bind: userID)
+                        """).run()
+                } else {
+                    try await sql.raw("DELETE FROM people WHERE user_id = \(bind: userID)").run()
+                    try await sql.raw("""
+                        UPDATE nas_faces SET embedding = NULL WHERE user_id = \(bind: userID)
+                        """).run()
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+        // The clusterer goes by how many faces it last grouped, and a library
+        // read again comes back to the same number: told outright instead.
+        await app.storage[PeopleClustererKey.self]?.touch(userID)
+        app.logger.info("curation: a person turned People \(on ? "on" : "off")")
     }
 
     /// Forgets everything the caller's devices ever reported. The photographs

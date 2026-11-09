@@ -93,7 +93,8 @@ struct AnalysisCommand: AsyncCommandGroup {
                 let embedding: Data
             }
             let rows = try await sql.raw("""
-                SELECT sha256, ordinal, embedding FROM nas_faces WHERE user_id = \(bind: person.id)
+                SELECT sha256, ordinal, embedding FROM nas_faces
+                WHERE user_id = \(bind: person.id) AND embedding IS NOT NULL
                 """).all(decoding: Row.self)
             let opened = rows.filter { row in
                 (try? seal.open(row.embedding, userID: person.id, sha256: row.sha256, ordinal: row.ordinal))?

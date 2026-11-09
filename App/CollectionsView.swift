@@ -408,6 +408,7 @@ struct CollectionHeroCard: View {
         case .recentlyAdded: return "JUST ARRIVED"
         case .favorites: return "YOUR FAVORITES"
         case .person: return "SOMEONE YOU KNOW"
+        case .together: return "TOGETHER"
         }
     }
 }

@@ -262,20 +262,40 @@ struct CollectionsController: RouteCollection {
         let unfeaturedOccasions = occasions.filter { !featuredKeys.contains($0.summary.key) }
 
         // The people in the owner's own library, for someone the NAS
-        // analyzes. Nil for anyone else and any other library, so no row.
-        let people = curation.isPersonal && curation.nas != "off"
+        // analyzes with People on. Nil for anyone else and any other library,
+        // so no row.
+        let people = curation.showsPeople
             ? try await PeopleController.summaries(
                 userID: device.userID, spaceID: spaceID, limit: PeopleController.pageLimit, on: req.sql
             )
             : nil
+        let together = curation.showsPeople
+            ? try await PeopleController.together(
+                userID: device.userID, spaceID: spaceID, limit: PeopleController.togetherLimit, on: req.sql
+            )
+            : nil
+
+        // Who was there, on every trip and occasion: "with Emma and Jack",
+        // and a birthday named for whose it plainly was. Added as the page is
+        // drawn and never kept, so it follows the names as they change and
+        // goes when People does. See `withPeople`.
+        let presence = curation.showsPeople
+            ? try await Self.namedPresence(spaceID: spaceID, userID: device.userID, on: req.sql)
+            : [:]
+        let birthdayTitle = CurationVocabulary.events.first { $0.tag == "birthday" }?.title
+        let birthdays = Set(occasions.filter { $0.isEvent && $0.occasion == birthdayTitle }.map(\.summary.key))
+        func mark(_ card: CollectionSummary) -> CollectionSummary {
+            Self.withPeople(card, presence: presence, birthday: birthdays.contains(card.key) ? birthdayTitle : nil)
+        }
+
         return CollectionsResponse(
-            hero: hero,
+            hero: hero.map(mark),
             trips: Self.featuredTrips(
                 unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:))
-            ),
+            ).map(mark),
             days: Self.featuredOccasions(
                 unfeaturedOccasions, today: today, comingUp: comingUp, heroOccasion: heroOccasion
-            ).map(yearMarked),
+            ).map(yearMarked).map(mark),
             // Somewhere you haven't been in years is a lovely thing to open on
             // and a list of four of them is a lot to scroll past, so they are
             // the hero some days and a row on none.
@@ -284,22 +304,113 @@ struct CollectionsController: RouteCollection {
             recentlyDeleted: deleted,
             recentlyAdded: arrived,
             favorites: marked,
-            allTrips: trips,
-            allOccasions: occasions.map { yearMarked($0.summary) },
-            featured: featured,
+            allTrips: trips.map(mark),
+            allOccasions: occasions.map { mark(yearMarked($0.summary)) },
+            featured: featured.map(mark),
             traditions: traditions,
             wideTrips: Self.featuredTrips(
                 unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:)),
                 limit: Self.wideLimit
-            ),
+            ).map(mark),
             // What happened once: the years of a tradition are its card's.
             wideDays: Self.featuredOccasions(
                 unfeaturedOccasions.filter { yearMarked($0.summary).tradition == nil },
                 today: today, comingUp: comingUp, heroOccasion: heroOccasion,
                 limit: Self.wideLimit
-            ),
-            people: people
+            ).map(mark),
+            people: people,
+            together: together
         )
+    }
+
+    // MARK: - Who was there
+
+    /// One person the owner named, in one day's photos.
+    struct Presence {
+        let personID: UUID
+        let name: String
+        let photos: Int
+    }
+
+    /// Everyone the owner named, by the days they're in the library's
+    /// photos. Never the owner: being in their own photos goes without
+    /// saying.
+    static func namedPresence(
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> [String: [Presence]] {
+        struct Row: Decodable { let day: String; let personID: UUID; let name: String; let photos: Int }
+        let rows = try await sql.raw("""
+            SELECT to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD') AS day,
+                   p.id AS "personID", p.name, count(DISTINCT a.sha256)::int AS photos
+            FROM person_faces pf
+            JOIN people p ON p.id = pf.person_id AND p.name IS NOT NULL AND NOT p.hidden AND NOT p.is_me
+            JOIN assets a ON a.sha256 = pf.sha256
+            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID)
+                                AND sa.deleted_at IS NULL
+            WHERE pf.user_id = \(bind: userID) AND pf.state IN ('auto', 'confirmed')
+              AND \(unsafeRaw: TimelineController.visible)
+            GROUP BY 1, p.id, p.name
+            """).all(decoding: Row.self)
+        return Dictionary(grouping: rows, by: \.day).mapValues { rows in
+            rows.map { Presence(personID: $0.personID, name: $0.name, photos: $0.photos) }
+        }
+    }
+
+    /// A trip or an occasion with who was there under its title: "with Emma
+    /// and Jack". Someone counts from two of its photos and one in twenty.
+    ///
+    /// `birthday`, the title of the birthday event, for a card the person's
+    /// own analysis found one on: named for whose it was where the photos
+    /// say so plainly, one person in at least half of them and twice as many
+    /// as anyone else. "Emma's birthday party in Culpeper"; anything less
+    /// certain stays "Birthday party in Culpeper". A name the person gave
+    /// the day is never touched, since that isn't an event.
+    static func withPeople(
+        _ card: CollectionSummary, presence: [String: [Presence]], birthday: String?
+    ) -> CollectionSummary {
+        guard !presence.isEmpty, [.trip, .day, .anniversary].contains(card.kind) else { return card }
+        var counts: [UUID: (name: String, photos: Int)] = [:]
+        for day in days(inKey: card.key) {
+            for person in presence[day] ?? [] {
+                counts[person.personID, default: (person.name, 0)].photos += person.photos
+            }
+        }
+        guard !counts.isEmpty else { return card }
+        let ranked = counts.sorted {
+            $0.value.photos != $1.value.photos
+                ? $0.value.photos > $1.value.photos
+                : ($0.value.name, $0.key.uuidString) < ($1.value.name, $1.key.uuidString)
+        }
+
+        var card = card
+        var whose: UUID?
+        if let birthday, card.title.hasPrefix(birthday), let first = ranked.first,
+           first.value.photos >= 3, first.value.photos * 2 >= card.count,
+           first.value.photos >= 2 * (ranked.dropFirst().first?.value.photos ?? 0) {
+            card = card.withTitle("\(first.value.name)'s \(birthday.lowercased())" + card.title.dropFirst(birthday.count))
+            whose = first.key
+        }
+
+        var names: [String] = []
+        for (id, entry) in ranked where id != whose && entry.photos >= 2 && entry.photos * 20 >= card.count {
+            if !names.contains(entry.name) { names.append(entry.name) }
+        }
+        guard let phrase = withPhrase(names) else { return card }
+        return card.withSubtitle([card.subtitle, phrase].compactMap { $0 }.joined(separator: " · "))
+    }
+
+    /// "with Emma", "with Emma and Jack", "with Emma, Jack and Grandma", and
+    /// past three, "and 2 others".
+    static func withPhrase(_ names: [String]) -> String? {
+        switch names.count {
+        case 0: return nil
+        case 1: return "with \(names[0])"
+        case 2: return "with \(names[0]) and \(names[1])"
+        case 3: return "with \(names[0]), \(names[1]) and \(names[2])"
+        default:
+            let more = names.count - 3
+            return "with \(names[0]), \(names[1]), \(names[2]) and \(more) \(more == 1 ? "other" : "others")"
+        }
     }
 
     /// At most this many cards to swipe through at the top of the page.
@@ -2633,6 +2744,29 @@ struct CollectionsController: RouteCollection {
                 """
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
+        case .together:
+            // The photos two people are both in. Ids of anyone else's
+            // people simply find nothing.
+            let ids = key.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+            guard ids.count == 2 else {
+                throw Abort(.badRequest, reason: "Together needs two people.")
+            }
+            filter = """
+                AND EXISTS (
+                    SELECT 1 FROM person_faces pf
+                    JOIN people p ON p.id = pf.person_id
+                    WHERE pf.person_id = \(bind: ids[0]) AND p.user_id = \(bind: device.userID)
+                      AND pf.user_id = \(bind: device.userID) AND pf.sha256 = a.sha256
+                      AND pf.state IN ('auto', 'confirmed')
+                )
+                AND EXISTS (
+                    SELECT 1 FROM person_faces pf
+                    JOIN people p ON p.id = pf.person_id
+                    WHERE pf.person_id = \(bind: ids[1]) AND p.user_id = \(bind: device.userID)
+                      AND pf.user_id = \(bind: device.userID) AND pf.sha256 = a.sha256
+                      AND pf.state IN ('auto', 'confirmed')
+                )
+                """
         case .person:
             // Someone the NAS found in the caller's own library. Another
             // person's id simply finds nothing.
@@ -2662,7 +2796,7 @@ struct CollectionsController: RouteCollection {
         // hundred: a person's come newest first, a page at a time, with
         // `nextOffset` saying there's more. Every other kind is one answer in
         // the order things happened, as it always was.
-        let byPage = kind == .person
+        let byPage = kind == .person || kind == .together
         let offset = byPage ? max(0, req.query[Int.self, at: "offset"] ?? 0) : 0
         let rows = try await req.sql.raw("""
             SELECT \(unsafeRaw: TimelineController.itemColumns),

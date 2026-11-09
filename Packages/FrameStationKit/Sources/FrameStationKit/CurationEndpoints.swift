@@ -16,11 +16,13 @@ extension FrameStationClient {
     /// devices, since the setting lives on the NAS.
     @discardableResult
     public func updateCurationSettings(
-        enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil
+        enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil, people: Bool? = nil
     ) async throws -> CurationSettings {
         try await put(
             "v1/curation/settings",
-            body: UpdateCurationSettingsRequest(enabled: enabled, holidays: holidays, nasPreview: nasPreview)
+            body: UpdateCurationSettingsRequest(
+                enabled: enabled, holidays: holidays, nasPreview: nasPreview, people: people
+            )
         )
     }
 

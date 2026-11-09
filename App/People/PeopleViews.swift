@@ -238,6 +238,13 @@ struct PersonView: View {
     /// person".
     private var called: String { person.name ?? "This Person" }
 
+    /// "Daughter · 214 photos", "You · 214 photos", or just the count.
+    private var headerLine: String {
+        [person.isMe ? "You" : person.relationship?.word, Self.countLine(person.photoCount)]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
     private var collection: CollectionSummary {
         CollectionSummary(
             kind: .person, key: person.id.uuidString, title: person.name ?? "",
@@ -299,7 +306,7 @@ struct PersonView: View {
                 session: session, spaceID: space.id, source: .person(person),
                 diameter: PeopleMetrics.headerFace
             )
-            Text(Self.countLine(person.photoCount))
+            Text(headerLine)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             #if !os(tvOS)
@@ -339,7 +346,7 @@ struct PersonView: View {
             Button {
                 naming = true
             } label: {
-                Label(person.name == nil ? "Add Name" : "Rename", systemImage: "pencil")
+                Label(person.name == nil ? "Add Name" : "Edit Name & Relationship", systemImage: "pencil")
             }
             if person.name != nil, person.questions > 0 {
                 Button {
@@ -386,7 +393,342 @@ struct PersonView: View {
     }
 }
 
+// MARK: - Together
+
+/// Two people's faces, overlapping, the way Photos draws a group.
+struct TogetherFaces: View {
+    let session: AppSession
+    let spaceID: UUID
+    let first: PersonSummary
+    let second: PersonSummary
+    let diameter: CGFloat
+
+    var body: some View {
+        ZStack {
+            FaceCircle(session: session, spaceID: spaceID, source: .person(first), diameter: diameter * 0.7)
+                .offset(x: -diameter * 0.16, y: -diameter * 0.1)
+            FaceCircle(session: session, spaceID: spaceID, source: .person(second), diameter: diameter * 0.7)
+                // A ring the page's color, so the two read as two.
+                .overlay(Circle().strokeBorder(.background, lineWidth: max(2, diameter * 0.03)))
+                .offset(x: diameter * 0.16, y: diameter * 0.12)
+        }
+        .frame(width: diameter, height: diameter)
+    }
+}
+
+/// Two people often in the same photos, on the People row: both faces and
+/// both names.
+struct TogetherBubble: View {
+    let session: AppSession
+    let spaceID: UUID
+    let first: PersonSummary
+    let second: PersonSummary
+    var diameter: CGFloat = PeopleMetrics.rowFace
+
+    /// "Emma & Jack", and "You & Emma" with the owner first.
+    static func title(_ first: PersonSummary, _ second: PersonSummary) -> String {
+        func called(_ person: PersonSummary) -> String { person.isMe ? "You" : (person.name ?? "Someone") }
+        let (one, two) = second.isMe ? (second, first) : (first, second)
+        return "\(called(one)) & \(called(two))"
+    }
+
+    var body: some View {
+        VStack(spacing: 7) {
+            TogetherFaces(session: session, spaceID: spaceID, first: first, second: second, diameter: diameter)
+            Text(Self.title(first, second))
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .frame(width: diameter + 40)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Self.title(first, second))
+    }
+}
+
+/// The photos two people are both in, newest first: a collection like a
+/// person's (`CollectionKind.together`).
+struct TogetherView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let pair: PeopleTogether
+    let first: PersonSummary
+    let second: PersonSummary
+
+    var body: some View {
+        CollectionDetailView(
+            session: session, space: space,
+            collection: CollectionSummary(
+                kind: .together, key: pair.key, title: TogetherBubble.title(first, second),
+                subtitle: nil, count: pair.photoCount, coverAssetIDs: []
+            ),
+            header: AnyView(
+                VStack(spacing: 10) {
+                    TogetherFaces(
+                        session: session, spaceID: space.id, first: first, second: second,
+                        diameter: PeopleMetrics.headerFace * 1.2
+                    )
+                    Text(PersonView.countLine(pair.photoCount))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 12)
+                .padding(.bottom, 18)
+            )
+        )
+    }
+}
+
 #if !os(tvOS)
+// MARK: - Who's in a photo
+
+/// Who's in one photo, in its Information panel: a face for each, named or
+/// not, and the way to say who someone is where the NAS has it wrong.
+struct PhotoPeopleSection: View {
+    let session: AppSession
+    let spaceID: UUID
+    let assetID: UUID
+    let faces: [PhotoFace]
+    /// The photo's people as they are after a change.
+    let onChanged: (PhotoPeopleResponse) -> Void
+
+    @State private var editing: PhotoFace?
+
+    static func label(_ face: PhotoFace) -> String {
+        if face.isMe { return "You" }
+        if let name = face.name { return name }
+        return face.personID == nil ? "Unknown" : "Add Name"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("PEOPLE")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .kerning(0.5)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(faces) { face in
+                        Button {
+                            editing = face
+                        } label: {
+                            VStack(spacing: 6) {
+                                FaceCircle(
+                                    session: session, spaceID: spaceID,
+                                    source: .suggestion(PersonSuggestion(assetID: assetID, ordinal: face.ordinal)),
+                                    diameter: 52
+                                )
+                                Text(Self.label(face))
+                                    .font(.caption)
+                                    .foregroundStyle(face.name == nil && !face.isMe ? .secondary : .primary)
+                                    .lineLimit(1)
+                                    .frame(width: 66)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Self.label(face))
+                        .accessibilityHint("Says who this is")
+                    }
+                }
+            }
+            Text("Tap a face to say who it is.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .sheet(item: $editing) { face in
+            FaceIdentitySheet(session: session, spaceID: spaceID, assetID: assetID, face: face) { changed in
+                editing = nil
+                if let changed { onChanged(changed) }
+            }
+        }
+    }
+}
+
+/// "Who is this?" for one face in a photo: someone already in People,
+/// someone new, or nobody the NAS had it with.
+///
+/// Every answer is kept and learned from. The face becomes part of who the
+/// person is to the NAS, which finds them in more photos for it, and it's
+/// never put back with someone the owner said it isn't.
+struct FaceIdentitySheet: View {
+    let session: AppSession
+    let spaceID: UUID
+    let assetID: UUID
+    let face: PhotoFace
+    /// Who's in the photo after the change, or nil when nothing changed.
+    let onFinished: (PhotoPeopleResponse?) -> Void
+
+    @State private var name = ""
+    @State private var everyone: [PersonSummary] = []
+    @State private var isSaving = false
+    @State private var failure: String?
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// A group the NAS found that nobody has named yet: typing names them,
+    /// rather than taking the face away from them.
+    private var isUnnamedGroup: Bool { face.personID != nil && face.name == nil }
+
+    /// The people with names, those matching what's typed; never who it is
+    /// already.
+    private var choices: [PersonSummary] {
+        let named = everyone.filter { $0.name != nil && $0.id != face.personID }
+        let typed = trimmed.lowercased()
+        guard !typed.isEmpty else { return Array(named.prefix(40)) }
+        return named.filter { ($0.name ?? "").lowercased().contains(typed) }
+    }
+
+    /// What's typed is someone's name already.
+    private var typedIsSomeone: Bool {
+        everyone.contains { $0.name?.caseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    private var faceSource: FaceCircle.Source {
+        .suggestion(PersonSuggestion(assetID: assetID, ordinal: face.ordinal))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 14) {
+                        FaceCircle(session: session, spaceID: spaceID, source: faceSource, diameter: 64)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(PhotoPeopleSection.label(face))
+                                .font(.headline)
+                            Text(
+                                face.personID == nil ? "Not anyone in People yet"
+                                    : face.isConfirmed ? "You said so" : "Your NAS thinks so"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    TextField(isUnnamedGroup ? "Their Name" : "Name", text: $name)
+                        #if os(iOS)
+                        .textContentType(.name)
+                        #endif
+                        .submitLabel(.done)
+                        .onSubmit(saveTyped)
+                } footer: {
+                    Text(
+                        "Your NAS learns from this. The face helps it find them in more of "
+                        + "your photos, and it never puts a face back with someone you've "
+                        + "said it isn't."
+                    )
+                }
+
+                if !trimmed.isEmpty, !typedIsSomeone {
+                    Section {
+                        Button(action: saveTyped) {
+                            Label(
+                                isUnnamedGroup ? "Name Them \(trimmed)" : "New Person: \(trimmed)",
+                                systemImage: isUnnamedGroup ? "pencil" : "person.badge.plus"
+                            )
+                        }
+                    }
+                }
+
+                if !choices.isEmpty {
+                    Section("People") {
+                        ForEach(choices) { person in
+                            Button {
+                                Task { await assign(AssignFaceRequest(personID: person.id)) }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    FaceCircle(
+                                        session: session, spaceID: spaceID,
+                                        source: .person(person), diameter: 34
+                                    )
+                                    Text(person.isMe ? "\(person.name ?? "") (You)" : person.name ?? "")
+                                }
+                            }
+                            // A name, not a link: the row is the button.
+                            .foregroundStyle(.primary)
+                        }
+                    }
+                }
+
+                if face.personID != nil {
+                    Section {
+                        Button(role: .destructive) {
+                            Task { await assign(AssignFaceRequest()) }
+                        } label: {
+                            Text(face.name.map { "Not \($0)" } ?? "Not This Person")
+                        }
+                    } footer: {
+                        Text("The face leaves them, and your NAS won't put it with them again.")
+                    }
+                }
+
+                if let failure {
+                    Section {
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .disabled(isSaving)
+            .navigationTitle("Who Is This?")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onFinished(nil) }
+                }
+            }
+            .task {
+                guard let client = session.client else { return }
+                everyone = (try? await client.people(spaceID: spaceID)) ?? []
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 480)
+        #endif
+    }
+
+    /// A typed name: the unnamed group's name, or someone new. A name that's
+    /// someone's already is chosen from the list instead.
+    private func saveTyped() {
+        guard !trimmed.isEmpty, !typedIsSomeone else { return }
+        if isUnnamedGroup, let personID = face.personID {
+            Task { await nameGroup(personID) }
+        } else {
+            Task { await assign(AssignFaceRequest(newName: trimmed)) }
+        }
+    }
+
+    private func assign(_ request: AssignFaceRequest) async {
+        guard let client = session.client else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            onFinished(try await client.assignFace(
+                spaceID: spaceID, assetID: assetID, ordinal: face.ordinal, request
+            ))
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
+    private func nameGroup(_ personID: UUID) async {
+        guard let client = session.client else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            _ = try await client.namePerson(spaceID: spaceID, personID: personID, name: trimmed)
+            onFinished(try await client.photoPeople(spaceID: spaceID, assetID: assetID))
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+}
+
 // MARK: - Naming
 
 /// Naming someone, or renaming them.
@@ -402,6 +744,8 @@ struct NamePersonSheet: View {
     let onFinished: (PersonSummary?) -> Void
 
     @State private var name: String
+    @State private var relationship: Relationship?
+    @State private var isMe: Bool
     @State private var everyone: [PersonSummary] = []
     @State private var isSaving = false
     @State private var failure: String?
@@ -417,9 +761,17 @@ struct NamePersonSheet: View {
         self.person = person
         self.onFinished = onFinished
         _name = State(initialValue: person.name ?? "")
+        _relationship = State(initialValue: person.relationship)
+        _isMe = State(initialValue: person.isMe)
     }
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Anything to save: a name, and something changed.
+    private var canSave: Bool {
+        !trimmed.isEmpty
+            && (trimmed != person.name || relationship != person.relationship || isMe != person.isMe)
+    }
 
     /// The named people whose names start with what's typed, as a way to say
     /// "it's them" with one tap.
@@ -466,15 +818,36 @@ struct NamePersonSheet: View {
                                         source: .person(other), diameter: 34
                                     )
                                     Text(other.name ?? "")
-                                        .foregroundStyle(.primary)
                                     Spacer()
                                     Text("Same Person")
                                         .font(.footnote)
                                         .foregroundStyle(.tint)
                                 }
                             }
+                            .foregroundStyle(.primary)
                         }
                     }
+                }
+
+                Section {
+                    Toggle("This Is Me", isOn: $isMe)
+                    if !isMe {
+                        Picker("Relationship", selection: $relationship) {
+                            Text("None").tag(Relationship?.none)
+                            ForEach(Relationship.Kind.allCases, id: \.self) { kind in
+                                Section {
+                                    ForEach(kind.words) { word in
+                                        Text(word.word).tag(Optional(word))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } footer: {
+                    Text(
+                        "Who they are to you, if you like. Only you see it, and it's how "
+                        + "your albums know family from friends."
+                    )
                 }
 
                 if person.name != nil {
@@ -496,7 +869,7 @@ struct NamePersonSheet: View {
             }
             .formStyle(.grouped)
             .disabled(isSaving)
-            .navigationTitle(person.name == nil ? "Add Name" : "Rename")
+            .navigationTitle(person.name == nil ? "Add Name" : "Edit")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -506,7 +879,7 @@ struct NamePersonSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save", action: save)
-                        .disabled(trimmed.isEmpty || trimmed == person.name)
+                        .disabled(!canSave)
                         .fontWeight(.semibold)
                 }
             }
@@ -540,8 +913,8 @@ struct NamePersonSheet: View {
     }
 
     private func save() {
-        guard !trimmed.isEmpty, trimmed != person.name else { return }
-        if let same = everyone.first(where: {
+        guard canSave else { return }
+        if trimmed != person.name, let same = everyone.first(where: {
             $0.id != person.id && $0.name?.caseInsensitiveCompare(trimmed) == .orderedSame
         }) {
             namesake = same
@@ -550,13 +923,24 @@ struct NamePersonSheet: View {
         Task { await rename(to: trimmed) }
     }
 
+    /// The name, then who they are: each only if it changed. "This is me"
+    /// takes the relationship's place; nobody is their own daughter.
     private func rename(to newName: String?) async {
         guard let client = session.client else { return }
         isSaving = true
         defer { isSaving = false }
         do {
-            let named = try await client.namePerson(spaceID: spaceID, personID: person.id, name: newName)
-            onFinished(named)
+            var current = person
+            if newName != person.name {
+                current = try await client.namePerson(spaceID: spaceID, personID: person.id, name: newName)
+            }
+            if isMe != person.isMe {
+                current = try await client.setIsMe(spaceID: spaceID, personID: person.id, isMe)
+            }
+            if !isMe, relationship != current.relationship {
+                current = try await client.setRelationship(spaceID: spaceID, personID: person.id, relationship)
+            }
+            onFinished(current)
         } catch {
             failure = "Couldn't save: \(error.localizedDescription)"
         }

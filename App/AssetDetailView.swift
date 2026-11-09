@@ -43,6 +43,9 @@ final class AssetDetailModel {
     var observation: AssetObservationDetail?
     /// What the NAS's analyzer saw, for someone it analyzes. Nil otherwise.
     var nasObservation: NASObservationDetail?
+    /// Who the NAS found in it, for someone with People: their own library,
+    /// analyzed by the NAS. Nil otherwise, and then no People section.
+    var photoPeople: PhotoPeopleResponse?
     private var hasLoadedObservation = false
 
     let item: TimelineItem
@@ -164,7 +167,9 @@ final class AssetDetailModel {
         hasLoadedObservation = true
         async let device = try? await client.observation(spaceID: spaceID, assetID: item.assetID)
         async let nas = try? await client.nasObservation(spaceID: spaceID, assetID: item.assetID)
+        async let people = try? await client.photoPeople(spaceID: spaceID, assetID: item.assetID)
         (observation, nasObservation) = await (device, nas)
+        photoPeople = await people ?? nil
     }
 
     /// Never swallow the error here. An earlier version caught and ignored it,
@@ -2092,7 +2097,15 @@ private struct InformationSheet: View {
                 onEditCredit: mayEditCredit(detail) ? { showCreditEditor = true } : nil,
                 onEditLocation: { showLocationEditor = true },
                 observation: model.observation,
-                nasObservation: model.nasObservation
+                nasObservation: model.nasObservation,
+                peopleSection: model.photoPeople.flatMap { found in
+                    found.faces.isEmpty ? nil : AnyView(
+                        PhotoPeopleSection(
+                            session: session, spaceID: detail.spaceID, assetID: detail.assetID,
+                            faces: found.faces
+                        ) { model.photoPeople = $0 }
+                    )
+                }
             )
             .task {
                 if let client = session.client { await model.loadObservation(client) }

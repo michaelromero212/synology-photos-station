@@ -679,7 +679,49 @@ struct AlbumsView: View {
                 #if os(tvOS)
                 .scrollClipDisabled()
                 #endif
+                together(found, people: people, space: space)
             }
+        }
+    }
+
+    /// People often in the same photos, under the faces: an album of each
+    /// pair, as Photos keeps groups under People. Only pairs whose faces the
+    /// page has.
+    @ViewBuilder
+    private func together(_ found: CollectionsResponse, people: [PersonSummary], space: SpaceDTO) -> some View {
+        let byID = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0) })
+        let pairs = (found.together ?? []).compactMap { pair -> (PeopleTogether, PersonSummary, PersonSummary)? in
+            guard pair.people.count == 2, let first = byID[pair.people[0]], let second = byID[pair.people[1]]
+            else { return nil }
+            return (pair, first, second)
+        }
+        if !pairs.isEmpty {
+            Text("Together")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, spacing)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(pairs, id: \.0.id) { pair, first, second in
+                        NavigationLink {
+                            TogetherView(session: session, space: space, pair: pair, first: first, second: second)
+                        } label: {
+                            TogetherBubble(session: session, spaceID: space.id, first: first, second: second)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, spacing)
+                #if os(tvOS)
+                .padding(.vertical, 20)
+                #endif
+            }
+            .scrollIndicators(.hidden)
+            #if os(tvOS)
+            .scrollClipDisabled()
+            #endif
         }
     }
 
@@ -2189,22 +2231,58 @@ extension AlbumsView {
                             + "people in them appear here, once they're in three or more."
                     )
                 } else {
-                    ScrollView(.horizontal) {
-                        LazyHStack(alignment: .top, spacing: Self.macGap) {
-                            ForEach(people) { person in
-                                NavigationLink {
-                                    PersonView(session: session, space: space, person: person)
-                                } label: {
-                                    PersonBubble(session: session, spaceID: space.id, person: person)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ScrollView(.horizontal) {
+                            LazyHStack(alignment: .top, spacing: Self.macGap) {
+                                ForEach(people) { person in
+                                    NavigationLink {
+                                        PersonView(session: session, space: space, person: person)
+                                    } label: {
+                                        PersonBubble(session: session, spaceID: space.id, person: person)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
+                            .padding(.horizontal, Self.macMargin)
                         }
-                        .padding(.horizontal, Self.macMargin)
+                        .scrollIndicators(.hidden)
+                        macTogether(found, people: people, space: space)
                     }
-                    .scrollIndicators(.hidden)
                 }
             }
+        }
+    }
+
+    /// People often together, under the faces, as on the phone.
+    @ViewBuilder
+    private func macTogether(_ found: CollectionsResponse, people: [PersonSummary], space: SpaceDTO) -> some View {
+        let byID = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0) })
+        let pairs = (found.together ?? []).compactMap { pair -> (PeopleTogether, PersonSummary, PersonSummary)? in
+            guard pair.people.count == 2, let first = byID[pair.people[0]], let second = byID[pair.people[1]]
+            else { return nil }
+            return (pair, first, second)
+        }
+        if !pairs.isEmpty {
+            Text("Together")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Self.macMargin)
+                .padding(.top, 18)
+                .padding(.bottom, 10)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: Self.macGap) {
+                    ForEach(pairs, id: \.0.id) { pair, first, second in
+                        NavigationLink {
+                            TogetherView(session: session, space: space, pair: pair, first: first, second: second)
+                        } label: {
+                            TogetherBubble(session: session, spaceID: space.id, first: first, second: second)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, Self.macMargin)
+            }
+            .scrollIndicators(.hidden)
         }
     }
 

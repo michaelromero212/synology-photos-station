@@ -18,6 +18,7 @@ struct CurationSettingsView: View {
     @State private var nas: NASAnalysisStatus?
     @State private var isSaving = false
     @State private var confirmDelete = false
+    @State private var confirmPeopleOff = false
     @State private var failure: String?
 
     var body: some View {
@@ -56,6 +57,15 @@ struct CurationSettingsView: View {
                         get: { nas.preview },
                         set: { value in Task { await setPreview(value) } }
                     ))
+                    // From a NAS that has the switch.
+                    if let people = nas.people {
+                        Toggle("People", isOn: Binding(
+                            get: { people },
+                            set: { value in
+                                if value { Task { await setPeople(true) } } else { confirmPeopleOff = true }
+                            }
+                        ))
+                    }
                 } header: {
                     Text("On Your NAS")
                 } footer: {
@@ -64,7 +74,8 @@ struct CurationSettingsView: View {
                         + "internet connection, and puts the people it finds under People "
                         + "on the Albums page. Turn on the preview to see the Albums page "
                         + "and search built from what it found. Nothing is saved while you "
-                        + "preview, and turning it off puts everything back as it was."
+                        + "preview, and turning it off puts everything back as it was. "
+                        + "Turn off People and your NAS stops recognizing faces."
                     )
                 }
                 .disabled(isSaving)
@@ -90,6 +101,18 @@ struct CurationSettingsView: View {
         // Pushed from More, under the floating tab bar.
         .floatingTabBarClearance()
         .task { await load() }
+        .alert("Turn Off People?", isPresented: $confirmPeopleOff) {
+            Button("Turn Off", role: .destructive) {
+                Task { await setPeople(false) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Your NAS will forget the people it found, the names and relationships "
+                + "you gave them, and what it knows of each face. Turn People back on "
+                + "and it looks through your photos again."
+            )
+        }
         .alert("Delete AI Data?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) {
                 Task { await deleteData() }
@@ -219,6 +242,22 @@ struct CurationSettingsView: View {
         defer { isSaving = false }
         do {
             try await client.updateCurationSettings(nasPreview: on)
+            nas = try await client.curationStatus().nas
+            session.albumsSourceChanged()
+            failure = nil
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
+    /// On every device at once. Off forgets everyone, so the Albums page
+    /// asks again on its next visit.
+    private func setPeople(_ on: Bool) async {
+        guard let client = session.client else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.updateCurationSettings(people: on)
             nas = try await client.curationStatus().nas
             session.albumsSourceChanged()
             failure = nil

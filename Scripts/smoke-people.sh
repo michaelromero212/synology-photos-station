@@ -10,6 +10,13 @@
 #  - a borderline face becomes "Is this …?", and yes and no both stick;
 #  - "Not this person" sticks, and merging joins two people;
 #  - someone's photos come newest first, a page at a time;
+#  - relationships and "This is me", one of them at most;
+#  - Together: two people often in the same photos, and their album;
+#  - a photo's people, and correcting them: someone else, someone new, nobody;
+#  - a face lying on its side is stood up in its picture, and an upright one
+#    isn't turned;
+#  - who was there, under a day's title, and a birthday named for whose it was;
+#  - People off forgets everyone and keeps no face templates; on, it's back;
 #  - face pictures are served, only to the owner;
 #  - Delete AI data takes it all.
 #
@@ -34,6 +41,8 @@ export FRAMESTATION_ANALYZER_SOCKET="$SOCK" FRAMESTATION_ANALYSIS_START_DELAY=1 
 export FRAMESTATION_PEOPLE_START_DELAY=2 FRAMESTATION_PEOPLE_INTERVAL=3 FRAMESTATION_PEOPLE_SETTLE=0
 # Five to a page, so Emma's eight photos are two pages.
 export FRAMESTATION_PERSON_PAGE=5
+# Two photos together make an album, as Emma and Jack have.
+export FRAMESTATION_TOGETHER_MINIMUM=2
 PASS=0; FAIL=0
 q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
 admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
@@ -92,10 +101,16 @@ class H(http.server.BaseHTTPRequestHandler):
         sha = os.path.basename(request["path"]).split(".")[0]
         plan = json.load(open(plan_path)) if os.path.exists(plan_path) else {}
         faces = []
-        for i, who in enumerate(plan.get(sha, [])):
+        for i, entry in enumerate(plan.get(sha, [])):
+            # "stranger@90": a face turned a quarter clockwise in the picture,
+            # so its eyes are one above the other.
+            who, _, turn = entry.partition("@")
             x = 0.1 + 0.45 * i
+            cx, cy = x + .15, .4
+            marks = ([cx, cy - .06, cx, cy + .06, cx - .04, cy, cx - .1, cy - .05, cx - .1, cy + .05]
+                     if turn == "90" else [x + .08, .3, x + .2, .3, x + .14, .38, x + .1, .46, x + .2, .46])
             faces.append({"box": [x, 0.2, 0.3, 0.4],
-                          "landmarks": [x + .08, .3, x + .2, .3, x + .14, .38, x + .1, .46, x + .2, .46],
+                          "landmarks": marks,
                           "score": 0.95, "size": 120, "sharpness": 50.0,
                           "embedding": b64(face_vector(who, int(hashlib.sha256((sha + str(i)).encode()).hexdigest()[:8], 16)))})
         scene = b64(unit(np.random.default_rng(int(sha[:8], 16)).standard_normal(768)))
@@ -120,10 +135,21 @@ read -r T2 P2 U2 <<< "$(newuser Neighbor)"
 A1="Authorization: Bearer $T1"; A2="Authorization: Bearer $T2"
 
 # photo <name> <width> <day> <faces…> → asset id, with the plan recorded.
+# Noise, except a "grad…" photo: red runs with x and green with y, so a face
+# cut from it says which way it was turned.
 photo(){
   local name=$1 width=$2 day=$3; shift 3
-  local f="$ROOT/files/$name.jpg" sha size up
-  vips gaussnoise "$ROOT/files/n.v" "$width" 480 >/dev/null 2>&1; vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
+  local f="$ROOT/files/$name.jpg" sha size up w="$ROOT/files"
+  if [[ $name == grad* ]]; then
+    vips xyz "$w/xyz.v" "$width" 480 >/dev/null 2>&1
+    vips extract_band "$w/xyz.v" "$w/x.v" 0 >/dev/null 2>&1; vips extract_band "$w/xyz.v" "$w/y.v" 1 >/dev/null 2>&1
+    vips linear "$w/x.v" "$w/r.v" "$(python3 -c "print(255 / ($width - 1))")" 0 --uchar >/dev/null 2>&1
+    vips linear "$w/y.v" "$w/g.v" "$(python3 -c "print(255 / 479)")" 0 --uchar >/dev/null 2>&1
+    vips black "$w/z0.v" "$width" 480 >/dev/null 2>&1; vips cast "$w/z0.v" "$w/z.v" uchar >/dev/null 2>&1
+    vips bandjoin "$w/r.v $w/g.v $w/z.v" "$w/rgb.v" >/dev/null 2>&1; vips copy "$w/rgb.v" "$f[Q=95]" >/dev/null 2>&1
+  else
+    vips gaussnoise "$w/n.v" "$width" 480 >/dev/null 2>&1; vips copy "$w/n.v" "$f" >/dev/null 2>&1
+  fi
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
   python3 -c "import json,os,sys; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {}; d[sys.argv[2]]=sys.argv[3:]; json.dump(d, open(p,'w'))" "$ROOT/plan.json" "$sha" "$@"
   up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A1" -H 'Content-Type: application/json' \
@@ -179,6 +205,45 @@ sleep 8
 check "no stays no, and yes stays yes" "rejected confirmed" "$(q "SELECT string_agg(state, ' ' ORDER BY a.width DESC) FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id IN ('$NEAR1', '$NEAR2') AND pf.person_id = '$E'")"
 check "nothing left to ask" "0" "$(curl -s "$API/v1/spaces/$P1/people/$E/suggestions" -H "$A1" | jq '["suggestions"].__len__()')"
 
+echo "Who people are to the owner"
+check "Jack has a name too" "Jack" "$(curl -s -X PUT "$API/v1/spaces/$P1/people/$J" -H "$A1" -H 'Content-Type: application/json' -d '{"name":"Jack"}' | jq '["name"]')"
+check "Emma is a daughter" "daughter" "$(curl -s -X PUT "$API/v1/spaces/$P1/people/$E/relation" -H "$A1" -H 'Content-Type: application/json' -d '{"relation":"daughter"}' | jq '["relation"]')"
+check "a word the server doesn't know is refused" "400" "$(code -X PUT "$API/v1/spaces/$P1/people/$E/relation" -H "$A1" -H 'Content-Type: application/json' -d '{"relation":"dragon"}')"
+check "this is me" "True" "$(curl -s -X PUT "$API/v1/spaces/$P1/people/$J/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":true}' | jq '["isMe"]')"
+curl -s -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":true}' >/dev/null
+check "only one me, and me isn't my own daughter" "False True None" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; p={x.get("name"): x for x in json.load(sys.stdin)["people"]}; print(p["Jack"]["isMe"], p["Emma"]["isMe"], p["Emma"].get("relation"))')"
+curl -s -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":false}' >/dev/null
+curl -s -X PUT "$API/v1/spaces/$P1/people/$E/relation" -H "$A1" -H 'Content-Type: application/json' -d '{"relation":"daughter"}' >/dev/null
+
+echo "Together"
+TOG=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
+check "Emma and Jack are often together" "2" "$(echo "$TOG" | python3 -c 'import sys,json; t=json.load(sys.stdin).get("together") or []; print(t[0]["photoCount"] if t else 0)')"
+PAIR=$(echo "$TOG" | python3 -c 'import sys,json; print(",".join(json.load(sys.stdin)["together"][0]["people"]))')
+check "their album is the photos they're both in" "2" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=together&key=$PAIR" -H "$A1" | jq '["total"]')"
+check "someone else's album of them finds nothing" "0" "$(curl -s "$API/v1/spaces/$P2/collections/items?kind=together&key=$PAIR" -H "$A2" | jq '["total"]')"
+
+echo "The people in a photo"
+names(){ python3 -c 'import sys,json; print(",".join(str(f.get("name")) for f in json.load(sys.stdin)["faces"]))'; }
+check "a photo lists who's in it, left to right" "Emma,Jack" "$(curl -s "$API/v1/spaces/$P1/assets/${BOTH[0]}/people" -H "$A1" | names)"
+check "a face can be someone new" "Emma,Jake" "$(curl -s -X PUT "$API/v1/spaces/$P1/assets/${BOTH[0]}/faces/1/person" -H "$A1" -H 'Content-Type: application/json' -d '{"newName":"Jake"}' | names)"
+check "and Jack never gets it back" "rejected" "$(q "SELECT pf.state FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id = '${BOTH[0]}' AND pf.ordinal = 1 AND pf.person_id = '$J'")"
+check "or nobody: Not Jake" "Emma,None" "$(curl -s -X PUT "$API/v1/spaces/$P1/assets/${BOTH[0]}/faces/1/person" -H "$A1" -H 'Content-Type: application/json' -d '{}' | names)"
+sleep 8
+check "and it stays nobody's" "Emma,None" "$(curl -s "$API/v1/spaces/$P1/assets/${BOTH[0]}/people" -H "$A1" | names)"
+check "someone else can't see who's in it" "404" "$(code "$API/v1/spaces/$P1/assets/${BOTH[0]}/people" -H "$A2")"
+check "nor say who it is" "404" "$(code -X PUT "$API/v1/spaces/$P1/assets/${BOTH[0]}/faces/0/person" -H "$A2" -H 'Content-Type: application/json' -d '{}')"
+
+echo "Faces stood up"
+TILTED=$(photo "grad1" 730 "06-10" "stranger@90"); UPRIGHT=$(photo "grad2" 731 "06-11" stranger)
+until_true 90 '[ "$(q "SELECT count(*) FROM nas_faces f JOIN assets a ON a.sha256 = f.sha256 WHERE a.id IN ('"'$TILTED'"', '"'$UPRIGHT'"')")" = "2" ]'
+# Along the crop's top row: red grows when it's as it was, green when it was
+# turned a quarter back, which is what a face lying on its side needs.
+along(){ curl -s "$API/v1/spaces/$P1/assets/$1/faces/0" -H "$A1" -o "$ROOT/files/along.jpg"
+  python3 -c "import sys; l=list(map(float,sys.argv[1].split())); r=list(map(float,sys.argv[2].split())); print('red' if r[0]-l[0] > 30 and abs(r[1]-l[1]) < 20 else 'green' if r[1]-l[1] > 30 and abs(r[0]-l[0]) < 20 else 'neither %s %s' % (l, r))" \
+    "$(vips getpoint "$ROOT/files/along.jpg" 8 8)" "$(vips getpoint "$ROOT/files/along.jpg" 247 8)"; }
+check "a face lying on its side is stood up" "green" "$(along "$TILTED")"
+check "an upright face isn't turned" "red" "$(along "$UPRIGHT")"
+
 echo "Not this person, and the same person"
 check "not Emma takes the photo out" "8" "$(curl -s -X POST "$API/v1/spaces/$P1/people/$E/remove" -H "$A1" -H 'Content-Type: application/json' -d "{\"assetIDs\":[\"${EMMA[5]}\"]}" | jq '["photoCount"]')"
 sleep 8
@@ -194,6 +259,38 @@ check "nor see a face" "404" "$(code "$API/v1/spaces/$P1/people/$E/face" -H "$A2
 check "nor find her photos" "0" "$(curl -s "$API/v1/spaces/$P2/collections/items?kind=person&key=$E" -H "$A2" | jq '["total"]')"
 check "their page has no People row" "None" "$(curl -s "$API/v1/spaces/$P2/collections?date=2026-10-12" -H "$A2" | jq '.get("people")')"
 lacks "no face numbers in any answer" "embedding" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1")$(curl -s "$API/v1/spaces/$P1/people/$E/suggestions" -H "$A1")"
+
+echo "Who was there"
+emma_count(){ curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; print([p["photoCount"] for p in json.load(sys.stdin)["people"] if p.get("name") == "Emma"][0])'; }
+# A day needs four photos to be a card: Emma in two, nobody in the others.
+PIC=(); for i in 1 2; do PIC+=("$(photo "picnic$i" $((740 + i)) "09-20" emma)"); done
+for i in 3 4; do PIC+=("$(photo "picnic$i" $((740 + i)) "09-20")"); done
+BD=(); for i in 1 2 3; do BD+=("$(photo "bday$i" $((750 + i)) "08-09" emma)"); done
+BD+=("$(photo "bday4" 754 "08-09" stranger)")
+until_true 120 '[ "$(emma_count)" = "18" ]'
+check "Emma is in the new photos" "18" "$(emma_count)"
+NAMEDAY=$(printf '{"day":"2025-09-20","name":"Picnic","everyYear":false}')
+curl -s -X PUT "$API/v1/spaces/$P1/collections/name" -H "$A1" -H 'Content-Type: application/json' -d "$NAMEDAY" >/dev/null
+OBS=$(python3 -c 'import json,sys; cake=[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]; print(json.dumps({"analysisVersion":1,"modelVersion":"smoke","observations":[{"assetID":a,"labels":cake,"aesthetic":0.4,"isUtility":False,"peopleCount":1,"animalCount":0} for a in sys.argv[1:]]}))' "${BD[0]}" "${BD[1]}" "${BD[2]}")
+curl -s -X POST "$API/v1/spaces/$P1/curation/observations" -H "$A1" -H 'Content-Type: application/json' -d "$OBS" >/dev/null
+PAGE=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
+has "a named day says who was there" "with Emma" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c.get("subtitle") for c in (json.load(sys.stdin).get("allOccasions") or []) if c["title"] == "Picnic"])')"
+has "a birthday is named for whose it plainly was" "Emma's birthday party" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
+
+echo "People off, and on again"
+check "People can be turned off" "200" "$(code -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"people":false}')"
+check "the settings say so" "False" "$(curl -s "$API/v1/curation" -H "$A1" | jq '["nas"]["people"]')"
+check "then there's no People" "404" "$(code "$API/v1/spaces/$P1/people" -H "$A1")"
+check "nor a People row" "None" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '.get("people")')"
+check "nor anyone under a title" "False" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys; print("Emma" in sys.stdin.read())')"
+check "no one, no names, no face templates" "0:0" "$(q "SELECT (SELECT count(*) FROM people WHERE user_id = '$U1') || ':' || (SELECT count(*) FROM nas_faces WHERE user_id = '$U1' AND embedding IS NOT NULL)")"
+check "a photo still knows how many faces it has" "yes" "$(q "SELECT CASE WHEN count(*) > 0 THEN 'yes' ELSE 'no' END FROM nas_faces WHERE user_id = '$U1'")"
+OFF=$(photo "while-off" 760 "10-01" emma)
+until_true 60 '[ "$(q "SELECT count(*) FROM nas_faces f JOIN assets a ON a.sha256 = f.sha256 WHERE a.id = '"'$OFF'"'")" = "1" ]'
+check "a photo analyzed while it's off keeps no template" "1:0" "$(q "SELECT count(*) || ':' || count(f.embedding) FROM nas_faces f JOIN assets a ON a.sha256 = f.sha256 WHERE a.id = '$OFF'")"
+check "on again" "200" "$(code -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"people":true}')"
+until_true 120 '[ "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | jq '"'"'["people"].__len__()'"'"')" != "0" ]'
+check "the NAS looks again, and People comes back" "yes" "$(q "SELECT CASE WHEN count(*) > 0 THEN 'yes' ELSE 'no' END FROM people WHERE user_id = '$U1'")"
 
 echo "Taken away with the AI data"
 check "Delete AI data answers" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A1")"

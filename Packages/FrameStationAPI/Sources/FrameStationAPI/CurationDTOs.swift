@@ -118,11 +118,16 @@ public struct UpdateCurationSettingsRequest: Codable, Sendable, Hashable {
     /// Preview the Albums page built from the NAS's analysis. Only for a
     /// person the NAS analyzes; a server from before ignores it.
     public let nasPreview: Bool?
+    /// People on or off, for a person the NAS analyzes. Off deletes their
+    /// people, names and face templates; on has the NAS read their library
+    /// for faces again. A server from before ignores it.
+    public let people: Bool?
 
-    public init(enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil) {
+    public init(enabled: Bool? = nil, holidays: Bool? = nil, nasPreview: Bool? = nil, people: Bool? = nil) {
         self.enabled = enabled
         self.holidays = holidays
         self.nasPreview = nasPreview
+        self.people = people
     }
 }
 
@@ -136,12 +141,16 @@ public struct NASAnalysisStatus: Codable, Sendable, Hashable {
     public let total: Int
     /// Whether the Albums page is currently built from it as a preview.
     public let preview: Bool
+    /// Whether People is on: faces recognized and grouped. Nil from a server
+    /// before the switch.
+    public let people: Bool?
 
-    public init(state: String, analyzed: Int, total: Int, preview: Bool) {
+    public init(state: String, analyzed: Int, total: Int, preview: Bool, people: Bool? = nil) {
         self.state = state
         self.analyzed = analyzed
         self.total = total
         self.preview = preview
+        self.people = people
     }
 }
 
