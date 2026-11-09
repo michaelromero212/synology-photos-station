@@ -320,8 +320,15 @@ faces are used for anything.
    - **Level faces.** A face tilted in its photo (someone lying down, a baby
      held, a selfie from above) is turned upright in its circle by the line
      between its eyes, to the nearest quarter turn. Covers prefer a level
-     face after one the owner confirmed. Crops are version 2, so neither the
-     NAS nor a device keeps serving the old ones.
+     face after one the owner confirmed.
+   - **A photo's rotation tag, once.** The NAS's vips (8.12, in the server
+     image) leaves a photo's rotation tag on the picture it has already
+     stood up. So the crop's last step mustn't obey it (`--no-rotate`).
+     Without that, every tagged photo's face was turned twice: sideways for
+     a portrait iPhone JPEG, upside down for a HEIC tagged 180°. vips 8.18 on
+     a Mac clears the tag, which is why the local tests didn't see it.
+     `Scripts/smoke-image.sh` checks it in the image that ships. Crops are
+     version 3, so neither the NAS nor a device keeps serving the old ones.
    - **The People switch** (§6, rule 7), in Curated Albums settings.
    - **Grouping.** `PeopleClusterer` compares each face with each person's
      average face (cosine on SFace's numbers), within one library only.

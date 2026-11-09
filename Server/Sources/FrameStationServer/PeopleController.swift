@@ -608,8 +608,9 @@ enum FaceCrop {
     static let margin: Float = 1.8
     /// Part of every crop's file name and of `PersonSummary.face`: moved
     /// when crops are made differently, so neither the NAS nor a device's
-    /// cache goes on serving the old ones. 2: leveled by the eyes.
-    static let version = 2
+    /// cache goes on serving the old ones. 2: leveled by the eyes. 3: a
+    /// photo's rotation tag applied once, not twice (see the last step).
+    static let version = 3
 
     static func serve(_ req: Request, userID: UUID, sha256: String, ordinal: Int) async throws -> Response {
         let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal)
@@ -680,8 +681,16 @@ enum FaceCrop {
             try await Shell.runChecked("vips", ["rot", square.path, level.path, turn], timeout: 60)
             square = level
         }
+        // Never by the photo's rotation tag again: the first step stood the
+        // picture up, but the NAS's vips (8.12) leaves the tag on what it
+        // made, and a second thumbnail turned every tagged photo's face a
+        // second time. That was the sideways and upside-down circles.
+        // `Scripts/smoke-image.sh` checks it in the image that ships.
         let partial = work.appendingPathComponent("face.jpg")
-        try await Shell.runChecked("vips", ["thumbnail", square.path, partial.path + "[Q=85,strip]", "\(size)"], timeout: 60)
+        try await Shell.runChecked(
+            "vips", ["thumbnail", square.path, partial.path + "[Q=85,strip]", "\(size)", "--no-rotate"],
+            timeout: 60
+        )
         try? FileManager.default.removeItem(at: target)
         try FileManager.default.moveItem(at: partial, to: target)
         return target
