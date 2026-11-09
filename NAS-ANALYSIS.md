@@ -310,13 +310,31 @@ faces are used for anything.
      and is never put back with someone the owner said it isn't.
    - **Together.** Two named people in at least 5 of the same photos get an
      album of those photos, under the People row, as Photos keeps groups.
-   - **Who was there.** Trips and occasions say "with Emma and Jack" under
-     their titles, for named people in two of the photos and one in twenty.
-     A birthday party is named for whose it plainly was: one person in at
-     least half the day's photos and twice as many as anyone else ("Emma's
-     birthday party in Culpeper"). Both are added as the page is drawn and
-     never saved, so they follow names as they change and go when People
-     does.
+   - **Named for who it was** (the owner asked for it short and clever, never
+     a list of names). As the owner names people, the albums the library
+     made take them in. Nothing is guessed beyond the photos and what the
+     owner said, and a name the owner gave an album is never touched.
+     - A birthday party, a graduation or a game that's plainly one person's
+       (them in at least three and half of its photos, and twice as many as
+       anyone else; never the owner) is named for them: "Thomas's Birthday",
+       "Emma's Graduation", "Jack's Soccer Game". The place moves to the line
+       under it.
+     - With a child's age where it's plain: "Celebrating Thomas's 2nd
+       Birthday". Only for someone the owner called their child, grandchild,
+       niece, nephew or cousin, first photographed at least two months into
+       the library (which is when they arrived), and a whole number of years
+       from then to within three weeks, 1 to 18.
+     - Over the Years: a birthday that's plainly the same child's every year
+       becomes "Thomas's Birthday", and each year takes its age.
+     - Christmas (Eve, Day), Thanksgiving, Easter and the Fourth of July take
+       the last name most of the people there share ("Deem Christmas 2023"),
+       or "Family" for three or more of the owner's family. Halloween plainly
+       one child's is "Thomas's Halloween 2023".
+     - Otherwise, one or two people who are the focus (each in a third of
+       the photos) go under the title, by first name: "with Thomas and
+       Grandma". Never three or more.
+     - All of it is added as the page is drawn and never saved, so it follows
+       names as they change and goes when People does.
    - **Level faces.** A face tilted in its photo (someone lying down, a baby
      held, a selfie from above) is turned upright in its circle by the line
      between its eyes, to the nearest quarter turn. Covers prefer a level
@@ -384,7 +402,7 @@ faces are used for anything.
    - **Shadow mode included.** People shows for anyone the NAS analyzes,
      shadow or on. It replaces nothing the phones do, so there's nothing to
      preview it against.
-   - **Tests.** `Scripts/smoke-people.sh` runs 62 checks with a stand-in
+   - **Tests.** `Scripts/smoke-people.sh` runs 69 checks with a stand-in
      analyzer whose faces are made-up vectors around known people. A face
      cut from a gradient photo, where color follows position, proves which
      way a crop was turned.

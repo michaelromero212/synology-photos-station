@@ -15,7 +15,9 @@
 #  - a photo's people, and correcting them: someone else, someone new, nobody;
 #  - a face lying on its side is stood up in its picture, and an upright one
 #    isn't turned;
-#  - who was there, under a day's title, and a birthday named for whose it was;
+#  - who was there, under a day's title; a birthday named for whose it was,
+#    with the age a child turned; a family's Christmas under their name, and
+#    Over the Years knowing whose birthday comes round;
 #  - People off forgets everyone and keeps no face templates; on, it's back;
 #  - face pictures are served, only to the owner;
 #  - Delete AI data takes it all.
@@ -75,7 +77,7 @@ import base64, hashlib, http.server, json, os, socketserver, sys
 import numpy as np
 sock, plan_path = sys.argv[1:3]
 def unit(v): return v / np.linalg.norm(v)
-people = {name: unit(np.random.default_rng(seed).standard_normal(128)) for name, seed in (("emma", 1), ("jack", 2))}
+people = {name: unit(np.random.default_rng(seed).standard_normal(128)) for name, seed in (("emma", 1), ("jack", 2), ("kid", 3))}
 def face_vector(who, seed):
     rng = np.random.default_rng(seed)
     noise = rng.standard_normal(128)
@@ -134,7 +136,8 @@ read -r T1 P1 U1 <<< "$(newuser Owner)"
 read -r T2 P2 U2 <<< "$(newuser Neighbor)"
 A1="Authorization: Bearer $T1"; A2="Authorization: Bearer $T2"
 
-# photo <name> <width> <day> <faces…> → asset id, with the plan recorded.
+# photo <name> <width> <day> <faces…> → asset id, with the plan recorded. The
+# day is MM-DD in 2025, or a whole YYYY-MM-DD.
 # Noise, except a "grad…" photo: red runs with x and green with y, so a face
 # cut from it says which way it was turned.
 photo(){
@@ -156,7 +159,7 @@ photo(){
     -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$name.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
   curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$A1" --data-binary "@$f" >/dev/null
   curl -s -X POST "$API/v1/uploads/$up/commit" -H "$A1" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$P1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$width,\"height\":480,\"capturedAt\":\"2025-${day}T12:00:00Z\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
+    -d "{\"spaceID\":\"$P1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$width,\"height\":480,\"capturedAt\":\"$([ ${#day} -eq 10 ] && echo "$day" || echo "2025-$day")T12:00:00Z\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
 }
 
 echo "A library: Emma, Jack, both together, and strangers"
@@ -275,7 +278,39 @@ OBS=$(python3 -c 'import json,sys; cake=[{"id":"birthday_cake","confidence":0.92
 curl -s -X POST "$API/v1/spaces/$P1/curation/observations" -H "$A1" -H 'Content-Type: application/json' -d "$OBS" >/dev/null
 PAGE=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
 has "a named day says who was there" "with Emma" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c.get("subtitle") for c in (json.load(sys.stdin).get("allOccasions") or []) if c["title"] == "Picnic"])')"
-has "a birthday is named for whose it plainly was" "Emma's birthday party" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
+has "a birthday is named for whose it plainly was" "Emma's Birthday" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
+lacks "without saying how old, when that isn't plain" "Celebrating Emma" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
+
+echo "Named for who it was"
+# The library begins in January 2022; Thomas first appears that May, which is
+# when he arrived. His birthday party every May 12 after, and a Christmas with
+# Emma, both of them Deems.
+photo "dawn" 770 "2022-01-05" >/dev/null
+KB=(); for i in 1 2 3 4; do KB+=("$(photo "born$i" $((770 + i)) "2022-05-1$i" kid)"); done
+for y in 2023 2024 2025; do
+  for i in 1 2 3; do photo "party$y-$i" $(( 780 + (y - 2023) * 10 + i )) "$y-05-12" kid >/dev/null; done
+  photo "party$y-4" $(( 784 + (y - 2023) * 10 )) "$y-05-12" stranger >/dev/null
+done
+XM=(); for i in 1 2 3 4; do XM+=("$(photo "xmas$i" $((810 + i)) "2024-12-25" emma kid)"); done
+kid_count(){ q "SELECT count(DISTINCT pf.sha256) FROM person_faces pf WHERE pf.person_id = (SELECT pf2.person_id FROM person_faces pf2 JOIN assets a ON a.sha256 = pf2.sha256 WHERE a.id = '${KB[0]}' AND pf2.state IN ('auto', 'confirmed') LIMIT 1) AND pf.state IN ('auto', 'confirmed')"; }
+until_true 180 '[ "$(kid_count)" = "17" ]'
+check "Thomas is in his photos" "17" "$(kid_count)"
+K=$(q "SELECT pf.person_id FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id = '${KB[0]}' AND pf.state IN ('auto', 'confirmed') LIMIT 1")
+curl -s -X PUT "$API/v1/spaces/$P1/people/$K" -H "$A1" -H 'Content-Type: application/json' -d '{"name":"Thomas Deem"}' >/dev/null
+curl -s -X PUT "$API/v1/spaces/$P1/people/$K/relation" -H "$A1" -H 'Content-Type: application/json' -d '{"relation":"son"}' >/dev/null
+curl -s -X PUT "$API/v1/spaces/$P1/people/$E" -H "$A1" -H 'Content-Type: application/json' -d '{"name":"Emma Deem"}' >/dev/null
+PARTIES=$(q "SELECT string_agg(a.id::text, ' ') FROM assets a JOIN person_faces pf ON pf.sha256 = a.sha256 AND pf.person_id = '$K' WHERE to_char(a.local_captured_at, 'MM-DD') = '05-12'")
+CAKES=$(python3 -c 'import json,sys; cake=[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]; print(json.dumps({"analysisVersion":1,"modelVersion":"smoke","observations":[{"assetID":a.upper(),"labels":cake,"aesthetic":0.4,"isUtility":False,"peopleCount":1,"animalCount":0} for a in sys.argv[1].split()]}))' "$PARTIES")
+curl -s -X POST "$API/v1/spaces/$P1/curation/observations" -H "$A1" -H 'Content-Type: application/json' -d "$CAKES" >/dev/null
+TREES=$(python3 -c 'import json,sys; tree=[{"id":"christmas_tree","confidence":0.88},{"id":"gift","confidence":0.5}]; print(json.dumps({"analysisVersion":1,"modelVersion":"smoke","observations":[{"assetID":a,"labels":tree,"aesthetic":0.4,"isUtility":False,"peopleCount":2,"animalCount":0} for a in sys.argv[1:]]}))' "${XM[@]}")
+curl -s -X POST "$API/v1/spaces/$P1/curation/observations" -H "$A1" -H 'Content-Type: application/json' -d "$TREES" >/dev/null
+PAGE=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
+OCCASIONS=$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')
+has "a child's birthday says how old he turned" "Celebrating Thomas's 3rd Birthday" "$OCCASIONS"
+has "every year of it" "Celebrating Thomas's 1st Birthday" "$OCCASIONS"
+has "a family's Christmas takes their name" "Deem Christmas 2024" "$OCCASIONS"
+lacks "and no list of names under it" "with Emma and Thomas" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c.get("subtitle") for c in (json.load(sys.stdin).get("allOccasions") or []) if "Christmas" in c["title"]])')"
+has "Over the Years knows whose birthday comes round" "Thomas's Birthday" "$(echo "$PAGE" | python3 -c 'import sys,json; print([t["title"] for t in (json.load(sys.stdin).get("traditions") or [])])')"
 
 echo "People off, and on again"
 check "People can be turned off" "200" "$(code -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"people":false}')"

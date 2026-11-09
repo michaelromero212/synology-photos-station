@@ -275,17 +275,17 @@ struct CollectionsController: RouteCollection {
             )
             : nil
 
-        // Who was there, on every trip and occasion: "with Emma and Jack",
-        // and a birthday named for whose it plainly was. Added as the page is
-        // drawn and never kept, so it follows the names as they change and
-        // goes when People does. See `withPeople`.
-        let presence = curation.showsPeople
-            ? try await Self.namedPresence(spaceID: spaceID, userID: device.userID, on: req.sql)
-            : [:]
-        let birthdayTitle = CurationVocabulary.events.first { $0.tag == "birthday" }?.title
-        let birthdays = Set(occasions.filter { $0.isEvent && $0.occasion == birthdayTitle }.map(\.summary.key))
+        // Named for the people in them, where it plainly fits: "Celebrating
+        // Thomas's 2nd Birthday", "Deem Christmas 2023", "Jack's Soccer
+        // Game". Added as the page is drawn and never kept, so each name the
+        // owner gives shows up at once, and goes again with it or with People.
+        // A name the owner gave an album is never touched. See `withPeople`.
+        let whoIsWho = curation.showsPeople
+            ? try await Self.namedPeople(spaceID: spaceID, userID: device.userID, on: req.sql)
+            : NamedPeople()
+        let occasionByKey = Dictionary(occasions.map { ($0.summary.key, $0) }, uniquingKeysWith: { first, _ in first })
         func mark(_ card: CollectionSummary) -> CollectionSummary {
-            Self.withPeople(card, presence: presence, birthday: birthdays.contains(card.key) ? birthdayTitle : nil)
+            Self.withPeople(card, people: whoIsWho, occasion: occasionByKey[card.key])
         }
 
         return CollectionsResponse(
@@ -307,7 +307,7 @@ struct CollectionsController: RouteCollection {
             allTrips: trips.map(mark),
             allOccasions: occasions.map { mark(yearMarked($0.summary)) },
             featured: featured.map(mark),
-            traditions: traditions,
+            traditions: traditions.map { Self.withPeople($0, people: whoIsWho) },
             wideTrips: Self.featuredTrips(
                 unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:)),
                 limit: Self.wideLimit
@@ -323,94 +323,308 @@ struct CollectionsController: RouteCollection {
         )
     }
 
-    // MARK: - Who was there
+    // MARK: - Named for the people in it
 
     /// One person the owner named, in one day's photos.
     struct Presence {
         let personID: UUID
         let name: String
+        let relation: String?
+        let isMe: Bool
         let photos: Int
     }
 
-    /// Everyone the owner named, by the days they're in the library's
-    /// photos. Never the owner: being in their own photos goes without
-    /// saying.
-    static func namedPresence(
-        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
-    ) async throws -> [String: [Presence]] {
-        struct Row: Decodable { let day: String; let personID: UUID; let name: String; let photos: Int }
+    /// Who the owner named, for the page's titles: day by day, with the day
+    /// each was first photographed and the day the library begins, which
+    /// together say how old a child turned.
+    struct NamedPeople {
+        var byDay: [String: [Presence]] = [:]
+        var firstDay: [UUID: String] = [:]
+        var libraryFirstDay: String?
+        var isEmpty: Bool { byDay.isEmpty }
+    }
+
+    static func namedPeople(spaceID: UUID, userID: UUID, on sql: any SQLDatabase) async throws -> NamedPeople {
+        struct Row: Decodable {
+            let day: String
+            let personID: UUID
+            let name: String
+            let relation: String?
+            let isMe: Bool
+            let photos: Int
+        }
         let rows = try await sql.raw("""
             SELECT to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD') AS day,
-                   p.id AS "personID", p.name, count(DISTINCT a.sha256)::int AS photos
+                   p.id AS "personID", p.name, p.relation, p.is_me AS "isMe",
+                   count(DISTINCT a.sha256)::int AS photos
             FROM person_faces pf
-            JOIN people p ON p.id = pf.person_id AND p.name IS NOT NULL AND NOT p.hidden AND NOT p.is_me
+            JOIN people p ON p.id = pf.person_id AND p.name IS NOT NULL AND NOT p.hidden
             JOIN assets a ON a.sha256 = pf.sha256
             JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID)
                                 AND sa.deleted_at IS NULL
             WHERE pf.user_id = \(bind: userID) AND pf.state IN ('auto', 'confirmed')
               AND \(unsafeRaw: TimelineController.visible)
-            GROUP BY 1, p.id, p.name
+            GROUP BY 1, p.id, p.name, p.relation, p.is_me
             """).all(decoding: Row.self)
-        return Dictionary(grouping: rows, by: \.day).mapValues { rows in
-            rows.map { Presence(personID: $0.personID, name: $0.name, photos: $0.photos) }
+        guard !rows.isEmpty else { return NamedPeople() }
+        struct First: Decodable { let day: String? }
+        let library = try await sql.raw("""
+            SELECT to_char(min(\(unsafeRaw: TimelineController.localTime)), 'YYYY-MM-DD') AS day
+            FROM space_assets sa JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND \(unsafeRaw: TimelineController.visible)
+            """).first(decoding: First.self)
+        var people = NamedPeople()
+        people.libraryFirstDay = library?.day
+        for row in rows {
+            people.byDay[row.day, default: []].append(Presence(
+                personID: row.personID, name: row.name, relation: row.relation, isMe: row.isMe, photos: row.photos
+            ))
+            if row.day < people.firstDay[row.personID, default: "9999"] { people.firstDay[row.personID] = row.day }
+        }
+        return people
+    }
+
+    /// One person across a card's days, the most photographed first.
+    struct Presences {
+        let ranked: [Presence]
+
+        init(_ people: NamedPeople, days: [String]) {
+            var total: [UUID: Presence] = [:]
+            for day in days {
+                for seen in people.byDay[day] ?? [] {
+                    let photos = (total[seen.personID]?.photos ?? 0) + seen.photos
+                    total[seen.personID] = Presence(
+                        personID: seen.personID, name: seen.name, relation: seen.relation,
+                        isMe: seen.isMe, photos: photos
+                    )
+                }
+            }
+            ranked = total.values.sorted {
+                $0.photos != $1.photos ? $0.photos > $1.photos
+                    : ($0.name, $0.personID.uuidString) < ($1.name, $1.personID.uuidString)
+            }
+        }
+
+        /// Who the photos are of, where one person plainly is: in at least
+        /// three and half of them, and twice as many as anyone else. Never
+        /// the owner: their photos are of everyone else.
+        func focus(of count: Int) -> Presence? {
+            let others = ranked.filter { !$0.isMe }
+            guard let first = others.first, first.photos >= 3, first.photos * 2 >= count,
+                  first.photos >= 2 * (others.dropFirst().first?.photos ?? 0)
+            else { return nil }
+            return first
+        }
+
+        /// What a family gathering is called after the people at it: the
+        /// last name most of them share ("Deem"), or "Family" for three or
+        /// more of the owner's family. Nil when neither is plain.
+        var familyWord: String? {
+            let there = ranked.filter { $0.photos >= 2 }
+            let surnames = Dictionary(grouping: there.compactMap { CollectionsController.surname($0.name) }, by: { $0 })
+            if let shared = surnames.max(by: { ($0.value.count, $1.key) < ($1.value.count, $0.key) }),
+               shared.value.count >= 2, shared.value.count * 2 >= there.count {
+                return shared.key
+            }
+            let family = there.filter { $0.isMe || Relationship(rawValue: $0.relation ?? "")?.isFamily == true }
+            return family.count >= 3 ? "Family" : nil
         }
     }
 
-    /// A trip or an occasion with who was there under its title: "with Emma
-    /// and Jack". Someone counts from two of its photos and one in twenty.
+    /// The holidays a family gathers for, which a family's name suits:
+    /// "Deem Christmas 2023", "Family Thanksgiving 2024".
+    static let gatheringHolidays: Set<String> = [
+        "Christmas", "Christmas Eve", "Christmas Day", "Thanksgiving", "Easter", "Fourth of July",
+    ]
+
+    /// Games that are somebody's: whoever the photos are of was playing.
+    static let games: [String: String] = [
+        "soccer": "Soccer Game", "baseball": "Baseball Game", "softball": "Softball Game",
+        "basketball": "Basketball Game", "football": "Football Game", "volleyball": "Volleyball Game",
+        "hockey": "Hockey Game", "tennis": "Tennis Match", "gymnastics": "Gymnastics Meet",
+        "sports": "Game Day",
+    ]
+
+    /// A trip or an occasion, named for the people in it where it plainly
+    /// fits, and never wordy:
+    /// - a birthday party plainly someone's: "Celebrating Thomas's 2nd
+    ///   Birthday", or "Thomas's Birthday" when his age isn't plain;
+    /// - a graduation or a game: "Emma's Graduation", "Jack's Soccer Game";
+    /// - a family holiday: "Deem Christmas 2023", "Family Thanksgiving 2024";
+    ///   Halloween plainly one child's: "Thomas's Halloween 2023".
     ///
-    /// `birthday`, the title of the birthday event, for a card the person's
-    /// own analysis found one on: named for whose it was where the photos
-    /// say so plainly, one person in at least half of them and twice as many
-    /// as anyone else. "Emma's birthday party in Culpeper"; anything less
-    /// certain stays "Birthday party in Culpeper". A name the person gave
-    /// the day is never touched, since that isn't an event.
+    /// Otherwise one or two people who are the focus go under the title:
+    /// "with Thomas", "with Thomas and Grandma". Never a list of everyone.
+    /// A name the owner gave the album is never changed.
     static func withPeople(
-        _ card: CollectionSummary, presence: [String: [Presence]], birthday: String?
+        _ card: CollectionSummary, people: NamedPeople, occasion: Occasion?
     ) -> CollectionSummary {
-        guard !presence.isEmpty, [.trip, .day, .anniversary].contains(card.kind) else { return card }
-        var counts: [UUID: (name: String, photos: Int)] = [:]
-        for day in days(inKey: card.key) {
-            for person in presence[day] ?? [] {
-                counts[person.personID, default: (person.name, 0)].photos += person.photos
-            }
-        }
-        guard !counts.isEmpty else { return card }
-        let ranked = counts.sorted {
-            $0.value.photos != $1.value.photos
-                ? $0.value.photos > $1.value.photos
-                : ($0.value.name, $0.key.uuidString) < ($1.value.name, $1.key.uuidString)
+        guard !people.isEmpty, [.trip, .day, .anniversary].contains(card.kind) else { return card }
+        let days = days(inKey: card.key)
+        let there = Presences(people, days: days)
+        guard !there.ranked.isEmpty else { return card }
+
+        if !card.isNamed, card.kind == .day, let occasion, let name = occasion.occasion,
+           let renamed = retitled(card, occasion: name, isEvent: occasion.isEvent,
+                                  isHoliday: occasion.isHoliday, there: there, people: people, day: days.last) {
+            return renamed
         }
 
-        var card = card
-        var whose: UUID?
-        if let birthday, card.title.hasPrefix(birthday), let first = ranked.first,
-           first.value.photos >= 3, first.value.photos * 2 >= card.count,
-           first.value.photos >= 2 * (ranked.dropFirst().first?.value.photos ?? 0) {
-            card = card.withTitle("\(first.value.name)'s \(birthday.lowercased())" + card.title.dropFirst(birthday.count))
-            whose = first.key
-        }
-
+        // One or two people the photos are of, each in a third of them.
+        let focus = there.ranked.filter { !$0.isMe && $0.photos >= 2 && $0.photos * 3 >= card.count }
         var names: [String] = []
-        for (id, entry) in ranked where id != whose && entry.photos >= 2 && entry.photos * 20 >= card.count {
-            if !names.contains(entry.name) { names.append(entry.name) }
-        }
-        guard let phrase = withPhrase(names) else { return card }
+        for person in focus where !names.contains(firstName(person.name)) { names.append(firstName(person.name)) }
+        guard (1...2).contains(names.count) else { return card }
+        let phrase = names.count == 1 ? "with \(names[0])" : "with \(names[0]) and \(names[1])"
         return card.withSubtitle([card.subtitle, phrase].compactMap { $0 }.joined(separator: " · "))
     }
 
-    /// "with Emma", "with Emma and Jack", "with Emma, Jack and Grandma", and
-    /// past three, "and 2 others".
-    static func withPhrase(_ names: [String]) -> String? {
-        switch names.count {
-        case 0: return nil
-        case 1: return "with \(names[0])"
-        case 2: return "with \(names[0]) and \(names[1])"
-        case 3: return "with \(names[0]), \(names[1]) and \(names[2])"
-        default:
-            let more = names.count - 3
-            return "with \(names[0]), \(names[1]), \(names[2]) and \(more) \(more == 1 ? "other" : "others")"
+    /// An occasion card under a title that says whose it was, or nil.
+    static func retitled(
+        _ card: CollectionSummary, occasion: String, isEvent: Bool, isHoliday: Bool,
+        there: Presences, people: NamedPeople, day: String?
+    ) -> CollectionSummary? {
+        if isEvent, let event = CurationVocabulary.events.first(where: { $0.title == occasion }),
+           let focus = there.focus(of: card.count) {
+            let first = firstName(focus.name)
+            let title: String
+            switch event.tag {
+            case "birthday":
+                title = birthdayTitle(first, age: day.flatMap { age(of: focus, on: $0, people: people) })
+            case "graduation":
+                title = "\(first)'s Graduation"
+            default:
+                guard let game = games[event.tag] else { return nil }
+                title = "\(first)'s \(game)"
+            }
+            return moved(card, to: title, from: event.title)
         }
+        if isHoliday, card.title.hasPrefix(occasion) {
+            if gatheringHolidays.contains(occasion), let family = there.familyWord {
+                return card.withTitle("\(family) \(card.title)")
+            }
+            if occasion == "Halloween", let focus = there.focus(of: card.count), isChildLike(focus.relation) {
+                return card.withTitle("\(firstName(focus.name))'s \(card.title)")
+            }
+        }
+        return nil
+    }
+
+    /// "Celebrating Thomas's 2nd Birthday", or "Thomas's Birthday".
+    static func birthdayTitle(_ first: String, age: Int?) -> String {
+        age.map { "Celebrating \(first)'s \(ordinal($0)) Birthday" } ?? "\(first)'s Birthday"
+    }
+
+    /// The card under its new title, with the place its old title carried
+    /// ("Birthday party in Culpeper") moved to the line under it.
+    static func moved(_ card: CollectionSummary, to title: String, from phrase: String) -> CollectionSummary {
+        var renamed = card.withTitle(title)
+        let rest = card.title.hasPrefix(phrase) ? card.title.dropFirst(phrase.count) : ""
+        let words = rest.split(separator: " ", maxSplits: 1)
+        if words.count == 2, ["in", "at", "to"].contains(words[0]) {
+            var parts = (card.subtitle ?? "").components(separatedBy: " · ").filter { !$0.isEmpty }
+            parts.insert(String(words[1]), at: min(1, parts.count))
+            renamed = renamed.withSubtitle(parts.joined(separator: " · "))
+        }
+        return renamed
+    }
+
+    /// How old a child turned on `day`, where it's plain: a child, grandchild,
+    /// niece, nephew or cousin of the owner, first photographed at least two
+    /// months into the library, which is when they arrived, and a whole number
+    /// of years from then to within three weeks.
+    static func age(of person: Presence, on day: String, people: NamedPeople) -> Int? {
+        guard !person.isMe, let relation = person.relation, isChildLike(relation),
+              let first = people.firstDay[person.personID].flatMap(CivilDay.number),
+              let start = people.libraryFirstDay.flatMap(CivilDay.number),
+              let party = CivilDay.number(day), first - start >= 60
+        else { return nil }
+        let days = Double(party - first)
+        let years = (days / 365.2425).rounded()
+        guard (1...18).contains(Int(years)), abs(days - years * 365.2425) <= 21 else { return nil }
+        return Int(years)
+    }
+
+    /// A child of the family's, by what the owner said they are.
+    static func isChildLike(_ relation: String?) -> Bool {
+        guard let kind = relation.flatMap(Relationship.init(rawValue:))?.kind else { return false }
+        return [.child, .grandchild, .nieceOrNephew, .cousin].contains(kind)
+    }
+
+    /// "Thomas" from "Thomas Deem", "Grandma" from "Grandma Deem".
+    static func firstName(_ name: String) -> String {
+        name.split(separator: " ").first.map(String.init) ?? name
+    }
+
+    /// The family name in a name, when it has one: "Deem" from "Thomas Deem".
+    static func surname(_ name: String) -> String? {
+        var words = name.split(separator: " ").map(String.init)
+        if let last = words.last, ["Jr", "Jr.", "Sr", "Sr.", "II", "III", "IV"].contains(last) { words.removeLast() }
+        guard words.count >= 2, let last = words.last, last.count >= 2,
+              last.first?.isUppercase == true,
+              last.allSatisfy({ $0.isLetter || $0 == "-" || $0 == "'" })
+        else { return nil }
+        return last
+    }
+
+    /// 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st.
+    static func ordinal(_ number: Int) -> String {
+        let suffix: String
+        switch (number % 100, number % 10) {
+        case (11...13, _): suffix = "th"
+        case (_, 1): suffix = "st"
+        case (_, 2): suffix = "nd"
+        case (_, 3): suffix = "rd"
+        default: suffix = "th"
+        }
+        return "\(number)\(suffix)"
+    }
+
+    /// Over the Years, named the same way: a birthday that's plainly the same
+    /// child's every year becomes "Thomas's Birthday", each year "Celebrating
+    /// Thomas's 2nd Birthday"; a family holiday's years take the family's
+    /// name where it fits. A name the owner gave is never touched.
+    static func withPeople(_ tradition: Tradition, people: NamedPeople) -> Tradition {
+        guard !people.isEmpty else { return tradition }
+        let birthday = CurationVocabulary.events.first { $0.tag == "birthday" }?.title ?? "Birthday party"
+        if tradition.title.hasPrefix("Birthday on ") || tradition.title.hasPrefix(birthday) {
+            let whose = tradition.years.map { year in
+                (year, Presences(people, days: days(inKey: year.key)).focus(of: year.count))
+            }
+            let found = Set(whose.compactMap { $0.1?.personID })
+            guard found.count == 1, whose.filter({ $0.1 != nil }).count >= 2,
+                  let person = whose.compactMap(\.1).first
+            else { return tradition }
+            let first = firstName(person.name)
+            let years = whose.map { year, focus -> CollectionSummary in
+                guard let focus, let day = days(inKey: year.key).last else { return year }
+                let title = age(of: focus, on: day, people: people)
+                    .map { birthdayTitle(first, age: $0) } ?? "\(first)'s Birthday \(day.prefix(4))"
+                return year.withTitle(title)
+            }
+            return Tradition(
+                id: tradition.id, title: "\(first)'s Birthday", subtitle: tradition.subtitle,
+                count: tradition.count, coverAssetIDs: tradition.coverAssetIDs, years: years,
+                next: tradition.next, naming: tradition.naming
+            )
+        }
+        if tradition.id.hasPrefix("holiday:") {
+            let holiday = String(tradition.id.dropFirst("holiday:".count))
+            guard gatheringHolidays.contains(holiday) else { return tradition }
+            let years = tradition.years.map { year -> CollectionSummary in
+                guard year.title.hasPrefix(holiday),
+                      let family = Presences(people, days: days(inKey: year.key)).familyWord
+                else { return year }
+                return year.withTitle("\(family) \(year.title)")
+            }
+            return Tradition(
+                id: tradition.id, title: tradition.title, subtitle: tradition.subtitle,
+                count: tradition.count, coverAssetIDs: tradition.coverAssetIDs, years: years,
+                next: tradition.next, naming: tradition.naming
+            )
+        }
+        return tradition
     }
 
     /// At most this many cards to swipe through at the top of the page.
