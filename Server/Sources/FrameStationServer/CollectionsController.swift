@@ -269,11 +269,6 @@ struct CollectionsController: RouteCollection {
                 userID: device.userID, spaceID: spaceID, limit: PeopleController.pageLimit, on: req.sql
             )
             : nil
-        let together = curation.showsPeople
-            ? try await PeopleController.together(
-                userID: device.userID, spaceID: spaceID, limit: PeopleController.togetherLimit, on: req.sql
-            )
-            : nil
 
         // Named for the people in them, where it plainly fits: "Celebrating
         // Thomas's 2nd Birthday", "Deem Christmas 2023", "Jack's Soccer
@@ -318,8 +313,10 @@ struct CollectionsController: RouteCollection {
                 today: today, comingUp: comingUp, heroOccasion: heroOccasion,
                 limit: Self.wideLimit
             ).map(mark),
-            people: people,
-            together: together
+            // No Together: two people's album was one section too many on a
+            // page that already had a lot going on (his call, 2026-11-09).
+            // People's names go into the albums the page already has.
+            people: people
         )
     }
 
@@ -2959,8 +2956,9 @@ struct CollectionsController: RouteCollection {
         case .recentlyDeleted:
             throw Abort(.badRequest, reason: "Recently Deleted has its own endpoint.")
         case .together:
-            // The photos two people are both in. Ids of anyone else's
-            // people simply find nothing.
+            // The photos two people are both in. The page no longer offers
+            // these, but an app drawing a page it saved before may still
+            // open one. Ids of anyone else's people simply find nothing.
             let ids = key.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
             guard ids.count == 2 else {
                 throw Abort(.badRequest, reason: "Together needs two people.")

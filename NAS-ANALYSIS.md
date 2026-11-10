@@ -308,8 +308,12 @@ faces are used for anything.
      a person's faces in every frame together, so they all move. Every
      answer is learned from: the face joins who the person is to the NAS,
      and is never put back with someone the owner said it isn't.
-   - **Together.** Two named people in at least 5 of the same photos get an
-     album of those photos, under the People row, as Photos keeps groups.
+   - **No Together.** Two people often photographed together had their own
+     row under People, as Photos keeps groups. The owner found it one section
+     too many on a page that already had a lot going on (2026-11-09), so the
+     page doesn't offer it. People's names go into the albums the page
+     already has instead. The album of two still opens for an app drawing a
+     page it saved before.
    - **Named for who it was** (the owner asked for it short and clever, never
      a list of names). As the owner names people, the albums the library
      made take them in. Nothing is guessed beyond the photos and what the

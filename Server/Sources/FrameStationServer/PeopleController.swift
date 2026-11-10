@@ -531,38 +531,6 @@ struct PeopleController: RouteCollection {
         return try await Self.photoPeople(userID: userID, sha256: sha256, on: req.sql)
     }
 
-    // MARK: - Together
-
-    /// Two named people often in the same photos, the most first: at least
-    /// `togetherMinimum` of them.
-    static func together(
-        userID: UUID, spaceID: UUID, limit: Int, on sql: any SQLDatabase
-    ) async throws -> [PeopleTogether] {
-        struct Row: Decodable { let first: UUID; let second: UUID; let photos: Int }
-        let rows = try await sql.raw("""
-            SELECT one.person_id AS first, two.person_id AS second, count(DISTINCT one.sha256)::int AS photos
-            FROM person_faces one
-            JOIN person_faces two ON two.user_id = one.user_id AND two.sha256 = one.sha256
-                                 AND two.person_id > one.person_id AND two.state IN ('auto', 'confirmed')
-            JOIN people p1 ON p1.id = one.person_id AND p1.name IS NOT NULL AND NOT p1.hidden
-            JOIN people p2 ON p2.id = two.person_id AND p2.name IS NOT NULL AND NOT p2.hidden
-            JOIN assets a ON a.sha256 = one.sha256
-            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-            WHERE one.user_id = \(bind: userID) AND one.state IN ('auto', 'confirmed')
-              AND \(unsafeRaw: TimelineController.visible)
-            GROUP BY one.person_id, two.person_id
-            HAVING count(DISTINCT one.sha256) >= \(bind: Self.togetherMinimum)
-            ORDER BY photos DESC, first, second
-            LIMIT \(bind: limit)
-            """).all(decoding: Row.self)
-        return rows.map { PeopleTogether(people: [$0.first, $0.second], photoCount: $0.photos) }
-    }
-
-    /// How many photos two people need together to have an album of them.
-    /// Fewer in the smoke tests.
-    static let togetherMinimum = Environment.get("FRAMESTATION_TOGETHER_MINIMUM").flatMap(Int.init) ?? 5
-    static let togetherLimit = 6
-
     // MARK: - Faces
 
     @Sendable

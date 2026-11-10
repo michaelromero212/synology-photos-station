@@ -1728,8 +1728,8 @@ of watching progress bars before anything is evaluable.
 - ~~Face recognition and grouping~~ is under way since 2026-11-05. The NAS
   analyzes faces, scenes and video keyframes in shadow mode, and People is
   built: grouping, naming, "Is this Emma?", relationships, who's in each
-  photo and correcting it, Together, "with Emma and Jack" under titles, and
-  a switch that turns it all off. See [NAS-ANALYSIS.md](NAS-ANALYSIS.md).
+  photo and correcting it, albums named for the people in them ("Romero
+  Thanksgiving 2023"), and a switch that turns it all off. See [NAS-ANALYSIS.md](NAS-ANALYSIS.md).
 - Semantic/object search. The NAS's scene embeddings would make
   natural-language search possible; nothing uses them for that yet.
 - Tag search — blocked on the importer keeping IPTC keywords, see §9.

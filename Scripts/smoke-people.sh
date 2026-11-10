@@ -11,7 +11,7 @@
 #  - "Not this person" sticks, and merging joins two people;
 #  - someone's photos come newest first, a page at a time;
 #  - relationships and "This is me", one of them at most;
-#  - Together: two people often in the same photos, and their album;
+#  - no Together row, though an album of two saved by an older app opens;
 #  - a photo's people, and correcting them: someone else, someone new, nobody;
 #  - a face lying on its side is stood up in its picture, and an upright one
 #    isn't turned;
@@ -43,8 +43,6 @@ export FRAMESTATION_ANALYZER_SOCKET="$SOCK" FRAMESTATION_ANALYSIS_START_DELAY=1 
 export FRAMESTATION_PEOPLE_START_DELAY=2 FRAMESTATION_PEOPLE_INTERVAL=3 FRAMESTATION_PEOPLE_SETTLE=0
 # Five to a page, so Emma's eight photos are two pages.
 export FRAMESTATION_PERSON_PAGE=5
-# Two photos together make an album, as Emma and Jack have.
-export FRAMESTATION_TOGETHER_MINIMUM=2
 PASS=0; FAIL=0
 q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
 admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
@@ -218,12 +216,10 @@ check "only one me, and me isn't my own daughter" "False True None" "$(curl -s "
 curl -s -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":false}' >/dev/null
 curl -s -X PUT "$API/v1/spaces/$P1/people/$E/relation" -H "$A1" -H 'Content-Type: application/json' -d '{"relation":"daughter"}' >/dev/null
 
-echo "Together"
-TOG=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
-check "Emma and Jack are often together" "2" "$(echo "$TOG" | python3 -c 'import sys,json; t=json.load(sys.stdin).get("together") or []; print(t[0]["photoCount"] if t else 0)')"
-PAIR=$(echo "$TOG" | python3 -c 'import sys,json; print(",".join(json.load(sys.stdin)["together"][0]["people"]))')
-check "their album is the photos they're both in" "2" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=together&key=$PAIR" -H "$A1" | jq '["total"]')"
-check "someone else's album of them finds nothing" "0" "$(curl -s "$API/v1/spaces/$P2/collections/items?kind=together&key=$PAIR" -H "$A2" | jq '["total"]')"
+echo "No Together"
+check "the page has no Together row" "None" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '.get("together")')"
+check "an album of two an older app saved still opens" "2" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=together&key=$E,$J" -H "$A1" | jq '["total"]')"
+check "someone else's album of them finds nothing" "0" "$(curl -s "$API/v1/spaces/$P2/collections/items?kind=together&key=$E,$J" -H "$A2" | jq '["total"]')"
 
 echo "The people in a photo"
 names(){ python3 -c 'import sys,json; print(",".join(str(f.get("name")) for f in json.load(sys.stdin)["faces"]))'; }
