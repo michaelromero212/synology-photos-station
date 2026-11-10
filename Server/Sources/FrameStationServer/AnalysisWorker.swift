@@ -36,7 +36,6 @@ actor AnalysisWorker {
     /// What was last said in the log about the analyzer, so a state is
     /// announced once rather than on every retry.
     private var announced: String?
-    private var lastSweep: ContinuousClock.Instant?
     private var window = Window()
     /// Files in a row the analyzer couldn't find or read. One is that file;
     /// ten in a row is a mount, and analysis pauses rather than marking the
@@ -99,7 +98,6 @@ actor AnalysisWorker {
                 }
                 announce("analysis: analyzer ready, version \(health.analyzer), \(health.threads) threads, \(health.modelSummary)")
                 backoff = .seconds(10)
-                await sweepIfDue()
 
                 let batch = try await candidates(version: health.analyzer)
                 if batch.isEmpty {
@@ -381,42 +379,9 @@ actor AnalysisWorker {
         window = Window()
     }
 
-    // MARK: - Cleanup
-
-    /// Hourly: what was analyzed for a file no longer in its person's library
-    /// goes, faces included. A file in Recently Deleted keeps its analysis
-    /// until it's deleted for good, so restoring it costs nothing.
-    private func sweepIfDue() async {
-        let now = ContinuousClock.now
-        if let last = lastSweep, now - last < .seconds(3600) { return }
-        lastSweep = now
-        do {
-            let removed = try await Self.sweep(on: app.sql)
-            if removed > 0 {
-                app.logger.info("analysis: removed \(removed) analyses of files no longer in their library")
-            }
-        } catch {
-            app.logger.error("analysis: sweep failed: \(String(reflecting: error))")
-        }
-    }
-
-    static func sweep(on sql: any SQLDatabase) async throws -> Int {
-        struct Count: Decodable { let count: Int }
-        return try await sql.raw("""
-            WITH gone AS (
-                DELETE FROM nas_analysis n
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM space_members m
-                    JOIN spaces s ON s.id = m.space_id AND s.kind = 'personal'
-                    JOIN space_assets sa ON sa.space_id = s.id AND sa.purged_at IS NULL
-                    JOIN assets a ON a.id = sa.asset_id
-                    WHERE m.user_id = n.user_id AND a.sha256 = n.sha256
-                )
-                RETURNING 1
-            )
-            SELECT count(*)::int AS count FROM gone
-            """).first(decoding: Count.self)?.count ?? 0
-    }
+    // What was analyzed for a file no longer in its person's library goes in
+    // `RetentionWorker`'s hourly pass, faces and their names included. It
+    // used to go from here, which meant only while the analyzer answered.
 }
 
 struct AnalysisWorkerKey: StorageKey {

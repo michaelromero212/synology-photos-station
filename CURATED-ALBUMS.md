@@ -459,7 +459,7 @@ images, and those stay out of the repo and out of CI (spec §53, Q8).
 | 12 | Works offline? | Yes. Observations queue until the NAS answers. | Airplane-mode test, then reconnect. |
 | 13 | Temporary files? | None in normal use. Any needed for video frames go in the app's temp directory and are deleted. | Code review. |
 | 14 | Disable AI? | A server-side setting per person, followed by every device. | Settings test across two devices. |
-| 15 | Delete AI data? | One action removes observations, curated albums and edits to them. Never media or the person's own albums. | Server test: counts before and after. |
+| 15 | Delete AI data? | One action removes observations, curated albums and edits to them. Never media or the person's own albums. A photo deleted for good takes its observations with it within the hour, once no library the person is in still holds the file. Recently Deleted still holds it, so a restore needs no new analysis. | Server test: counts before and after. `smoke-retention.sh`: gone after a permanent delete, kept while another of the person's libraries holds the file. |
 | 16 | Edits preserved? | Stored as rows the resolver reads on every run. Only Reset clears them. | Spec scenarios C, D and F. |
 | 17 | Logs privacy-safe? | Ids, versions, durations and counts only. | Read a diagnostics export in review. |
 | 18 | Model downloads trusted? | The app downloads none. Vision's models are part of the OS. | — |

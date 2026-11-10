@@ -1281,6 +1281,17 @@ The hash survives `rebuild`, which assigns new asset ids. The server reads it
 from the asset row and never accepts one from a client, so a hash is never a
 way to ask whether a photo exists.
 
+A row lasts as long as the person holds the file. Once no library they belong
+to has it, not even in Recently Deleted, `RetentionWorker`'s hourly pass
+removes the row, so a photo deleted for good doesn't leave its labels and
+search terms behind. Any library counts, shared ones and shared albums
+included, because covers there read the person's own observations. The same
+pass takes the NAS's own analysis, its faces and the names given them, once
+the file leaves the person's own library, the only one the NAS analyzes, and
+it doesn't need the analyzer running to do it. The pass is paced for the
+J4125: a page of a thousand rows, each checked with a few index lookups, then
+a pause twice as long as the page took.
+
 Two settings on `users`, both on by default, apply to every one of the person's
 devices at once. One switches curation off entirely; the page is then exactly
 what it was before. The other switches holiday albums off, including in trip
@@ -1663,7 +1674,10 @@ two background passes read it:
    leaving a shared space.
 2. **`RetentionWorker`** purges the blob and its derivatives at
    `Retention.days` (29), hourly, and only once **no other placement still
-   wants those bytes**.
+   wants those bytes**. The same pass then removes what was seen in files
+   people no longer hold: by their devices (see "Curated albums"), and by the
+   NAS's analyzer, faces and the names given them included, whether or not
+   the analyzer is running.
 
 That last clause is load-bearing. `assets.sha256` is **not unique** — sharing a
 photograph makes a second asset row over the same blob — so a purge that

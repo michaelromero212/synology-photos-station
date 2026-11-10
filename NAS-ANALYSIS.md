@@ -206,7 +206,8 @@ The rules:
    a landmark, an embedding, a name or a path.
 5. **Gone when the person says so.** "Delete AI data" deletes it along with the
    device labels, and so does deleting the account. A photo deleted for good
-   takes its faces with it within the hour. Turning curation off stops
+   takes its faces, and the names given to them, with it within the hour,
+   whether or not the analyzer is running. Turning curation off stops
    analysis.
 6. **Names, in the People phase, belong to the person who gave them.** One
    person's "Mom" is someone else's "Grandma".
@@ -485,8 +486,12 @@ faces are used for anything.
 14. **Can people disable it?** Yes. The People switch forgets everyone and
     keeps no face template; the curation switch stops analysis; and there's
     `analysis remove`.
-15. **Can people delete it?** Yes: "Delete AI data", account deletion, and the
-    hourly sweep after a permanent delete.
+15. **Can people delete it?** Yes: "Delete AI data", account deletion, and
+    `RetentionWorker`'s hourly pass after a permanent delete, which runs
+    whether or not the analyzer does. The pass takes the NAS's analysis, its
+    faces and the names given to them once the file leaves the person's own
+    library, and what their phones saw once no library they're in still
+    holds it.
 16. **Are user overrides preserved?** Shadow mode changes nothing. Later,
     names and edits always win.
 17. **Are logs privacy-safe?** Yes: counts, timings and hash prefixes only.

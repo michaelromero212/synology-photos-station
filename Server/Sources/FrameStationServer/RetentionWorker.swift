@@ -24,6 +24,10 @@ extension Retention {
 /// is purged in is immaterial; what an hourly pass buys is that a server which
 /// was asleep at midnight still catches up promptly instead of waiting a whole
 /// day for the next tick.
+///
+/// Each pass then forgets what was seen in files people no longer hold
+/// (`forget`), by their devices and by the NAS's analyzer, faces included, so
+/// a photo deleted for good leaves nothing about itself behind.
 actor RetentionWorker {
     private let app: Application
     private let interval: Duration
@@ -103,6 +107,164 @@ actor RetentionWorker {
         } catch {
             app.logger.error("retention sweep failed: \(String(reflecting: error))")
         }
+
+        // After the purges, so what ran out its window in this pass is
+        // forgotten in this pass too. Both run even when the purges failed,
+        // since they only read what's already marked, and neither needs the
+        // analyzer: it may be stopped, crashing or not set up at all.
+        let nas = await forgetting(.nasAnalysis, on: sql)
+        let devices = await forgetting(.deviceObservations, on: sql)
+        if nas + devices > 0 {
+            app.logger.info("retention: removed \(devices) device observations and \(nas) NAS analyses of files no longer in their libraries")
+        }
+    }
+
+    /// `forget`, with a failure logged rather than thrown, so one kind failing
+    /// doesn't keep the other from running. The next pass tries again.
+    private func forgetting(_ what: Forgotten, on sql: any SQLDatabase) async -> Int {
+        do {
+            return try await Self.forget(what, on: sql)
+        } catch is CancellationError {
+            return 0
+        } catch {
+            app.logger.error("retention: forgetting \(what) failed: \(String(reflecting: error))")
+            return 0
+        }
+    }
+
+    /// What a pass forgets about files people no longer hold, and where a file
+    /// has to be for it to stay.
+    enum Forgotten: Sendable {
+        /// What a person's devices saw (`media_observations`). It stays while
+        /// any library the person is in holds the file, shared libraries and
+        /// shared albums included, because covers there read the caller's own
+        /// observations (`CollectionsController.observed(by:)`).
+        case deviceObservations
+        /// What the NAS's analyzer saw (`nas_analysis`, whose faces and scene
+        /// labels go with it), and the names given to those faces. It stays
+        /// while the person's own library holds the file, the only library
+        /// the NAS analyzes.
+        case nasAnalysis
+    }
+
+    /// Forgets `what` for every file its person no longer holds. Returns how
+    /// many rows went.
+    ///
+    /// Both kinds are keyed by person and file hash, not by placement, so a
+    /// permanent delete used to leave them behind. Device observations stayed
+    /// for good: Vision's labels, the aesthetic score, the tags and the search
+    /// terms of a photo that's gone. The NAS's analysis, sealed face
+    /// templates included, was swept only while the analyzer was answering.
+    /// Data that outlives what it describes is a leak waiting to happen. This
+    /// takes it within the hour, however the file went: its 29 days ran out,
+    /// someone chose Delete Permanently, or the person left the last library
+    /// that held it.
+    ///
+    /// Held is matched by hash, since sharing a photo can make a second asset
+    /// row over the same bytes. A photo in Recently Deleted still holds it, by
+    /// the same test `purge` uses for the bytes, so a restore needs no new
+    /// analysis.
+    ///
+    /// Paced for the J4125: a page of rows in key order, each judged by a
+    /// probe of the indexes on hash and placement, then a pause twice as long
+    /// as the page took, never under `breath`. The pass stays under a third
+    /// of one core and slows itself down when the NAS is busy.
+    static func forget(
+        _ what: Forgotten,
+        on sql: any SQLDatabase,
+        pageSize: Int = 1_000,
+        breath: Duration = .milliseconds(100)
+    ) async throws -> Int {
+        struct Page: Decodable {
+            let lastUser: UUID
+            let lastHash: String
+            let scanned: Int
+            let removed: Int
+        }
+        // Before every key: no id sorts below the nil UUID, and no hash below
+        // the empty string.
+        var afterUser = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        var afterHash = ""
+        var removed = 0
+        while true {
+            try Task.checkCancellation()
+            let started = ContinuousClock.now
+            guard let page = try await sql.raw(
+                Self.page(of: what, after: afterUser, afterHash, limit: pageSize)
+            ).first(decoding: Page.self)
+            else { return removed }
+
+            removed += page.removed
+            if page.scanned < pageSize { return removed }
+            afterUser = page.lastUser
+            afterHash = page.lastHash
+            try await Task.sleep(for: max(breath, (ContinuousClock.now - started) * 2))
+        }
+    }
+
+    /// One page of `forget`: the next rows after the given key, whether each
+    /// is held, and the ones that aren't, deleted.
+    ///
+    /// Whether a row is held is worked out row by row, in the page's select
+    /// list, so the plan is always a few index probes per row and never a scan
+    /// of every placement in the house. What's spliced in is constant SQL,
+    /// never input.
+    private static func page(
+        of what: Forgotten, after user: UUID, _ hash: String, limit: Int
+    ) -> SQLQueryString {
+        let table: String
+        let scope: String
+        let along: String
+        switch what {
+        case .deviceObservations:
+            table = "media_observations"
+            scope = ""
+            along = ""
+        case .nasAnalysis:
+            // Its faces and scene labels go with the row, by cascade. The names
+            // given to those faces are kept by file and place rather than by
+            // face row, so that a name outlives a model upgrade, and go here.
+            table = "nas_analysis"
+            scope = "JOIN spaces s ON s.id = sa.space_id AND s.kind = 'personal'"
+            along = """
+                , names AS (
+                    DELETE FROM person_faces pf
+                    USING gone g
+                    WHERE pf.user_id = g.user_id AND pf.sha256 = g.sha256
+                )
+                """
+        }
+        return """
+            WITH page AS (
+                SELECT o.user_id, o.sha256,
+                       EXISTS (
+                           SELECT 1 FROM assets a
+                           JOIN space_assets sa ON sa.asset_id = a.id
+                           \(unsafeRaw: scope)
+                           JOIN space_members m
+                             ON m.space_id = sa.space_id AND m.user_id = o.user_id
+                           WHERE a.sha256 = o.sha256
+                             AND (sa.deleted_at IS NULL OR sa.purged_at IS NULL)
+                       ) AS held
+                FROM \(unsafeRaw: table) o
+                WHERE (o.user_id, o.sha256) > (\(bind: user), \(bind: hash))
+                ORDER BY o.user_id, o.sha256
+                LIMIT \(bind: limit)
+            ), gone AS (
+                DELETE FROM \(unsafeRaw: table) o
+                USING page p
+                WHERE o.user_id = p.user_id AND o.sha256 = p.sha256 AND NOT p.held
+                RETURNING o.user_id, o.sha256
+            )\(unsafeRaw: along), last AS (
+                SELECT user_id, sha256 FROM page
+                ORDER BY user_id DESC, sha256 DESC
+                LIMIT 1
+            )
+            SELECT last.user_id AS "lastUser", last.sha256 AS "lastHash",
+                   (SELECT count(*)::int FROM page) AS scanned,
+                   (SELECT count(*)::int FROM gone) AS removed
+            FROM last
+            """
     }
 
     /// Marks one removed placement purged and removes its bytes if nothing else
