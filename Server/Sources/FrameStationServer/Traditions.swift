@@ -653,7 +653,11 @@ struct YearlyPatterns {
                 id: pattern.id, title: title, subtitle: subtitle,
                 count: summaries.reduce(0) { $0 + $1.count },
                 coverAssetIDs: covers,
-                years: Array(summaries.prefix(Self.yearLimit)),
+                // The latest years, read as a story: oldest first, as the
+                // line under the title and the library itself run (his
+                // word, 2026-11-10).
+                years: Array(summaries.sorted { $0.key > $1.key }.prefix(Self.yearLimit))
+                    .sorted { $0.key < $1.key },
                 next: next.map(CivilDay.stamp),
                 naming: naming(pattern, cards: summaries, title: title)
             )

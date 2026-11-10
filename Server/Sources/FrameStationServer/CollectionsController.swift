@@ -2566,7 +2566,7 @@ struct CollectionsController: RouteCollection {
                 subtitle: [every, "\(years.count) years · \(first)–\(last)"].compactMap { $0 }.joined(separator: " · "),
                 count: newest.reduce(0) { $0 + $1.count },
                 coverAssetIDs: Array(turned.compactMap(\.coverAssetIDs.first).prefix(coverDepth)),
-                years: Array(newest.prefix(YearlyPatterns.yearLimit)),
+                years: Array(newest.prefix(YearlyPatterns.yearLimit).reversed()),
                 next: next.map(CivilDay.stamp), naming: nil
             )
         }

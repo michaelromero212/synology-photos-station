@@ -1479,8 +1479,10 @@ plays rule changes against a library and checks nothing a person saw is lost.
 What comes round every year, each with all its years: every Christmas as one
 card, a day somebody named for every year, the date a library is photographed
 most years. The NAS sends `traditions`, the soonest to come round first, and
-each tradition's `years` are ordinary `.day` cards keyed by their days, so a
-year opens the way every card on the page does. `YearlyPatterns`
+each tradition's `years` are ordinary `.day` cards keyed by their days (a
+trip's are its `.trip` cards), so a year opens the way every card on the page
+does. The years run oldest first, the latest 25 of them, read as a story the
+way the library itself runs (his word, 2026-11-10). `YearlyPatterns`
 (`Traditions.swift`) plans them from one pass over the library's day counts,
 before the occasions query, so that query also brings back every year of each.
 Four kinds, tried in order, each day belonging to one:

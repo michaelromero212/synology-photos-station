@@ -110,7 +110,7 @@ elif what == 'titles': print('|'.join(t['title'] for t in ts or []))
 elif what == 'field': print(by.get(args[0], {}).get(args[1]))
 elif what == 'years': print('|'.join(y['title'] for y in by.get(args[0], {}).get('years', [])))
 elif what == 'keys': print('|'.join(y['key'] for y in by.get(args[0], {}).get('years', [])))
-elif what == 'newest': print(all(a['key'] > b['key'] for a, b in zip(by[args[0]]['years'], by[args[0]]['years'][1:])))
+elif what == 'oldest': print(all(a['key'] < b['key'] for a, b in zip(by[args[0]]['years'], by[args[0]]['years'][1:])))
 elif what == 'naming':
     n = by.get(args[0], {}).get('naming')
     print(None if n is None else f"{n['key']} {n['title']} {n['isNamed']} {n['recursAnnually']}")
@@ -201,9 +201,9 @@ check "then the rest by date" "Birthday on April 5|Birthday party in Culpeper|Bi
 check "every Christmas, home or away, Christmas Eve 2021 among them" "5 years · 2021–2025" \
   "$(T field holiday:Christmas subtitle)"
 check "each by the name Holidays & Occasions gives it" \
-  "Christmas 2025|Christmas 2024|Christmas 2023|Christmas 2022|Christmas Eve 2021" "$(T years holiday:Christmas)"
+  "Christmas Eve 2021|Christmas 2022|Christmas 2023|Christmas 2024|Christmas 2025" "$(T years holiday:Christmas)"
 check "with all its photos" "33" "$(T field holiday:Christmas count)"
-check "newest first" "True" "$(T newest holiday:Christmas)"
+check "oldest first, read as a story" "True" "$(T oldest holiday:Christmas)"
 check "the one away is just its holiday's days" "2023-12-24..2023-12-25" \
   "$(T keys holiday:Christmas | tr '|' '\n' | grep 2023)"
 check "which open on their photos" "10" \
@@ -216,7 +216,7 @@ lacks "nor a holiday that only happened to have photos, twice" "Memorial Day" "$
 has "though Holidays & Occasions still lists it, as it did" "Memorial Day 2023" "$(T occasions)"
 check "a date with cake in its photos is a birthday" "7 years · 2019–2025" "$(T field date:04-05 subtitle)"
 check "every year of it, the quiet one too" \
-  "April 5, 2025|April 5, 2024|April 5, 2023|April 5, 2022|April 5, 2021|April 5, 2020|April 5, 2019" \
+  "April 5, 2019|April 5, 2020|April 5, 2021|April 5, 2022|April 5, 2023|April 5, 2024|April 5, 2025" \
   "$(T years date:04-05)"
 check "which can be named, every year" "2025-04-05 Birthday on April 5 False True" "$(T naming date:04-05)"
 check "Holidays & Occasions asks about it by the same name, once" "1" \
@@ -224,7 +224,7 @@ check "Holidays & Occasions asks about it by the same name, once" "1" \
 lacks "and no longer as just a date" "Every year on April 5" "$(T occasions)"
 check "a party the same week every year is one tradition" "Every May · 4 years · 2022–2025" \
   "$(T field event:birthday:05 subtitle)"
-check "each year by its date" "May 17, 2025|May 18, 2024|May 20, 2023|May 14, 2022" \
+check "each year by its date" "May 14, 2022|May 20, 2023|May 18, 2024|May 17, 2025" \
   "$(T years event:birthday:05)"
 check "an event isn't named from here" "None" "$(T naming event:birthday:05)"
 check "a date photographed every year, with nothing in its photos to say why, isn't one" "None" \
@@ -266,7 +266,7 @@ check "naming August 14 for every year" "204" "$(name 2025-08-14 "Mom's birthday
 page
 check "makes it a tradition by that name" "Mom's birthday" "$(T field date:08-14 title)"
 check "says which day it is" "August 14 · 3 years · 2023–2025" "$(T field date:08-14 subtitle)"
-check "and each year carries its year" "Mom's birthday 2025|Mom's birthday 2024|Mom's birthday 2023" \
+check "and each year carries its year" "Mom's birthday 2023|Mom's birthday 2024|Mom's birthday 2025" \
   "$(T years date:08-14)"
 check "renaming it renames every year" "2025-08-14 Mom's birthday True True" "$(T naming date:08-14)"
 
@@ -274,7 +274,7 @@ echo "Next year"
 photos 2026-12-25 5; photos 2026-04-05 5
 page 2026-12-27
 check "this Christmas joins the moment its photos do" "6 years · 2021–2026" "$(T field holiday:Christmas subtitle)"
-check "at the top" "Christmas 2026" "$(T years holiday:Christmas | cut -d'|' -f1)"
+check "at the end, the latest" "Christmas 2026" "$(T years holiday:Christmas | tr '|' '\n' | tail -1)"
 check "and this April 5, quiet as it was" "8 years · 2019–2026" "$(T field date:04-05 subtitle)"
 has "though it fell on Easter Sunday" "Easter 2026" "$(T occasions)"
 

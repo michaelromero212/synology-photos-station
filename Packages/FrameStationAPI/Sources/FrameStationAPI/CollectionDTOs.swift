@@ -402,8 +402,9 @@ public struct Tradition: Codable, Sendable, Hashable, Identifiable {
     public let count: Int
     /// A photo from one of its years, a different year each day, best first.
     public let coverAssetIDs: [UUID]
-    /// Each year of it, newest first. Kind `.day`, keyed by its days, so each
-    /// opens on its own photos.
+    /// Each year of it, oldest first (newest first before November 2026):
+    /// the latest 25, read as a story. Kind `.day`, keyed by its days, or
+    /// `.trip` for a trip taken every year, so each opens on its own photos.
     public let years: [CollectionSummary]
     /// When it next comes round, `YYYY-MM-DD`. The server already lists the
     /// soonest first; this is for saying so.
