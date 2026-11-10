@@ -1306,6 +1306,24 @@ if the Private Cloud Compute model appears anywhere. The Information panel
 shows what was detected in each photo, so the reading can be judged photo by
 photo.
 
+### Every album has a reason
+
+His word on 2026-11-10, after a page with "Birthday on July 5" (the lake the
+day after the Fourth) and a weekend away that was a burst of nine shots, a
+photo saved twice and a candy board: "Curated albums should have a purpose."
+An album the page makes has to say what it is, and be worth opening.
+
+- **It says what it is.** A trip is somewhere away from home. An occasion is a
+  holiday, a name the person gave a day, or an event their devices saw. A
+  tradition is a holiday, a name, an event, or a birthday. A date that's
+  merely busy says nothing of why, and isn't an album.
+- **It's worth opening,** counted in moments, the minutes with photos in
+  them, since a burst is one thing seen once and a photo saved twice is one
+  photo: three for an occasion or a year of a tradition, two for a holiday,
+  six for a trip. A day the person named is theirs, however few.
+- **Kept albums meet it too.** One an older version made and kept goes when
+  it doesn't (below).
+
 ### Curated albums are kept as the rules improve
 
 The page works its trips and occasions out afresh on every visit, and the rules
@@ -1313,13 +1331,14 @@ behind them keep changing: better place names, holidays that need evidence,
 events the phone learns to see. Left at that, each improvement could retitle,
 split or quietly drop an album someone had come to know. Apple's Photos keeps
 its memories and trips across iOS updates, and `CuratedAlbums` does the same.
-**Improvements may rename, refine and add. They may not drop.**
+**Improvements may rename, refine and add. They may not drop,** except an album
+with no reason to be one.
 
 **Saved the first time it's shown.** `curated_albums` holds one row per album,
 per person, per library, under a stable id. Trips are saved, and so are
 occasions that are something: a holiday, a name the person gave a day, an
-event. The "Every year on August 14" prompts aren't saved, because they're
-questions.
+event. The prompts to name a date ("Birthday on April 5") aren't saved,
+because they're questions.
 
 **Still found, it follows the rules.** A better name is the point of an
 improvement, so a kept album takes the new title. A small change in dates is
@@ -1338,7 +1357,10 @@ photos are counted again on each visit. It goes only when:
   since found the day wasn't that holiday (no tree on Christmas). Shown
   before analysis, a holiday is `provisional`. Once their analysis confirms
   it, the flag clears for good, and a later reading that disagrees, such as
-  a stricter vocabulary, can't take it away.
+  a stricter vocabulary, can't take it away;
+- it's too thin to open: fewer moments than an album of its kind needs (see
+  "Every album has a reason"), unless the person named it. Its photos in
+  Recently Deleted count, so deleting some for a while doesn't let it go.
 
 An album from a setting the person switched off (holidays, or curation) waits
 until the setting is back on. A prompt never takes a kept album's place.
@@ -1376,20 +1398,24 @@ Four kinds, tried in order, each day belonging to one:
    held the weekend nearest a birthday: event days by kind, clustered on the
    year as a circle (±14 days), about once a year. A season of pool days isn't
    one.
-4. **A date that stands out from the weeks around it.** Photographed, or busy,
-   in more of its years than its ±15-day neighbors were in the same years, by a
-   binomial test at 0.001, from the first year it was photographed to the
-   last. Cake in two of its years, or a birthday party within three days, makes
-   it "Birthday on April 5", and so do birthday parties held around it (their
-   middle within four days). Any other event names it only by happening on the
+4. **A date with something on it.** A date photographed in three of its years
+   is a tradition only for what its photos show happening on it. A birthday
+   in two of its years (cake, or a birthday party within three days, or
+   parties held around it with their middle within four days) makes it
+   "Birthday on April 5". Any other event names it only by happening on the
    date itself in two of its years: concerts *around* August 10 don't make
-   August 10 a concert.
+   August 10 a concert. A date that's merely busy every year isn't one: until
+   2026-11-10 a binomial test made those "Every year on August 14", an album
+   of photos with nothing in common. Nor is a date within two days of a family
+   holiday (Christmas, New Year's, Thanksgiving, Easter, the Fourth) in most of
+   its years, which is busy because of the holiday.
 
 **Minimums are about proof.** Two years make a holiday or a named day a
 tradition, since what the day is is already known; three for anything found in
 the photos. A holiday also has to be confirmed by its own photos in two years,
 or stand out from the weeks around it (0.02), so a Memorial Day that happened to
-have photos twice isn't one. A crowd alone doesn't confirm one when the photos
+have photos twice isn't one. Each year needs the moments a Holidays & Occasions
+card does, so a burst of fireworks alone isn't a year of the Fourth. A crowd alone doesn't confirm one when the photos
 show something else the crowd was there for: a Memorial Day volleyball
 tournament, a birthday party on Mother's Day. A wedding or a graduation that
 falls on a date is never a year of that date's pattern.

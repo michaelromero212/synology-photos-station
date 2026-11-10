@@ -2,7 +2,8 @@
 # Curated albums are kept once shown. Improving the rules can rename an album
 # or refine its dates, and add new ones, but never make one disappear: as Apple
 # keeps its memories across iOS updates. Only its photos all being deleted
-# removes one, and one from a feature switched off waits until it's back.
+# removes one, or its being too thin to open (a burst and a few strays, kept by
+# an older version), and one from a feature switched off waits until it's back.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-kept-albums.sh
 #
@@ -77,17 +78,24 @@ settle(){ for _ in $(seq 1 120); do
 done; }
 
 CULPEPER="38.4716 -77.9967"; ASHEVILLE="35.5951 -82.5515"; MAGIC_KINGDOM="28.4194 -81.5812"
+# observe <photo> <analysis version> <labels>: what their phone saw in it.
+observe(){ curl -s -o /dev/null -X POST "$API/v1/spaces/$SPACE/curation/observations" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d "{\"analysisVersion\":$2,\"modelVersion\":\"smoke\",\"observations\":[{\"assetID\":\"$(cat "$ROOT/ids/$1")\",\"labels\":$3,\"aesthetic\":0.4,\"isUtility\":false,\"peopleCount\":0,\"animalCount\":0}]}"; }
+CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]'
 
 echo "Uploading"
 for d in $(seq -w 1 15); do shoot "h$d-" "2025-01-$d" 9 2 CULPEPER; done
 shoot x25 2024-12-25 9 6 CULPEPER; shoot t28 2024-11-28 9 4 CULPEPER
 shoot a10 2024-09-10 9 5 ASHEVILLE; shoot a11 2024-09-11 9 5 ASHEVILLE; shoot a12 2024-09-12 9 5 ASHEVILLE
 for d in 10 11 12 13; do shoot "d$d-" "2025-03-$d" 9 5 MAGIC_KINGDOM; done
-# August 14 three years running, busiest last: a date the page asks to name.
+# August 14 three years running, busiest last, a cake in the first two: a
+# birthday the page asks to name.
 shoot y22 2022-08-14 9 4 CULPEPER; shoot y23 2023-08-14 9 4 CULPEPER; shoot y24 2024-08-14 6 16 CULPEPER
 # An ordinary day, until somebody names it.
 shoot f20 2025-02-20 9 5 CULPEPER
 settle
+for i in 1 2 3; do observe "y22$i" 1 "$CAKE"; observe "y23$i" 1 "$CAKE"; done
 
 titles_of(){ curl -s "$API/v1/spaces/$1/collections?date=2026-10-12" -H "$2" | python3 -c "
 import sys, json
@@ -109,7 +117,7 @@ has "a trip" "Three days in Asheville" "$T"
 has "another" "Four days at Walt Disney World" "$T"
 has "a holiday" "Christmas 2024" "$T"
 has "and another" "Thanksgiving 2024" "$T"
-has "a date to name" "Every year on August 14" "$T"
+has "a birthday to name" "Birthday on August 14" "$T"
 check "both trips are kept" "2" "$(saved "kind = 'trip'")"
 check "and the holidays" "2" "$(saved "kind = 'day' AND is_holiday")"
 check "but not the question" "0" "$(saved "key = '2024-08-14'")"
@@ -156,20 +164,16 @@ q "INSERT INTO curated_albums (space_id, user_id, kind, key, title, occasion, is
    VALUES ('$SPACE', '$USER_ID', 'day', '2024-08-14', 'A day at the beach', 'A day at the beach', true, true)" >/dev/null
 T=$(titles)
 has "the kept album shows" "A day at the beach" "$T"
-lacks "not the question" "Every year on August 14" "$T"
+lacks "not the question" "Birthday on August 14" "$T"
 settings '{"enabled":false}'
 T=$(titles)
-has "with curation off, the question is back" "Every year on August 14" "$T"
-lacks "and the album waits" "A day at the beach" "$T"
+lacks "with curation off, the album waits" "A day at the beach" "$T"
+lacks "and no question takes its place: nothing else says what the date is" "August 14" "$T"
 check "without being forgotten" "1" "$(saved "key = '2024-08-14'")"
 settings '{"enabled":true}'
 has "until curation is on again" "A day at the beach" "$(titles)"
 
 echo "Holidays and the person's own analysis"
-# observe <photo> <analysis version> <labels>: what their phone saw in it.
-observe(){ curl -s -o /dev/null -X POST "$API/v1/spaces/$SPACE/curation/observations" -H "$AUTH" \
-  -H 'Content-Type: application/json' \
-  -d "{\"analysisVersion\":$2,\"modelVersion\":\"smoke\",\"observations\":[{\"assetID\":\"$(cat "$ROOT/ids/$1")\",\"labels\":$3,\"aesthetic\":0.4,\"isUtility\":false,\"peopleCount\":0,\"animalCount\":0}]}"; }
 TREE='[{"id":"christmas_tree","confidence":0.88},{"id":"gift","confidence":0.5}]'
 SKY='[{"id":"sky","confidence":0.9},{"id":"outdoor","confidence":0.8}]'
 check "holidays shown on their dates alone are provisional" "2" "$(saved "is_holiday AND provisional")"
@@ -221,7 +225,36 @@ q "UPDATE curated_albums SET hidden = true WHERE id = '$ASHEVILLE_ID'" >/dev/nul
 lacks "a removed album isn't shown" "Biltmore Forest" "$(titles)"
 check "nor found again" "1" "$(q "SELECT count(*) FROM curated_albums WHERE key LIKE '2024-09-%'")"
 
+echo "Too thin to be an album"
+# A weekend away that's a burst of nine, a photo saved twice and a candy board,
+# as "A weekend in Linton Hall" was in his library (2026-11-10).
+for i in $(seq 1 9); do put "w4-$i" "2023-02-04T10:00" $ASHEVILLE; done
+put w4-board "2023-02-04T15:00" $ASHEVILLE
+put w5-1 "2023-02-05T11:00" $ASHEVILLE; put w5-2 "2023-02-05T11:00" $ASHEVILLE
+# And a day that's one burst.
+for i in $(seq 1 5); do put "b12-$i" "2025-04-12T14:00" $CULPEPER; done
+settle
+lacks "a weekend away that's a burst and a few strays isn't a trip" "A weekend in Asheville" "$(titles)"
+# As if an older version had made them albums, and kept them.
+q "INSERT INTO curated_albums (space_id, user_id, kind, key, title, subtitle) VALUES
+   ('$SPACE', '$USER_ID', 'trip', '2023-02-04..2023-02-05', 'A weekend in Asheville', 'February 4–5, 2023')" >/dev/null
+q "INSERT INTO curated_albums (space_id, user_id, kind, key, title, occasion, is_event) VALUES
+   ('$SPACE', '$USER_ID', 'day', '2025-04-12', 'Soccer game in Culpeper', 'Soccer game', true)" >/dev/null
+T=$(titles)
+lacks "nor kept as one" "A weekend in Asheville" "$T"
+lacks "nor is a burst kept as an occasion" "Soccer game" "$T"
+check "both are let go" "0" "$(saved "key IN ('2023-02-04..2023-02-05', '2025-04-12')")"
+has "while the albums worth opening stay" "Four days at Walt Disney World" "$T"
+
 echo "Recently Deleted"
+CHRISTMAS=$(cat "$ROOT"/ids/x25*)
+for id in $CHRISTMAS; do curl -s -o /dev/null -X DELETE "$API/v1/spaces/$SPACE/assets/$id" -H "$AUTH"; done
+lacks "a holiday whose photos are all deleted isn't shown" "Christmas 2024" "$(titles)"
+check "but waits for them, as thin as it looks" "1" "$(saved "title = 'Christmas 2024'")"
+curl -s -o /dev/null -X POST "$API/v1/spaces/$SPACE/collections/deleted/restore" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d "{\"assetIDs\":$(echo "$CHRISTMAS" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read().split()))")}"
+has "and comes back with them" "Christmas 2024" "$(titles)"
 DISNEY=$(cat "$ROOT"/ids/d1*)
 PICKED=$(echo "$DISNEY" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read().split()))")
 for id in $DISNEY; do curl -s -o /dev/null -X DELETE "$API/v1/spaces/$SPACE/assets/$id" -H "$AUTH"; done

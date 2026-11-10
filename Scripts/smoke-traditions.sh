@@ -1,9 +1,10 @@
 #!/bin/bash
 # Over the Years: what comes round every year, with each year of it. Every
-# Christmas as one card, home or away. A date photographed most years, called a
-# birthday when its photos show one. The birthday party held about the same week
-# every spring. A day somebody named for every year. And what isn't one: a
-# holiday from a single year, a date that was busy a few times by coincidence.
+# Christmas as one card, home or away. A date photographed most years whose
+# photos show a birthday. The birthday party held about the same week every
+# spring. A day somebody named for every year. And what isn't one: a holiday
+# from a single year, a date that was busy a few times by coincidence, a date
+# busy every year for no reason its photos show, and the day after the Fourth.
 # Next year's Christmas joins on its own, the Albums page around it stays as it
 # was, and an older app's fields are all still there.
 #
@@ -75,6 +76,7 @@ CAKE='[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}
 CONCERT='[{"id":"concert","confidence":0.9},{"id":"crowd","confidence":0.6}]'
 CAPGOWN='[{"id":"graduation","confidence":0.7},{"id":"gown","confidence":0.6},{"id":"ceremony","confidence":0.5}]'
 BASEBALL='[{"id":"baseball","confidence":0.9},{"id":"crowd","confidence":0.5}]'
+FIREWORKS='[{"id":"fireworks","confidence":0.9},{"id":"flag","confidence":0.6}]'
 SKY='[{"id":"sky","confidence":0.9},{"id":"outdoor","confidence":0.8}]'
 observe(){
   local ids body
@@ -169,6 +171,10 @@ for y in 2020 2021 2022 2023 2024 2025; do photos "$y-10-20" 6; done
 # Father's Day three years among those busy Junes, each a ball game with a
 # crowd: the crowd is the game's, and the day isn't kept as Father's Day.
 for d in 2021-06-20 2022-06-19 2023-06-18; do photos "$d" 6; done
+# The Fourth every year, fireworks in two of them, and the day after it busy
+# every year too, with a cake in two: the lake the day after the Fourth, not a
+# birthday on July 5 (his library, 2026-11-10).
+for y in 2021 2022 2023 2024 2025; do photos "$y-07-04" 8; photos "$y-07-05" 8; done
 # The baseline out of the way of the days it's a baseline for.
 BASELINE_IN_THE_WAY="SELECT q.id FROM assets q WHERE q.sha256 LIKE 'TRADQ%' AND q.local_captured_at::date IN (
      SELECT local_captured_at::date FROM assets WHERE sha256 LIKE 'TRAD%' AND sha256 NOT LIKE 'TRADQ%')"
@@ -183,13 +189,15 @@ for d in 2021-10-20 2023-10-20; do observe "$d" 3; done
 for d in 2020-10-20 2022-10-20 2025-10-20; do observe "$d" 0; done
 observe 2024-10-20 4 "$CAPGOWN"
 for d in 2021-06-20 2022-06-19 2023-06-18; do observe "$d" 6 "$BASEBALL" 4; done
+for d in 2022-07-04 2024-07-04; do observe "$d" 4 "$FIREWORKS"; done
+for d in 2022-07-05 2024-07-05; do observe "$d" 3; done
 
 echo "Over the Years"
 page
 check "the page carries them" "True" "$(T present)"
 check "the soonest first: Thanksgiving, then Christmas" "Thanksgiving|Christmas" "$(T titles | cut -d'|' -f1-2)"
-check "then the rest by date" "Birthday on April 5|Birthday party in Culpeper|Every year on August 14" \
-  "$(T titles | tr '|' '\n' | grep -E '^(Birthday on April 5|Birthday party in Culpeper|Every year on August 14)$' | head -3 | paste -sd'|' -)"
+check "then the rest by date" "Birthday on April 5|Birthday party in Culpeper|Birthday on October 20" \
+  "$(T titles | tr '|' '\n' | grep -E '^(Birthday on April 5|Birthday party in Culpeper|Birthday on October 20)$' | uniq | head -3 | paste -sd'|' -)"
 check "every Christmas, home or away, Christmas Eve 2021 among them" "5 years · 2021–2025" \
   "$(T field holiday:Christmas subtitle)"
 check "each by the name Holidays & Occasions gives it" \
@@ -219,12 +227,12 @@ check "a party the same week every year is one tradition" "Every May · 4 years 
 check "each year by its date" "May 17, 2025|May 18, 2024|May 20, 2023|May 14, 2022" \
   "$(T years event:birthday:05)"
 check "an event isn't named from here" "None" "$(T naming event:birthday:05)"
-check "a date photographed every year, quietly, is one too" "3 years · 2023–2025" \
+check "a date photographed every year, with nothing in its photos to say why, isn't one" "None" \
   "$(T field date:08-14 subtitle)"
 lacks "a date busy three times among busy Junes isn't" "June" "$(T titles)"
-check "concerts around a date don't name it" "Every year on March 10" "$(T field date:03-10 title)"
+check "concerts around a date don't make it one" "None" "$(T field date:03-10 title)"
 check "they're their own tradition" "Every March · 4 years · 2021–2024" "$(T field event:concert:03 subtitle)"
-check "nor do a week-earlier birthday's parties" "Every year on September 20" "$(T field date:09-20 title)"
+check "nor do a week-earlier birthday's parties" "None" "$(T field date:09-20 title)"
 check "which are that birthday's own" "Every September · 4 years · 2021–2024" \
   "$(T field event:birthday:09 subtitle)"
 check "a graduation on a birthday's date isn't a year of it" "5 years · 2020–2025" \
@@ -233,6 +241,9 @@ lacks "nor one of its cards" "October 20, 2024" "$(T years date:10-20)"
 check "it's still a birthday" "Birthday on October 20" "$(T field date:10-20 title)"
 has "and the graduation is a graduation" "Graduation" "$(T occasions)"
 lacks "a Father's Day that was a ball game isn't kept as Father's Day" "Father's Day" "$(T titles)"
+check "the Fourth is kept, every year of it" "5 years · 2021–2025" "$(T field "holiday:Fourth of July" subtitle)"
+check "and the day after it isn't a tradition of its own" "None" "$(T field date:07-05 title)"
+lacks "nor a birthday, though it had a cake twice" "July 5" "$(T titles)"
 has "though Holidays & Occasions still calls the day that" "Father's Day 2023" "$(T occasions)"
 check "a card that's a year of a tradition says which" "Christmas 2024=holiday:Christmas" \
   "$(T marked 'Christmas 2024')"
@@ -253,7 +264,7 @@ check "and the question is never saved" "0" "$(q "SELECT count(*) FROM curated_a
 echo "Named by the person"
 check "naming August 14 for every year" "204" "$(name 2025-08-14 "Mom's birthday")"
 page
-check "keeps the tradition where it was" "Mom's birthday" "$(T field date:08-14 title)"
+check "makes it a tradition by that name" "Mom's birthday" "$(T field date:08-14 title)"
 check "says which day it is" "August 14 · 3 years · 2023–2025" "$(T field date:08-14 subtitle)"
 check "and each year carries its year" "Mom's birthday 2025|Mom's birthday 2024|Mom's birthday 2023" \
   "$(T years date:08-14)"
@@ -273,12 +284,13 @@ page
 lacks "holidays off: no Christmas" "Christmas" "$(T titles)"
 lacks "nor Thanksgiving" "Thanksgiving" "$(T titles)"
 has "the birthday stays" "Birthday on April 5" "$(T titles)"
+lacks "and the day after the Fourth is still the Fourth's, not a birthday" "July 5" "$(T titles)"
 settings '{"holidays":true}'
 settings '{"enabled":false}'
 page
-check "curation off: the date is only a date" "Every year on April 5" "$(T field date:04-05 title)"
+check "curation off: nothing says what the date is, so it isn't one" "None" "$(T field date:04-05 title)"
 lacks "and no party is seen" "Birthday party" "$(T titles)"
-has "the question is asked by the date" "Every year on April 5" "$(T occasions)"
+lacks "nor is the date asked about" "on April 5" "$(T occasions)"
 settings '{"enabled":true}'
 page
 check "back on, it's a birthday again" "Birthday on April 5" "$(T field date:04-05 title)"

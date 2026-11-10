@@ -17,9 +17,11 @@ import Vapor
 ///   name is the point of an improvement. A small shift in dates is the same
 ///   album, matched by the days it shares.
 /// - When the rules no longer find it, it stays as last shown, with its photos
-///   counted afresh. It goes only when none of its photos are left, or when its
-///   days have become part of a trip, which still shows them. While its photos
-///   are all in Recently Deleted it waits, and putting them back brings it back.
+///   counted afresh. It goes only when none of its photos are left, when its
+///   days have become part of a trip, which still shows them, or when it's too
+///   thin to be worth opening: a burst and a stray, kept from before the rules
+///   asked for more (his word, 2026-11-10). While its photos are all in
+///   Recently Deleted it waits, and putting them back brings it back.
 /// - Albums from a feature the person has since turned off (holidays, or what
 ///   their devices saw) wait hidden until it's back on. A day the person named
 ///   goes when they take the name back.
@@ -29,9 +31,9 @@ import Vapor
 ///   album, and a later reading can't take it away.
 ///
 /// Saved: trips, and occasions that are something, such as a holiday, a name
-/// the person gave a day, or an event. Not the "Every year on August 14"
-/// prompts, which ask for a name and are offered one year at a time, and which
-/// never take a kept album's place.
+/// the person gave a day, or an event. Not the prompts to name a date
+/// ("Birthday on April 5"), which ask for a name and are offered one year at a
+/// time, and which never take a kept album's place.
 ///
 /// Per person and per library, like the page.
 struct CuratedAlbums {
@@ -223,7 +225,7 @@ struct CuratedAlbums {
                 shown.append(candidate)
                 continue
             }
-            // An "Every year on…" prompt where a kept album is. The album
+            // A prompt to name a date where a kept album is. The album
             // stays, unless its feature is off or the person undid it.
             switch Self.fate(of: match, standing: standing) {
             case .shown:
@@ -363,6 +365,10 @@ struct CuratedAlbums {
         let count: Int
         let videos: Int
         let coverAssetIDs: [UUID]
+        /// Minutes with photos in them, Recently Deleted counted in: what
+        /// the album holds until its photos are deleted for good. See
+        /// `CollectionsController.DayRow`.
+        let moments: Int
     }
 
     /// A kept occasion's subtitle, with its videos counted as they are today:
@@ -398,6 +404,7 @@ struct CuratedAlbums {
                        count(*) FILTER (WHERE sa.deleted_at IS NULL)::int AS count,
                        count(*) FILTER (WHERE sa.deleted_at IS NULL AND a.media_type = 'video')::int
                            AS videos,
+                       count(DISTINCT date_trunc('minute', \(unsafeRaw: local)))::int AS moments,
                        COALESCE((ARRAY_AGG(a.id ORDER BY \(unsafeRaw: CollectionsController.coverOrder(seed: seed)))
                                     FILTER (WHERE sa.deleted_at IS NULL))
                                 [1:\(unsafeRaw: String(CollectionsController.coverDepth))], '{}')
@@ -421,6 +428,17 @@ struct CuratedAlbums {
         var gone: [UUID] = []
         for row in rows {
             guard let found = byID[row.id] else {
+                gone.append(row.id)
+                continue
+            }
+            // Kept so an album somebody knows doesn't vanish, but not one too
+            // thin to be worth opening, kept from before the rules asked for
+            // more: those were never albums (his word, 2026-11-10). A day the
+            // person named stays theirs. Counted with Recently Deleted, so
+            // putting photos there for a while doesn't let an album go.
+            let needed = row.kind == CollectionKind.trip.rawValue ? CollectionsController.tripMoments
+                : row.isHoliday ? CollectionsController.holidayMoments : CollectionsController.minimumMoments
+            if !row.isNamed, found.moments < needed {
                 gone.append(row.id)
                 continue
             }

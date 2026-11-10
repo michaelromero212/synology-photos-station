@@ -45,6 +45,17 @@ struct CollectionsController: RouteCollection {
     /// Below this a collection isn't worth a card. Three photos from one day is
     /// a coincidence, not an occasion.
     static let minimumItems = 4
+    /// And it needs this many moments (minutes with photos in them) to be
+    /// worth opening: a burst is one, so a burst and a stray isn't an album.
+    /// A birthday with a few candle shots still is. A holiday says what it is
+    /// with fewer.
+    static let minimumMoments = 3
+    static let holidayMoments = 2
+    /// A trip needs more: being away is its whole reason, and two days with
+    /// a burst, a photo saved twice and a candy board in them were "A weekend
+    /// in Linton Hall" (his example, 2026-11-10). Half a dozen moments is the
+    /// least of a weekend anyone would open.
+    static let tripMoments = 6
 
     /// How many trips, and how many holidays and occasions, the page itself
     /// shows. The rest wait behind See All.
@@ -967,6 +978,9 @@ struct CollectionsController: RouteCollection {
         /// went abroad.
         let home: String?
         let coverAssetIDs: [UUID]
+        /// Minutes with photos in them. See `DayRow.moments`. Optional, so a
+        /// query that doesn't select it still decodes.
+        var moments: Int?
     }
 
     /// Runs of consecutive days spent a long way from home.
@@ -994,6 +1008,7 @@ struct CollectionsController: RouteCollection {
         let rows = try await sql.raw("""
             WITH located AS (
                 SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
+                       date_trunc('minute', \(unsafeRaw: local)) AS minute,
                        a.lat, a.lon, \(unsafeRaw: TimelineController.placeName) AS place_name,
                        a.id, a.derived_at, a.camera_make,
                        a.burst_id, a.burst_pick, a.media_type,
@@ -1049,6 +1064,7 @@ struct CollectionsController: RouteCollection {
             per_day AS (
                 SELECT day,
                        count(*)::int AS count,
+                       count(DISTINCT minute)::int AS moments,
                        avg(lat) AS lat, avg(lon) AS lon,
                        (ARRAY_AGG(id ORDER BY
                             (derived_at IS NOT NULL) DESC,
@@ -1067,7 +1083,7 @@ struct CollectionsController: RouteCollection {
                    COALESCE(m.lats, ARRAY[]::float8[]) AS "placeLatitudes",
                    COALESCE(m.lons, ARRAY[]::float8[]) AS "placeLongitudes",
                    (SELECT place_name FROM busiest) AS home,
-                   p.cover AS "coverAssetIDs"
+                   p.cover AS "coverAssetIDs", p.moments
             FROM per_day p
             LEFT JOIN main_places m ON m.day = p.day
             CROSS JOIN home h
@@ -1086,7 +1102,10 @@ struct CollectionsController: RouteCollection {
         // too, and a family that drives to the coast most weekends used those
         // up within a couple of years.
         return Self.tripRuns(from: rows)
-            .filter { $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems }
+            .filter {
+                $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems
+                    && $0.reduce(0) { $0 + ($1.moments ?? $1.count) } >= Self.tripMoments
+            }
             .prefix(Self.allTripsLimit)
             .map {
                 Self.describeTrip(
@@ -1423,6 +1442,9 @@ struct CollectionsController: RouteCollection {
         /// Whether the day clears the occasions query's busy bar. Optional so
         /// a query that doesn't select it still decodes.
         var busy: Bool?
+        /// Minutes with photos in them: a burst, or the same thing shot nine
+        /// times, is one moment. Optional, like `busy`.
+        var moments: Int?
     }
 
     /// Holidays, the days somebody named, and the dates that come round busy
@@ -1482,6 +1504,7 @@ struct CollectionsController: RouteCollection {
                        max(EXTRACT(HOUR FROM \(unsafeRaw: local)))::int AS "lastHour",
                        count(DISTINCT COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id))::int
                            AS "peopleCount",
+                       count(DISTINCT date_trunc('minute', \(unsafeRaw: local)))::int AS moments,
                        (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
                            [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
                 FROM space_assets sa
@@ -1495,7 +1518,7 @@ struct CollectionsController: RouteCollection {
                 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY count) AS median FROM per_day
             )
             SELECT p.day, p.count, p.place, p."placeCount", p."videoCount",
-                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs",
+                   p."firstHour", p."lastHour", p."peopleCount", p.cover AS "coverAssetIDs", p.moments,
                    p.count >= GREATEST(b.median * 3, \(bind: Self.minimumItems * 2)) AS busy
             FROM per_day p, baseline b
             WHERE (p.day = ANY(string_to_array(\(bind: special), ','))
@@ -1553,6 +1576,13 @@ struct CollectionsController: RouteCollection {
             run, holidays: holidays, named: named, recurring: recurring, events: events
         ) else { return nil }
         let userName = run.days.compactMap { named[$0.day] }.first
+        // Enough to look at, or it isn't an album: a burst of one thing and
+        // a stray beside it says nothing. A day the person named is theirs to
+        // keep, however few.
+        if userName == nil {
+            let needed = holiday(in: run, holidays: holidays) != nil ? Self.holidayMoments : Self.minimumMoments
+            guard run.moments >= needed else { return nil }
+        }
         let holidayName = userName == nil ? holiday(in: run, holidays: holidays)?.name : nil
         let given = userName ?? holidayName
         // An event only where nothing better names the day, matching the
@@ -1601,6 +1631,7 @@ struct CollectionsController: RouteCollection {
         var days: [DayRow]
 
         var count: Int { days.reduce(0) { $0 + $1.count } }
+        var moments: Int { days.reduce(0) { $0 + ($1.moments ?? $1.count) } }
         var videoCount: Int { days.reduce(0) { $0 + $1.videoCount } }
         var first: DayRow { days.last! }   // rows arrive newest-first
         var last: DayRow { days.first! }

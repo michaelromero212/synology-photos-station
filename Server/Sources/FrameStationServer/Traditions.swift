@@ -155,13 +155,11 @@ struct YearlyPatterns {
 
     /// How far either side of a date its neighbors reach: a month in all.
     static let neighborhood = 15
-    /// How unlikely a date's photos must be by chance alone, given how often
-    /// the weeks around it are photographed, before it counts as a pattern.
-    /// About one false date in a thousand tested, and a library tests a few
-    /// hundred.
-    static let significance = 0.001
-    /// The same for a holiday, whose date is already a reason to expect
-    /// photos, and of which there are a dozen to test rather than hundreds.
+    /// How unlikely a holiday's photos must be by chance alone, given how
+    /// often the weeks around it are photographed, before it stands out on
+    /// photos alone. Its date is already a reason to expect photos, and there
+    /// are a dozen to test rather than hundreds. A date that isn't a holiday
+    /// isn't found this way any more: being busy says nothing of why.
     static let holidaySignificance = 0.02
     /// How far either side of its middle an event can fall and still be the
     /// same event: a birthday party moves with the weekends.
@@ -173,6 +171,9 @@ struct YearlyPatterns {
     /// on. Ten days reached the next birthday over, and called an anniversary
     /// a week after a child's parties a birthday.
     static let birthdayReach = 4
+    /// The holidays a family gathers for, whose neighboring days are busy
+    /// because of them. See `family(of:)`.
+    static let gatherings: Set<String> = ["Christmas", "New Year's", "Thanksgiving", "Easter", "Fourth of July"]
     /// Events that don't come round: the next wedding is somebody else's.
     static let oneOffEvents: Set<String> = ["wedding", "graduation"]
     /// What one tradition sends, and how many the page gets. Bounded, like
@@ -209,7 +210,7 @@ struct YearlyPatterns {
         var years: Int { Set(members.map(\.year)).count }
     }
 
-    /// A year of a date, as the rules weigh it.
+    /// A year of a holiday, as the rules weigh it.
     struct YearTest {
         let photographed: Bool
         let busy: Bool
@@ -240,6 +241,12 @@ struct YearlyPatterns {
         }
         let holidayNumbers = Set(holidays.keys.compactMap(CivilDay.number))
         let claimedNumbers = Set(claimed.compactMap(CivilDay.number))
+        // The days of the holidays a family gathers for, whether or not
+        // holidays are shown: the day after the Fourth is busy because of the
+        // Fourth either way.
+        let gatheringNumbers = Set(Holidays.table(forYears: years).compactMap { stamp, name in
+            gatherings.contains(family(of: name)) ? CivilDay.number(stamp) : nil
+        })
         // A name on one of these dates is the name of that holiday.
         let fixed: Set<String> = calendar.isEmpty ? [] : Holidays.fixedMonthDays
         var used = Set<String>()
@@ -358,15 +365,13 @@ struct YearlyPatterns {
         }
         var clusters = Self.clusters(of: occurrences)
 
-        // 4. Dates photographed far more often than the weeks around them.
-        let busyBar = days.busyBar
+        // 4. Dates photographed most years, for what happens on them.
         for monthDay in days.recurring.sorted() where annual[monthDay] == nil {
             guard let (month, day) = CivilDay.monthDay(monthDay) else { continue }
             var members: [Int] = []
             var birthdays = Set<Int>()
             // Each kind of event, and the years it happened on the date itself.
             var onTheDay: [String: Set<Int>] = [:]
-            var tests: [YearTest] = []
             for year in ascending where CivilDay.isValid(year: year, month: month, day: day) {
                 let number = CivilDay.number(year: year, month: month, day: day)
                 guard number <= todayNumber else { continue }
@@ -382,27 +387,6 @@ struct YearlyPatterns {
                 if count >= minimum { members.append(number) }
                 if isBirthday(around: number, events: events, evidence: evidence) { birthdays.insert(year) }
                 if let tag = events[CivilDay.stamp(number)]?.tag { onTheDay[tag, default: []].insert(year) }
-                // Days away say nothing about the date, and nor does a
-                // holiday: a vacation or an Easter is busy whatever the date
-                // is.
-                guard !claimedNumbers.contains(number), !isHoliday else { continue }
-                var near = (days: 0, any: 0, photographed: 0, busy: 0)
-                for offset in -neighborhood...neighborhood where offset != 0 {
-                    let other = number + offset
-                    guard !holidayNumbers.contains(other), !claimedNumbers.contains(other) else { continue }
-                    let photos = countAt[other] ?? 0
-                    near.days += 1
-                    if photos > 0 { near.any += 1 }
-                    if photos >= minimum { near.photographed += 1 }
-                    if Double(photos) >= busyBar { near.busy += 1 }
-                }
-                // A year the library holds nothing from, around then, says
-                // nothing either way.
-                guard count > 0 || near.any > 0 else { continue }
-                tests.append(YearTest(
-                    photographed: count >= minimum, busy: Double(count) >= busyBar,
-                    nearDays: near.days, nearPhotographed: near.photographed, nearBusy: near.busy
-                ))
             }
             guard members.count >= 3 else { continue }
 
@@ -426,8 +410,19 @@ struct YearlyPatterns {
             }
             let alikeEvent = alike.first.map { clusters[$0].event }
 
-            let showsIt = birthdays.count >= 2
-            guard significant(tests) || showsIt || !alike.isEmpty else { continue }
+            // A date is a tradition only for what happens on it: a birthday
+            // in two of its years at least (cake, or a party near it), or
+            // another event on the day itself in two. A date that's merely busy says nothing about
+            // why, and its album was photos with nothing in common. And one
+            // within two days of a family holiday in most of its years is busy
+            // because of the holiday: July 5 is the day after the Fourth, and
+            // one cake at one cookout made it "Birthday on July 5". Both made
+            // albums that meant nothing (his word, 2026-11-10).
+            let byHoliday = members.filter { number in
+                (-2...2).contains { $0 != 0 && gatheringNumbers.contains(number + $0) }
+            }.count * 2 >= members.count
+            let isBirthday = birthdays.count >= 2
+            guard !byHoliday, let what = isBirthday ? "Birthday" : alikeEvent?.title else { continue }
 
             var pattern = Pattern(
                 id: "date:\(monthDay)", title: "", source: .date, monthDay: monthDay,
@@ -446,14 +441,7 @@ struct YearlyPatterns {
                 clusters.remove(at: index)
             }
             pattern.members.sort { ($0.first ?? "") > ($1.first ?? "") }
-            let spoken = CivilDay.spoken(month: month, day: day)
-            if !birthdays.isEmpty {
-                pattern.title = "Birthday on \(spoken)"
-            } else if let event = alikeEvent {
-                pattern.title = "\(event.title) on \(spoken)"
-            } else {
-                pattern.title = "Every year on \(spoken)"
-            }
+            pattern.title = "\(what) on \(CivilDay.spoken(month: month, day: day))"
             result.dates[monthDay] = pattern.title
             result.extraDays.formUnion(pattern.members.joined())
             result.patterns.append(pattern)
@@ -522,18 +510,16 @@ struct YearlyPatterns {
         }
     }
 
-    /// Whether a date's years stand out from the weeks around them, by more
-    /// than chance would: photographed, or busy, more often than its neighbors
-    /// were in the same years.
+    /// Whether a holiday's years stand out from the weeks around them, by
+    /// more than chance would: photographed, or busy, more often than its
+    /// neighbors were in the same years.
     ///
-    /// From the first year it was photographed to the last, so a birthday that
-    /// began four years ago counts its four years and not the twenty before,
-    /// and one the family stopped marking keeps the years it was. The first of
-    /// those is left out of the reckoning, since it is where the count starts
-    /// by construction.
-    static func significant(
-        _ tests: [YearTest], threshold: Double = significance, fewest: Int = 3
-    ) -> Bool {
+    /// From the first year it was photographed to the last, so a holiday
+    /// first kept four years ago counts its four years and not the twenty
+    /// before, and one the family stopped keeping keeps the years it was. The
+    /// first of those is left out of the reckoning, since it is where the
+    /// count starts by construction.
+    static func significant(_ tests: [YearTest], threshold: Double, fewest: Int) -> Bool {
         guard let first = tests.firstIndex(where: \.photographed),
               let last = tests.lastIndex(where: \.photographed) else { return false }
         let span = tests[first...last]
@@ -615,6 +601,12 @@ struct YearlyPatterns {
                 guard !found.isEmpty else { continue }
                 // Newest first, as a run is.
                 let run = CollectionsController.Run(days: found.reversed())
+                // Each year worth opening, as a Holidays & Occasions card has
+                // to be. One the person named is theirs, however few.
+                var needed = CollectionsController.minimumMoments
+                if case .holiday = pattern.source { needed = CollectionsController.holidayMoments }
+                guard pattern.source == .named || run.days.contains(where: { named[$0.day] != nil })
+                    || run.moments >= needed else { continue }
                 cards.append(card(for: run, in: pattern, holidays: holidays, named: named, annual: annual, events: events))
             }
             let years = Set(cards.map(\.year))

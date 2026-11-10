@@ -135,7 +135,8 @@ read -r T2 P2 U2 <<< "$(newuser Neighbor)"
 A1="Authorization: Bearer $T1"; A2="Authorization: Bearer $T2"
 
 # photo <name> <width> <day> <faces…> → asset id, with the plan recorded. The
-# day is MM-DD in 2025, or a whole YYYY-MM-DD.
+# day is MM-DD in 2025, or a whole YYYY-MM-DD; the minute comes from the width,
+# so photos of one day are moments apart, as at a real party.
 # Noise, except a "grad…" photo: red runs with x and green with y, so a face
 # cut from it says which way it was turned.
 photo(){
@@ -157,7 +158,7 @@ photo(){
     -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$name.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
   curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$A1" --data-binary "@$f" >/dev/null
   curl -s -X POST "$API/v1/uploads/$up/commit" -H "$A1" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$P1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$width,\"height\":480,\"capturedAt\":\"$([ ${#day} -eq 10 ] && echo "$day" || echo "2025-$day")T12:00:00Z\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
+    -d "{\"spaceID\":\"$P1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$width,\"height\":480,\"capturedAt\":\"$([ ${#day} -eq 10 ] && echo "$day" || echo "2025-$day")T12:$(printf %02d $((width % 60))):00Z\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
 }
 
 echo "A library: Emma, Jack, both together, and strangers"
