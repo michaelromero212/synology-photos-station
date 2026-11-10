@@ -1186,7 +1186,16 @@ Where is the most particular place that holds:
    them: "Utah and Arizona Vacation 2024";
 5. abroad, the country, two countries or, for three or more, the continent:
    "Europe Vacation 2023";
-6. otherwise no place: "Vacation 2025", "Weekend Away 2024".
+6. otherwise it isn't a trip, unless it's three days or more with 18 moments
+   in them, which is a "Road Trip 2021": Las Vegas, the Grand Canyon and
+   Yosemite, a day each.
+
+**A day is away when most of its photos were taken away,** 80 km or more from
+home, never by where its photos average out. Five days of the cat at home
+with a few photos from far away arriving each day averaged out to a town
+nobody was in, and became "Trip 2022" (his library, 2026-11-10). A trip's
+place and covers come from its photos taken away; the morning at home before
+leaving isn't where it was.
 
 The kind of stay (`tripKind`) comes from what the person's devices saw, then
 from what the place is, then from how long it was:
@@ -1362,6 +1371,10 @@ An album the page makes has to say what it is, and be worth opening.
   six for a trip. A day the person named is theirs, however few.
 - **Kept albums meet it too.** One an older version made and kept goes when
   it doesn't (below).
+- **An outing says what it was,** by Vision's own word: Bowling, Ice skating,
+  Roller skating, Go-karts, Climbing, Fishing. "Game day" is only for a game,
+  never for an outing that happens to be a sport with balls in it: a family's
+  bowling night was "Game day in West Gate" (vocabulary 5, 2026-11-10).
 - **An event's album is the event,** not the day it fell on (`EventScope`).
   The day splits into stretches wherever photos pause for half an hour. The
   stretches whose photos show the event stay, and so does a stretch beside

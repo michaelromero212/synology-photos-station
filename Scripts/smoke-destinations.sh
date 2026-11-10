@@ -95,6 +95,7 @@ LINCOLN="38.8893 -77.0502"; CAPITOL="38.8899 -77.0091"; GEORGETOWN="38.9097 -77.
 ZION_CANYON="37.2502 -112.9566"; BRYCE="37.6266 -112.1677"; PAGE="36.9147 -111.4558"
 GRAND_CANYON="36.0544 -112.1401"
 KAANAPALI="20.9256 -156.6950"; WAILEA="20.6873 -156.4416"; HANA="20.7575 -155.9884"
+LAS_VEGAS="36.1147 -115.1728"; YOSEMITE="37.7456 -119.5936"
 
 # shoot <prefix> <day> <hour before the first> <count> <place>
 shoot(){
@@ -113,6 +114,15 @@ shoot a4d 2025-03-13 9 3 SPRINGS
 # A week in Duck, too small to be in the town dataset, and a trip to Corolla.
 for d in 12 13 14 15 16 17 18; do shoot "b$d-" "2025-07-$d" 9 3 DUCK; done
 shoot b14c 2025-07-14 15 2 COROLLA
+# Five days at home, with a few photos from far away arriving each day, as
+# family's photos do: never a trip, however the days average out. It was
+# "Trip 2022" in his library (2026-11-10).
+for d in 03 04 05 06 07; do shoot "mx$d-" "2022-11-$d" 9 2 CULPEPER; shoot "mv$d-" "2022-11-$d" 14 2 LAS_VEGAS; done
+# Las Vegas, the Grand Canyon and Yosemite, a day each: a road trip.
+shoot rt1 2021-08-02 9 7 LAS_VEGAS; shoot rt2 2021-08-03 9 7 GRAND_CANYON; shoot rt3 2021-08-04 9 7 YOSEMITE
+# Two days of a few photos from four states: photos from all over, not a trip.
+shoot sc1v 2020-02-10 9 2 LAS_VEGAS; shoot sc1y 2020-02-10 13 2 YOSEMITE
+shoot sc2g 2020-02-11 9 2 GRAND_CANYON; shoot sc2z 2020-02-11 13 2 ZION_CANYON
 # A week in Duck the two Julys before too: the family's beach week. A photo
 # a day, so home is still where most of the library is.
 for y in 23 24; do for d in 08 09 10 11 12 13 14; do shoot "b$y$d-" "20$y-07-$d" 9 1 DUCK; done; done
@@ -150,7 +160,7 @@ shoot n08 2023-06-08 9 4 ZURICH; shoot n09 2023-06-09 9 4 COLOSSEUM; shoot n10 2
 shoot o06 2023-03-06 9 4 KAANAPALI; shoot o07 2023-03-07 9 4 KAANAPALI; shoot o08 2023-03-08 9 4 KAANAPALI
 shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023-03-11 9 4 HANA
 shoot o12 2023-03-12 9 2 WAILEA
-check "every photo arrived" "302" "$(q "SELECT count(*) FROM assets")"
+check "every photo arrived" "351" "$(q "SELECT count(*) FROM assets")"
 
 DISNEY=39; OBX=37; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
@@ -204,6 +214,9 @@ has "Paris, Zurich and Rome are a Europe vacation" "Europe Vacation 2023" "$T"
 has "two parks in Utah and two places in Arizona name both" "Utah and Arizona Vacation 2024" "$T"
 has "a week around Maui is a Maui vacation" "Maui Vacation 2023" "$T"
 lacks "and no trip says how many days it was" "days" "$T"
+lacks "days at home with a few photos from far away are no trip" "2022" "$T"
+has "Las Vegas, the Grand Canyon and Yosemite, a day each, are a road trip" "Road Trip 2021" "$T"
+lacks "and two days of a few photos from four states aren't a trip at all" "2020" "$T"
 lacks "no trip is named for a region nobody says" "Île-de-France" "$T"
 lacks "nor for a neighborhood" "Passy" "$T"
 lacks "no trip is named for a state it was more particular than" "Florida" "$T"
@@ -294,7 +307,7 @@ check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "places: named 302 photos again" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 351 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -1246,6 +1246,21 @@ struct CollectionsController: RouteCollection {
                 SELECT avg(l.lat) AS lat, avg(l.lon) AS lon
                 FROM located l JOIN busiest b ON b.place_name = l.place_name
             ),
+            -- Each photo, and whether it was taken away. A day is away when
+            -- most of its photos were, never by where they average out: the
+            -- cat at home and a few photos from somewhere far averaged to a
+            -- town nobody was in, and five days of that were "Trip 2022" (his
+            -- library, 2026-11-10).
+            marked AS (
+                SELECT l.*,
+                       6371 * acos(LEAST(1, GREATEST(-1,
+                           sin(radians(l.lat)) * sin(radians(h.lat))
+                         + cos(radians(l.lat)) * cos(radians(h.lat))
+                         * cos(radians(l.lon - h.lon))
+                       ))) > \(bind: Self.awayKilometers) AS far
+                FROM located l CROSS JOIN home h
+                WHERE h.lat IS NOT NULL
+            ),
             -- Places worth naming the day after: ones holding at least a fifth
             -- of it. A trip picks up stray coordinates — the drive home, a
             -- screenshot, someone else's phone with a stale fix — and a single
@@ -1256,10 +1271,12 @@ struct CollectionsController: RouteCollection {
             -- title can tell the place most of a trip was spent from one it
             -- passed through, and which area a place is in. See
             -- `whereabouts(of:)`.
+            -- Of the photos taken away only: home on the morning you left is
+            -- not where the trip was.
             per_place AS (
                 SELECT day, place_name, count(*)::int AS n,
                        avg(lat) AS lat, avg(lon) AS lon
-                FROM located WHERE place_name IS NOT NULL
+                FROM marked WHERE place_name IS NOT NULL AND far
                 GROUP BY day, place_name
             ),
             day_total AS (
@@ -1278,9 +1295,10 @@ struct CollectionsController: RouteCollection {
             per_day AS (
                 SELECT day,
                        count(*)::int AS count,
-                       count(DISTINCT minute)::int AS moments,
-                       avg(lat) AS lat, avg(lon) AS lon,
+                       count(*) FILTER (WHERE far)::int AS away,
+                       count(DISTINCT minute) FILTER (WHERE far)::int AS moments,
                        (ARRAY_AGG(id ORDER BY
+                            far DESC,
                             (derived_at IS NOT NULL) DESC,
                             utility ASC,
                             (aesthetic > \(unsafeRaw: String(Self.goodLooking))) DESC,
@@ -1289,7 +1307,7 @@ struct CollectionsController: RouteCollection {
                             (media_type = 'photo') DESC,
                             md5(id::text || '\(unsafeRaw: seed)')
                         )) [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
-                FROM located GROUP BY day
+                FROM marked GROUP BY day
             )
             SELECT p.day, p.count,
                    COALESCE(m.places, ARRAY[]::text[]) AS places,
@@ -1300,13 +1318,7 @@ struct CollectionsController: RouteCollection {
                    p.cover AS "coverAssetIDs", p.moments
             FROM per_day p
             LEFT JOIN main_places m ON m.day = p.day
-            CROSS JOIN home h
-            WHERE h.lat IS NOT NULL
-              AND 6371 * acos(LEAST(1, GREATEST(-1,
-                    sin(radians(p.lat)) * sin(radians(h.lat))
-                  + cos(radians(p.lat)) * cos(radians(h.lat))
-                  * cos(radians(p.lon - h.lon))
-                  ))) > \(bind: Self.awayKilometers)
+            WHERE p.away * 2 > p.count
             ORDER BY p.day DESC
             LIMIT 1000
             """).all(decoding: TripDay.self)
@@ -1315,10 +1327,16 @@ struct CollectionsController: RouteCollection {
         // reaches further back than the page does. Day trips count against it
         // too, and a family that drives to the coast most weekends used those
         // up within a couple of years.
+        // And a trip is somewhere: days away that no place holds most of are
+        // photos from all over, not a trip anyone took. Unless there are days
+        // and days of them, which is a road trip.
         return Self.tripRuns(from: rows)
-            .filter {
-                $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems
-                    && $0.reduce(0) { $0 + ($1.moments ?? $1.count) } >= Self.tripMoments
+            .filter { run in
+                let moments = run.reduce(0) { $0 + ($1.moments ?? $1.count) }
+                guard run.count >= 2, run.reduce(0, { $0 + $1.count }) >= Self.minimumItems,
+                      moments >= Self.tripMoments else { return false }
+                return Self.whereabouts(of: run, geocoder: geocoder) != nil
+                    || (run.count >= Self.roadTripDays && moments >= Self.roadTripMoments)
             }
             .map {
                 Self.describeTrip(
@@ -1331,6 +1349,10 @@ struct CollectionsController: RouteCollection {
 
     /// How far from home stops being an errand.
     static let awayKilometers = 80
+    /// A trip no one place holds most of is a road trip only with this many
+    /// days and moments in it; less is photos from all over.
+    static let roadTripDays = 3
+    static let roadTripMoments = 18
 
     /// Groups consecutive days into trips. Rows arrive newest-first.
     ///
@@ -1388,7 +1410,8 @@ struct CollectionsController: RouteCollection {
             title = where_.map { "\(holiday) \($0.locative)" } ?? "\(holiday) away from home"
         } else {
             var kind = tripKind(event: event, implies: where_?.implies ?? [], days: run.count, weekend: weekend)
-            if where_ == nil, kind == "Weekend" { kind = "Weekend Away" }
+            // Days on the road that no place holds most of.
+            if where_ == nil { kind = "Road Trip" }
             let year = ordered.first.map { String($0.day.prefix(4)) } ?? ""
             title = [where_?.title, kind, year].compactMap { $0 }.joined(separator: " ")
         }
@@ -1434,14 +1457,15 @@ struct CollectionsController: RouteCollection {
     static let tripKinds: [String: String] = [
         "golf": "Golf Trip", "camping": "Camping Trip", "hiking": "Hiking Trip",
         "boating": "Boating Trip", "snow": "Snow Trip", "amusement_park": "Theme Park Trip",
+        "fishing": "Fishing Trip",
     ]
 
     /// Every kind a trip's name can end in before its year, longest first, to
     /// read a name back. See `tripPlace(inTitle:)`.
     static let tripKindWords = [
-        "Theme Park Trip", "Weekend Away", "Beach Weekend", "Camping Trip", "Boating Trip",
-        "Hiking Trip", "Beach Week", "Beach Trip", "Graduation", "Golf Trip", "Snow Trip",
-        "Ski Trip", "Vacation", "Wedding", "Weekend", "Trip",
+        "Theme Park Trip", "Weekend Away", "Beach Weekend", "Fishing Trip", "Camping Trip",
+        "Boating Trip", "Hiking Trip", "Beach Week", "Beach Trip", "Graduation", "Golf Trip",
+        "Snow Trip", "Road Trip", "Ski Trip", "Vacation", "Wedding", "Weekend", "Trip",
     ]
 
     /// "OBX Beach Week" and 2025, from "OBX Beach Week 2025". Nil for a name

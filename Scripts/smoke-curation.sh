@@ -237,6 +237,23 @@ W=(); for i in 1 2 3 4; do W+=("$(upload "$SP" "$A" "both$i" $((700 + i)) "2020-
 for w in "${W[@]}"; do observe "$SP" "$A" "$w" "$BOTH" >/dev/null; done
 lacks "a day seen as both, as often, is the graduation" "Wedding" "$(titles "$SP" "$A")"
 
+echo "What a family went out to do"
+# A bowling night, which Vision also calls a sport with balls in it: it was
+# "Game day in West Gate" in his library (2026-11-10).
+BOWL='[{"id":"bowling","confidence":0.8},{"id":"sport","confidence":0.6},{"id":"ball","confidence":0.5},{"id":"sports_equipment","confidence":0.5}]'
+for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "bowl$i" $((800 + i)) "2022-05-21T1${i}:00:00Z")" "$BOWL" >/dev/null; done
+T=$(titles "$SP" "$A")
+has "bowling is bowling" "Bowling" "$T"
+lacks "not a game day" "Game day" "$T"
+GAME='[{"id":"stadium","confidence":0.8},{"id":"sport","confidence":0.6},{"id":"crowd","confidence":0.5}]'
+for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "game$i" $((810 + i)) "2022-09-10T1${i}:00:00Z")" "$GAME" >/dev/null; done
+has "a day in the stands is still a game day" "Game day" "$(titles "$SP" "$A")"
+SKATE='[{"id":"ice_skating","confidence":0.8},{"id":"snow","confidence":0.4}]'
+for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "skate$i" $((820 + i)) "2022-01-15T1${i}:00:00Z")" "$SKATE" >/dev/null; done
+T=$(titles "$SP" "$A")
+has "a rink is ice skating" "Ice skating" "$T"
+lacks "not a snow day" "Snow day" "$T"
+
 echo "The party, not the rest of the day"
 # A morning at a pool across town, then a party at home: people arriving an
 # hour before the cake, the cake, presents, and a photo that evening. The

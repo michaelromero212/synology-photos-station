@@ -26,7 +26,11 @@ enum CurationVocabulary {
     /// 4: a gown and a ceremony no longer make a wedding, since a graduation
     ///    has both, and nor does anything short of a wedding's own labels in a
     ///    photo Vision also called a graduation.
-    static let version = 4
+    /// 5: an outing is what Vision saw it was: bowling, skating, go-karts,
+    ///    climbing, fishing. A family's bowling night was "Game day in West
+    ///    Gate" (his library, 2026-11-10), because bowling is a sport and has
+    ///    balls; "Game day" is now only for a game.
+    static let version = 5
 
     // MARK: - Labels to tags
 
@@ -84,9 +88,19 @@ enum CurationVocabulary {
         Rule("tennis", strong: ["tennis": 0.3]),
         Rule("golf", strong: ["golf": 0.3, "golf_course": 0.3]),
         Rule("gymnastics", strong: ["gymnastics": 0.3]),
+        // What a family goes out to do, by Vision's own word for it.
+        Rule("bowling", strong: ["bowling": 0.3]),
+        Rule("ice_skating", strong: ["ice_skating": 0.3, "ice_skates": 0.3]),
+        Rule("roller_skating", strong: ["rollerskating": 0.3, "rollerskates": 0.3]),
+        Rule("go_karts", strong: ["go_kart": 0.3]),
+        Rule("climbing", strong: ["rock_climbing": 0.3]),
+        Rule("fishing", strong: ["fishing": 0.3]),
+        // A game nobody can say more of. Not an outing with a ball in it.
         Rule("sports",
              strong: ["sport": 0.4, "stadium": 0.3, "athletics": 0.3, "scoreboard": 0.3],
-             supporting: ["ball": 0.3, "ballgames": 0.3, "sports_equipment": 0.3]),
+             supporting: ["ball": 0.3, "ballgames": 0.3, "sports_equipment": 0.3],
+             unless: ["bowling": 0.3, "billiards": 0.3, "ice_skating": 0.3, "rollerskating": 0.3,
+                      "go_kart": 0.3, "rock_climbing": 0.3, "fishing": 0.3, "skateboarding": 0.3]),
 
         // Outings.
         Rule("amusement_park",
@@ -103,9 +117,10 @@ enum CurationVocabulary {
         Rule("hiking",
              strong: ["hiking": 0.3, "trail": 0.4, "waterfall": 0.4, "canyon": 0.4],
              supporting: ["mountain": 0.3, "forest": 0.3, "backpack": 0.3]),
+        // Not ice skating, which is mostly a rink indoors: see above.
         Rule("snow",
              strong: ["skiing": 0.3, "snowboarding": 0.3, "sledding": 0.3, "snowman": 0.3,
-                      "winter_sport": 0.3, "ice_skating": 0.3],
+                      "winter_sport": 0.3],
              supporting: ["snow": 0.3, "ski_equipment": 0.3, "sled": 0.3, "snowball": 0.3,
                           "snowboard": 0.3]),
         Rule("beach",
@@ -235,7 +250,8 @@ enum CurationVocabulary {
         // Sports and the like.
         ["sports", "soccer", "baseball", "softball", "basketball", "football",
          "volleyball", "hockey", "tennis", "golf", "gymnastics", "dancing", "ballet",
-         "swimming", "cycling", "surfing", "skateboarding", "martial_arts"],
+         "swimming", "cycling", "surfing", "skateboarding", "martial_arts", "bowling",
+         "ice_skating", "roller_skating", "go_karts", "climbing"],
         // Animals.
         ["dog", "cat", "horse", "bird", "fish", "cow", "sheep", "goat", "pig", "deer",
          "rabbit", "squirrel", "butterfly", "turtle", "dolphin", "whale", "elephant",
@@ -345,6 +361,12 @@ enum CurationVocabulary {
         Event("tennis", "Tennis", share: 0.25),
         Event("golf", "Golf", trip: "Golf trip", share: 0.25),
         Event("gymnastics", "Gymnastics meet", share: 0.25),
+        Event("bowling", "Bowling", share: 0.25),
+        Event("ice_skating", "Ice skating", share: 0.25),
+        Event("roller_skating", "Roller skating", share: 0.25),
+        Event("go_karts", "Go-karts", share: 0.25),
+        Event("climbing", "Climbing", share: 0.25),
+        Event("fishing", "Fishing", trip: "Fishing trip", share: 0.25),
         Event("sports", "Game day", share: 0.3, photos: 4),
         Event("amusement_park", "Amusement park", trip: "Theme park trip", share: 0.2),
         Event("zoo", "A day at the zoo", share: 0.2),
