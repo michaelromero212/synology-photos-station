@@ -309,6 +309,27 @@ has "a family's Christmas takes their name" "Deem Christmas 2024" "$OCCASIONS"
 lacks "and no list of names under it" "with Emma and Thomas" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c.get("subtitle") for c in (json.load(sys.stdin).get("allOccasions") or []) if "Christmas" in c["title"]])')"
 has "Over the Years knows whose birthday comes round" "Thomas's Birthday" "$(echo "$PAGE" | python3 -c 'import sys,json; print([t["title"] for t in (json.load(sys.stdin).get("traditions") or [])])')"
 
+echo "At the cake"
+# A party where his mother is in more of the day's photos than he is, and he
+# is in every photo of the cake: whose birthday it is goes by the cake, and he
+# turned four (his question, 2026-11-10).
+AC=(); for i in 1 2; do AC+=("$(photo "cake$i" $((820 + i)) "2026-05-14" kid)"); done
+for i in 3 4; do AC+=("$(photo "cake$i" $((820 + i)) "2026-05-14" kid emma)"); done
+MOM=(); for i in 1 2 3 4 5 6; do MOM+=("$(photo "mom$i" $((830 + i)) "2026-05-14" emma)"); done
+until_true 180 '[ "$(kid_count)" = "21" ]'
+# The whole day seen by his phone: the cake in four, his mother in the rest.
+CAKED=$(python3 -c 'import json,sys; cake=[{"id":"birthday_cake","confidence":0.92},{"id":"candle","confidence":0.6}]; mom=[{"id":"people","confidence":0.8}]; print(json.dumps({"analysisVersion":1,"modelVersion":"smoke","observations":[{"assetID":a,"labels":cake if n < 4 else mom,"aesthetic":0.4,"isUtility":False,"peopleCount":1,"animalCount":0} for n, a in enumerate(sys.argv[1:])]}))' "${AC[@]}" "${MOM[@]}")
+curl -s -X POST "$API/v1/spaces/$P1/curation/observations" -H "$A1" -H 'Content-Type: application/json' -d "$CAKED" >/dev/null
+until_true 60 '[ "$(q "SELECT count(*) FROM nas_faces f JOIN assets a ON a.sha256 = f.sha256 WHERE a.local_captured_at::date = '"'2026-05-14'"'")" = "12" ]'
+PAGE=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
+check "whose birthday is whoever's at the cake, and how old he turned" "Celebrating Thomas's 4th Birthday" \
+  "$(echo "$PAGE" | python3 -c 'import sys,json; print(" ".join(c["title"] for c in (json.load(sys.stdin).get("allOccasions") or []) if c["key"] == "2026-05-14"))')"
+# Her own birthday, were she the owner: not named for whoever else is there.
+curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":true}'
+check "the owner's own birthday isn't given to anyone else" "Birthday party" \
+  "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys,json; print(" ".join(c["title"] for c in (json.load(sys.stdin).get("allOccasions") or []) if c["key"] == "2025-08-09"))')"
+curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":false}'
+
 echo "People off, and on again"
 check "People can be turned off" "200" "$(code -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"people":false}')"
 check "the settings say so" "False" "$(curl -s "$API/v1/curation" -H "$A1" | jq '["nas"]["people"]')"

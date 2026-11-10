@@ -56,10 +56,12 @@ read -r T2 SP2 <<<"$(signin Neighbor)"; A2="Authorization: Bearer $T2"
 # Fail loudly here rather than reporting thirty confusing 404s downstream.
 [ -n "$SP" ] && [ -n "$SP2" ] || { echo "setup failed: no space"; tail -20 "$ROOT/server.log"; exit 1; }
 
-# upload <space> <auth> <name> <width> <capturedAt> → asset id. The width keeps
-# every file's bytes different, so nothing is deduplicated into another.
+# upload <space> <auth> <name> <width> <capturedAt> [lat lon] → asset id. The
+# width keeps every file's bytes different, so nothing is deduplicated into
+# another.
 upload(){
-  local f="$ROOT/files/$3.jpg" SHA SZ UP
+  local f="$ROOT/files/$3.jpg" SHA SZ UP where=""
+  [ -n "${6:-}" ] && where=",\"latitude\":$6,\"longitude\":$7"
   vips gaussnoise "$ROOT/files/n.v" "$4" 240 >/dev/null 2>&1
   vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
   SHA=$(shasum -a 256 "$f" | awk '{print $1}'); SZ=$(stat -f%z "$f")
@@ -67,7 +69,7 @@ upload(){
     -d "{\"spaceID\":\"$1\",\"sha256\":\"$SHA\",\"byteSize\":$SZ,\"filename\":\"$3.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
   curl -s -X PUT "$API/v1/uploads/$UP/chunk/0" -H "$2" --data-binary "@$f" >/dev/null
   curl -s -X POST "$API/v1/uploads/$UP/commit" -H "$2" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$4,\"height\":240,\"capturedAt\":\"$5\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
+    -d "{\"spaceID\":\"$1\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$4,\"height\":240,\"capturedAt\":\"$5\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false$where}" | jq '["assetID"]'
 }
 # observe <space> <auth> <asset> <labels json> [version] [people] → accepted
 observe(){
@@ -232,6 +234,40 @@ BOTH='[{"id":"graduation","confidence":0.7},{"id":"wedding","confidence":0.4}]'
 W=(); for i in 1 2 3 4; do W+=("$(upload "$SP" "$A" "both$i" $((700 + i)) "2020-06-06T1${i}:00:00Z")"); done
 for w in "${W[@]}"; do observe "$SP" "$A" "$w" "$BOTH" >/dev/null; done
 lacks "a day seen as both, as often, is the graduation" "Wedding" "$(titles "$SP" "$A")"
+
+echo "The party, not the rest of the day"
+# A morning at a pool across town, then a party at home: people arriving an
+# hour before the cake, the cake, presents, and a photo that evening. The
+# party's album is the party (his example, 2026-11-10).
+HOME_AT="38.4716 -77.9967"; POOL_AT="38.7200 -77.7900"
+PD=2024-07-18
+POOLS=(); for m in 00 01; do POOLS+=("$(upload "$SP" "$A" "pool$m" "9$m" "${PD}T09:$m:00Z" $POOL_AT)"); done
+ARRIVE=$(upload "$SP" "$A" "arrive" 920 "${PD}T13:10:00Z" $HOME_AT)
+PARTY=(); for t in 1400 1420 1435 1450 1510; do
+  PARTY+=("$(upload "$SP" "$A" "party$t" "9$((t % 100 + 30))" "${PD}T${t:0:2}:${t:2:2}:00Z" $HOME_AT)"); done
+EVENING=$(upload "$SP" "$A" "evening" 990 "${PD}T20:00:00Z" $HOME_AT)
+for x in "${POOLS[@]}" "$ARRIVE" "${PARTY[0]}" "${PARTY[4]}" "$EVENING"; do observe "$SP" "$A" "$x" "$SKY" >/dev/null; done
+for x in "${PARTY[@]:1:3}"; do observe "$SP" "$A" "$x" "$CAKE" >/dev/null; done
+party_card(){ curl -s "$API/v1/spaces/$SP/collections?date=2026-10-12" -H "$A" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(' '.join(f\"{c['title']}={c['count']}\" for c in (d.get('allOccasions') or []) if c['key'] == '$PD'))"; }
+party_items(){ curl -s "$API/v1/spaces/$SP/collections/items?kind=day&key=$PD${1:-}" -H "$A"; }
+check "the party is a birthday party of the party's photos" "Birthday party=6" "$(party_card)"
+ITEMS=$(party_items)
+check "its album opens on the party" "6" "$(echo "$ITEMS" | jq '["total"]')"
+lacks "not the morning at the pool" "${POOLS[0]}" "$ITEMS"
+lacks "nor that evening" "$EVENING" "$ITEMS"
+has "but the arrival an hour before the cake" "$ARRIVE" "$ITEMS"
+has "and the presents after it" "${PARTY[4]}" "$ITEMS"
+check "highlights are the party's too" "6" "$(party_items '&highlights=10' | jq '["total"]')"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
+check "curation off: the day is the day again" "9" "$(party_items | jq '["total"]')"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
+check "a day named by the person is their whole day" "204" "$(code -X PUT "$API/v1/spaces/$SP/collections/name" \
+  -H "$A" -H 'Content-Type: application/json' -d "{\"day\":\"$PD\",\"name\":\"Lily's day\",\"everyYear\":false}")"
+check "all of it" "9" "$(party_items | jq '["total"]')"
+check "and its card says so" "Lily's day=9" "$(party_card)"
 
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"

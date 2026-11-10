@@ -1323,6 +1323,24 @@ An album the page makes has to say what it is, and be worth opening.
   six for a trip. A day the person named is theirs, however few.
 - **Kept albums meet it too.** One an older version made and kept goes when
   it doesn't (below).
+- **An event's album is the event,** not the day it fell on (`EventScope`).
+  The day splits into stretches wherever photos pause for half an hour. The
+  stretches whose photos show the event stay, and so does a stretch beside
+  them within 90 minutes at the same place (within a kilometer, where the
+  photos say where they were), such as people arriving an hour before the
+  cake. Everything else that day goes: a
+  morning at the pool across town, a photo that evening. A day the person
+  named is theirs, whole. The card's count, covers and people, the album
+  itself and its highlights all read the same stretches. Keys stay whole
+  days, so kept albums match as before.
+- **A birthday is whoever's at the cake.** Of the people the owner named,
+  it's whoever is in the most photos showing the cake, in two at least and
+  half of those with anyone named in them. A child of the family in nearly
+  as many wins over an adult, since a child's parents are at their cake too.
+  Twins, a tie, or the owner's own birthday leave the title as it was. The
+  age is how many years it's been since the child first appears in the
+  library, where that's within three weeks of a whole year (their arrival).
+  Nothing reads the numbers or writing on a cake.
 
 ### Curated albums are kept as the rules improve
 

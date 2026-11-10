@@ -146,6 +146,14 @@ struct CollectionsController: RouteCollection {
         let named = try await occasionNames(
             spaceID: spaceID, userID: device.userID, years: years, on: req.sql
         )
+        // What of each event day was the event, so its album is the party and
+        // not the morning at the pool before it. See `EventScope`.
+        let scope = curation.enabled && curation.isPersonal
+            ? try await Self.eventScope(
+                spaceID: spaceID, userID: device.userID, source: curation.source,
+                events: events, named: named, on: req.sql
+            )
+            : EventScope()
 
         // What comes round every year, planned from the library's calendar
         // before the occasions query, so that query brings back every year of
@@ -160,11 +168,11 @@ struct CollectionsController: RouteCollection {
         let found = try await occasions(
             spaceID: spaceID, seed: seed, userID: device.userID, named: named,
             holidays: holidays, events: events, excluding: claimed,
-            recurring: library.recurring, yearly: yearly, on: req.sql
+            recurring: library.recurring, yearly: yearly, scope: scope, on: req.sql
         )
         let occasions = await keeper.keep(
             occasions: found.occasions,
-            saved: saved, claimed: claimed,
+            saved: saved, claimed: claimed, outside: scope.filter,
             standing: CuratedAlbums.Standing(
                 named: named, showEvents: curation.enabled, showHolidays: curation.holidays,
                 // A holiday shown on its date alone is the person's analysis
@@ -287,7 +295,7 @@ struct CollectionsController: RouteCollection {
         // owner gives shows up at once, and goes again with it or with People.
         // A name the owner gave an album is never touched. See `withPeople`.
         let whoIsWho = curation.showsPeople
-            ? try await Self.namedPeople(spaceID: spaceID, userID: device.userID, on: req.sql)
+            ? try await Self.namedPeople(spaceID: spaceID, userID: device.userID, scope: scope, on: req.sql)
             : NamedPeople()
         let occasionByKey = Dictionary(occasions.map { ($0.summary.key, $0) }, uniquingKeysWith: { first, _ in first })
         func mark(_ card: CollectionSummary) -> CollectionSummary {
@@ -349,10 +357,26 @@ struct CollectionsController: RouteCollection {
         var byDay: [String: [Presence]] = [:]
         var firstDay: [UUID: String] = [:]
         var libraryFirstDay: String?
+        /// Whose birthday each birthday party was, by day. See
+        /// `whoseBirthday`.
+        var birthdays: [String: Presence] = [:]
+        /// The parties whose cake was photographed with people the owner
+        /// named, in two photos at least: there, the cake says whose it was,
+        /// or that it isn't plain, and nothing else is asked.
+        var cakeDays: Set<String> = []
         var isEmpty: Bool { byDay.isEmpty }
+
+        func sawTheCake(on days: [String]) -> Bool { days.contains(where: cakeDays.contains) }
+
+        /// Whose birthday it was, on any of these days.
+        func birthday(on days: [String]) -> Presence? {
+            days.lazy.compactMap { birthdays[$0] }.first
+        }
     }
 
-    static func namedPeople(spaceID: UUID, userID: UUID, on sql: any SQLDatabase) async throws -> NamedPeople {
+    static func namedPeople(
+        spaceID: UUID, userID: UUID, scope: EventScope = EventScope(), on sql: any SQLDatabase
+    ) async throws -> NamedPeople {
         struct Row: Decodable {
             let day: String
             let personID: UUID
@@ -372,6 +396,7 @@ struct CollectionsController: RouteCollection {
                                 AND sa.deleted_at IS NULL
             WHERE pf.user_id = \(bind: userID) AND pf.state IN ('auto', 'confirmed')
               AND \(unsafeRaw: TimelineController.visible)
+              \(scope.filter)
             GROUP BY 1, p.id, p.name, p.relation, p.is_me
             """).all(decoding: Row.self)
         guard !rows.isEmpty else { return NamedPeople() }
@@ -390,7 +415,106 @@ struct CollectionsController: RouteCollection {
             ))
             if row.day < people.firstDay[row.personID, default: "9999"] { people.firstDay[row.personID] = row.day }
         }
+        (people.birthdays, people.cakeDays) = try await birthdayPeople(userID: userID, scope: scope, on: sql)
         return people
+    }
+
+    /// Someone in the photos that show a birthday's cake.
+    struct CakeSeat {
+        let personID: UUID
+        let name: String
+        let relation: String?
+        let isMe: Bool
+        var photos = 0
+        /// Their share of the faces in those photos, by area, added up: the
+        /// one the photos are taken of is nearest the camera.
+        var prominence = 0.0
+    }
+
+    /// Whose birthday each birthday party was: the person at the cake, from
+    /// the faces in the photos that show it. See `whoseBirthday`.
+    static func birthdayPeople(
+        userID: UUID, scope: EventScope, on sql: any SQLDatabase
+    ) async throws -> (whose: [String: Presence], seen: Set<String>) {
+        let cakes = scope.showing.filter { scope.tags[$0.key] == "birthday" }
+        let files = Array(Set(cakes.values.joined()))
+        guard !files.isEmpty else { return ([:], []) }
+        struct Face: Decodable {
+            let sha256: String
+            let personID: UUID
+            let name: String
+            let relation: String?
+            let isMe: Bool
+            let box: [Float]
+        }
+        let faces = try await sql.raw("""
+            SELECT pf.sha256, p.id AS "personID", p.name, p.relation, p.is_me AS "isMe", pf.box
+            FROM person_faces pf
+            JOIN people p ON p.id = pf.person_id AND p.name IS NOT NULL AND NOT p.hidden
+            WHERE pf.user_id = \(bind: userID) AND pf.state IN ('auto', 'confirmed')
+              AND pf.sha256 = ANY(\(bind: files)::text[])
+            """).all(decoding: Face.self)
+        let byFile = Dictionary(grouping: faces, by: \.sha256)
+        var found: [String: Presence] = [:]
+        var seen = Set<String>()
+        for (day, files) in cakes {
+            var seats: [UUID: CakeSeat] = [:]
+            var photos = 0
+            for file in files {
+                guard let here = byFile[file], !here.isEmpty else { continue }
+                photos += 1
+                // Each person once a photo, by their largest face in it.
+                var largest: [UUID: (face: Face, area: Double)] = [:]
+                for face in here {
+                    let area = face.box.count == 4 ? Double(max(0, face.box[2]) * max(0, face.box[3])) : 0
+                    if area >= largest[face.personID]?.area ?? -1 { largest[face.personID] = (face, area) }
+                }
+                let total = largest.values.reduce(0) { $0 + $1.area }
+                for (id, seen) in largest {
+                    var seat = seats[id] ?? CakeSeat(
+                        personID: id, name: seen.face.name, relation: seen.face.relation, isMe: seen.face.isMe
+                    )
+                    seat.photos += 1
+                    seat.prominence += total > 0 ? seen.area / total : 1 / Double(largest.count)
+                    seats[id] = seat
+                }
+            }
+            if photos >= 2 { seen.insert(day) }
+            found[day] = whoseBirthday(Array(seats.values), photos: photos)
+        }
+        return (found, seen)
+    }
+
+    /// Whose birthday it was, from the photos of the cake: whoever is in the
+    /// most of them, and in two at least and half of those with anyone named
+    /// in them. A child of the family in nearly as many wins over an adult,
+    /// since a child's parents are at their cake too. Nil where it isn't
+    /// plain, such as twins, and for the owner's own.
+    static func whoseBirthday(_ seats: [CakeSeat], photos: Int) -> Presence? {
+        let regulars = seats
+            .filter { $0.photos >= 2 && $0.photos * 2 >= photos }
+            .sorted {
+                ($0.photos, $0.prominence, $1.name, $1.personID.uuidString)
+                    > ($1.photos, $1.prominence, $0.name, $0.personID.uuidString)
+            }
+        guard let top = regulars.first else { return nil }
+        var pick = top
+        if !isChildLike(top.relation),
+           let child = regulars.first(where: {
+               isChildLike($0.relation) && ($0.photos + 1 >= top.photos || $0.photos * 5 >= top.photos * 4)
+           }) {
+            pick = child
+        }
+        // Plain: no one else of their kind is in as many, as near the camera.
+        if let rival = regulars.first(where: {
+            $0.personID != pick.personID && isChildLike($0.relation) == isChildLike(pick.relation)
+        }), rival.photos >= pick.photos, rival.prominence * 1.25 > pick.prominence {
+            return nil
+        }
+        guard !pick.isMe else { return nil }
+        return Presence(
+            personID: pick.personID, name: pick.name, relation: pick.relation, isMe: false, photos: pick.photos
+        )
     }
 
     /// One person across a card's days, the most photographed first.
@@ -475,7 +599,7 @@ struct CollectionsController: RouteCollection {
 
         if !card.isNamed, card.kind == .day, let occasion, let name = occasion.occasion,
            let renamed = retitled(card, occasion: name, isEvent: occasion.isEvent,
-                                  isHoliday: occasion.isHoliday, there: there, people: people, day: days.last) {
+                                  isHoliday: occasion.isHoliday, there: there, people: people, days: days) {
             return renamed
         }
 
@@ -491,15 +615,19 @@ struct CollectionsController: RouteCollection {
     /// An occasion card under a title that says whose it was, or nil.
     static func retitled(
         _ card: CollectionSummary, occasion: String, isEvent: Bool, isHoliday: Bool,
-        there: Presences, people: NamedPeople, day: String?
+        there: Presences, people: NamedPeople, days: [String]
     ) -> CollectionSummary? {
-        if isEvent, let event = CurationVocabulary.events.first(where: { $0.title == occasion }),
-           let focus = there.focus(of: card.count) {
+        if isEvent, let event = CurationVocabulary.events.first(where: { $0.title == occasion }) {
+            // A birthday is whoever's at the cake, where the cake was
+            // photographed with people the owner named; anything else,
+            // whoever the photos are of.
+            let cake = event.tag == "birthday" && people.sawTheCake(on: days)
+            guard let focus = cake ? people.birthday(on: days) : there.focus(of: card.count) else { return nil }
             let first = firstName(focus.name)
             let title: String
             switch event.tag {
             case "birthday":
-                title = birthdayTitle(first, age: day.flatMap { age(of: focus, on: $0, people: people) })
+                title = birthdayTitle(first, age: days.last.flatMap { age(of: focus, on: $0, people: people) })
             case "graduation":
                 title = "\(first)'s Graduation"
             default:
@@ -598,7 +726,9 @@ struct CollectionsController: RouteCollection {
         let birthday = CurationVocabulary.events.first { $0.tag == "birthday" }?.title ?? "Birthday party"
         if tradition.title.hasPrefix("Birthday on ") || tradition.title.hasPrefix(birthday) {
             let whose = tradition.years.map { year in
-                (year, Presences(people, days: days(inKey: year.key)).focus(of: year.count))
+                let days = days(inKey: year.key)
+                return (year, people.sawTheCake(on: days)
+                    ? people.birthday(on: days) : Presences(people, days: days).focus(of: year.count))
             }
             let found = Set(whose.compactMap { $0.1?.personID })
             guard found.count == 1, whose.filter({ $0.1 != nil }).count >= 2,
@@ -1478,7 +1608,7 @@ struct CollectionsController: RouteCollection {
         spaceID: UUID, seed: String, userID: UUID, named: [String: String],
         holidays: [String: String], events: [String: CurationVocabulary.Event] = [:],
         excluding claimed: Set<String>, recurring: Set<String>, yearly: YearlyPatterns,
-        on sql: any SQLDatabase
+        scope: EventScope = EventScope(), on sql: any SQLDatabase
     ) async throws -> (occasions: [Occasion], rows: [DayRow]) {
         let local = TimelineController.localTime
 
@@ -1512,6 +1642,7 @@ struct CollectionsController: RouteCollection {
                 \(Self.observed(by: userID))
                 WHERE sa.space_id = \(bind: spaceID)
                   AND sa.deleted_at IS NULL
+                  \(scope.filter)
                 GROUP BY day
             ),
             baseline AS (
@@ -1708,11 +1839,18 @@ struct CollectionsController: RouteCollection {
     /// it. Utility photos (screenshots, receipts, documents) count toward how
     /// much of a day was analyzed but are never evidence of an occasion.
     private func dayEvidence(
-        spaceID: UUID, userID: UUID, source: ObservationSource, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, source: ObservationSource, days: [String]? = nil,
+        on sql: any SQLDatabase
     ) async throws -> [String: DayEvidence] {
         struct TotalRow: Decodable { let day: String; let total: Int; let analyzed: Int; let usable: Int }
         struct TagRow: Decodable { let day: String; let tag: String; let n: Int }
         let local = TimelineController.localTime
+        let only: SQLQueryString
+        if let days {
+            only = "AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD') = ANY(\(bind: days)::text[])"
+        } else {
+            only = ""
+        }
 
         let totals = try await sql.raw("""
             SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day,
@@ -1727,6 +1865,7 @@ struct CollectionsController: RouteCollection {
                    ON o.user_id = \(bind: userID) AND o.sha256 = a.sha256
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
+              \(only)
             GROUP BY 1
             HAVING count(o.sha256) > 0
             """).all(decoding: TotalRow.self)
@@ -1741,6 +1880,7 @@ struct CollectionsController: RouteCollection {
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
               AND \(unsafeRaw: TimelineController.visible)
               AND NOT o.is_utility AND NOT ('utility' = ANY(o.tags))
+              \(only)
             GROUP BY 1, 2
             """).all(decoding: TagRow.self)
 
@@ -1754,6 +1894,27 @@ struct CollectionsController: RouteCollection {
             evidence[row.day]?.tags[row.tag] = row.n
         }
         return evidence
+    }
+
+    /// What of a `.day` album's days was an event, worked out as the page
+    /// works it out, for the album endpoint.
+    func eventScope(
+        forDays days: [String], spaceID: UUID, userID: UUID, on sql: any SQLDatabase
+    ) async throws -> EventScope {
+        guard !days.isEmpty else { return EventScope() }
+        let curation = try await CurationController.context(userID: userID, spaceID: spaceID, on: sql)
+        guard curation.enabled, curation.isPersonal else { return EventScope() }
+        let evidence = try await dayEvidence(
+            spaceID: spaceID, userID: userID, source: curation.source, days: days, on: sql
+        )
+        let years = Set(days.compactMap { Int($0.prefix(4)) }).sorted()
+        let calendar = curation.holidays ? Holidays.table(forYears: years) : [:]
+        let events = Self.events(in: evidence, excluding: Self.evidenced(calendar, by: evidence))
+        guard !events.isEmpty else { return EventScope() }
+        let named = try await occasionNames(spaceID: spaceID, userID: userID, years: years, on: sql)
+        return try await Self.eventScope(
+            spaceID: spaceID, userID: userID, source: curation.source, events: events, named: named, on: sql
+        )
     }
 
     /// The holidays that looked like themselves.
@@ -2926,6 +3087,11 @@ struct CollectionsController: RouteCollection {
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
 
+        // An event's album is the event, not the whole of its day. See
+        // `EventScope`.
+        let scope = kind == .day
+            ? try await eventScope(forDays: Self.days(inKey: key), spaceID: spaceID, userID: device.userID, on: req.sql)
+            : EventScope()
         let filter: SQLQueryString
         switch kind {
         case .onThisDay:
@@ -2951,6 +3117,7 @@ struct CollectionsController: RouteCollection {
             filter = """
                 AND to_char(\(unsafeRaw: TimelineController.localTime), 'YYYY-MM-DD')
                     BETWEEN \(bind: from) AND \(bind: to)
+                \(scope.filter)
                 """
         case .anniversary, .season:
             // Both are date ranges, like a trip.

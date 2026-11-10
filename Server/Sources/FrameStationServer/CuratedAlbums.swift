@@ -192,7 +192,7 @@ struct CuratedAlbums {
     /// day inside a trip: an occasion those days were has become part of it.
     func keep(
         occasions found: [CollectionsController.Occasion], saved all: [Saved]?, claimed: Set<String>,
-        standing: Standing, limit: Int, seed: String
+        outside: SQLQueryString = "", standing: Standing, limit: Int, seed: String
     ) async -> [CollectionsController.Occasion] {
         guard let all else { return found }
         let kind = CollectionKind.day.rawValue
@@ -256,7 +256,7 @@ struct CuratedAlbums {
         }
 
         let restored = await restore(
-            Self.within(limit, of: shown.map(\.summary.key), waiting), seed: seed
+            Self.within(limit, of: shown.map(\.summary.key), waiting), seed: seed, outside: outside
         )
         changes.deletes += restored.gone
         await write(changes)
@@ -387,9 +387,10 @@ struct CuratedAlbums {
 
     /// Each album's photos as they are today: how many, and the best covers.
     /// One whose photos are all in Recently Deleted waits for them; one with
-    /// none left at all is gone.
+    /// none left at all is gone. `outside` leaves out the parts of event days
+    /// that weren't the event (`EventScope`).
     private func restore(
-        _ rows: [Saved], seed: String
+        _ rows: [Saved], seed: String, outside: SQLQueryString = ""
     ) async -> (kept: [(Saved, Photos)], gone: [UUID]) {
         guard !rows.isEmpty else { return ([], []) }
         // Each album as its days, so the library is read once, matched by day.
@@ -417,6 +418,7 @@ struct CuratedAlbums {
                 WHERE sa.space_id = \(bind: spaceID)
                   AND sa.purged_at IS NULL
                   AND \(unsafeRaw: TimelineController.visible)
+                  \(outside)
                 GROUP BY d.id
                 """).all(decoding: Photos.self)
         } catch {
