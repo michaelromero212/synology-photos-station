@@ -136,13 +136,20 @@ struct PersonBubble: View {
     var body: some View {
         VStack(spacing: 7) {
             FaceCircle(session: session, spaceID: spaceID, source: .person(person), diameter: diameter)
-            // A blank line for someone unnamed, so every face sits at the same
-            // height along the row.
+            // The whole name, never cut off: two lines where it needs them,
+            // broken between words ("Grandma / Deem"), and room for two kept
+            // under every face, named or not, so the faces line up along the
+            // row. A cut-off "Michael Ro…" looked unfinished (his word,
+            // 2026-11-10).
             Text(person.name ?? " ")
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(.primary)
-                .lineLimit(1)
-                .frame(width: diameter + 10)
+                .multilineTextAlignment(.center)
+                .lineLimit(2, reservesSpace: true)
+                // Only a name too long for two lines shrinks, and only a
+                // little: one long surname, such as "Featherstonehaugh".
+                .minimumScaleFactor(0.75)
+                .frame(width: diameter + 16)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -432,11 +439,15 @@ struct PhotoPeopleSection: View {
                                     source: .suggestion(PersonSuggestion(assetID: assetID, ordinal: face.ordinal)),
                                     diameter: 52
                                 )
+                                // The whole name, on two lines where it needs
+                                // them, as under every face in People.
                                 Text(Self.label(face))
                                     .font(.caption)
                                     .foregroundStyle(face.name == nil && !face.isMe ? .secondary : .primary)
-                                    .lineLimit(1)
-                                    .frame(width: 66)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2, reservesSpace: true)
+                                    .minimumScaleFactor(0.85)
+                                    .frame(width: 72)
                             }
                             .contentShape(Rectangle())
                         }
