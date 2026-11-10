@@ -39,16 +39,98 @@ struct PeopleController: RouteCollection {
     static let pageLimit = 20
     static let listLimit = 500
 
-    /// Which of someone's faces stands for them: one they confirmed, then one
-    /// that's level (eyes side by side, the right eye on the left, so not
-    /// sideways or upside down), then from a photo rather than a video, then
-    /// the biggest and clearest. Expects their faces as `c` and the NAS's
-    /// rows as `f`.
-    static let coverOrder = """
-        (c.state = 'confirmed') DESC,
-        (f.landmarks[3] - f.landmarks[1] > abs(f.landmarks[4] - f.landmarks[2])) DESC,
-        (f.frame_ms IS NULL) DESC, f.size_px * f.score DESC
-        """
+    /// The face that stands for each of these people in their circle: a clean
+    /// headshot, so who it is shows at a glance (his ask, 2026-11-10). By the
+    /// person's file and face, for those with any face in this library.
+    ///
+    /// Clean means all of these, from what the NAS measured when it found
+    /// the face:
+    /// - surely them: one the owner confirmed, or a close match;
+    /// - level and facing the camera: the eyes side by side, the right eye
+    ///   on the left, and the nose between them;
+    /// - big enough to be sharp in the circle, and found with confidence;
+    /// - with room around it, so the circle isn't cut off by the photo's
+    ///   edge;
+    /// - from a photo, not a video frame or a screenshot.
+    ///
+    /// Of those, one from the last two years they were photographed, so a
+    /// child looks like they do now, and then the sharpest for them, the
+    /// biggest, the most like them, from a photo the owner's phone rated
+    /// well. Someone with no clean face gets their best one anyway: level
+    /// first, then a photo, then the clearest.
+    static func covers(
+        of people: [UUID], userID: UUID, spaceID: UUID, on sql: any SQLDatabase
+    ) async throws -> [UUID: (sha256: String, ordinal: Int)] {
+        guard !people.isEmpty else { return [:] }
+        struct Cover: Decodable { let personID: UUID; let sha256: String; let ordinal: Int }
+        // Landmarks are x, y pairs in fractions of the frame: right eye, left
+        // eye, nose, then the mouth's corners. Scaled by the photo's own
+        // width and height, which are as it's shown, so angles are true.
+        let rows = try await sql.raw("""
+            WITH faces AS (
+                SELECT c.person_id, c.sha256, c.ordinal, f.box, f.landmarks, f.score, f.size_px, f.sharpness,
+                       f.frame_ms IS NULL AS still,
+                       c.state = 'confirmed' OR c.similarity >= \(bind: Self.sureLikeness) AS sure,
+                       COALESCE(c.similarity, 0.8)::float8 AS likeness,
+                       a.local_captured_at AS taken,
+                       COALESCE(NULLIF(a.width, 0), 1)::float8 AS w,
+                       COALESCE(NULLIF(a.height, 0), 1)::float8 AS h,
+                       COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false) AS utility,
+                       COALESCE(o.aesthetic, 0)::float8 AS aesthetic
+                FROM person_faces c
+                JOIN nas_faces f ON f.user_id = c.user_id AND f.sha256 = c.sha256 AND f.ordinal = c.ordinal
+                JOIN assets a ON a.sha256 = c.sha256
+                JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID)
+                                    AND sa.deleted_at IS NULL
+                LEFT JOIN media_observations o ON o.user_id = c.user_id AND o.sha256 = c.sha256
+                WHERE c.user_id = \(bind: userID) AND c.person_id = ANY(\(bind: people)::uuid[])
+                  AND c.state IN ('auto', 'confirmed')
+            ),
+            measured AS (
+                SELECT *,
+                       (landmarks[3] - landmarks[1]) * w AS dx,
+                       (landmarks[4] - landmarks[2]) * h AS dy,
+                       abs(landmarks[5] - (landmarks[1] + landmarks[3]) / 2) * w AS off,
+                       \(unsafeRaw: String(FaceCrop.margin)) * greatest(box[3] * w, box[4] * h) AS side,
+                       (box[1] + box[3] / 2) * w AS cx,
+                       (box[2] + box[4] / 2) * h AS cy,
+                       percent_rank() OVER (PARTITION BY person_id ORDER BY sharpness) AS sharper,
+                       COALESCE(taken >= max(taken) OVER (PARTITION BY person_id) - interval '2 years', false)
+                           AS recent
+                FROM faces
+            ),
+            judged AS (
+                SELECT *,
+                       dx > 0 AND abs(dy) <= \(unsafeRaw: String(Self.levelSlope)) * dx AS level,
+                       sure AND still AND NOT utility
+                           AND dx > 0 AND abs(dy) <= \(unsafeRaw: String(Self.levelSlope)) * dx
+                           AND off <= \(unsafeRaw: String(Self.frontalOffset)) * dx
+                           AND size_px >= \(unsafeRaw: String(Self.headshotPixels))
+                           AND score >= \(unsafeRaw: String(Self.headshotScore))
+                           AND cx - side / 2 >= 0 AND cx + side / 2 <= w
+                           AND cy - side / 2 >= 0 AND cy + side / 2 <= h AS clean,
+                       score * least(size_px, 200) * (0.5 + sharper) * likeness * (2 + aesthetic) AS quality
+                FROM measured
+            )
+            SELECT DISTINCT ON (person_id) person_id AS "personID", sha256, ordinal::int AS ordinal
+            FROM judged
+            ORDER BY person_id, clean DESC, (clean AND recent) DESC, level DESC, still DESC,
+                     quality DESC, sha256, ordinal
+            """).all(decoding: Cover.self)
+        return Dictionary(rows.map { ($0.personID, ($0.sha256, $0.ordinal)) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// A face placed this close to someone's others is surely them.
+    static let sureLikeness: Float = 0.6
+    /// Level: tilted no more than 15 degrees (tan 15° ≈ 0.27).
+    static let levelSlope = 0.27
+    /// Facing the camera: the nose within a fifth of the eyes' distance of
+    /// the point between them.
+    static let frontalOffset = 0.2
+    /// Big and sure enough for a circle: the face's shorter side in the
+    /// analyzer's 1,280-pixel render, and YuNet's confidence.
+    static let headshotPixels = 90
+    static let headshotScore = 0.8
 
     // MARK: - Who can ask
 
@@ -112,19 +194,9 @@ struct PeopleController: RouteCollection {
             """).all(decoding: Row.self)
         guard !rows.isEmpty else { return [] }
 
-        // The face that stands for each: one they confirmed, from a photo
-        // rather than a video, the biggest and clearest.
-        struct Cover: Decodable { let personID: UUID; let sha256: String; let ordinal: Int }
-        let covers = try await sql.raw("""
-            SELECT DISTINCT ON (c.person_id) c.person_id AS "personID", c.sha256, c.ordinal::int AS ordinal
-            FROM person_faces c
-            JOIN nas_faces f ON f.user_id = c.user_id AND f.sha256 = c.sha256 AND f.ordinal = c.ordinal
-            WHERE c.person_id = ANY(\(bind: rows.map(\.id))::uuid[]) AND c.state IN ('auto', 'confirmed')
-            ORDER BY c.person_id, \(unsafeRaw: Self.coverOrder), c.sha256, c.ordinal
-            """).all(decoding: Cover.self)
-        let cover = Dictionary(uniqueKeysWithValues: covers.map {
-            ($0.personID, "\($0.sha256.prefix(12))-\($0.ordinal)-v\(FaceCrop.version)")
-        })
+        // The face that stands for each: a clean headshot. See `covers`.
+        let cover = try await Self.covers(of: rows.map(\.id), userID: userID, spaceID: spaceID, on: sql)
+            .mapValues { "\($0.sha256.prefix(12))-\($0.ordinal)-v\(FaceCrop.version)" }
         return rows.map {
             PersonSummary(id: $0.id, name: $0.name, photoCount: $0.photos,
                           face: cover[$0.id] ?? "none", questions: $0.name == nil ? 0 : $0.questions,
@@ -537,17 +609,8 @@ struct PeopleController: RouteCollection {
     func personFace(req: Request) async throws -> Response {
         let (userID, spaceID) = try await Self.requireOwnLibrary(req)
         let personID = try await Self.requirePerson(req, userID: userID)
-        struct Row: Decodable { let sha256: String; let ordinal: Int }
-        guard let cover = try await req.sql.raw("""
-            SELECT c.sha256, c.ordinal::int AS ordinal
-            FROM person_faces c
-            JOIN nas_faces f ON f.user_id = c.user_id AND f.sha256 = c.sha256 AND f.ordinal = c.ordinal
-            JOIN assets a ON a.sha256 = c.sha256
-            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-            WHERE c.person_id = \(bind: personID) AND c.state IN ('auto', 'confirmed')
-            ORDER BY \(unsafeRaw: Self.coverOrder), c.sha256, c.ordinal
-            LIMIT 1
-            """).first(decoding: Row.self)
+        // The same face the People row names in `PersonSummary.face`.
+        guard let cover = try await Self.covers(of: [personID], userID: userID, spaceID: spaceID, on: req.sql)[personID]
         else { throw Abort(.notFound) }
         return try await FaceCrop.serve(req, userID: userID, sha256: cover.sha256, ordinal: cover.ordinal)
     }
@@ -577,8 +640,12 @@ enum FaceCrop {
     /// Part of every crop's file name and of `PersonSummary.face`: moved
     /// when crops are made differently, so neither the NAS nor a device's
     /// cache goes on serving the old ones. 2: leveled by the eyes. 3: a
-    /// photo's rotation tag applied once, not twice (see the last step).
-    static let version = 3
+    /// photo's rotation tag applied once, not twice (see the last step). 4: a
+    /// face small in its photo cut from a bigger render.
+    static let version = 4
+    /// The most a photo is rendered at for a small face: a 48-megapixel
+    /// photo's long side is about 8,000.
+    static let largestRender = 4096
 
     static func serve(_ req: Request, userID: UUID, sha256: String, ordinal: Int) async throws -> Response {
         let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal)
@@ -629,11 +696,25 @@ enum FaceCrop {
                                                   "-i", source.path, "-frames:v", "1", "-y", frame.path], timeout: 120)
             still = frame
         }
-        let upright = work.appendingPathComponent("upright.v")
+        var upright = work.appendingPathComponent("upright.v")
         try await Shell.runChecked("vips", ["thumbnail", still.path, upright.path, "1600"], timeout: 120)
-        let width = try await dimension("width", of: upright)
-        let height = try await dimension("height", of: upright)
+        var width = try await dimension("width", of: upright)
+        var height = try await dimension("height", of: upright)
         let (x, y, w, h) = (face.box[0], face.box[1], face.box[2], face.box[3])
+        // A face small in its photo is cut from a bigger render, so its circle
+        // is the photo's own pixels rather than enlarged ones, as far as the
+        // photo has them. Never past its own size.
+        let wanted = max(w * Float(width), h * Float(height)) * margin
+        if wanted < Float(size) {
+            let bigger = min(Int((1600 * Float(size) / max(wanted, 1)).rounded(.up)), Self.largestRender)
+            let detailed = work.appendingPathComponent("detailed.v")
+            try await Shell.runChecked(
+                "vips", ["thumbnail", still.path, detailed.path, "\(bigger)", "--size", "down"], timeout: 120
+            )
+            upright = detailed
+            width = try await dimension("width", of: upright)
+            height = try await dimension("height", of: upright)
+        }
         let side = min(max(w * Float(width), h * Float(height)) * margin, Float(min(width, height)))
         let cx = (x + w / 2) * Float(width), cy = (y + h / 2) * Float(height)
         let left = Int(min(max(cx - side / 2, 0), Float(width) - side))

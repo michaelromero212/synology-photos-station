@@ -341,16 +341,30 @@ faces are used for anything.
        names as they change and goes when People does.
    - **Level faces.** A face tilted in its photo (someone lying down, a baby
      held, a selfie from above) is turned upright in its circle by the line
-     between its eyes, to the nearest quarter turn. Covers prefer a level
-     face after one the owner confirmed.
+     between its eyes, to the nearest quarter turn.
+   - **A clean headshot in each circle** (his ask, 2026-11-10), so who it is
+     shows at a glance (`PeopleController.covers`). A clean face is surely
+     theirs (confirmed, or placed at a likeness of 0.6 or more). It is level
+     (within 15°) and facing the camera (the nose within a fifth of the
+     eyes' distance of the point between them). It is at least 90 pixels
+     across in the analyzer's render with a score of 0.8, from a photo
+     rather than a video frame or a screenshot, with room around it for the
+     circle inside the photo. Of those, the circle shows one from the last
+     two years the person was photographed, so a child looks like they do
+     now, and then the sharpest for them, the biggest, the most like them,
+     from a photo their phone rated well. Someone with no clean face gets
+     their best one anyway. A face small in its photo is cut from a bigger
+     render of it (up to 4,096 pixels, never past the photo's own size), so
+     the circle is real pixels rather than enlarged ones. Crop version 4.
    - **A photo's rotation tag, once.** The NAS's vips (8.12, in the server
      image) leaves a photo's rotation tag on the picture it has already
      stood up. So the crop's last step mustn't obey it (`--no-rotate`).
      Without that, every tagged photo's face was turned twice: sideways for
      a portrait iPhone JPEG, upside down for a HEIC tagged 180°. vips 8.18 on
      a Mac clears the tag, which is why the local tests didn't see it.
-     `Scripts/smoke-image.sh` checks it in the image that ships. Crops are
-     version 3, so neither the NAS nor a device keeps serving the old ones.
+     `Scripts/smoke-image.sh` checks it in the image that ships. Crops went
+     to version 3 for it (4 since the bigger render below), so neither the
+     NAS nor a device keeps serving the old ones.
    - **The People switch** (§6, rule 7), in Curated Albums settings.
    - **Grouping.** `PeopleClusterer` compares each face with each person's
      average face (cosine on SFace's numbers), within one library only.

@@ -104,15 +104,28 @@ class H(http.server.BaseHTTPRequestHandler):
         faces = []
         for i, entry in enumerate(plan.get(sha, [])):
             # "stranger@90": a face turned a quarter clockwise in the picture,
-            # so its eyes are one above the other.
+            # so its eyes are one above the other. "kid@clean": a headshot,
+            # level, facing the camera, sharp, with room around it; "@soft"
+            # the same but blurry and bigger; "@side" sharp and bigger but
+            # turned away; "@edge" sharp and bigger but at the photo's edge.
             who, _, turn = entry.partition("@")
             x = 0.1 + 0.45 * i
             cx, cy = x + .15, .4
-            marks = ([cx, cy - .06, cx, cy + .06, cx - .04, cy, cx - .1, cy - .05, cx - .1, cy + .05]
-                     if turn == "90" else [x + .08, .3, x + .2, .3, x + .14, .38, x + .1, .46, x + .2, .46])
-            faces.append({"box": [x, 0.2, 0.3, 0.4],
+            box, size, sharp = [x, 0.2, 0.3, 0.4], 120, 50.0
+            if turn == "90":
+                marks = [cx, cy - .06, cx, cy + .06, cx - .04, cy, cx - .1, cy - .05, cx - .1, cy + .05]
+            elif turn in ("clean", "soft", "side", "edge"):
+                bx = 0.0 if turn == "edge" else 0.4
+                box, cx, cy = [bx, 0.3, 0.15, 0.2], bx + .075, .4
+                nose = cx - .028 if turn == "side" else cx
+                marks = [cx - .03, cy - .03, cx + .03, cy - .03, nose, cy + .01, cx - .02, cy + .05, cx + .02, cy + .05]
+                size = {"clean": 120, "soft": 200, "side": 300, "edge": 300}[turn]
+                sharp = {"clean": 300.0, "soft": 5.0, "side": 400.0, "edge": 400.0}[turn]
+            else:
+                marks = [x + .08, .3, x + .2, .3, x + .14, .38, x + .1, .46, x + .2, .46]
+            faces.append({"box": box,
                           "landmarks": marks,
-                          "score": 0.95, "size": 120, "sharpness": 50.0,
+                          "score": 0.95, "size": size, "sharpness": sharp,
                           "embedding": b64(face_vector(who, int(hashlib.sha256((sha + str(i)).encode()).hexdigest()[:8], 16)))})
         scene = b64(unit(np.random.default_rng(int(sha[:8], 16)).standard_normal(768)))
         self.reply({"protocol": 1, "analyzer": 1, "timings": {"totalMS": 1},
@@ -349,6 +362,18 @@ check "two of his cake photos say 5" "2" "$(wrote 1 5 "${AC[0]}" "${AC[1]}")"
 check "where the cake and first appearance disagree, the cake wins" "Celebrating Thomas's 5th Birthday" "$(party 2026-05-14)"
 check "read again, they say 2" "2" "$(wrote 2 2 "${AC[0]}" "${AC[1]}")"
 check "never younger than he's been in the photos" "Celebrating Thomas's 4th Birthday" "$(party 2026-05-14)"
+echo "A clean face in each circle"
+# Four new photos of Thomas: a headshot, and three that the biggest face used
+# to win with but that aren't one: blurry, turned away, at the photo's edge.
+n=860; for kind in side edge soft clean; do
+  n=$((n + 1)); HEAD=$(photo "head-$kind" $n "2026-06-01" "kid@$kind")
+  [ "$kind" = clean ] && CLEAN=$HEAD
+done
+until_true 180 '[ "$(kid_count)" = "25" ]'
+check "his circle is the headshot" "$(q "SELECT left(sha256, 12) FROM assets WHERE id = '$CLEAN'")-0-v4" \
+  "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; print([p["face"] for p in json.load(sys.stdin)["people"] if p.get("name") == "Thomas Deem"][0])')"
+check "and its picture is served" "200 image/jpeg" \
+  "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$API/v1/spaces/$P1/people/$K/face" -H "$A1")"
 # Her own birthday, were she the owner: not named for whoever else is there.
 curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":true}'
 check "the owner's own birthday isn't given to anyone else" "Birthday party" \

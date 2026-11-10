@@ -67,14 +67,15 @@ pass "vips (with HEIF), exiftool, ffmpeg and ffprobe present"
 # upright is. Stood up, the face's top row goes from green to less green with
 # red unchanged. The image's vips (8.12) leaves the tag on what thumbnail
 # makes, so a last step that obeyed it turned the face a second time.
-POINTS=$(docker run --rm --entrypoint sh "$IMAGE" -c '
+PHOTO='
   set -e; cd /tmp
   vips xyz xyz.v 400 300
   vips extract_band xyz.v x.v 0; vips extract_band xyz.v y.v 1
   vips linear x.v r.v 0.6375 0 --uchar; vips linear y.v g.v 0.85 0 --uchar
   vips black z0.v 400 300; vips cast z0.v z.v uchar
   vips bandjoin "r.v g.v z.v" rgb.v; vips copy rgb.v "photo.jpg[Q=95]"
-  exiftool -q -overwrite_original -Orientation#=6 photo.jpg
+  exiftool -q -overwrite_original -Orientation#=6 photo.jpg'
+POINTS=$(docker run --rm --entrypoint sh "$IMAGE" -c "$PHOTO"'
   vips thumbnail photo.jpg upright.v 1600
   vips extract_area upright.v square.v 0 0 600 600
   vips thumbnail square.v "face.jpg[Q=85,strip]" 64 --no-rotate
@@ -86,6 +87,14 @@ left, right = (list(map(float, side.split())) for side in sys.argv[1].split("|")
 sys.exit(0 if left[1] - right[1] > 60 and abs(left[0] - right[0]) < 20 else 1)
 PY
 pass "a face cut from a rotated photo comes out upright"
+# A face small in its photo is cut from a bigger render of it: never past the
+# photo's own size, and stood up once, as the first render is.
+BIGGER=$(docker run --rm --entrypoint sh "$IMAGE" -c "$PHOTO"'
+  vips thumbnail photo.jpg detailed.v 4096 --size down
+  echo "$(vipsheader -f width detailed.v) $(vipsheader -f height detailed.v)"
+' 2>/dev/null) || fail "a bigger render for a small face"
+[ "$BIGGER" = "300 400" ] || fail "a small face's bigger render is the photo's own size, upright (got $BIGGER)"
+pass "a small face's bigger render is the photo's own size, upright"
 
 echo
 echo "=== start Postgres and the server ==="
