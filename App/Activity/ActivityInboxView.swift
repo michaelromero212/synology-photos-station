@@ -126,6 +126,14 @@ struct ActivityInboxView: View {
                 }
             }
         }
+        // A Mac sheet is as big as what it holds asks to be, and a list asks
+        // for next to nothing: the inbox opened as a strip with its title and
+        // its two buttons, and the activity that lit the bell was in there,
+        // with no room to show it. The empty state has a size of its own,
+        // which is why "Nothing new" always showed and the rows never did.
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 480)
+        #endif
     }
 
     private func row(_ item: ActivityItemDTO) -> some View {
