@@ -50,6 +50,17 @@ final class TimelineGridLayout: UICollectionViewLayout {
         var areaHeaderHeight: CGFloat
         /// The library's count above the oldest day. Zero for none.
         var libraryHeaderHeight: CGFloat
+
+        /// Whether `next` is this library with photographs added or taken
+        /// away, as opposed to the same photographs drawn another way — a
+        /// change of density, or of the headings' sizes. Only the first is
+        /// animated; see `TimelineCollection.Coordinator.animatableChange`.
+        func drawsLike(_ next: Shape) -> Bool {
+            columns == next.columns && spacing == next.spacing
+                && headerHeight == next.headerHeight
+                && areaHeaderHeight == next.areaHeaderHeight
+                && libraryHeaderHeight == next.libraryHeaderHeight
+        }
     }
 
     /// One area's tiles within a day: its first entry, how many, and where its
@@ -60,41 +71,228 @@ final class TimelineGridLayout: UICollectionViewLayout {
         let top: CGFloat
     }
 
+    /// Where everything goes, for one shape at one width: what `prepare` works
+    /// out, and everything that is asked of the layout is answered from it.
+    ///
+    /// A value rather than the layout's own properties so that the one on
+    /// screen can be kept while the grid animates to the next — every tile
+    /// that moves is moved from where this says it was. See `beginChange`.
+    struct Placement {
+        private(set) var shape: Shape
+        private(set) var width: CGFloat = 0
+        /// Tiles across, for the width the grid has now: `shape.columns` on a
+        /// phone, more on an iPad. Worked out here, from the collection view's
+        /// own width, so that turning an iPad or resizing it in Split View
+        /// reflows the grid in the same layout pass that
+        /// `TimelineCollectionView` holds the screen's place across.
+        private(set) var columnCount = 1
+        private(set) var side: CGFloat = 0
+        /// Where each day's heading begins, in content coordinates.
+        private(set) var starts: [CGFloat] = []
+        /// The areas of each day spent in more than one, by section. Every
+        /// other day is a single run starting under its heading, and isn't
+        /// stored.
+        private(set) var runs: [Int: [Run]] = [:]
+        private(set) var height: CGFloat = 0
+        private(set) var scale: CGFloat = 3
+        /// Empty room above a library too short to fill the screen.
+        ///
+        /// The grid runs oldest to newest and opens on the newest, so a long
+        /// library shows its newest photos resting on the bar at the bottom.
+        /// One that fits on screen with room to spare used to start at the top
+        /// instead. A shared album of nine photos showed them up under the
+        /// clock with half a screen of nothing below, newest in the middle. The
+        /// room goes above, so a short library looks the way the end of a long
+        /// one does.
+        private(set) var lead: CGFloat = 0
+
+        init(shape: Shape) {
+            self.shape = shape
+        }
+
+        /// Lays `shape` out across `width`, with `visible` points of screen
+        /// between the bars for a short library to rest at the bottom of.
+        mutating func place(_ shape: Shape, width: CGFloat, scale: CGFloat, visible: CGFloat) {
+            self.shape = shape
+            self.width = width
+            self.scale = scale
+            columnCount = PhotoGridMetrics.squareColumns(shape.columns, across: width)
+            let columns = columnCount
+            // The same arithmetic `PhotoGridSection` used, so the tiles come
+            // out the size they always were.
+            side = max((width - shape.spacing * CGFloat(columns - 1)) / CGFloat(columns), 1)
+            // Before anything is measured: a day's height includes its areas'.
+            runs.removeAll(keepingCapacity: true)
+            for (section, areas) in shape.areas.enumerated() where areas.count > 1 {
+                var laid: [Run] = []
+                var first = 0
+                var top = shape.headerHeight
+                for (index, count) in areas.enumerated() {
+                    if index > 0 { top += shape.areaHeaderHeight }
+                    laid.append(Run(first: first, count: count, top: top))
+                    first += count
+                    top += rowsHeight(count)
+                }
+                runs[section] = laid
+            }
+            let natural = shape.counts.indices.reduce(shape.libraryHeaderHeight) { $0 + sectionHeight($1) }
+            // On a whole device pixel, so every edge below it rounds the way it
+            // would without it and the gaps stay crisp.
+            let room = shape.counts.isEmpty ? 0 : max(visible - natural, 0)
+            lead = (room * scale).rounded(.down) / scale
+            starts.removeAll(keepingCapacity: true)
+            starts.reserveCapacity(shape.counts.count)
+            var y = lead + shape.libraryHeaderHeight
+            for section in shape.counts.indices {
+                starts.append(y)
+                y += sectionHeight(section)
+            }
+            height = y
+        }
+
+        private func rows(_ count: Int) -> Int {
+            let columns = columnCount
+            return (max(count, 0) + columns - 1) / columns
+        }
+
+        /// The rows of `count` tiles, top of the first to bottom of the last.
+        private func rowsHeight(_ count: Int) -> CGFloat {
+            let rows = rows(count)
+            return CGFloat(rows) * side + CGFloat(max(rows - 1, 0)) * shape.spacing
+        }
+
+        /// A day's heading, its rows, and the place line before each area
+        /// after its first.
+        func sectionHeight(_ section: Int) -> CGFloat {
+            guard shape.counts.indices.contains(section) else { return 0 }
+            if let last = runs[section]?.last { return last.top + rowsHeight(last.count) }
+            return shape.headerHeight + rowsHeight(shape.counts[section])
+        }
+
+        /// A day's runs: its areas, or the whole day as one.
+        func runs(in section: Int) -> [Run] {
+            runs[section] ?? [Run(first: 0, count: shape.counts[section], top: shape.headerHeight)]
+        }
+
+        /// The run an entry belongs to. A day has a handful of areas at most,
+        /// so a scan is all this needs.
+        private func run(of item: Int, in section: Int) -> Run {
+            let all = runs(in: section)
+            return all.last { item >= $0.first } ?? all[0]
+        }
+
+        /// Whether this placement has a tile at `item` of `section`.
+        func contains(item: Int, inSection section: Int) -> Bool {
+            starts.indices.contains(section) && shape.counts.indices.contains(section)
+                && item >= 0 && item < shape.counts[section]
+        }
+
+        /// The day holding a point in the content. A binary search, because
+        /// this is asked every frame of a scroll and a library of 67,000
+        /// photographs is a few thousand days.
+        func section(at y: CGFloat) -> Int? {
+            guard !starts.isEmpty else { return nil }
+            if y <= starts[0] { return 0 }
+            var low = 0
+            var high = starts.count - 1
+            while low < high {
+                let mid = (low + high + 1) / 2
+                if starts[mid] <= y { low = mid } else { high = mid - 1 }
+            }
+            return low
+        }
+
+        func sectionTop(_ section: Int) -> CGFloat? {
+            starts.indices.contains(section) ? starts[section] : nil
+        }
+
+        /// The first tile of the row at a point inside a day, or nil when the
+        /// point is on the day's heading. On a place line, the first tile of
+        /// the area it starts.
+        func item(at y: CGFloat, inSection section: Int) -> Int? {
+            guard starts.indices.contains(section) else { return nil }
+            let all = runs(in: section)
+            guard y >= starts[section] + all[0].top else { return nil }
+            let run = all.last { y >= starts[section] + $0.top - shape.areaHeaderHeight } ?? all[0]
+            let gridTop = starts[section] + run.top
+            guard y >= gridTop else { return run.count > 0 ? run.first : nil }
+            let row = Int((y - gridTop) / (side + shape.spacing))
+            let index = row * columnCount
+            return index < run.count ? run.first + index : nil
+        }
+
+        /// Frames land on whole device pixels, the way SwiftUI's did.
+        /// Fractional edges would blur the two-point gaps into gray smears.
+        private func pixel(_ value: CGFloat) -> CGFloat {
+            (value * scale).rounded() / scale
+        }
+
+        func frame(forItem item: Int, inSection section: Int) -> CGRect {
+            let columns = columnCount
+            let run = run(of: item, in: section)
+            let row = (item - run.first) / columns
+            let column = (item - run.first) % columns
+            let gridTop = starts[section] + run.top
+            let x = CGFloat(column) * (side + shape.spacing)
+            let y = gridTop + CGFloat(row) * (side + shape.spacing)
+            let minX = pixel(x), maxX = pixel(x + side)
+            let minY = pixel(y), maxY = pixel(y + side)
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+
+        func headerFrame(_ section: Int) -> CGRect? {
+            guard starts.indices.contains(section) else { return nil }
+            let top = starts[section]
+            let minY = pixel(top)
+            return CGRect(x: 0, y: minY, width: width, height: pixel(top + shape.headerHeight) - minY)
+        }
+
+        /// The place line above a day's `area`-th area, from the second on.
+        func areaHeaderFrame(_ area: Int, inSection section: Int) -> CGRect? {
+            guard starts.indices.contains(section),
+                  let laid = runs[section], laid.indices.contains(area), area > 0
+            else { return nil }
+            let bottom = starts[section] + laid[area].top
+            let minY = pixel(bottom - shape.areaHeaderHeight)
+            return CGRect(x: 0, y: minY, width: width, height: pixel(bottom) - minY)
+        }
+
+        /// How many place lines a day has: one above each area after its
+        /// first, at area indices 1 through this.
+        func areaLines(_ section: Int) -> Int {
+            max((runs[section]?.count ?? 1) - 1, 0)
+        }
+
+        /// The library's count, above the oldest day, if it has one.
+        var libraryFrame: CGRect? {
+            guard shape.libraryHeaderHeight > 0 else { return nil }
+            return CGRect(x: 0, y: lead, width: width, height: shape.libraryHeaderHeight)
+        }
+
+        /// Any heading's frame, by the kind and index path a collection view
+        /// names it with.
+        func frame(ofSupplementary kind: String, at indexPath: IndexPath) -> CGRect? {
+            switch kind {
+            case TimelineGridLayout.libraryHeaderKind: return libraryFrame
+            case TimelineGridLayout.areaHeaderKind:
+                return areaHeaderFrame(indexPath.item, inSection: indexPath.section)
+            default: return headerFrame(indexPath.section)
+            }
+        }
+    }
+
     var shape: Shape {
         didSet { if shape != oldValue { invalidateLayout() } }
     }
 
-    private var width: CGFloat = 0
-    /// Tiles across, for the width the grid has now: `shape.columns` on a
-    /// phone, more on an iPad. Worked out here, from the collection view's own
-    /// width, so that turning an iPad or resizing it in Split View reflows the
-    /// grid in the same layout pass that `TimelineCollectionView` holds the
-    /// screen's place across.
-    private(set) var columnCount = 1
-    private var side: CGFloat = 0
-    /// Where each day's heading begins, in content coordinates.
-    private var starts: [CGFloat] = []
-    /// The areas of each day spent in more than one, by section. Every other
-    /// day is a single run starting under its heading, and isn't stored.
-    private var runs: [Int: [Run]] = [:]
-    private var height: CGFloat = 0
-    private var scale: CGFloat = 3
-    /// Empty room above a library too short to fill the screen.
-    ///
-    /// The grid runs oldest to newest and opens on the newest, so a long
-    /// library shows its newest photos resting on the bar at the bottom. One
-    /// that fits on screen with room to spare used to start at the top
-    /// instead. A shared album of nine photos showed them up under the clock
-    /// with half a screen of nothing below, newest in the middle. The room
-    /// goes above, so a short library looks the way the end of a long one
-    /// does.
-    private var lead: CGFloat = 0
+    private var placement: Placement
     /// The height the grid was last laid out for. A short library rests on the
     /// bottom, so it moves when the bottom does.
     private var boundsHeight: CGFloat = 0
 
     init(shape: Shape) {
         self.shape = shape
+        self.placement = Placement(shape: shape)
         super.init()
     }
 
@@ -105,43 +303,14 @@ final class TimelineGridLayout: UICollectionViewLayout {
     override func prepare() {
         super.prepare()
         guard let collectionView else { return }
-        width = collectionView.bounds.width
         let displayScale = collectionView.traitCollection.displayScale
-        scale = displayScale > 0 ? displayScale : 3
-        columnCount = PhotoGridMetrics.squareColumns(shape.columns, across: width)
-        let columns = columnCount
-        // The same arithmetic `PhotoGridSection` used, so the tiles come out the
-        // size they always were.
-        side = max((width - shape.spacing * CGFloat(columns - 1)) / CGFloat(columns), 1)
         boundsHeight = collectionView.bounds.height
-        // Before anything is measured: a day's height includes its areas'.
-        runs.removeAll(keepingCapacity: true)
-        for (section, areas) in shape.areas.enumerated() where areas.count > 1 {
-            var laid: [Run] = []
-            var first = 0
-            var top = shape.headerHeight
-            for (index, count) in areas.enumerated() {
-                if index > 0 { top += shape.areaHeaderHeight }
-                laid.append(Run(first: first, count: count, top: top))
-                first += count
-                top += rowsHeight(count)
-            }
-            runs[section] = laid
-        }
-        let natural = shape.counts.indices.reduce(shape.libraryHeaderHeight) { $0 + sectionHeight($1) }
-        // On a whole device pixel, so every edge below it rounds the way it
-        // would without it and the gaps stay crisp.
-        let room = shape.counts.isEmpty
-            ? 0 : max(visibleHeight(collectionView, height: boundsHeight) - natural, 0)
-        lead = (room * scale).rounded(.down) / scale
-        starts.removeAll(keepingCapacity: true)
-        starts.reserveCapacity(shape.counts.count)
-        var y = lead + shape.libraryHeaderHeight
-        for section in shape.counts.indices {
-            starts.append(y)
-            y += sectionHeight(section)
-        }
-        height = y
+        placement.place(
+            shape,
+            width: collectionView.bounds.width,
+            scale: displayScale > 0 ? displayScale : 3,
+            visible: visibleHeight(collectionView, height: boundsHeight)
+        )
     }
 
     /// How much of the grid's height is not under a bar: the content insets
@@ -154,44 +323,17 @@ final class TimelineGridLayout: UICollectionViewLayout {
     /// visible height, or was the last time it was laid out. Either way, a
     /// change to the bars or the screen moves it.
     func restsOnBottom(within visible: CGFloat) -> Bool {
-        lead > 0 || height - lead < visible
+        placement.lead > 0 || placement.height - placement.lead < visible
     }
 
-    private func rows(_ count: Int) -> Int {
-        let columns = columnCount
-        return (max(count, 0) + columns - 1) / columns
-    }
+    var columnCount: Int { placement.columnCount }
 
-    /// The rows of `count` tiles, top of the first to bottom of the last.
-    private func rowsHeight(_ count: Int) -> CGFloat {
-        let rows = rows(count)
-        return CGFloat(rows) * side + CGFloat(max(rows - 1, 0)) * shape.spacing
-    }
+    func sectionHeight(_ section: Int) -> CGFloat { placement.sectionHeight(section) }
 
-    /// A day's heading, its rows, and the place line before each area after
-    /// its first.
-    func sectionHeight(_ section: Int) -> CGFloat {
-        guard shape.counts.indices.contains(section) else { return 0 }
-        if let last = runs[section]?.last { return last.top + rowsHeight(last.count) }
-        return shape.headerHeight + rowsHeight(shape.counts[section])
-    }
-
-    /// A day's runs: its areas, or the whole day as one.
-    private func runs(in section: Int) -> [Run] {
-        runs[section] ?? [Run(first: 0, count: shape.counts[section], top: shape.headerHeight)]
-    }
-
-    /// The run an entry belongs to. A day has a handful of areas at most, so
-    /// a scan is all this needs.
-    private func run(of item: Int, in section: Int) -> Run {
-        let all = runs(in: section)
-        return all.last { item >= $0.first } ?? all[0]
-    }
-
-    var contentHeight: CGFloat { height }
+    var contentHeight: CGFloat { placement.height }
 
     override var collectionViewContentSize: CGSize {
-        CGSize(width: width, height: height)
+        CGSize(width: placement.width, height: placement.height)
     }
 
     /// Told that the width is about to change, while everything here still
@@ -208,7 +350,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
     /// the old offset: measured, it named whatever had moved under the old
     /// offset, and putting that back moved nothing.
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
-        if newBounds.width != width {
+        if newBounds.width != placement.width {
             widthWillChange?()
             return true
         }
@@ -216,108 +358,57 @@ final class TimelineGridLayout: UICollectionViewLayout {
         return restsOnBottom(within: visibleHeight(collectionView, height: newBounds.height))
     }
 
-    /// The day holding a point in the content. A binary search, because this is
-    /// asked every frame of a scroll and a library of 67,000 photographs is a few
-    /// thousand days.
-    func section(at y: CGFloat) -> Int? {
-        guard !starts.isEmpty else { return nil }
-        if y <= starts[0] { return 0 }
-        var low = 0
-        var high = starts.count - 1
-        while low < high {
-            let mid = (low + high + 1) / 2
-            if starts[mid] <= y { low = mid } else { high = mid - 1 }
-        }
-        return low
-    }
+    func section(at y: CGFloat) -> Int? { placement.section(at: y) }
 
-    func sectionTop(_ section: Int) -> CGFloat? {
-        starts.indices.contains(section) ? starts[section] : nil
-    }
+    func sectionTop(_ section: Int) -> CGFloat? { placement.sectionTop(section) }
 
-    /// The first tile of the row at a point inside a day, or nil when the point
-    /// is on the day's heading. On a place line, the first tile of the area it
-    /// starts.
     func item(at y: CGFloat, inSection section: Int) -> Int? {
-        guard starts.indices.contains(section) else { return nil }
-        let all = runs(in: section)
-        guard y >= starts[section] + all[0].top else { return nil }
-        let run = all.last { y >= starts[section] + $0.top - shape.areaHeaderHeight } ?? all[0]
-        let gridTop = starts[section] + run.top
-        guard y >= gridTop else { return run.count > 0 ? run.first : nil }
-        let row = Int((y - gridTop) / (side + shape.spacing))
-        let index = row * columnCount
-        return index < run.count ? run.first + index : nil
-    }
-
-    /// Frames land on whole device pixels, the way SwiftUI's did. Fractional
-    /// edges would blur the two-point gaps into gray smears.
-    private func pixel(_ value: CGFloat) -> CGFloat {
-        (value * scale).rounded() / scale
+        placement.item(at: y, inSection: section)
     }
 
     func frame(forItem item: Int, inSection section: Int) -> CGRect {
-        let columns = columnCount
-        let run = run(of: item, in: section)
-        let row = (item - run.first) / columns
-        let column = (item - run.first) % columns
-        let gridTop = starts[section] + run.top
-        let x = CGFloat(column) * (side + shape.spacing)
-        let y = gridTop + CGFloat(row) * (side + shape.spacing)
-        let minX = pixel(x), maxX = pixel(x + side)
-        let minY = pixel(y), maxY = pixel(y + side)
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-    }
-
-    private func headerFrame(_ section: Int) -> CGRect {
-        let top = starts[section]
-        let minY = pixel(top)
-        return CGRect(x: 0, y: minY, width: width, height: pixel(top + shape.headerHeight) - minY)
-    }
-
-    /// The place line above a day's `area`-th area, from the second on.
-    private func areaHeaderFrame(_ area: Int, inSection section: Int) -> CGRect? {
-        guard let laid = runs[section], laid.indices.contains(area), area > 0 else { return nil }
-        let bottom = starts[section] + laid[area].top
-        let minY = pixel(bottom - shape.areaHeaderHeight)
-        return CGRect(x: 0, y: minY, width: width, height: pixel(bottom) - minY)
+        placement.frame(forItem: item, inSection: section)
     }
 
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
         var result: [UICollectionViewLayoutAttributes] = []
-        if shape.libraryHeaderHeight > 0,
-           rect.minY < lead + shape.libraryHeaderHeight, rect.maxY > lead,
-           let library = layoutAttributesForSupplementaryView(
-               ofKind: Self.libraryHeaderKind, at: IndexPath(item: 0, section: 0)
-           ) {
-            result.append(library)
+        let placed = placement
+        if let library = placed.libraryFrame, rect.minY < library.maxY, rect.maxY > library.minY {
+            let attributes = UICollectionViewLayoutAttributes(
+                forSupplementaryViewOfKind: Self.libraryHeaderKind, with: IndexPath(item: 0, section: 0)
+            )
+            attributes.frame = library
+            attributes.zIndex = Self.headingZIndex
+            result.append(attributes)
         }
-        guard var section = section(at: max(rect.minY, 0)) else { return result }
-        let columns = columnCount
-        let pitch = side + shape.spacing
-        while section < starts.count, starts[section] < rect.maxY {
-            let top = starts[section]
-            if top + sectionHeight(section) > rect.minY {
-                if top + shape.headerHeight > rect.minY {
+        guard var section = placed.section(at: max(rect.minY, 0)) else { return result }
+        let columns = placed.columnCount
+        let pitch = placed.side + placed.shape.spacing
+        while section < placed.starts.count, placed.starts[section] < rect.maxY {
+            let top = placed.starts[section]
+            if top + placed.sectionHeight(section) > rect.minY {
+                if top + placed.shape.headerHeight > rect.minY, let frame = placed.headerFrame(section) {
                     let header = UICollectionViewLayoutAttributes(
                         forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                         with: IndexPath(item: 0, section: section)
                     )
-                    header.frame = headerFrame(section)
+                    header.frame = frame
+                    header.zIndex = Self.headingZIndex
                     result.append(header)
                 }
-                for (area, run) in runs(in: section).enumerated() {
+                for (area, run) in placed.runs(in: section).enumerated() {
                     let gridTop = top + run.top
-                    if area > 0, let line = areaHeaderFrame(area, inSection: section),
+                    if area > 0, let line = placed.areaHeaderFrame(area, inSection: section),
                        line.maxY > rect.minY, line.minY < rect.maxY {
                         let header = UICollectionViewLayoutAttributes(
                             forSupplementaryViewOfKind: Self.areaHeaderKind,
                             with: IndexPath(item: area, section: section)
                         )
                         header.frame = line
+                        header.zIndex = Self.headingZIndex
                         result.append(header)
                     }
-                    let totalRows = rows(run.count)
+                    let totalRows = (max(run.count, 0) + columns - 1) / columns
                     guard totalRows > 0 else { continue }
                     let first = max(0, Int(floor((rect.minY - gridTop) / pitch)))
                     let last = min(totalRows - 1, Int(floor((rect.maxY - gridTop) / pitch)))
@@ -330,7 +421,7 @@ final class TimelineGridLayout: UICollectionViewLayout {
                             let attributes = UICollectionViewLayoutAttributes(
                                 forCellWith: IndexPath(item: item, section: section)
                             )
-                            attributes.frame = frame(forItem: item, inSection: section)
+                            attributes.frame = placed.frame(forItem: item, inSection: section)
                             result.append(attributes)
                         }
                     }
@@ -342,36 +433,23 @@ final class TimelineGridLayout: UICollectionViewLayout {
     }
 
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
-        guard shape.counts.indices.contains(indexPath.section),
-              starts.indices.contains(indexPath.section),
-              indexPath.item < shape.counts[indexPath.section]
-        else { return nil }
+        guard placement.contains(item: indexPath.item, inSection: indexPath.section) else { return nil }
         let attributes = UICollectionViewLayoutAttributes(forCellWith: indexPath)
-        attributes.frame = frame(forItem: indexPath.item, inSection: indexPath.section)
+        attributes.frame = placement.frame(forItem: indexPath.item, inSection: indexPath.section)
         return attributes
     }
 
+    /// Nil for a heading that isn't there: an area line whose day is down to
+    /// one area, a day that has gone.
     override func layoutAttributesForSupplementaryView(
         ofKind kind: String, at indexPath: IndexPath
     ) -> UICollectionViewLayoutAttributes? {
+        guard let frame = placement.frame(ofSupplementary: kind, at: indexPath) else { return nil }
         let attributes = UICollectionViewLayoutAttributes(
             forSupplementaryViewOfKind: kind, with: indexPath
         )
-        if kind == Self.libraryHeaderKind {
-            guard shape.libraryHeaderHeight > 0 else { return nil }
-            attributes.frame = CGRect(
-                x: 0, y: lead, width: width, height: shape.libraryHeaderHeight
-            )
-            return attributes
-        }
-        if kind == Self.areaHeaderKind {
-            guard let line = areaHeaderFrame(indexPath.item, inSection: indexPath.section)
-            else { return nil }
-            attributes.frame = line
-            return attributes
-        }
-        guard starts.indices.contains(indexPath.section) else { return nil }
-        attributes.frame = headerFrame(indexPath.section)
+        attributes.frame = frame
+        attributes.zIndex = Self.headingZIndex
         return attributes
     }
 
@@ -382,14 +460,281 @@ final class TimelineGridLayout: UICollectionViewLayout {
         var height: [String: Double] = [:]
         start.reserveCapacity(keys.count)
         height.reserveCapacity(keys.count)
-        for (index, key) in keys.enumerated() where starts.indices.contains(index) {
-            start[key] = Double(starts[index])
-            height[key] = Double(sectionHeight(index))
+        for (index, key) in keys.enumerated() where placement.starts.indices.contains(index) {
+            start[key] = Double(placement.starts[index])
+            height[key] = Double(placement.sectionHeight(index))
         }
         return LibrarySpan(
-            total: Double(self.height), start: start, height: height,
-            order: keys, header: Double(shape.headerHeight)
+            total: Double(placement.height), start: start, height: height,
+            order: keys, header: Double(placement.shape.headerHeight)
         )
+    }
+
+    // MARK: Animating a change
+
+    /// Where the screen comes to rest once a change has played, in the new
+    /// library's terms.
+    enum Rest {
+        /// On the newest row, which is where the library opens and where it
+        /// stays as new photographs arrive.
+        case bottom
+        /// With this tile's row at the top, as far into it as before.
+        case item(section: Int, item: Int, delta: CGFloat)
+        /// With this day at the top, as far into it as before.
+        case section(Int, delta: CGFloat)
+    }
+
+    /// The change being played: where everything was, and how to find each
+    /// tile and heading again on the other side.
+    private struct Change {
+        let from: Placement
+        let diff: GridDiff
+        let rest: Rest?
+        /// The scroll before the change, and after it once the collection
+        /// view has asked where to rest — see `targetContentOffset`.
+        let fromOffset: CGFloat
+        var toOffset: CGFloat?
+
+        /// How far the change scrolls the grid. What comes and goes does so
+        /// where it is on screen, so it is moved this far in the content to
+        /// stand still while the scroll goes by — a photograph deleted on
+        /// screen fades where you were looking at it, rather than drifting
+        /// over its neighbors on the way out.
+        var scroll: CGFloat { (toOffset ?? fromOffset) - fromOffset }
+    }
+
+    private var change: Change?
+
+    /// A heading, as the collection view names it.
+    struct Heading: Hashable {
+        let kind: String
+        let indexPath: IndexPath
+    }
+
+    /// The headings the collection view asked to animate out during the
+    /// change being worked out. See `Coordinator.animate` for the ones it
+    /// doesn't ask about.
+    private(set) var headingsAnimatedOut: Set<Heading> = []
+
+    /// Keeps where everything is now, just before a batch update, so each
+    /// tile and heading can be animated from there to its new place. Called
+    /// with the grid laid out for what is on screen.
+    func beginChange(_ diff: GridDiff, resting rest: Rest?) {
+        change = Change(
+            from: placement, diff: diff, rest: rest,
+            fromOffset: collectionView?.contentOffset.y ?? 0
+        )
+        headingsAnimatedOut.removeAll()
+    }
+
+    /// How far the change being played scrolls the grid. See `Change.scroll`.
+    var changeScroll: CGFloat { change?.scroll ?? 0 }
+
+    /// The batch update has been worked out and its animations are running;
+    /// nothing here is asked about it again.
+    func endChange() {
+        change = nil
+        headingsAnimatedOut.removeAll()
+    }
+
+    /// The screen held where it was — the day at the top kept at the top, or
+    /// the newest row kept on the bar — in the same animation that moves the
+    /// tiles, so a change above the screen moves nothing you can see.
+    override func targetContentOffset(forProposedContentOffset proposed: CGPoint) -> CGPoint {
+        guard change != nil else {
+            return super.targetContentOffset(forProposedContentOffset: proposed)
+        }
+        let target = resting(proposed)
+        change?.toOffset = target.y
+        return target
+    }
+
+    private func resting(_ proposed: CGPoint) -> CGPoint {
+        guard let rest = change?.rest, let collectionView else { return proposed }
+        let inset = collectionView.contentInset
+        let lowest = -inset.top
+        let highest = max(placement.height + inset.bottom - collectionView.bounds.height, lowest)
+        let y: CGFloat
+        switch rest {
+        case .bottom:
+            y = highest
+        case .item(let section, let item, let delta):
+            guard placement.contains(item: item, inSection: section) else { return proposed }
+            y = placement.frame(forItem: item, inSection: section).minY + delta - inset.top
+        case .section(let section, let delta):
+            guard let top = placement.sectionTop(section) else { return proposed }
+            y = top + delta - inset.top
+        }
+        return CGPoint(x: proposed.x, y: min(max(y, lowest), highest))
+    }
+
+    /// The headings a change takes away. A collection view works out which
+    /// tiles go with a deleted day, but a custom layout names the headings
+    /// that come and go itself. The one heading this isn't enough for is the
+    /// newest day's — see `Coordinator.droppedHeadings`.
+    override func indexPathsToDeleteForSupplementaryView(ofKind kind: String) -> [IndexPath] {
+        guard let change else { return super.indexPathsToDeleteForSupplementaryView(ofKind: kind) }
+        let diff = change.diff
+        switch kind {
+        case UICollectionView.elementKindSectionHeader:
+            return diff.deletedSections.map { IndexPath(item: 0, section: $0) }
+        case Self.areaHeaderKind:
+            var paths: [IndexPath] = []
+            for old in diff.sectionOldToNew.indices {
+                let before = change.from.areaLines(old)
+                let after = diff.newSection(forOld: old).map { placement.areaLines($0) } ?? 0
+                guard before > after else { continue }
+                for area in (after + 1)...before { paths.append(IndexPath(item: area, section: old)) }
+            }
+            return paths
+        case Self.libraryHeaderKind:
+            // On the first day's index path, so it is handed to a new view
+            // whenever the first day is a different one.
+            return change.from.libraryFrame != nil && diff.newSection(forOld: 0) != 0
+                ? [IndexPath(item: 0, section: 0)] : []
+        default:
+            return []
+        }
+    }
+
+    /// The headings a change brings. See `indexPathsToDeleteForSupplementaryView`.
+    override func indexPathsToInsertForSupplementaryView(ofKind kind: String) -> [IndexPath] {
+        guard let change else { return super.indexPathsToInsertForSupplementaryView(ofKind: kind) }
+        let diff = change.diff
+        switch kind {
+        case UICollectionView.elementKindSectionHeader:
+            return diff.insertedSections.map { IndexPath(item: 0, section: $0) }
+        case Self.areaHeaderKind:
+            var paths: [IndexPath] = []
+            for new in diff.sectionNewToOld.indices {
+                let after = placement.areaLines(new)
+                let before = diff.oldSection(forNew: new).map { change.from.areaLines($0) } ?? 0
+                guard after > before else { continue }
+                for area in (before + 1)...after { paths.append(IndexPath(item: area, section: new)) }
+            }
+            return paths
+        case Self.libraryHeaderKind:
+            return placement.libraryFrame != nil && diff.oldSection(forNew: 0) != 0
+                ? [IndexPath(item: 0, section: 0)] : []
+        default:
+            return []
+        }
+    }
+
+    /// A tile coming into view: from where it was, if it was anywhere, or
+    /// fading in where it now is if it's new.
+    ///
+    /// Asked about new tiles, and about tiles the change itself pulls on
+    /// screen from somewhere off it — which slide in from there rather than
+    /// appear in place. Tiles already on screen the collection view moves
+    /// without asking.
+    override func initialLayoutAttributesForAppearingItem(
+        at itemIndexPath: IndexPath
+    ) -> UICollectionViewLayoutAttributes? {
+        guard let change, let attributes = layoutAttributesForItem(at: itemIndexPath) else {
+            return super.initialLayoutAttributesForAppearingItem(at: itemIndexPath)
+        }
+        let new = GridDiff.Path(section: itemIndexPath.section, item: itemIndexPath.item)
+        if let old = change.diff.oldPath(forNew: new),
+           change.from.contains(item: old.item, inSection: old.section) {
+            attributes.frame = change.from.frame(forItem: old.item, inSection: old.section)
+        } else {
+            attributes.frame.origin.y -= change.scroll
+            attributes.alpha = 0
+        }
+        return attributes
+    }
+
+    /// Headings sit beneath the tiles. They never overlap at rest, but in a
+    /// change the tiles sliding up into a new day's place pass over its
+    /// heading as it fades in, rather than under it.
+    static let headingZIndex = -1
+    /// Beneath everything else, for whatever is fading out: the tiles sliding
+    /// into a gap pass over what is leaving it. Something fading in takes its
+    /// resting place in the order at once, whatever it starts with.
+    static let fadingZIndex = -2
+
+    /// A tile leaving the screen: to where it is going, or fading out where
+    /// it was if it's gone.
+    override func finalLayoutAttributesForDisappearingItem(
+        at itemIndexPath: IndexPath
+    ) -> UICollectionViewLayoutAttributes? {
+        guard let change else {
+            return super.finalLayoutAttributesForDisappearingItem(at: itemIndexPath)
+        }
+        let old = GridDiff.Path(section: itemIndexPath.section, item: itemIndexPath.item)
+        let attributes = UICollectionViewLayoutAttributes(forCellWith: itemIndexPath)
+        if let new = change.diff.newPath(forOld: old),
+           placement.contains(item: new.item, inSection: new.section) {
+            attributes.frame = placement.frame(forItem: new.item, inSection: new.section)
+        } else if change.from.contains(item: old.item, inSection: old.section) {
+            attributes.frame = change.from.frame(forItem: old.item, inSection: old.section)
+                .offsetBy(dx: 0, dy: change.scroll)
+            attributes.alpha = 0
+            attributes.zIndex = Self.fadingZIndex
+        } else {
+            return super.finalLayoutAttributesForDisappearingItem(at: itemIndexPath)
+        }
+        return attributes
+    }
+
+    /// The same for headings: a day's heading moves with its day, and comes
+    /// and goes with it.
+    override func initialLayoutAttributesForAppearingSupplementaryElement(
+        ofKind kind: String, at elementIndexPath: IndexPath
+    ) -> UICollectionViewLayoutAttributes? {
+        guard let change, let attributes = layoutAttributesForSupplementaryView(
+            ofKind: kind, at: elementIndexPath
+        ) else {
+            return super.initialLayoutAttributesForAppearingSupplementaryElement(
+                ofKind: kind, at: elementIndexPath
+            )
+        }
+        if let old = change.diff.oldSection(forNew: elementIndexPath.section)
+            ?? (kind == Self.libraryHeaderKind ? 0 : nil),
+           let frame = change.from.frame(
+               ofSupplementary: kind, at: IndexPath(item: elementIndexPath.item, section: old)
+           ) {
+            attributes.frame = frame
+        } else {
+            attributes.frame.origin.y -= change.scroll
+            attributes.alpha = 0
+        }
+        return attributes
+    }
+
+    override func finalLayoutAttributesForDisappearingSupplementaryElement(
+        ofKind kind: String, at elementIndexPath: IndexPath
+    ) -> UICollectionViewLayoutAttributes? {
+        guard let change else {
+            return super.finalLayoutAttributesForDisappearingSupplementaryElement(
+                ofKind: kind, at: elementIndexPath
+            )
+        }
+        headingsAnimatedOut.insert(Heading(kind: kind, indexPath: elementIndexPath))
+        let attributes = UICollectionViewLayoutAttributes(
+            forSupplementaryViewOfKind: kind, with: elementIndexPath
+        )
+        attributes.zIndex = Self.headingZIndex
+        if let new = change.diff.newSection(forOld: elementIndexPath.section)
+            ?? (kind == Self.libraryHeaderKind ? 0 : nil),
+           let frame = placement.frame(
+               ofSupplementary: kind, at: IndexPath(item: elementIndexPath.item, section: new)
+           ) {
+            attributes.frame = frame
+            // The count's line can be handed over to a new view when days
+            // come and go below it, and the two say different numbers.
+            if kind == Self.libraryHeaderKind { attributes.alpha = 0 }
+        } else if let frame = change.from.frame(ofSupplementary: kind, at: elementIndexPath) {
+            attributes.frame = frame.offsetBy(dx: 0, dy: change.scroll)
+            attributes.alpha = 0
+            attributes.zIndex = Self.fadingZIndex
+        } else {
+            return super.finalLayoutAttributesForDisappearingSupplementaryElement(
+                ofKind: kind, at: elementIndexPath
+            )
+        }
+        return attributes
     }
 }
 
@@ -532,6 +877,16 @@ struct TimelineCollection: UIViewRepresentable {
         private var deferredJump: String?
         /// Days being fetched because they are on screen or about to be.
         private var loads: [String: Task<Void, Never>] = [:]
+        /// What each day's tiles were the last time they were drawn, by day:
+        /// what a change is told against, when a day's count changes. See
+        /// `animatableChange`.
+        private var drawn: [String: DrawnTiles] = [:]
+        /// Bumped for a day each time a change is animated through it. A tile
+        /// keeps its cell through a change, and with it the list of the day's
+        /// photographs it was built with — the one the viewer walks when the
+        /// tile is opened — so a cell built before the change is rebuilt when
+        /// it next shows. See `configure`.
+        private var dayRevisions: [String: Int] = [:]
 
         private var sweep: UIPanGestureRecognizer?
         private var sweeping = false
@@ -612,9 +967,14 @@ struct TimelineCollection: UIViewRepresentable {
         /// Called whenever the timeline re-renders. Does as little as the
         /// change allows, in order of cost:
         ///
-        /// A different shape — a day added, a photograph arriving, a density
-        /// change, the phone turning — reloads, holding whatever was on screen
-        /// where it was. The only time the content changes size.
+        /// Photographs arriving or leaving — a backup, a delete, another
+        /// phone's upload — animate: the tiles slide to their new places and
+        /// close the gap, as Photos does, holding whatever was on screen where
+        /// it was. See `animate`.
+        ///
+        /// A shape drawn another way — a density change — or a change too big
+        /// to be worth watching reloads, holding the screen's place the same
+        /// way. The phone turning is neither: that is the layout's own.
         ///
         /// The same shape with different contents — a day finishing loading, a
         /// pending tile starting to send — redraws only the days whose tiles
@@ -641,19 +1001,26 @@ struct TimelineCollection: UIViewRepresentable {
             let reshaped = nextShape != layout.shape || nextKeys != keys
 
             if reshaped {
-                keys = nextKeys
-                rebuildIndex()
-                layout.shape = nextShape
-                view.reloadData()
-                view.layoutIfNeeded()
-                // At the newest, a new photograph arriving should come into
-                // view rather than land out of sight below it. Anywhere else,
-                // whatever was at the top of the screen stays there.
-                if wasAtBottom {
-                    scrollToBottom()
-                } else if let anchor {
-                    restore(anchor)
+                if !insetsChanged,
+                   let diff = animatableChange(to: nextShape, keys: nextKeys, from: next) {
+                    animate(diff, keys: nextKeys, shape: nextShape, wasAtBottom: wasAtBottom, anchor: anchor)
+                } else {
+                    keys = nextKeys
+                    rebuildIndex()
+                    layout.shape = nextShape
+                    view.reloadData()
+                    view.layoutIfNeeded()
+                    // At the newest, a new photograph arriving should come
+                    // into view rather than land out of sight below it.
+                    // Anywhere else, whatever was at the top of the screen
+                    // stays there.
+                    if wasAtBottom {
+                        scrollToBottom()
+                    } else if let anchor {
+                        restore(anchor)
+                    }
                 }
+                forgetDaysNotIn(nextKeys)
             } else {
                 // A bar appearing at the bottom — selecting, a review — would
                 // otherwise cover the newest row until you scrolled.
@@ -711,9 +1078,246 @@ struct TimelineCollection: UIViewRepresentable {
         private func entries(_ section: Int) -> [GridEntry] {
             if let cached = entryCache[section] { return cached }
             guard parent.sections.indices.contains(section) else { return [] }
-            let built = parent.entries(parent.sections[section].bucket)
+            let bucket = parent.sections[section].bucket
+            let built = parent.entries(bucket)
             entryCache[section] = built
+            drawn[bucket.key] = DrawnTiles(built)
             return built
+        }
+
+        // MARK: Animating a change
+
+        /// One day's tiles as they were drawn, as identities. Hashes, not the
+        /// entries themselves: they are kept for every day that has been on
+        /// screen, which after a fling through a big library is most of it.
+        struct DrawnTiles {
+            let ids: [Int]
+            /// Placeholders among them: a day that hasn't loaded, whose tiles
+            /// are told apart only by position.
+            let positional: Bool
+
+            init(_ entries: [GridEntry]) {
+                var positional = false
+                ids = entries.map { entry in
+                    var hasher = Hasher()
+                    switch entry {
+                    case .item(let item):
+                        // A photograph this phone uploaded is the same tile
+                        // as the one that stood for it while it was on the
+                        // way — finishing an upload swaps the picture and
+                        // moves nothing. See `TimelineView.stillQueued`.
+                        if let local = item.sourceLocalID {
+                            hasher.combine(0)
+                            hasher.combine(local)
+                        } else {
+                            hasher.combine(1)
+                            hasher.combine(item.id)
+                        }
+                    case .placeholder(let index):
+                        positional = true
+                        hasher.combine(2)
+                        hasher.combine(index)
+                    case .pending(let local, _):
+                        hasher.combine(0)
+                        hasher.combine(local)
+                    }
+                    return hasher.finalize()
+                }
+                self.positional = positional
+            }
+        }
+
+        /// How long a change takes to play. Photos is a little quicker than
+        /// UIKit's default, and settles without overshooting.
+        private static let changeDuration: TimeInterval = 0.4
+
+        /// What changed, worked out well enough to animate, or nil when the
+        /// grid should reload instead: before it has opened, while it is off
+        /// screen or turning, when the same photographs are drawn another way,
+        /// and when the change is too big to be worth watching — see
+        /// `GridDiff.between`.
+        private func animatableChange(
+            to nextShape: TimelineGridLayout.Shape, keys nextKeys: [String], from next: TimelineCollection
+        ) -> GridDiff? {
+            guard let view, let layout, hasLanded, view.window != nil, view.bounds.height > 0,
+                  placeBeforeWidthChange == nil, layout.shape.drawsLike(nextShape)
+            else { return nil }
+            var newIndex: [String: Int] = [:]
+            newIndex.reserveCapacity(nextKeys.count)
+            for (index, key) in nextKeys.enumerated() { newIndex[key] = index }
+            let oldCounts = layout.shape.counts
+            let diff = GridDiff.between(
+                oldKeys: keys, oldCounts: oldCounts, newKeys: nextKeys, newCounts: nextShape.counts
+            ) { key, oldCount, _ -> GridDiff.Tiles<Int> in
+                // Only a day that was drawn, at the count it had, can be told
+                // tile by tile — and every day that was on screen was.
+                guard let before = drawn[key], before.ids.count == oldCount, !before.positional,
+                      let section = newIndex[key], next.sections.indices.contains(section)
+                else { return .positional }
+                let after = DrawnTiles(next.entries(next.sections[section].bucket))
+                drawn[key] = after
+                return after.positional ? .positional : .identified(old: before.ids, new: after.ids)
+            }
+            // Checked here as well as by construction: an update that doesn't
+            // add up is a crash, and a reload is only a jump.
+            guard let diff, diff.isConsistent(oldCounts: oldCounts, newCounts: nextShape.counts)
+            else { return nil }
+            return diff
+        }
+
+        /// Plays a change: every tile slides from where it was to where it now
+        /// goes, what's gone fades where it was, and what's new fades in where
+        /// it lands — one batch update, in one spring.
+        ///
+        /// The screen is held the way a reload holds it, but inside the same
+        /// animation (`TimelineGridLayout.targetContentOffset`): the newest
+        /// row stays on the bar if that's where the grid was, and otherwise
+        /// the row at the top of the screen stays at the top. So a photograph
+        /// deleted on screen closes its gap, one arriving opens a place, and a
+        /// change somewhere off screen moves nothing you can see.
+        private func animate(
+            _ diff: GridDiff, keys nextKeys: [String], shape nextShape: TimelineGridLayout.Shape,
+            wasAtBottom: Bool, anchor: Anchor?
+        ) {
+            guard let view, let layout else { return }
+            let rest: TimelineGridLayout.Rest? = wasAtBottom
+                ? .bottom : anchor.flatMap { rest(for: $0, through: diff) }
+            for section in diff.changedSections where nextKeys.indices.contains(section) {
+                dayRevisions[nextKeys[section], default: 0] += 1
+            }
+            // Laid out for what is on screen, so that is what it animates from.
+            view.layoutIfNeeded()
+            let headings = headingsOnScreen()
+            var dropped: [TimelineTileCell] = []
+            layout.beginChange(diff, resting: rest)
+            UIView.animate(
+                springDuration: Self.changeDuration, bounce: 0, initialSpringVelocity: 0,
+                delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]
+            ) {
+                view.performBatchUpdates {
+                    self.keys = nextKeys
+                    self.rebuildIndex()
+                    layout.shape = nextShape
+                    if !diff.deletedSections.isEmpty { view.deleteSections(diff.deletedSections) }
+                    if !diff.insertedSections.isEmpty { view.insertSections(diff.insertedSections) }
+                    if !diff.deletedItems.isEmpty {
+                        view.deleteItems(at: diff.deletedItems.map { IndexPath(item: $0.item, section: $0.section) })
+                    }
+                    if !diff.insertedItems.isEmpty {
+                        view.insertItems(at: diff.insertedItems.map { IndexPath(item: $0.item, section: $0.section) })
+                    }
+                    for move in diff.movedItems {
+                        view.moveItem(
+                            at: IndexPath(item: move.from.item, section: move.from.section),
+                            to: IndexPath(item: move.to.item, section: move.to.section)
+                        )
+                    }
+                }
+                // Still inside the spring: what the update dropped fades in it.
+                dropped = self.droppedHeadings(headings, animatedOut: layout.headingsAnimatedOut)
+                let scroll = layout.changeScroll
+                for heading in dropped {
+                    view.sendSubviewToBack(heading)
+                    heading.alpha = 0
+                    heading.frame.origin.y += scroll
+                }
+            } completion: { [weak view] _ in
+                guard let view else { return }
+                let kept = Set(Self.headingKinds.flatMap { view.visibleSupplementaryViews(ofKind: $0) }
+                    .map(ObjectIdentifier.init))
+                for heading in dropped
+                where heading.superview === view && !kept.contains(ObjectIdentifier(heading)) {
+                    heading.removeFromSuperview()
+                }
+            }
+            layout.endChange()
+            // Outside the animation: what the tiles that stayed show is
+            // redrawn, not animated, and they still carry the day as it was.
+            refreshVisible(forceAll: false)
+        }
+
+        private static let headingKinds = [
+            UICollectionView.elementKindSectionHeader,
+            TimelineGridLayout.areaHeaderKind,
+            TimelineGridLayout.libraryHeaderKind,
+        ]
+
+        /// Every heading on screen, by the kind and index path it is shown at.
+        private func headingsOnScreen() -> [TimelineGridLayout.Heading: TimelineTileCell] {
+            guard let view else { return [:] }
+            var found: [TimelineGridLayout.Heading: TimelineTileCell] = [:]
+            for kind in Self.headingKinds {
+                for path in view.indexPathsForVisibleSupplementaryElements(ofKind: kind) {
+                    guard let heading = view.supplementaryView(forElementKind: kind, at: path)
+                        as? TimelineTileCell
+                    else { continue }
+                    found[TimelineGridLayout.Heading(kind: kind, indexPath: path)] = heading
+                }
+            }
+            return found
+        }
+
+        /// Headings a batch update let go of without animating them out.
+        ///
+        /// When the newest day goes — the day most often emptied, by a delete
+        /// at the bottom of the library — the collection view never asks for
+        /// its heading's way out. The heading stays where it was, opaque and
+        /// no longer tracked: on screen over the tab bar, and still there once
+        /// the day came back, under the new one. Deleting any other day asks,
+        /// and so does everything else this grid changes. Measured in the
+        /// simulator; it was the same whether the heading was a cell or a
+        /// plain reusable view, whatever the layout answered for the old
+        /// index path, and with or without the spring around the update.
+        ///
+        /// So whatever was on screen, isn't any more, and wasn't asked about
+        /// fades out here, in the same spring, where it stands on screen — as
+        /// the collection view would have done — and is taken away after.
+        private func droppedHeadings(
+            _ before: [TimelineGridLayout.Heading: TimelineTileCell],
+            animatedOut: Set<TimelineGridLayout.Heading>
+        ) -> [TimelineTileCell] {
+            guard let view, !before.isEmpty else { return [] }
+            let kept = Set(Self.headingKinds.flatMap { view.visibleSupplementaryViews(ofKind: $0) }
+                .map(ObjectIdentifier.init))
+            return before.compactMap { key, heading in
+                guard !animatedOut.contains(key), !kept.contains(ObjectIdentifier(heading)),
+                      heading.superview === view, !heading.isHidden
+                else { return nil }
+                return heading
+            }
+        }
+
+        /// The anchor taken before the change, in the library after it: the
+        /// same tile — or, if it went, the first after it in its day that
+        /// stayed — or failing that the next day that stayed.
+        private func rest(for anchor: Anchor, through diff: GridDiff) -> TimelineGridLayout.Rest? {
+            guard let layout, let old = sectionIndex[anchor.key] else { return nil }
+            if let section = diff.newSection(forOld: old) {
+                guard let item = anchor.item else { return .section(section, delta: anchor.delta) }
+                let count = layout.shape.counts.indices.contains(old) ? layout.shape.counts[old] : 0
+                for candidate in item..<max(count, item) {
+                    if let now = diff.newPath(forOld: GridDiff.Path(section: old, item: candidate)) {
+                        return .item(section: now.section, item: now.item, delta: anchor.delta)
+                    }
+                }
+                return .section(section, delta: 0)
+            }
+            for later in (old + 1)..<max(diff.sectionOldToNew.count, old + 1) {
+                if let section = diff.newSection(forOld: later) { return .section(section, delta: 0) }
+            }
+            return .bottom
+        }
+
+        /// Lets go of what was drawn for days the library no longer has.
+        private func forgetDaysNotIn(_ keys: [String]) {
+            guard drawn.count > keys.count || dayRevisions.count > keys.count else { return }
+            let live = Set(keys)
+            drawn = drawn.filter { live.contains($0.key) }
+            dayRevisions = dayRevisions.filter { live.contains($0.key) }
+        }
+
+        private func revision(ofSection section: Int) -> Int {
+            keys.indices.contains(section) ? dayRevisions[keys[section]] ?? 0 : 0
         }
 
         /// Redraws the visible tiles whose entries changed, and the headings.
@@ -728,7 +1332,8 @@ struct TimelineCollection: UIViewRepresentable {
                 let all = entries(path.section)
                 guard path.item < all.count else { continue }
                 let cell = view.cellForItem(at: path) as? TimelineTileCell
-                if forceAll || cell?.shown != all[path.item] {
+                if forceAll || cell?.shown != all[path.item]
+                    || cell?.shownRevision != revision(ofSection: path.section) {
                     stale.append(path)
                 }
             }
@@ -746,6 +1351,18 @@ struct TimelineCollection: UIViewRepresentable {
                     header.shownDay != parent.sections[path.section].bucket
                 else { continue }
                 configureHeader(header, section: path.section)
+            }
+            // And a place line can name another place once a day's areas
+            // change, which a reload used to redraw and a change carries over.
+            for path in view.indexPathsForVisibleSupplementaryElements(
+                ofKind: TimelineGridLayout.areaHeaderKind
+            ) {
+                guard let line = view.supplementaryView(
+                    forElementKind: TimelineGridLayout.areaHeaderKind, at: path
+                ) as? TimelineTileCell,
+                    line.shownArea != areaTitle(at: path)
+                else { continue }
+                configureArea(line, at: path)
             }
         }
 
@@ -794,6 +1411,7 @@ struct TimelineCollection: UIViewRepresentable {
             }
             .margins(.all, 0)
             cell.shown = entry
+            cell.shownRevision = revision(ofSection: indexPath.section)
         }
 
         func collectionView(
@@ -814,14 +1432,7 @@ struct TimelineCollection: UIViewRepresentable {
                 let view = collectionView.dequeueReusableSupplementaryView(
                     ofKind: kind, withReuseIdentifier: Self.areaID, for: indexPath
                 ) as! TimelineTileCell
-                let areas = parent.sections.indices.contains(indexPath.section)
-                    ? parent.sections[indexPath.section].areas : []
-                let title = areas.indices.contains(indexPath.item) ? areas[indexPath.item].title : nil
-                let build = parent.areaHeader
-                view.contentConfiguration = UIHostingConfiguration {
-                    TileHost { build(title ?? "") }
-                }
-                .margins(.all, 0)
+                configureArea(view, at: indexPath)
                 return view
             }
             let view = collectionView.dequeueReusableSupplementaryView(
@@ -843,6 +1454,23 @@ struct TimelineCollection: UIViewRepresentable {
             view.shownDay = bucket
         }
 
+        /// The place an area line names: the day's `item`-th area.
+        private func areaTitle(at indexPath: IndexPath) -> String {
+            let areas = parent.sections.indices.contains(indexPath.section)
+                ? parent.sections[indexPath.section].areas : []
+            return (areas.indices.contains(indexPath.item) ? areas[indexPath.item].title : nil) ?? ""
+        }
+
+        private func configureArea(_ view: TimelineTileCell, at indexPath: IndexPath) {
+            let title = areaTitle(at: indexPath)
+            let build = parent.areaHeader
+            view.contentConfiguration = UIHostingConfiguration {
+                TileHost { build(title) }
+            }
+            .margins(.all, 0)
+            view.shownArea = title
+        }
+
         // MARK: Delegate
 
         func collectionView(_ collectionView: UICollectionView, shouldHighlightItemAt indexPath: IndexPath) -> Bool { false }
@@ -857,7 +1485,9 @@ struct TimelineCollection: UIViewRepresentable {
         ) {
             guard let cell = cell as? TimelineTileCell else { return }
             let all = entries(indexPath.section)
-            if indexPath.item < all.count, cell.shown != all[indexPath.item] {
+            if indexPath.item < all.count,
+               cell.shown != all[indexPath.item]
+                || cell.shownRevision != revision(ofSection: indexPath.section) {
                 configure(cell, at: indexPath)
             }
         }
@@ -1103,6 +1733,7 @@ struct TimelineCollection: UIViewRepresentable {
             updateLoads()
         }
 
+
         // MARK: Drag to select
 
         /// Dragging across tiles adds them to the selection, the way it did in
@@ -1206,9 +1837,15 @@ final class TimelineTileCell: UICollectionViewCell {
     /// None, ever — see `TimelineCollectionView.safeAreaInsets`.
     override var safeAreaInsets: UIEdgeInsets { .zero }
     var shown: GridEntry?
+    /// Which of its day's changes the tile was built after. See
+    /// `Coordinator.dayRevisions`.
+    var shownRevision = 0
     /// The same for a heading: the day it was drawn for, place name included.
     var shownDay: TimelineBucket?
+    /// And for a place line, the place.
+    var shownArea: String?
 }
+
 
 /// Runs its content's builder in a view's body, filling its cell.
 ///

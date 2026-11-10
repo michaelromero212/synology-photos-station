@@ -64,7 +64,7 @@ struct MacGridDay {
     let height: CGFloat
     /// Changes whenever anything this day draws does — its photographs, their
     /// details, its heading. A row compares this rather than the photographs
-    /// themselves; see `MacGridRowView`.
+    /// themselves; see `MacGridPieceView`.
     let version: Int
 }
 
@@ -76,6 +76,13 @@ struct MacGridLayout {
     var dayIndex: [String: Int] = [:]
     /// Bumped whenever anything above moved, so the scroller can keep its place.
     var revision = 0
+    /// Whether this layout differs from the last by photographs added or
+    /// taken away — a delete, an upload, someone else's photographs arriving —
+    /// and so should be animated to: the tiles slide to their new places
+    /// rather than jump there. Not for a new width or density, and not for a
+    /// day arriving from the NAS, which turns its placeholders into the real
+    /// shapes and is seen while scrolling, when nothing should move by itself.
+    var animatesChange = false
 
     /// The rows overlapping `top..<bottom`, by binary search on their tops.
     func rows(from top: CGFloat, to bottom: CGFloat) -> Range<Int> {
@@ -176,13 +183,22 @@ final class MacGridLayoutCache {
     private var cachedMetrics: MacGridMetrics?
     private var lastSignatures: [DaySignature] = []
     private var lastKeys: [String] = []
+    /// The same signatures by day, to tell what kind of change a new layout is.
+    private var lastSignatureByKey: [String: DaySignature] = [:]
+    /// Which library the layout is of. A grid can be handed another library
+    /// in place — switching between shared libraries reuses the view — and
+    /// that is a different library, not a change to animate.
+    private var library: UUID?
     private(set) var layout = MacGridLayout()
 
     func layout(
-        buckets: [TimelineBucket], items: [String: [TimelineItem]], metrics: MacGridMetrics
+        library: UUID, buckets: [TimelineBucket], items: [String: [TimelineItem]],
+        metrics: MacGridMetrics
     ) -> MacGridLayout {
         guard metrics.width > 0 else { return layout }
-        if metrics != cachedMetrics {
+        let sameLibrary = library == self.library
+        self.library = library
+        if metrics != cachedMetrics || !sameLibrary {
             cache.removeAll(keepingCapacity: true)
         }
 
@@ -214,13 +230,20 @@ final class MacGridLayoutCache {
             }
         }
         let keys = buckets.map(\.key)
-        if !edited, metrics == cachedMetrics, signatures == lastSignatures, keys == lastKeys {
+        if sameLibrary, !edited, metrics == cachedMetrics, signatures == lastSignatures,
+           keys == lastKeys {
             return layout
         }
+        let sameMetrics = metrics == cachedMetrics && sameLibrary
         cachedMetrics = metrics
 
         var next = MacGridLayout()
         next.revision = layout.revision + 1
+        next.animatesChange = sameMetrics && layout.revision > 0
+            && Self.isMembershipChange(
+                keys: keys, signatures: signatures,
+                lastKeys: lastKeys, lastSignatures: lastSignatureByKey
+            )
         next.days.reserveCapacity(buckets.count)
         var y: CGFloat = 0
 
@@ -232,8 +255,15 @@ final class MacGridLayoutCache {
             y = metrics.libraryHeaderHeight
         }
 
-        for (index, bucket) in buckets.enumerated() {
-            let signature = signatures[index]
+        for (position, bucket) in buckets.enumerated() {
+            // Not a day that has loaded and come back empty: its last
+            // photograph has just been deleted or moved, and the library's
+            // outline, fetched again after the change rather than with it,
+            // hasn't caught up. Drawn, its heading stayed behind for a moment
+            // after its photographs had gone — the gap closing in two steps.
+            if items[bucket.key]?.isEmpty == true { continue }
+            let index = next.days.count
+            let signature = signatures[position]
             let pieces: DayPieces
             if let cached = cache[bucket.key], cached.signature == signature {
                 pieces = cached
@@ -288,8 +318,41 @@ final class MacGridLayoutCache {
         }
         lastSignatures = signatures
         lastKeys = keys
+        lastSignatureByKey = Dictionary(zip(keys, signatures), uniquingKeysWith: { _, last in last })
         layout = next
         return next
+    }
+
+    /// Whether the days changed by what they hold — photographs added or
+    /// taken away, days coming or going — rather than by loading. A day that
+    /// has loaded since, or unloaded, changes shape from squares to the real
+    /// thing, which is a different kind of change and isn't animated.
+    ///
+    /// Nor is a change too big to watch, as on the iPhone (`GridDiff`): more
+    /// than 64 days at once is an import or a sync, and none surviving is a
+    /// different library.
+    private static func isMembershipChange(
+        keys: [String], signatures: [DaySignature],
+        lastKeys: [String], lastSignatures: [String: DaySignature]
+    ) -> Bool {
+        var survived = 0
+        var changed = 0
+        for (key, now) in zip(keys, signatures) {
+            guard let before = lastSignatures[key] else {
+                changed += 1
+                continue
+            }
+            survived += 1
+            guard before != now else { continue }
+            if (before.loaded < 0) != (now.loaded < 0) { return false }
+            let moved = now.loaded < 0
+                ? before.count != now.count
+                : before.loaded != now.loaded || before.first != now.first
+                    || before.last != now.last || before.areas != now.areas
+            if moved { changed += 1 }
+        }
+        changed += lastKeys.count - survived
+        return survived > 0 && changed > 0 && changed <= 64
     }
 
     /// Whether two runs of photographs are the same, checking storage first:
@@ -414,7 +477,7 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
         GeometryReader { proxy in
             let width = layoutWidth > 0 ? layoutWidth : proxy.size.width
             let layout = cache.layout(
-                buckets: buckets, items: items,
+                library: space, buckets: buckets, items: items,
                 metrics: MacGridMetrics(
                     width: width, targetHeight: targetHeight, spacing: spacing,
                     headerHeight: headerHeight, areaHeaderHeight: areaHeaderHeight,
@@ -463,22 +526,28 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
     }
 }
 
-/// The rows, placed where the layout already says they go.
+/// The tiles and headings, placed where the layout already says they go.
 ///
 /// A `ZStack` of offset rows asked every row its size on each update — the
 /// scroll view measuring its content — which for rows of known size is work
-/// with a known answer. This states the size and places each row without
+/// with a known answer. This states the size and places each piece without
 /// asking.
+///
+/// Each tile is placed on its own rather than inside a row, so that a tile
+/// keeps its identity from one layout to the next wherever it lands. That is
+/// what lets a change animate: a placement changed inside an animation
+/// slides there, and a tile carried into the row above — a deleted photograph
+/// closing its gap — slides up into it rather than reappearing in it.
 private struct MacGridCanvas: Layout {
     let size: CGSize
-    let rows: [CGRect]
+    let frames: [CGRect]
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         size
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for (subview, frame) in zip(subviews, rows) {
+        for (subview, frame) in zip(subviews, frames) {
             subview.place(
                 at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
                 anchor: .topLeading, proposal: ProposedViewSize(frame.size)
@@ -487,15 +556,15 @@ private struct MacGridCanvas: Layout {
     }
 }
 
-/// One row of the grid, rebuilt only when something it draws has changed.
+/// One tile or heading, rebuilt only when something it draws has changed.
 ///
-/// The row's content is a closure, which SwiftUI cannot compare, so without
-/// this every row on screen was rebuilt each time the scroller re-rendered —
-/// the window moving, or any day anywhere arriving from the NAS. Its own
-/// day's version says whether anything it shows is different. Selection and
-/// the like are still followed: they are read inside `body`, which observes
-/// them on its own.
-private struct MacGridRowView<Content: View>: View, Equatable {
+/// The content is a closure, which SwiftUI cannot compare, so without this
+/// everything on screen was rebuilt each time the scroller re-rendered — the
+/// window moving, or any day anywhere arriving from the NAS. Its own day's
+/// version says whether anything it shows is different. Selection and the
+/// like are still followed: they are read inside `body`, which observes them
+/// on its own.
+private struct MacGridPieceView<Content: View>: View, Equatable {
     let id: String
     let version: Int
     let width: CGFloat
@@ -507,6 +576,23 @@ private struct MacGridRowView<Content: View>: View, Equatable {
     static func == (a: Self, b: Self) -> Bool {
         a.id == b.id && a.version == b.version && a.width == b.width && a.height == b.height
     }
+}
+
+/// A tile or heading as drawn: what it is, and where.
+private struct MacGridPiece: Identifiable {
+    enum Kind {
+        case library
+        case day(Int)
+        case area(String)
+        case tile(day: Int, entry: Int)
+    }
+
+    /// Stable across layouts: a photograph is the same piece wherever it
+    /// lands, and a heading belongs to its day.
+    let id: String
+    let kind: Kind
+    let frame: CGRect
+    let version: Int
 }
 
 /// A view whose content is built when SwiftUI first asks for its body, not
@@ -546,6 +632,12 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     /// the one it will open over. Changes as the pointer crosses from one
     /// photograph to the next, not as it moves within one.
     @State private var pointed: UUID?
+    /// The content's height before a change that shortened it, kept until
+    /// the change has played. See `canvasHeight`.
+    @State private var heldHeight: CGFloat?
+    /// Which hold is current, so an older change letting go late can't
+    /// release a newer one's.
+    @State private var heldSerial = 0
 
     init(
         space: UUID, layout: MacGridLayout, layoutWidth: CGFloat, viewportWidth: CGFloat,
@@ -599,33 +691,45 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         /// the offset put every return a heading's height off.
         var top: CGFloat = 0
         var atEnd = true
+        /// How much of the content fits between the toolbar and the window's
+        /// bottom edge.
+        var viewport: CGFloat = 0
         var layout = MacGridLayout()
         var loads: [String: Task<Void, Never>] = [:]
         var topKey: String?
         /// The stretch of the library the drawn rows cover. See `updateWindow`.
         var covered: ClosedRange<CGFloat>?
+        /// The layout `window` was worked out for, and the days it held —
+        /// first and last, and whether it reached the library's top — so the
+        /// same stretch can be found again in the next layout. See `drawnRows`.
+        var windowRevision = 0
+        var windowDays: (first: String, last: String, fromTop: Bool)?
         /// The pointer, in the scroll view's own coordinates.
         var pointer: CGPoint?
     }
 
     var body: some View {
         ScrollView(.vertical) {
-            let drawn = layout.rows[clamped(window)]
+            let drawn = pieces(in: drawnRows)
             MacGridCanvas(
-                size: CGSize(width: layoutWidth, height: layout.total),
-                rows: drawn.map { CGRect(x: 0, y: $0.y, width: layoutWidth, height: $0.height) }
+                size: CGSize(width: layoutWidth, height: canvasHeight),
+                frames: drawn.map(\.frame)
             ) {
-                ForEach(drawn) { row in
-                    MacGridRowView(
-                        id: row.id,
-                        version: row.day >= 0 ? layout.days[row.day].version : layout.revision,
-                        width: layoutWidth, height: row.height
+                ForEach(drawn) { piece in
+                    MacGridPieceView(
+                        id: piece.id, version: piece.version,
+                        width: piece.frame.width, height: piece.frame.height
                     ) {
-                        rowView(row)
+                        pieceView(piece)
                     }
                     .equatable()
                 }
             }
+            // Photographs arriving or leaving slide everything to its new
+            // place, in the same spring as the scroll that holds the screen
+            // still around them — see `relaid`. Anything else that changes the
+            // layout — a day arriving, a new width — is applied as it was.
+            .animation(layout.animatesChange ? Self.change : nil, value: layout.revision)
             // One click handler and one menu for the whole library, finding the
             // photograph from the layout — how a collection view does it. A
             // gesture on every tile was a third of the cost of a tile coming
@@ -695,34 +799,151 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         let content: CGFloat
     }
 
+    /// How tall the scroll view's content is: the library's height, or —
+    /// while a change that shortened it plays — the height it had before.
+    ///
+    /// A scroll view whose content gets shorter than where it is scrolled to
+    /// moves at once to the new end, and on a Mac that move isn't animated:
+    /// measured, a deleted photograph near the bottom of the library moved
+    /// everything above it 170 points in the frame the change arrived, before
+    /// the spring had started. Kept as tall as it was, nothing is cut off,
+    /// the scroll moves in the same spring as the tiles (see `relaid`), and
+    /// the extra height goes once it has arrived, by which point nothing is
+    /// scrolled into it.
+    ///
+    /// The first render of a change comes before `relaid` has held anything,
+    /// so it reads the height from the layout `relaid` hasn't caught up to.
+    private var canvasHeight: CGFloat {
+        var height = layout.total
+        if let heldHeight { height = max(height, heldHeight) }
+        if layout.animatesChange, tracker.layout.revision > 0,
+           tracker.layout.revision != layout.revision {
+            height = max(height, tracker.layout.total)
+        }
+        return height
+    }
+
+    /// The rows to draw: the window — or, in the render a change of
+    /// photographs first arrives in, the same days the window held.
+    ///
+    /// The window is a range of row numbers, and a day arriving above it
+    /// renumbers every row below. Read as numbers against the new layout, it
+    /// drew a day too early for that render, so the last day on screen left
+    /// and came straight back: back where it was going, not sliding there,
+    /// with a gap opening above it while the rest slid. Found again by its
+    /// days, everything that was drawn stays drawn, and slides.
+    private var drawnRows: Range<Int> {
+        guard layout.animatesChange, tracker.windowRevision != layout.revision,
+              let days = tracker.windowDays,
+              let rows = rows(spanning: days, previous: tracker.layout)
+        else { return clamped(window) }
+        return rows
+    }
+
+    /// The rows from one day to another in the current layout, by key. A day
+    /// that has gone is stood in for by its nearest neighbor that hasn't.
+    private func rows(
+        spanning days: (first: String, last: String, fromTop: Bool), previous old: MacGridLayout
+    ) -> Range<Int>? {
+        func surviving(_ key: String, forward: Bool) -> Int? {
+            if let index = layout.dayIndex[key] { return index }
+            guard let start = old.dayIndex[key] else { return nil }
+            let order = forward
+                ? Array(start..<old.days.count) : Array((0...start).reversed())
+            for index in order {
+                if let found = layout.dayIndex[old.days[index].bucket.key] { return found }
+            }
+            return nil
+        }
+        guard let first = surviving(days.first, forward: false) ?? surviving(days.first, forward: true),
+              let last = surviving(days.last, forward: true) ?? surviving(days.last, forward: false)
+        else { return nil }
+        let a = layout.days[first], b = layout.days[last]
+        let low = days.fromTop ? 0 : min(a.start, b.start)
+        return layout.rows(from: low, to: max(a.start + a.height, b.start + b.height))
+    }
+
+    /// The first and last days a range of rows holds, by key.
+    private func dayKeys(of range: Range<Int>) -> (first: String, last: String, fromTop: Bool)? {
+        let rows = layout.rows[clamped(range)]
+        guard let first = rows.first(where: { $0.day >= 0 }),
+              let last = rows.last(where: { $0.day >= 0 })
+        else { return nil }
+        return (layout.days[first.day].bucket.key, layout.days[last.day].bucket.key, range.lowerBound == 0)
+    }
+
     private func clamped(_ range: Range<Int>) -> Range<Int> {
         let upper = min(range.upperBound, layout.rows.count)
         return min(range.lowerBound, upper)..<upper
     }
 
-    @ViewBuilder
-    private func rowView(_ row: MacGridRow) -> some View {
-        switch row.kind {
-        case .library:
-            libraryHeader()
-        case .day:
-            dayHeader(layout.days[row.day].bucket)
-        case .area(let name):
-            areaHeader(name)
-        case .tiles(let range, let height):
-            let day = layout.days[row.day]
-            HStack(spacing: PhotoGridMetrics.spacing) {
-                ForEach(day.entries[range]) { entry in
-                    cell(
-                        entry,
-                        CGSize(
-                            width: JustifiedLayout.width(forRatio: entry.aspectRatio, height: Double(height)),
-                            height: height
-                        ),
-                        day.items
+    /// How long a change takes to play: the iPhone's spring, as SwiftUI
+    /// names it.
+    static var change: Animation { .spring(duration: 0.4, bounce: 0) }
+
+    /// Long enough for `change` to have arrived: its duration says when it is
+    /// close, not when it is done.
+    static var changeSettles: Duration { .milliseconds(700) }
+
+    /// The tiles and headings of the rows in `range`, each placed on its own.
+    private func pieces(in range: Range<Int>) -> [MacGridPiece] {
+        var result: [MacGridPiece] = []
+        var seen = Set<String>()
+        // A name used twice would be two views claiming one identity, which
+        // SwiftUI resolves by drawing one of them wherever it likes.
+        func add(_ id: String, _ kind: MacGridPiece.Kind, _ frame: CGRect, _ version: Int) {
+            var unique = id
+            var n = 1
+            while !seen.insert(unique).inserted {
+                n += 1
+                unique = "\(id)#\(n)"
+            }
+            result.append(MacGridPiece(id: unique, kind: kind, frame: frame, version: version))
+        }
+        for row in layout.rows[range] {
+            let line = CGRect(x: 0, y: row.y, width: layoutWidth, height: row.height)
+            switch row.kind {
+            case .library:
+                add("library", .library, line, layout.revision)
+            case .day:
+                let day = layout.days[row.day]
+                add("\(day.bucket.key)|h", .day(row.day), line, day.version)
+            case .area(let name):
+                let day = layout.days[row.day]
+                add("\(day.bucket.key)|a|\(name)", .area(name), line, day.version)
+            case .tiles(let range, let height):
+                let day = layout.days[row.day]
+                var x: CGFloat = 0
+                for index in range {
+                    let entry = day.entries[index]
+                    let width = JustifiedLayout.width(forRatio: entry.aspectRatio, height: Double(height))
+                    // A photograph by its own identity; a placeholder, which
+                    // has none, by its place in its day.
+                    let id: String
+                    if case .item = entry { id = entry.id } else { id = "\(day.bucket.key)|\(entry.id)" }
+                    add(
+                        id, .tile(day: row.day, entry: index),
+                        CGRect(x: x, y: row.y, width: width, height: height), day.version
                     )
+                    x += width + PhotoGridMetrics.spacing
                 }
             }
+        }
+        return result
+    }
+
+    @ViewBuilder
+    private func pieceView(_ piece: MacGridPiece) -> some View {
+        switch piece.kind {
+        case .library:
+            libraryHeader()
+        case .day(let index):
+            dayHeader(layout.days[index].bucket)
+        case .area(let name):
+            areaHeader(name)
+        case .tile(let index, let entry):
+            let day = layout.days[index]
+            cell(day.entries[entry], piece.frame.size, day.items)
         }
     }
 
@@ -755,6 +976,7 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         tracker.top = sample.top
         // Within a row's gap of the end counts as resting on it.
         tracker.atEnd = sample.bottom >= sample.content - 24
+        tracker.viewport = sample.bottom - sample.top
         updateWindow()
         remember()
     }
@@ -768,7 +990,7 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     /// Now the drawn stretch reaches a screen past each edge and moves once
     /// the window has used up a quarter screen of that — about a tenth as
     /// often at the same speed, and rows already drawn are left alone (see
-    /// `MacGridRowView`). Not bigger strides: a whole screen of new rows at
+    /// `MacGridPieceView`). Not bigger strides: a whole screen of new rows at
     /// once measured as a 40 ms frame of its own.
     private func updateWindow() {
         let visible = tracker.visible
@@ -779,6 +1001,8 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
             window = next
             requestDays(in: next)
         }
+        tracker.windowRevision = layout.revision
+        tracker.windowDays = dayKeys(of: next)
         if let index = layout.day(at: tracker.top + 1) {
             let key = layout.days[index].bucket.key
             if tracker.topKey != key {
@@ -832,29 +1056,75 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     /// At the newest end, the newest end is kept instead.
     private func relaid() {
         defer {
+            // A change of photographs keeps drawing the days it was drawing
+            // (see `drawnRows`) until the scroll moves on from them. The
+            // visible rect is still measured in the old layout, so working
+            // the window out from it now would draw the wrong stretch.
+            let carried = layout.animatesChange && tracker.windowRevision != layout.revision
+                ? drawnRows : nil
             tracker.layout = layout
             progress.span = layout.span(header: headerHeight)
             // The rows have moved, so what the window covered is stale.
             tracker.covered = nil
-            updateWindow()
+            if let carried {
+                window = carried
+                tracker.windowRevision = layout.revision
+                tracker.windowDays = dayKeys(of: carried)
+            } else {
+                updateWindow()
+            }
         }
         let old = tracker.layout
         let top = tracker.top
         guard old.revision > 0, !old.days.isEmpty, tracker.visible.height > 0 else { return }
+        // In the same spring as the tiles when photographs came or went, so
+        // that what the scroll holds still stays still while the rest slides:
+        // the newest row on the window's edge, or the day at the top.
+        let animated = layout.animatesChange
+        if animated, old.total > layout.total { hold(old.total) }
+        func move(to y: CGFloat) {
+            guard animated else { return position.scrollTo(y: y) }
+            withAnimation(Self.change) { position.scrollTo(y: y) }
+        }
 
         if tracker.atEnd {
             if abs(old.total - layout.total) > 0.5 {
-                position.scrollTo(edge: .bottom)
+                if animated {
+                    // To the new end by position rather than by edge: while
+                    // the content is held, its edge is the old one.
+                    move(to: max(layout.total - tracker.viewport, 0))
+                } else {
+                    position.scrollTo(edge: .bottom)
+                }
             }
             return
         }
         guard let index = old.day(at: top) else { return }
         let before = old.days[index]
-        guard let now = layout.dayIndex[before.bucket.key].map({ layout.days[$0] }) else { return }
-        let into = min(top - before.start, now.height)
+        // The day at the top, or — if it was the one that went — the first
+        // one after it that's still there.
+        let now = old.days[index...].lazy
+            .compactMap { day in self.layout.dayIndex[day.bucket.key].map { self.layout.days[$0] } }
+            .first
+        guard let now else { return }
+        let into = now.bucket.key == before.bucket.key ? min(top - before.start, now.height) : 0
         let target = now.start + into
         if abs(target - top) > 0.5 {
-            position.scrollTo(y: target)
+            move(to: target)
+        }
+    }
+
+    /// Keeps the content `height` tall until a change has played — a little
+    /// longer than the spring takes to arrive, and then it lets go whatever
+    /// else has happened, so the library is never left with room under it.
+    private func hold(_ height: CGFloat) {
+        heldHeight = max(heldHeight ?? 0, height)
+        heldSerial += 1
+        let serial = heldSerial
+        Task { @MainActor in
+            try? await Task.sleep(for: Self.changeSettles)
+            guard heldSerial == serial else { return }
+            heldHeight = nil
         }
     }
 

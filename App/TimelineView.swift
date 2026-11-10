@@ -1422,7 +1422,11 @@ struct TimelineView: View {
     /// moving anything.
     private func entries(for bucket: TimelineBucket, items: [TimelineItem]) -> [GridEntry] {
         #if os(iOS)
-        return entries(for: bucket, items: items, queued: queuedByDay[bucket.key] ?? [])
+        // Empty reads as not loaded here, as it always has; only the iPhone
+        // grid tells the two apart. See `entries(for:items:queued:)`.
+        return entries(
+            for: bucket, items: items.isEmpty ? nil : items, queued: queuedByDay[bucket.key] ?? []
+        )
         #else
         return items.isEmpty
             ? (0..<max(bucket.count, 0)).map { GridEntry.placeholder($0) }
@@ -1437,22 +1441,27 @@ struct TimelineView: View {
     /// backup of a few thousand photographs is a few thousand iterations — and
     /// the grid asks for one day's entries at a time. The collection-view grid
     /// groups once per render and hands each day its own slice.
+    ///
+    /// `items` is nil for a day that hasn't loaded, which is drawn as
+    /// placeholders. A day that has loaded and holds nothing draws nothing
+    /// but its uploads — see `collectionGrid`.
     private func entries(
-        for bucket: TimelineBucket, items: [TimelineItem], queued: [QueuedTile]
+        for bucket: TimelineBucket, items: [TimelineItem]?, queued: [QueuedTile]
     ) -> [GridEntry] {
         // In the order they were taken, on `(date, id)` so it is stable from
         // one redraw to the next — not the order the queues hold them in, which
         // for photographs that have just landed is the order they *finished*.
-        let tiles = stillQueued(queued, among: items).sorted {
+        let tiles = stillQueued(queued, among: items ?? []).sorted {
             ($0.wallClock, $0.localIdentifier) < ($1.wallClock, $1.localIdentifier)
         }
-        if items.isEmpty {
+        guard let items, !items.isEmpty else {
             // Placeholders keep the section the right height so the scrollbar
             // doesn't jump when the bucket lands. Nothing to interleave with
             // yet, so the pending tiles lead.
             let pending = tiles.map {
                 GridEntry.pending(localIdentifier: $0.localIdentifier, state: $0.state)
             }
+            guard items == nil else { return pending }
             return pending + (0..<placeholders(for: bucket, beside: tiles))
                 .map { GridEntry.placeholder($0) }
         }
@@ -1493,11 +1502,11 @@ struct TimelineView: View {
     /// exactly — a day that draws one tile more than it was measured for runs
     /// into the next day's heading.
     private func entryCount(
-        for bucket: TimelineBucket, items: [TimelineItem], queued: [QueuedTile]
+        for bucket: TimelineBucket, items: [TimelineItem]?, queued: [QueuedTile]
     ) -> Int {
-        let queued = stillQueued(queued, among: items)
+        let queued = stillQueued(queued, among: items ?? [])
         return queued.count
-            + (items.isEmpty ? placeholders(for: bucket, beside: queued) : items.count)
+            + (items.map(\.count) ?? placeholders(for: bucket, beside: queued))
     }
 
     /// The local tiles a day still needs: those whose photograph isn't among
@@ -2201,9 +2210,17 @@ struct TimelineView: View {
         let libraryHeight = headerLine + 60
         // Grouped once per render, not once per day. See `entries(for:items:queued:)`.
         let queued = queuedByDay
-        let days = Self.mergedBuckets(store, queued: queued)
+        // Not a day that has loaded and come back empty. That is a day whose
+        // last photograph has just been deleted or moved, still in the
+        // library's outline only because the outline is fetched again after
+        // the change is applied, not with it. Drawn, it was a gray tile where
+        // the photograph had been, then nothing: the gap closing in two steps
+        // where it should close in one.
+        let days = Self.mergedBuckets(store, queued: queued).filter { bucket in
+            store.items[bucket.key]?.isEmpty != true || queued[bucket.key]?.isEmpty == false
+        }
         let sections = days.map { bucket in
-            let items = store.items[bucket.key] ?? []
+            let items = store.items[bucket.key]
             let dayQueued = queued[bucket.key] ?? []
             guard (bucket.areas?.count ?? 0) > 1 else {
                 return TimelineCollection.Section(
@@ -2254,7 +2271,7 @@ struct TimelineView: View {
                 entries: { bucket in
                     entries(
                         for: bucket,
-                        items: store.items[bucket.key] ?? [],
+                        items: store.items[bucket.key],
                         queued: queued[bucket.key] ?? []
                     )
                 },
