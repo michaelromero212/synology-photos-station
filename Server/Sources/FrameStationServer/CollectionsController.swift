@@ -129,12 +129,15 @@ struct CollectionsController: RouteCollection {
         )
         let saved = await keeper.load()
 
+        // Every trip the library holds, for the ones a family takes every
+        // year (see `tripTraditions`); the page and See All show the latest.
+        let everyTrip = try await trips(
+            spaceID: spaceID, seed: seed, userID: device.userID,
+            holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
+            on: req.sql
+        )
         let trips = await keeper.keep(
-            trips: try await trips(
-                spaceID: spaceID, seed: seed, userID: device.userID,
-                holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
-                on: req.sql
-            ),
+            trips: Array(everyTrip.prefix(Self.allTripsLimit)),
             saved: saved, limit: Self.allTripsLimit, seed: seed
         )
 
@@ -321,7 +324,8 @@ struct CollectionsController: RouteCollection {
             allTrips: trips.map(mark),
             allOccasions: occasions.map { mark(yearMarked($0.summary)) },
             featured: featured.map(mark),
-            traditions: traditions.map { Self.withPeople($0, people: whoIsWho) },
+            traditions: Self.withTrips(traditions, trips: everyTrip, today: today, turn: turn)
+                .map { Self.withPeople($0, people: whoIsWho) },
             wideTrips: Self.featuredTrips(
                 unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:)),
                 limit: Self.wideLimit
@@ -1029,8 +1033,14 @@ struct CollectionsController: RouteCollection {
     /// aren't anywhere in particular.
     static func place(of collection: CollectionSummary) -> String? {
         switch collection.kind {
-        case .trip, .anniversary:
-            return whereabouts(inTitle: collection.title)?.place
+        case .trip:
+            return tripPlace(inTitle: collection.title)
+        case .anniversary:
+            // "the Outer Banks" from its sentence, as a trip's name says it:
+            // "OBX".
+            return whereabouts(inTitle: collection.title).map {
+                Destinations.place(spoken: $0.place)?.title ?? Whereabouts(name: $0.place).title
+            }
         case .revisit:
             return collection.title
         default:
@@ -1310,7 +1320,6 @@ struct CollectionsController: RouteCollection {
                 $0.count >= 2 && $0.reduce(0) { $0 + $1.count } >= Self.minimumItems
                     && $0.reduce(0) { $0 + ($1.moments ?? $1.count) } >= Self.tripMoments
             }
-            .prefix(Self.allTripsLimit)
             .map {
                 Self.describeTrip(
                     $0, holidays: holidays,
@@ -1343,21 +1352,18 @@ struct CollectionsController: RouteCollection {
         return runs
     }
 
-    /// "Six days at Walt Disney World", "Seven days in the Outer Banks", "Five
-    /// days in Orlando": where the trip was, as particularly as is true. See
-    /// `whereabouts(of:)`.
+    /// What the family calls the trip, as they'd name the album themselves:
+    /// where, what kind of stay, and the year. "OBX Beach Week 2025", "WDW
+    /// Vacation 2025", "Asheville Weekend 2024", "Italy Vacation 2024".
+    /// Never how long it was: nobody says "seven days in the Outer Banks"
+    /// (his word, 2026-11-10), and the dates under the title say it anyway.
+    /// Where is as particular as is true (see `whereabouts(of:)`), by the
+    /// name a family uses for it (`Destinations.Place.nickname`).
     ///
     /// A week or less away over a holiday is named for the holiday — "Christmas
     /// 2024 in Asheville" is what the family calls it, and the days it covers
     /// are claimed by the trip, so it is the only card that can say so. Two
-    /// weeks away that happen to include Labor Day were not a Labor Day trip,
-    /// and keep their length.
-    ///
-    /// Otherwise, where the person's devices have seen what the trip was, it
-    /// is named for that: "Beach trip to the Outer Banks", "Wedding in
-    /// Charleston". Not where the place's name already says it: a theme park
-    /// trip to Walt Disney World is a trip to Walt Disney World. The dates
-    /// under the title already say how long. See `tripEvent`.
+    /// weeks away that happen to include Labor Day were not a Labor Day trip.
     static func describeTrip(
         _ run: [TripDay], holidays: [String: String] = [:],
         event: CurationVocabulary.Event? = nil, geocoder: Geocoder? = nil
@@ -1365,18 +1371,11 @@ struct CollectionsController: RouteCollection {
         let ordered = run.reversed().map { $0 }        // oldest first
         let count = run.reduce(0) { $0 + $1.count }
         let where_ = whereabouts(of: run, geocoder: geocoder)
-        let kind = event.flatMap { where_?.implies.contains($0.tag) == true ? nil : $0 }
 
         let weekdays = ordered.compactMap { parseDate($0.day) }
             .map { utc.component(.weekday, from: $0) }
-        let phrase: String
-        if run.count == 2, weekdays.contains(1), weekdays.contains(7) {
-            phrase = "A weekend"
-        } else if run.count == 3, weekdays.contains(1) || weekdays.contains(7) {
-            phrase = "A long weekend"
-        } else {
-            phrase = "\(spelled(run.count).capitalized) days"
-        }
+        let weekend = (run.count == 2 && weekdays.contains(1) && weekdays.contains(7))
+            || (run.count == 3 && (weekdays.contains(1) || weekdays.contains(7)))
 
         let holiday = run.count <= 7
             ? run.filter { holidays[$0.day] != nil }
@@ -1387,10 +1386,11 @@ struct CollectionsController: RouteCollection {
         let title: String
         if let holiday {
             title = where_.map { "\(holiday) \($0.locative)" } ?? "\(holiday) away from home"
-        } else if let kind, let named = kind.tripTitle {
-            title = where_.map { "\(named) \($0.phrase(kind.tripPreposition))" } ?? named
         } else {
-            title = where_.map { "\(phrase) \($0.locative)" } ?? "\(phrase) away"
+            var kind = tripKind(event: event, implies: where_?.implies ?? [], days: run.count, weekend: weekend)
+            if where_ == nil, kind == "Weekend" { kind = "Weekend Away" }
+            let year = ordered.first.map { String($0.day.prefix(4)) } ?? ""
+            title = [where_?.title, kind, year].compactMap { $0 }.joined(separator: " ")
         }
 
         var parts: [String] = []
@@ -1409,6 +1409,63 @@ struct CollectionsController: RouteCollection {
         )
     }
 
+    /// What kind of stay a trip was, as a family would say it: a week at
+    /// the beach is "Beach Week" and a weekend there "Beach Weekend"; a
+    /// theme park, a "Vacation"; a wedding, a "Wedding"; a week anywhere, a
+    /// "Vacation"; a weekend, a "Weekend"; anything shorter, a "Trip". What
+    /// the person's devices saw names it first, then what the place is.
+    static func tripKind(
+        event: CurationVocabulary.Event?, implies: Set<String>, days: Int, weekend: Bool
+    ) -> String {
+        let tag = event?.tag
+        if tag == "wedding" { return "Wedding" }
+        if tag == "graduation" { return "Graduation" }
+        if tag == "beach" || implies.contains("beach") {
+            return days >= 5 ? "Beach Week" : weekend ? "Beach Weekend" : "Beach Trip"
+        }
+        if implies.contains("snow") { return "Ski Trip" }
+        if implies.contains("amusement_park") { return weekend ? "Weekend" : "Vacation" }
+        if let tag, let kind = tripKinds[tag] { return kind }
+        if days >= 5 { return "Vacation" }
+        return weekend ? "Weekend" : "Trip"
+    }
+
+    /// The kinds of trip the photos can show, besides the beach.
+    static let tripKinds: [String: String] = [
+        "golf": "Golf Trip", "camping": "Camping Trip", "hiking": "Hiking Trip",
+        "boating": "Boating Trip", "snow": "Snow Trip", "amusement_park": "Theme Park Trip",
+    ]
+
+    /// Every kind a trip's name can end in before its year, longest first, to
+    /// read a name back. See `tripPlace(inTitle:)`.
+    static let tripKindWords = [
+        "Theme Park Trip", "Weekend Away", "Beach Weekend", "Camping Trip", "Boating Trip",
+        "Hiking Trip", "Beach Week", "Beach Trip", "Graduation", "Golf Trip", "Snow Trip",
+        "Ski Trip", "Vacation", "Wedding", "Weekend", "Trip",
+    ]
+
+    /// "OBX Beach Week" and 2025, from "OBX Beach Week 2025". Nil for a name
+    /// that doesn't end in a year: a holiday's ("Christmas 2023 in
+    /// Asheville") or one from before.
+    static func yearless(_ title: String) -> (name: String, year: Int)? {
+        guard let space = title.lastIndex(of: " "), let year = Int(title[title.index(after: space)...]),
+              (1900...2999).contains(year) else { return nil }
+        return (String(title[..<space]), year)
+    }
+
+    /// The place a trip's name says: "OBX" from "OBX Beach Week 2025". For a
+    /// name from before, or a holiday's, the words after its preposition:
+    /// "Walt Disney World" from "Four days at Walt Disney World".
+    static func tripPlace(inTitle title: String) -> String? {
+        if let (name, _) = yearless(title) {
+            for kind in tripKindWords where name == kind || name.hasSuffix(" " + kind) {
+                let place = name.dropLast(kind.count).trimmingCharacters(in: .whitespaces)
+                return place.isEmpty ? nil : place
+            }
+        }
+        return whereabouts(inTitle: title)?.place
+    }
+
     /// Where a trip or a day was, as a title says it.
     struct Whereabouts {
         /// "Walt Disney World", "the Outer Banks", "Nags Head", "Florida".
@@ -1417,6 +1474,8 @@ struct CollectionsController: RouteCollection {
         let preposition: String
         /// Trip kinds the name already says. See `Destinations.Place.implies`.
         var implies: Set<String> = []
+        /// What a trip's name calls it: "OBX", "WDW", "Nags Head", "Italy".
+        let title: String
 
         /// "at Walt Disney World".
         var locative: String { "\(preposition) \(name)" }
@@ -1428,14 +1487,15 @@ struct CollectionsController: RouteCollection {
             preposition == "to" ? "to \(name)" : locative
         }
 
-        init(name: String, preposition: String = "in", implies: Set<String> = []) {
+        init(name: String, preposition: String = "in", implies: Set<String> = [], title: String? = nil) {
             self.name = name
             self.preposition = preposition
             self.implies = implies
+            self.title = title ?? (name.hasPrefix("the ") ? String(name.dropFirst(4)) : name)
         }
 
         init(_ place: Destinations.Place) {
-            self.init(name: place.spoken, preposition: place.preposition, implies: place.implies)
+            self.init(name: place.spoken, preposition: place.preposition, implies: place.implies, title: place.title)
         }
 
         /// A stored place name as a title says it: a destination its own way,
@@ -2444,6 +2504,72 @@ struct CollectionsController: RouteCollection {
         return .noContent
     }
 
+    // MARK: - Trips every year
+
+    /// Trips a family takes year after year: the same place and the same
+    /// kind of stay, by the name the family gives it, in three years at
+    /// least. "OBX Beach Week · Every July · 6 years". Each year is that
+    /// year's trip, which opens as it does under Trips. A trip over a holiday
+    /// is a year of that holiday instead, and has no year at the end of its
+    /// name.
+    static func tripTraditions(_ trips: [CollectionSummary], today: Date, turn: Int) -> [Tradition] {
+        var byName: [String: [(trip: CollectionSummary, year: Int)]] = [:]
+        for trip in trips where trip.kind == .trip {
+            guard let (name, year) = yearless(trip.title), tripPlace(inTitle: trip.title) != nil else { continue }
+            byName[name, default: []].append((trip, year))
+        }
+        let todayNumber = CivilDay.number(of: today)
+        let thisYear = CivilDay.civil(todayNumber).year
+        return byName.compactMap { name, found -> Tradition? in
+            let years = Set(found.map(\.year))
+            guard years.count >= 3, let first = years.min(), let last = years.max() else { return nil }
+            let newest = found.map(\.trip).sorted { $0.key > $1.key }
+            let starts = newest.compactMap { CivilDay.number(String($0.key.prefix(10))) }.map(CivilDay.civil)
+            // "Every July", where two in three of them start in it.
+            let months = Dictionary(grouping: starts.map(\.month), by: { $0 })
+            let every = months.max { ($0.value.count, $1.key) < ($1.value.count, $0.key) }
+                .flatMap { $0.value.count * 3 >= starts.count * 2 ? "Every \(CivilDay.months[$0.key - 1])" : nil }
+            // Next time round: the latest one's start date, in the year ahead.
+            let next = starts.first.flatMap { start in
+                (thisYear...thisYear + 1).lazy
+                    .filter { CivilDay.isValid(year: $0, month: start.month, day: start.day) }
+                    .map { CivilDay.number(year: $0, month: start.month, day: start.day) }
+                    .first { $0 > todayNumber }
+            }
+            let turned = rotated(newest, by: turn)
+            return Tradition(
+                id: "trip:\(name.lowercased())", title: name,
+                subtitle: [every, "\(years.count) years · \(first)–\(last)"].compactMap { $0 }.joined(separator: " · "),
+                count: newest.reduce(0) { $0 + $1.count },
+                coverAssetIDs: Array(turned.compactMap(\.coverAssetIDs.first).prefix(coverDepth)),
+                years: Array(newest.prefix(YearlyPatterns.yearLimit)),
+                next: next.map(CivilDay.stamp), naming: nil
+            )
+        }
+    }
+
+    /// Over the Years with the trips taken every year in it, the soonest to
+    /// come round first, as the rest are.
+    static func withTrips(
+        _ traditions: [Tradition], trips: [CollectionSummary], today: Date, turn: Int
+    ) -> [Tradition] {
+        let found = tripTraditions(trips, today: today, turn: turn)
+        guard !found.isEmpty else { return traditions }
+        return (traditions + found)
+            .sorted { a, b in
+                switch (a.next, b.next) {
+                case let (x?, y?) where x != y: return x < y
+                case (nil, .some): return false
+                case (.some, nil): return true
+                default: break
+                }
+                if a.years.count != b.years.count { return a.years.count > b.years.count }
+                return a.title < b.title
+            }
+            .prefix(YearlyPatterns.traditionLimit)
+            .map { $0 }
+    }
+
     // MARK: - Anniversaries
 
     /// The trip you were on this week, in an earlier year.
@@ -2477,10 +2603,15 @@ struct CollectionsController: RouteCollection {
                 return nil
             }
 
-            // "at Walt Disney World" from "Four days at Walt Disney World". A
-            // trip *to* somewhere was a time you were *in* it, or at it.
+            // "at Walt Disney World" from "WDW Vacation 2025": the place by
+            // its whole name, as it's said in a sentence. A trip from before
+            // says it after its preposition, and a trip *to* somewhere was a
+            // time you were *in* it, or at it.
             let title: String
-            if let (preposition, place) = whereabouts(inTitle: trip.title) {
+            if yearless(trip.title) != nil, let word = tripPlace(inTitle: trip.title) {
+                let place = Destinations.place(titled: word).map(Whereabouts.init) ?? Whereabouts(name: word)
+                title = "\(agoPhrase(ago)) you were \(place.locative)"
+            } else if let (preposition, place) = whereabouts(inTitle: trip.title) {
                 let locative = preposition == "to"
                     ? Whereabouts.locative(spoken: place)
                     : "\(preposition) \(place)"

@@ -1171,21 +1171,45 @@ travels, wherever they go:
   whose provinces are what people go to (Canada, Australia, New Zealand, the
   UK) keep them abroad too: "Ten days in Scotland".
 
-A trip takes the most particular name that holds:
+A trip is named the way the family would name the album: where, what kind
+of stay, and the year. "OBX Beach Week 2025", "WDW Vacation 2025", "Asheville
+Weekend 2024". Never how many days it was: nobody says "seven days in the
+Outer Banks" (his word, 2026-11-10), and the dates under the title say it.
+Where is the most particular place that holds:
 
-1. a destination with half its photos, on at least half its days: "Six days at
-   Walt Disney World";
-2. a town with three quarters of them: "Three days in Asheville";
-3. an area with three quarters of them: "Five days in Orlando";
+1. a destination with half its photos, on at least half its days, by what a
+   family calls it (`Place.nickname`: OBX, WDW, Vegas, Universal, Glacier):
+   "WDW Vacation 2025";
+2. a town with three quarters of them: "Asheville Trip 2024";
+3. an area with three quarters of them: "Orlando Vacation 2024";
 4. at home, a state with three quarters of them, or two that hold them between
-   them: "Six days in Utah and Arizona";
-5. abroad, the country, two countries ("in France and Italy") or, for three or
-   more, the continent: "Six days in Europe";
-6. otherwise, "away".
+   them: "Utah and Arizona Vacation 2024";
+5. abroad, the country, two countries or, for three or more, the continent:
+   "Europe Vacation 2023";
+6. otherwise no place: "Vacation 2025", "Weekend Away 2024".
 
-Each place carries how a title says it ("at" Walt Disney World, "in the" Outer
-Banks, "on" Cape Cod). It also carries the trip kinds its name already says, so
-a theme park trip to Walt Disney World is just a trip to Walt Disney World.
+The kind of stay (`tripKind`) comes from what the person's devices saw, then
+from what the place is, then from how long it was:
+
+- a wedding or a graduation: "Charleston Wedding 2023";
+- the beach, seen in the photos or at a beach place (the Outer Banks, Myrtle
+  Beach): "Beach Week" for five days or more, "Beach Weekend", "Beach Trip";
+- a ski place: "Ski Trip"; a theme park: "Vacation", or "Weekend";
+- golf, camping, hiking, boating, snow or a theme park the place doesn't say:
+  "Golf Trip" and the like;
+- otherwise five days or more is a "Vacation", two or three over a weekend a
+  "Weekend", and anything else a "Trip".
+
+A week or less over a holiday keeps the holiday's name: "Christmas 2023 in
+Asheville". The page reads a trip's place back from its name (`tripPlace`), for
+one trip per place in its rows and for "A year ago you were in the Outer
+Banks", which says the place in full.
+
+**Trips taken every year are a tradition.** The same name less its year in
+three years or more is an Over the Years card of its own: "OBX Beach Week ·
+Every July · 6 years". Each year is that year's trip, opening as it does under
+Trips. Counted over every trip the library holds, not only the latest forty
+that See All lists (`tripTraditions`).
 
 Photos are filed wherever coordinates are written: upload, import, rebuild and
 a location edit. A boot-time pass (`PlaceFiling`) names every photo again whose

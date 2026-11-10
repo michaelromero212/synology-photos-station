@@ -1,14 +1,16 @@
 #!/bin/bash
 # Places people call by their own names. A photo taken at Walt Disney World or
 # on the Outer Banks goes by that name on its day's header, in Places, in
-# search and in the Information panel, and a trip there is named for it:
-# "Four days at Walt Disney World", where it used to be "Four days in Florida"
-# because the parks sit nearest three different suburbs. A trip between the
-# parks and a rental in Kissimmee is "Five days in Orlando".
+# search and in the Information panel, and a trip there is named the way the
+# family says it: "WDW Vacation 2025", where it used to be "Four days in
+# Florida" because the parks sit nearest three different suburbs. A trip
+# between the parks and a rental in Kissimmee is "Orlando Vacation 2024", and
+# a week in Duck every July is "OBX Beach Week", one of the family's
+# traditions.
 #
 # And the same for anyone's travels, not only the places on the list: a city's
 # neighborhoods are named for the city ("Paris", not "Paris 16 Passy"), and a
-# trip abroad for its country or continent ("Five days in Italy").
+# trip abroad for its country or continent ("Italy Vacation 2024").
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-destinations.sh
 #
@@ -111,6 +113,9 @@ shoot a4d 2025-03-13 9 3 SPRINGS
 # A week in Duck, too small to be in the town dataset, and a trip to Corolla.
 for d in 12 13 14 15 16 17 18; do shoot "b$d-" "2025-07-$d" 9 3 DUCK; done
 shoot b14c 2025-07-14 15 2 COROLLA
+# A week in Duck the two Julys before too: the family's beach week. A photo
+# a day, so home is still where most of the library is.
+for y in 23 24; do for d in 08 09 10 11 12 13 14; do shoot "b$y$d-" "20$y-07-$d" 9 1 DUCK; done; done
 # Universal, Disney World and SeaWorld from a rental in Kissimmee.
 shoot c3u 2024-06-03 9 3 UNIVERSAL;      shoot c3k 2024-06-03 18 2 KISSIMMEE
 shoot c4u 2024-06-04 9 3 UNIVERSAL;      shoot c4k 2024-06-04 18 2 KISSIMMEE
@@ -145,9 +150,9 @@ shoot n08 2023-06-08 9 4 ZURICH; shoot n09 2023-06-09 9 4 COLOSSEUM; shoot n10 2
 shoot o06 2023-03-06 9 4 KAANAPALI; shoot o07 2023-03-07 9 4 KAANAPALI; shoot o08 2023-03-08 9 4 KAANAPALI
 shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023-03-11 9 4 HANA
 shoot o12 2023-03-12 9 2 WAILEA
-check "every photo arrived" "288" "$(q "SELECT count(*) FROM assets")"
+check "every photo arrived" "302" "$(q "SELECT count(*) FROM assets")"
 
-DISNEY=39; OBX=23; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
+DISNEY=39; OBX=37; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
 echo "Filing"
 check "a photo at Epcot is filed under Walt Disney World" "Walt Disney World, Florida" \
@@ -185,23 +190,29 @@ trips(){ curl -s "$API/v1/spaces/$SPACE/collections?date=$1" -H "$AUTH" \
   | python3 -c "import sys,json; print('|'.join(c['title'] for c in json.load(sys.stdin).get('allTrips') or []))"; }
 hero(){ curl -s "$API/v1/spaces/$SPACE/collections?date=$1" -H "$AUTH" | jq '["hero"]["title"]'; }
 T=$(trips 2026-10-12)
-has "four days at the parks are named for them" "Four days at Walt Disney World" "$T"
-has "a week in Duck is a week in the Outer Banks" "Seven days in the Outer Banks" "$T"
-has "Universal, Disney World and SeaWorld from Kissimmee is Orlando" "Five days in Orlando" "$T"
+has "four days at the parks are what the family calls them" "WDW Vacation 2025" "$T"
+has "a week in Duck is OBX Beach Week" "OBX Beach Week 2025" "$T"
+has "every year of it" "OBX Beach Week 2024|OBX Beach Week 2023" "$(echo "$T" | tr '|' '\n' | grep '^OBX' | tail -2 | paste -sd'|' -)"
+has "Universal, Disney World and SeaWorld from Kissimmee is an Orlando vacation" "Orlando Vacation 2024" "$T"
 has "Christmas there is named for both" "Christmas 2023 at Walt Disney World" "$T"
-has "a town most of a trip was in names it, the drive down and all" "Three days in Asheville" "$T"
-has "four days across Paris's arrondissements are four days in Paris" "Four days in Paris" "$T"
-has "and three across London's boroughs, three in London" "Three days in London" "$T"
-has "a weekend around the Capitol is a weekend in Washington" "A weekend in Washington" "$T"
-has "Rome and Florence are a trip to Italy" "Five days in Italy" "$T"
-has "Paris, Zurich and Rome are a trip to Europe" "Six days in Europe" "$T"
-has "two parks in Utah and two places in Arizona name both" "Six days in Utah and Arizona" "$T"
-has "a week around Maui is spent on Maui" "Seven days on Maui" "$T"
+has "a town most of a trip was in names it, the drive down and all" "Asheville Trip 2024" "$T"
+has "four days across Paris's arrondissements are a Paris trip" "Paris Trip 2024" "$T"
+has "and three across London's boroughs, a London trip" "London Trip 2023" "$T"
+has "a weekend around the Capitol is a Washington weekend" "Washington Weekend 2023" "$T"
+has "Rome and Florence are an Italy vacation" "Italy Vacation 2024" "$T"
+has "Paris, Zurich and Rome are a Europe vacation" "Europe Vacation 2023" "$T"
+has "two parks in Utah and two places in Arizona name both" "Utah and Arizona Vacation 2024" "$T"
+has "a week around Maui is a Maui vacation" "Maui Vacation 2023" "$T"
+lacks "and no trip says how many days it was" "days" "$T"
 lacks "no trip is named for a region nobody says" "Île-de-France" "$T"
 lacks "nor for a neighborhood" "Passy" "$T"
-lacks "no trip is named for a state it was more particular than" "in Florida" "$T"
+lacks "no trip is named for a state it was more particular than" "Florida" "$T"
 lacks "nor for a suburb" "Celebration" "$T"
 check "a year on, the trip comes back" "A year ago you were at Walt Disney World" "$(hero 2026-03-13)"
+check "a beach week every July is one of the family's traditions" "OBX Beach Week · Every July · 3 years · 2023–2025" \
+  "$(curl -s "$API/v1/spaces/$SPACE/collections?date=2026-10-12" -H "$AUTH" | python3 -c "
+import sys, json
+print(' '.join(t['title'] + ' · ' + t['subtitle'] for t in json.load(sys.stdin).get('traditions') or [] if t['id'].startswith('trip:')))")"
 subtitles(){ curl -s "$API/v1/spaces/$SPACE/collections?date=$1" -H "$AUTH" \
   | python3 -c "import sys,json; print('|'.join(c['subtitle'] or '' for c in json.load(sys.stdin).get('allTrips') or []))"; }
 has "dates read the American way" "March 10–13, 2025" "$(subtitles 2026-10-12)"
@@ -220,9 +231,9 @@ names(){ ls "$ROOT/ids" | grep "^$1" | tr '\n' ' '; }
 check "the beach week is seen as beach" "$OBX" "$(observe '[{"id":"beach","confidence":0.9}]' $(names b))"
 check "the parks as a theme park" "21" "$(observe '[{"id":"amusement_park","confidence":0.9}]' $(names a))"
 T=$(trips 2026-10-12)
-has "a beach trip goes to the Outer Banks" "Beach trip to the Outer Banks" "$T"
-has "a theme park trip to Walt Disney World is a trip to Walt Disney World" "Four days at Walt Disney World" "$T"
-lacks "and isn't called a theme park trip" "Theme park trip" "$T"
+has "a beach week seen as beach is still OBX Beach Week" "OBX Beach Week 2025" "$T"
+has "a theme park trip to Walt Disney World is the family's WDW vacation" "WDW Vacation 2025" "$T"
+lacks "and isn't called a theme park trip" "Theme Park Trip" "$T"
 check "a year after the beach trip, you were in the Outer Banks" "A year ago you were in the Outer Banks" \
   "$(hero 2026-07-15)"
 
@@ -283,7 +294,7 @@ check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "places: named 288 photos again" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 302 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

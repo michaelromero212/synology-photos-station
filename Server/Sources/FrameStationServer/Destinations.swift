@@ -26,7 +26,7 @@ import SQLKit
 /// - An **area** is a cluster of real towns that a trip moving between them is
 ///   called by: Orlando, Cape Cod, the Smokies. Its photos keep their towns,
 ///   so a day in Kissimmee still says Kissimmee, and only a trip's title uses
-///   it: "Five days in Orlando" for a week split between Disney World,
+///   it: "Orlando Vacation 2024" for a week split between Disney World,
 ///   Universal and a rental in Kissimmee. Searching for one finds the photos
 ///   inside it.
 ///
@@ -57,6 +57,12 @@ enum Destinations {
         /// found by any word of its name, which is in its label. An area has
         /// no label, so these are the only words that find it.
         let aliases: Set<String>
+        /// What a family calls it when it names a trip there, where that
+        /// isn't its name: "OBX Beach Week 2025", "WDW Vacation 2025".
+        var nickname: String?
+
+        /// How a trip's name says it: "OBX", "Grand Canyon", "Smokies".
+        var title: String { nickname ?? name }
 
         /// The label a destination's photos are filed under.
         var label: String { "\(name), \(region)" }
@@ -128,6 +134,9 @@ enum Destinations {
     /// The destination or area a title calls this: "the Outer Banks".
     static func place(spoken: String) -> Place? { bySpoken[spoken] }
 
+    /// The destination or area a trip's name calls this: "OBX".
+    static func place(titled word: String) -> Place? { byTitle[word] }
+
     /// The destinations and areas a searched word can mean beyond its
     /// letters: the labels "obx" files photos under, and the areas "orlando"
     /// covers.
@@ -167,15 +176,31 @@ enum Destinations {
     private static let bySpoken: [String: Place] = Dictionary(
         (destinations + areas).map { ($0.spoken, $0) }, uniquingKeysWith: { first, _ in first }
     )
+    private static let byTitle: [String: Place] = Dictionary(
+        (destinations + areas).map { ($0.title, $0) }, uniquingKeysWith: { first, _ in first }
+    )
 
     // MARK: - The list
 
     private static let themePark: Set<String> = ["amusement_park"]
     private static let skiing: Set<String> = ["snow"]
+    /// Where a family goes for a week at the beach: a week there is "Beach
+    /// Week" whatever its photos show.
+    private static let beach: Set<String> = ["beach"]
 
     private static func destination(
         _ name: String, _ region: String, _ preposition: String, the: Bool = false,
-        implies: Set<String> = [], aliases: Set<String> = [], _ circles: [Circle]
+        implies: Set<String> = [], aliases: Set<String> = [], nickname: String? = nil, _ circles: [Circle]
+    ) -> Place {
+        Place(
+            name: name, region: region, preposition: preposition,
+            takesThe: the, circles: circles, implies: implies, aliases: aliases, nickname: nickname
+        )
+    }
+
+    private static func area(
+        _ name: String, _ region: String, _ preposition: String, the: Bool = false,
+        implies: Set<String> = [], aliases: Set<String>, _ circles: [Circle]
     ) -> Place {
         Place(
             name: name, region: region, preposition: preposition,
@@ -183,20 +208,10 @@ enum Destinations {
         )
     }
 
-    private static func area(
-        _ name: String, _ region: String, _ preposition: String, the: Bool = false,
-        aliases: Set<String>, _ circles: [Circle]
-    ) -> Place {
-        Place(
-            name: name, region: region, preposition: preposition,
-            takesThe: the, circles: circles, implies: [], aliases: aliases
-        )
-    }
-
     static let destinations: [Place] = [
         // Theme parks. Their photos land in whatever suburb is nearest, and
         // nobody calls a day at Epcot a day in Celebration.
-        destination("Walt Disney World", "Florida", "at", implies: themePark, aliases: ["wdw"], [
+        destination("Walt Disney World", "Florida", "at", implies: themePark, aliases: ["wdw"], nickname: "WDW", [
             // Magic Kingdom and the resorts on its lakes.
             Circle(28.411, -81.580, km: 2.6),
             // Epcot and Hollywood Studios, and the resorts between them.
@@ -208,13 +223,13 @@ enum Destinations {
             // Pop Century, Art of Animation and ESPN Wide World of Sports.
             Circle(28.346, -81.550, km: 1.7),
         ]),
-        destination("Universal Orlando", "Florida", "at", implies: themePark, [
+        destination("Universal Orlando", "Florida", "at", implies: themePark, nickname: "Universal", [
             // Both parks, CityWalk, Volcano Bay and the hotels.
             Circle(28.4725, -81.4685, km: 1.6),
             // Epic Universe.
             Circle(28.4410, -81.4470, km: 1.5),
         ]),
-        destination("SeaWorld Orlando", "Florida", "at", implies: themePark, [
+        destination("SeaWorld Orlando", "Florida", "at", implies: themePark, nickname: "SeaWorld", [
             // With Aquatica and Discovery Cove.
             Circle(28.4105, -81.4595, km: 1.3),
         ]),
@@ -250,7 +265,7 @@ enum Destinations {
         ]),
 
         // The Strip is in Paradise, Nevada, as far as the dataset knows.
-        destination("Las Vegas", "Nevada", "in", [
+        destination("Las Vegas", "Nevada", "in", nickname: "Vegas", [
             // Mandalay Bay to New York-New York and the MGM Grand.
             Circle(36.0985, -115.1735, km: 1.3),
             // Park MGM to the Linq: Bellagio, Caesars, Paris, the Cosmopolitan.
@@ -264,7 +279,7 @@ enum Destinations {
         // Barrier islands whose towns are mostly too small for the dataset.
         // Corolla came out as Currituck, on the mainland, and Ocracoke as
         // Buxton, forty kilometers up the coast.
-        destination("Outer Banks", "North Carolina", "in", the: true, aliases: ["obx"], [
+        destination("Outer Banks", "North Carolina", "in", the: true, implies: beach, aliases: ["obx"], nickname: "OBX", [
             Circle(36.500, -75.855, km: 5.5),   // Carova
             Circle(36.400, -75.835, km: 6.0),   // Corolla
             Circle(36.300, -75.800, km: 6.5),   // Pine Island and Sanderling
@@ -297,7 +312,7 @@ enum Destinations {
             Circle(44.940, -110.660, km: 8),    // Mammoth Hot Springs
             Circle(44.880, -110.250, km: 14),   // Tower and Lamar Valley
         ]),
-        destination("Grand Teton National Park", "Wyoming", "in", [
+        destination("Grand Teton National Park", "Wyoming", "in", nickname: "Grand Teton", [
             Circle(43.730, -110.700, km: 11),   // Jenny Lake, Moose and Mormon Row
             Circle(43.870, -110.600, km: 11),   // Signal Mountain, Jackson Lake Lodge and Colter Bay
         ]),
@@ -328,7 +343,7 @@ enum Destinations {
             Circle(34.000, -116.150, km: 12),   // Hidden Valley, Keys View and Jumbo Rocks
             Circle(33.920, -115.930, km: 6),    // The Cholla Cactus Garden
         ]),
-        destination("Glacier National Park", "Montana", "in", [
+        destination("Glacier National Park", "Montana", "in", nickname: "Glacier", [
             Circle(48.560, -113.940, km: 8),    // Apgar and West Glacier
             Circle(48.650, -113.800, km: 9),    // Lake McDonald Lodge and Logan Pass
             Circle(48.760, -113.600, km: 9),    // Many Glacier
@@ -346,13 +361,13 @@ enum Destinations {
             Circle(44.335, -68.220, km: 5),
             Circle(44.338, -68.059, km: 4),     // The Schoodic Peninsula
         ]),
-        destination("Great Smoky Mountains", "Tennessee", "in", the: true, aliases: ["smokies", "smoky"], [
+        destination("Great Smoky Mountains", "Tennessee", "in", the: true, aliases: ["smokies", "smoky"], nickname: "Smokies", [
             // Short of Gatlinburg and Townsend, which are towns people name.
             Circle(35.600, -83.480, km: 9),     // Newfound Gap, Clingmans Dome and the Chimney Tops
             Circle(35.655, -83.580, km: 5),     // Elkmont and Laurel Falls
             Circle(35.590, -83.820, km: 6),     // Cades Cove
         ]),
-        destination("Shenandoah National Park", "Virginia", "in", [
+        destination("Shenandoah National Park", "Virginia", "in", nickname: "Shenandoah", [
             // Skyline Drive, north to south, short of the towns at either end.
             Circle(38.860, -78.210, km: 6),
             Circle(38.790, -78.260, km: 6),
@@ -438,7 +453,7 @@ enum Destinations {
             Circle(38.360, -122.330, km: 10),   // Napa and Yountville
             Circle(38.540, -122.510, km: 10),   // St. Helena and Calistoga
         ]),
-        area("Myrtle Beach", "South Carolina", "in", aliases: ["myrtle", "beach"], [
+        area("Myrtle Beach", "South Carolina", "in", implies: beach, aliases: ["myrtle", "beach"], [
             Circle(33.850, -78.650, km: 8),     // North Myrtle Beach
             Circle(33.740, -78.830, km: 10),    // Myrtle Beach
             Circle(33.580, -79.000, km: 9),     // Surfside Beach, Garden City and Murrells Inlet

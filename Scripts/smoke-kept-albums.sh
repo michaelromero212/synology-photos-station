@@ -113,15 +113,15 @@ settings(){ curl -s -o /dev/null -X PUT "$API/v1/curation/settings" -H "$AUTH" \
 
 echo "First shown"
 T=$(titles)
-has "a trip" "Three days in Asheville" "$T"
-has "another" "Four days at Walt Disney World" "$T"
+has "a trip" "Asheville Trip 2024" "$T"
+has "another" "WDW Vacation 2025" "$T"
 has "a holiday" "Christmas 2024" "$T"
 has "and another" "Thanksgiving 2024" "$T"
 has "a birthday to name" "Birthday on August 14" "$T"
 check "both trips are kept" "2" "$(saved "kind = 'trip'")"
 check "and the holidays" "2" "$(saved "kind = 'day' AND is_holiday")"
 check "but not the question" "0" "$(saved "key = '2024-08-14'")"
-ASHEVILLE_ID=$(q "SELECT id FROM curated_albums WHERE title = 'Three days in Asheville'")
+ASHEVILLE_ID=$(q "SELECT id FROM curated_albums WHERE title = 'Asheville Trip 2024'")
 BEFORE=$(q "SELECT count(*) || ' ' || max(updated_at) FROM curated_albums")
 titles >/dev/null
 check "a visit that finds the same writes nothing" "$BEFORE" \
@@ -130,8 +130,8 @@ check "a visit that finds the same writes nothing" "$BEFORE" \
 echo "A better name"
 q "UPDATE assets SET place_name = 'Biltmore Forest, North Carolina' WHERE id IN (
      SELECT asset_id FROM space_assets WHERE filename LIKE 'a1%')" >/dev/null
-has "the rules rename the trip" "Three days in Biltmore Forest" "$(titles)"
-check "and the kept album takes the name" "Three days in Biltmore Forest" \
+has "the rules rename the trip" "Biltmore Forest Trip 2024" "$(titles)"
+check "and the kept album takes the name" "Biltmore Forest Trip 2024" \
   "$(q "SELECT title FROM curated_albums WHERE id = '$ASHEVILLE_ID'")"
 check "it's still the one album" "2" "$(saved "kind = 'trip'")"
 
@@ -139,7 +139,7 @@ echo "Refined dates"
 shoot a09 2024-09-09 15 3 ASHEVILLE; settle
 q "UPDATE assets SET place_name = 'Biltmore Forest, North Carolina' WHERE id IN (
      SELECT asset_id FROM space_assets WHERE filename LIKE 'a09%')" >/dev/null
-has "a day more makes the trip longer" "Four days in Biltmore Forest" "$(titles)"
+check "a day more makes the trip longer" "2024-09-09..2024-09-12" "$(card "Biltmore Forest Trip 2024" | cut -d' ' -f1)"
 check "as the same album, with its new dates" "2024-09-09..2024-09-12" \
   "$(q "SELECT key FROM curated_albums WHERE id = '$ASHEVILLE_ID'")"
 check "not a second one" "2" "$(saved "kind = 'trip'")"
@@ -148,7 +148,7 @@ echo "No longer found"
 q "UPDATE assets SET lat = 38.4716, lon = -77.9967, destination = NULL, place_name = 'Culpeper, Virginia'
    WHERE id IN (SELECT asset_id FROM space_assets WHERE filename LIKE 'd1%')" >/dev/null
 check "the rules no longer find the Disney trip, and it stays" "2025-03-10..2025-03-13 20" \
-  "$(card "Four days at Walt Disney World")"
+  "$(card "WDW Vacation 2025")"
 check "its photos still open" "20" "$(curl -s "$API/v1/spaces/$SPACE/collections/items?kind=trip&key=2025-03-10..2025-03-13" -H "$AUTH" | jq '["total"]')"
 
 echo "Switched off"
@@ -234,7 +234,7 @@ put w5-1 "2023-02-05T11:00" $ASHEVILLE; put w5-2 "2023-02-05T11:00" $ASHEVILLE
 # And a day that's one burst.
 for i in $(seq 1 5); do put "b12-$i" "2025-04-12T14:00" $CULPEPER; done
 settle
-lacks "a weekend away that's a burst and a few strays isn't a trip" "A weekend in Asheville" "$(titles)"
+lacks "a weekend away that's a burst and a few strays isn't a trip" "Asheville Weekend 2023" "$(titles)"
 # As if an older version had made them albums, and kept them.
 q "INSERT INTO curated_albums (space_id, user_id, kind, key, title, subtitle) VALUES
    ('$SPACE', '$USER_ID', 'trip', '2023-02-04..2023-02-05', 'A weekend in Asheville', 'February 4–5, 2023')" >/dev/null
@@ -244,7 +244,7 @@ T=$(titles)
 lacks "nor kept as one" "A weekend in Asheville" "$T"
 lacks "nor is a burst kept as an occasion" "Soccer game" "$T"
 check "both are let go" "0" "$(saved "key IN ('2023-02-04..2023-02-05', '2025-04-12')")"
-has "while the albums worth opening stay" "Four days at Walt Disney World" "$T"
+has "while the albums worth opening stay" "WDW Vacation 2025" "$T"
 
 echo "Recently Deleted"
 CHRISTMAS=$(cat "$ROOT"/ids/x25*)
@@ -258,16 +258,16 @@ has "and comes back with them" "Christmas 2024" "$(titles)"
 DISNEY=$(cat "$ROOT"/ids/d1*)
 PICKED=$(echo "$DISNEY" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read().split()))")
 for id in $DISNEY; do curl -s -o /dev/null -X DELETE "$API/v1/spaces/$SPACE/assets/$id" -H "$AUTH"; done
-lacks "an album whose photos are all deleted isn't shown" "Walt Disney World" "$(titles)"
-check "but waits in case they come back" "1" "$(saved "title LIKE '%Disney%'")"
+lacks "an album whose photos are all deleted isn't shown" "WDW Vacation 2025" "$(titles)"
+check "but waits in case they come back" "1" "$(saved "title LIKE 'WDW%'")"
 check "putting them back" "20" "$(curl -s -X POST "$API/v1/spaces/$SPACE/collections/deleted/restore" -H "$AUTH" \
   -H 'Content-Type: application/json' -d "{\"assetIDs\":$PICKED}" | jq '["updated"]')"
-check "brings it back as it was" "2025-03-10..2025-03-13 20" "$(card "Four days at Walt Disney World")"
+check "brings it back as it was" "2025-03-10..2025-03-13 20" "$(card "WDW Vacation 2025")"
 for id in $DISNEY; do curl -s -o /dev/null -X DELETE "$API/v1/spaces/$SPACE/assets/$id" -H "$AUTH"; done
 check "deleting them for good" "20" "$(curl -s -X POST "$API/v1/spaces/$SPACE/collections/deleted/purge" -H "$AUTH" \
   -H 'Content-Type: application/json' -d "{\"assetIDs\":$PICKED}" | jq '["updated"]')"
-lacks "lets the album go" "Walt Disney World" "$(titles)"
-check "and its record" "0" "$(saved "title LIKE '%Disney%'")"
+lacks "lets the album go" "WDW Vacation 2025" "$(titles)"
+check "and its record" "0" "$(saved "title LIKE 'WDW%'")"
 
 echo "Leaving a shared library"
 R=$(redeem Member); MEMBER_AUTH="Authorization: Bearer $(echo "$R" | jq '["token"]')"
@@ -278,8 +278,8 @@ INTO=$SHARED; BY=$MEMBER_AUTH
 for d in $(seq -w 1 10); do shoot "s$d-" "2025-05-$d" 9 2 CULPEPER; done
 shoot sa1 2025-06-01 9 4 ASHEVILLE; shoot sa2 2025-06-02 9 4 ASHEVILLE; shoot sa3 2025-06-03 9 4 ASHEVILLE
 INTO=""; BY=""; settle
-has "a member's trip in the shared library" "A long weekend in Asheville" "$(titles_of "$SHARED" "$MEMBER_AUTH")"
-has "which its owner sees too" "A long weekend in Asheville" "$(titles_of "$SHARED" "$AUTH")"
+has "a member's trip in the shared library" "Asheville Weekend 2025" "$(titles_of "$SHARED" "$MEMBER_AUTH")"
+has "which its owner sees too" "Asheville Weekend 2025" "$(titles_of "$SHARED" "$AUTH")"
 check "each keeping their own" "2" "$(q "SELECT count(*) FROM curated_albums WHERE space_id = '$SHARED'")"
 check "leaving" "204" "$(code -X DELETE "$API/v1/spaces/$SHARED/members/$MEMBER" -H "$MEMBER_AUTH")"
 check "takes the member's kept albums with them" "0" \
