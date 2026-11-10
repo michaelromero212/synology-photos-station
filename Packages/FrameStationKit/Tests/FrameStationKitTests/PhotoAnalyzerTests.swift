@@ -141,7 +141,14 @@ final class PhotoAnalyzerTests: XCTestCase {
         XCTAssertTrue(CGImageDestinationFinalize(destination))
 
         let analyzer = PhotoAnalyzer()
-        let age = try await analyzer.readNumbers(imageData: data as Data)
+        let age: [Int]
+        do {
+            age = try await analyzer.readNumbers(imageData: data as Data)
+        } catch let error where "\(error)".contains("e5rt") {
+            // GitHub's virtual Macs can't compile Vision's text model, and
+            // fail before reading anything. A real Mac or iPhone runs it.
+            throw XCTSkip("Vision's text recognition can't run on this machine: \(error)")
+        }
         XCTAssertEqual(age, [2])
         let nothing = try await analyzer.readNumbers(imageData: try gradientJPEG())
         XCTAssertEqual(nothing, [])
