@@ -364,6 +364,9 @@ struct CollectionsController: RouteCollection {
         /// named, in two photos at least: there, the cake says whose it was,
         /// or that it isn't plain, and nothing else is asked.
         var cakeDays: Set<String> = []
+        /// What's written in each party's photos of the cake, by day: the
+        /// numbers the owner's devices read in each. See `writtenAge`.
+        var writing: [String: [CakeWriting]] = [:]
         var isEmpty: Bool { byDay.isEmpty }
 
         func sawTheCake(on days: [String]) -> Bool { days.contains(where: cakeDays.contains) }
@@ -372,6 +375,13 @@ struct CollectionsController: RouteCollection {
         func birthday(on days: [String]) -> Presence? {
             days.lazy.compactMap { birthdays[$0] }.first
         }
+    }
+
+    /// One photo of a birthday's cake that has numbers written in it.
+    struct CakeWriting {
+        let numbers: Set<Int>
+        /// Who the owner named in it.
+        let people: Set<UUID>
     }
 
     static func namedPeople(
@@ -415,7 +425,9 @@ struct CollectionsController: RouteCollection {
             ))
             if row.day < people.firstDay[row.personID, default: "9999"] { people.firstDay[row.personID] = row.day }
         }
-        (people.birthdays, people.cakeDays) = try await birthdayPeople(userID: userID, scope: scope, on: sql)
+        (people.birthdays, people.cakeDays, people.writing) = try await birthdayPeople(
+            userID: userID, scope: scope, on: sql
+        )
         return people
     }
 
@@ -432,13 +444,15 @@ struct CollectionsController: RouteCollection {
     }
 
     /// Whose birthday each birthday party was: the person at the cake, from
-    /// the faces in the photos that show it. See `whoseBirthday`.
+    /// the faces in the photos that show it (see `whoseBirthday`). And what
+    /// those photos have written in them, for how old they turned (see
+    /// `writtenAge`).
     static func birthdayPeople(
         userID: UUID, scope: EventScope, on sql: any SQLDatabase
-    ) async throws -> (whose: [String: Presence], seen: Set<String>) {
+    ) async throws -> (whose: [String: Presence], seen: Set<String>, writing: [String: [CakeWriting]]) {
         let cakes = scope.showing.filter { scope.tags[$0.key] == "birthday" }
         let files = Array(Set(cakes.values.joined()))
-        guard !files.isEmpty else { return ([:], []) }
+        guard !files.isEmpty else { return ([:], [], [:]) }
         struct Face: Decodable {
             let sha256: String
             let personID: UUID
@@ -455,9 +469,24 @@ struct CollectionsController: RouteCollection {
               AND pf.sha256 = ANY(\(bind: files)::text[])
             """).all(decoding: Face.self)
         let byFile = Dictionary(grouping: faces, by: \.sha256)
+        // The numbers the owner's phone read in them: whole numbers from 1 to
+        // 18, never the writing (`PhotoAnalyzer.readNumbers`).
+        struct Written: Decodable { let sha256: String; let written: [Int] }
+        let written = try await sql.raw("""
+            SELECT sha256, written::int8[] AS written
+            FROM media_observations
+            WHERE user_id = \(bind: userID) AND sha256 = ANY(\(bind: files)::text[])
+              AND cardinality(written) > 0
+            """).all(decoding: Written.self)
+        let numbers = Dictionary(written.map { ($0.sha256, Set($0.written)) }, uniquingKeysWith: { a, _ in a })
+        var writing: [String: [CakeWriting]] = [:]
         var found: [String: Presence] = [:]
         var seen = Set<String>()
         for (day, files) in cakes {
+            let read = files.compactMap { file in
+                numbers[file].map { CakeWriting(numbers: $0, people: Set((byFile[file] ?? []).map(\.personID))) }
+            }
+            if !read.isEmpty { writing[day] = read }
             var seats: [UUID: CakeSeat] = [:]
             var photos = 0
             for file in files {
@@ -482,7 +511,7 @@ struct CollectionsController: RouteCollection {
             if photos >= 2 { seen.insert(day) }
             found[day] = whoseBirthday(Array(seats.values), photos: photos)
         }
-        return (found, seen)
+        return (found, seen, writing)
     }
 
     /// Whose birthday it was, from the photos of the cake: whoever is in the
@@ -627,7 +656,7 @@ struct CollectionsController: RouteCollection {
             let title: String
             switch event.tag {
             case "birthday":
-                title = birthdayTitle(first, age: days.last.flatMap { age(of: focus, on: $0, people: people) })
+                title = birthdayTitle(first, age: turned(focus, on: days, people: people))
             case "graduation":
                 title = "\(first)'s Graduation"
             default:
@@ -664,6 +693,50 @@ struct CollectionsController: RouteCollection {
             renamed = renamed.withSubtitle(parts.joined(separator: " · "))
         }
         return renamed
+    }
+
+    /// How old a child of the family turned at their party on `days`: what's
+    /// written on the cake, where two photos of it say so, since that's the
+    /// family's own word and wins over anything worked out (decided
+    /// 2026-11-10); otherwise how long since they first appeared. Never for
+    /// a parent, a friend or the owner.
+    static func turned(_ person: Presence, on days: [String], people: NamedPeople) -> Int? {
+        guard !person.isMe, isChildLike(person.relation) else { return nil }
+        return writtenAge(of: person, on: days, people: people)
+            ?? days.last.flatMap { age(of: person, on: $0, people: people) }
+    }
+
+    /// The age written in the photos of a party's cake: a "2" candle, "Happy
+    /// 2nd Birthday", a "TWO" banner (`PhotoAnalyzer.readNumbers`).
+    ///
+    /// Counted over the photos of the cake that show them, or show no one the
+    /// owner named, so a sibling's cake at the same party doesn't count. The
+    /// number has to be in two of those at least, and in more of them than
+    /// any other number. One photo alone never decides it.
+    ///
+    /// Never younger than they've been in the library: a cousin in the photos
+    /// since 2019 isn't turning 1 in 2026, whatever a candle looked like. And
+    /// never a 4 on the Fourth of July, the day's own "Happy 4th".
+    static func writtenAge(of person: Presence, on days: [String], people: NamedPeople) -> Int? {
+        var photos: [Int: Int] = [:]
+        for day in days {
+            for photo in people.writing[day] ?? []
+            where photo.people.isEmpty || photo.people.contains(person.personID) {
+                for number in photo.numbers where !(number == 4 && day.hasSuffix("-07-04")) {
+                    photos[number, default: 0] += 1
+                }
+            }
+        }
+        let ranked = photos.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
+        guard let top = ranked.first, top.value >= 2,
+              ranked.count == 1 || ranked[1].value < top.value
+        else { return nil }
+        if let first = people.firstDay[person.personID].flatMap(CivilDay.number),
+           let party = days.last.flatMap(CivilDay.number),
+           Double(top.key) < (Double(party - first) / 365.2425).rounded(.down) {
+            return nil
+        }
+        return top.key
     }
 
     /// How old a child turned on `day`, where it's plain: a child, grandchild,
@@ -736,8 +809,9 @@ struct CollectionsController: RouteCollection {
             else { return tradition }
             let first = firstName(person.name)
             let years = whose.map { year, focus -> CollectionSummary in
-                guard let focus, let day = days(inKey: year.key).last else { return year }
-                let title = age(of: focus, on: day, people: people)
+                let inYear = days(inKey: year.key)
+                guard let focus, let day = inYear.last else { return year }
+                let title = turned(focus, on: inYear, people: people)
                     .map { birthdayTitle(first, age: $0) } ?? "\(first)'s Birthday \(day.prefix(4))"
                 return year.withTitle(title)
             }

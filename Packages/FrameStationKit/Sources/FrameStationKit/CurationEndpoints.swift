@@ -71,6 +71,29 @@ extension FrameStationClient {
         }
     }
 
+    /// Photos the NAS calls a birthday whose writing this person's devices
+    /// haven't read at `readingVersion`, newest first. Always empty for
+    /// someone without People. Nil from a server that predates reading it.
+    public func pendingWriting(
+        spaceID: UUID, readingVersion: Int, limit: Int
+    ) async throws -> PendingAnalysisResponse? {
+        do {
+            return try await get(
+                "v1/spaces/\(spaceID)/curation/written/pending"
+                + "?readingVersion=\(readingVersion)&limit=\(limit)"
+            )
+        } catch FrameStationClientError.http(status: 404, reason: _) {
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func submitWriting(
+        spaceID: UUID, _ request: SubmitWrittenNumbersRequest
+    ) async throws -> SubmitObservationsResponse {
+        try await post("v1/spaces/\(spaceID)/curation/written", body: request)
+    }
+
     /// One thumbnail's bytes, straight from the NAS.
     ///
     /// Deliberately not through `ThumbnailLoader`. The analyzer looks at each
@@ -80,6 +103,20 @@ extension FrameStationClient {
         guard let url = thumbnailURL(assetID: assetID, size: size, version: version) else {
             throw FrameStationClientError.invalidURL("thumbnail")
         }
+        return try await bytes(at: url)
+    }
+
+    /// One full-screen preview's bytes, straight from the NAS, for reading
+    /// what's written in a birthday photo. Not through the image cache, for
+    /// the same reason as `thumbnailData`.
+    public func previewData(assetID: UUID) async throws -> Data {
+        guard let url = previewURL(assetID: assetID) else {
+            throw FrameStationClientError.invalidURL("preview")
+        }
+        return try await bytes(at: url)
+    }
+
+    private func bytes(at url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         if let header = authorizationHeader() {
             request.setValue(header, forHTTPHeaderField: "Authorization")

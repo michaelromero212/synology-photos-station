@@ -16,8 +16,9 @@
 #  - a face lying on its side is stood up in its picture, and an upright one
 #    isn't turned;
 #  - who was there, under a day's title; a birthday named for whose it was,
-#    with the age a child turned; a family's Christmas under their name, and
-#    Over the Years knowing whose birthday comes round;
+#    with the age a child turned, from the cake where two photos of it say so
+#    and from first appearance otherwise; a family's Christmas under their
+#    name, and Over the Years knowing whose birthday comes round;
 #  - People off forgets everyone and keeps no face templates; on, it's back;
 #  - face pictures are served, only to the owner;
 #  - Delete AI data takes it all.
@@ -278,6 +279,23 @@ has "a named day says who was there" "with Emma" "$(echo "$PAGE" | python3 -c 'i
 has "a birthday is named for whose it plainly was" "Emma's Birthday" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
 lacks "without saying how old, when that isn't plain" "Celebrating Emma" "$(echo "$PAGE" | python3 -c 'import sys,json; print([c["title"] for c in (json.load(sys.stdin).get("allOccasions") or [])])')"
 
+echo "The age written on the cake"
+# What the phone sends after reading a birthday photo's writing: a number,
+# never the writing. Emma has been in the library since it began, so first
+# appearance can't say how old she turned; her cake can.
+written(){ curl -s "$API/v1/spaces/$P1/curation/written/pending?limit=50" -H "$A1"; }
+# wrote <version> <number, or empty for none> <asset…> → accepted
+wrote(){ local body
+  body=$(python3 -c 'import json,sys; v, n, *ids = sys.argv[1:]; print(json.dumps({"readingVersion": int(v), "photos": [{"assetID": a, "numbers": [int(n)] if n else []} for a in ids]}))' "$@")
+  curl -s -X POST "$API/v1/spaces/$P1/curation/written" -H "$A1" -H 'Content-Type: application/json' -d "$body" | jq '["accepted"]'; }
+party(){ curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys,json; print(" ".join(c["title"] for c in (json.load(sys.stdin).get("allOccasions") or []) if c["key"] == sys.argv[1]))' "$1"; }
+has "her cake photos are listed for reading" "${BD[0]}" "$(written)"
+check "one photo of the cake says 2" "1" "$(wrote 1 2 "${BD[0]}")"
+check "one photo alone never says how old" "Emma's Birthday" "$(party 2025-08-09)"
+check "a second says the same" "1" "$(wrote 1 2 "${BD[1]}")"
+check "two photos of the cake say how old she turned" "Celebrating Emma's 2nd Birthday" "$(party 2025-08-09)"
+lacks "and once read, they aren't listed again" "${BD[1]}" "$(written)"
+
 echo "Named for who it was"
 # The library begins in January 2022; Thomas first appears that May, which is
 # when he arrived. His birthday party every May 12 after, and a Christmas with
@@ -324,6 +342,13 @@ until_true 60 '[ "$(q "SELECT count(*) FROM nas_faces f JOIN assets a ON a.sha25
 PAGE=$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1")
 check "whose birthday is whoever's at the cake, and how old he turned" "Celebrating Thomas's 4th Birthday" \
   "$(echo "$PAGE" | python3 -c 'import sys,json; print(" ".join(c["title"] for c in (json.load(sys.stdin).get("allOccasions") or []) if c["key"] == "2026-05-14"))')"
+# His cake says 5 where first appearance says 4: the family's own word wins
+# (decided 2026-11-10). Read again as 2, younger than the four years he's
+# been in the photos, it can't be right, and first appearance stands.
+check "two of his cake photos say 5" "2" "$(wrote 1 5 "${AC[0]}" "${AC[1]}")"
+check "where the cake and first appearance disagree, the cake wins" "Celebrating Thomas's 5th Birthday" "$(party 2026-05-14)"
+check "read again, they say 2" "2" "$(wrote 2 2 "${AC[0]}" "${AC[1]}")"
+check "never younger than he's been in the photos" "Celebrating Thomas's 4th Birthday" "$(party 2026-05-14)"
 # Her own birthday, were she the owner: not named for whoever else is there.
 curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Content-Type: application/json' -d '{"isMe":true}'
 check "the owner's own birthday isn't given to anyone else" "Birthday party" \
@@ -333,6 +358,7 @@ curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/people/$E/me" -H "$A1" -H 'Conte
 echo "People off, and on again"
 check "People can be turned off" "200" "$(code -X PUT "$API/v1/curation/settings" -H "$A1" -H 'Content-Type: application/json' -d '{"people":false}')"
 check "the settings say so" "False" "$(curl -s "$API/v1/curation" -H "$A1" | jq '["nas"]["people"]')"
+check "nor is any photo's writing read" "0" "$(written | jq '["remaining"]')"
 check "then there's no People" "404" "$(code "$API/v1/spaces/$P1/people" -H "$A1")"
 check "nor a People row" "None" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '.get("people")')"
 check "nor anyone under a title" "False" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys; print("Emma" in sys.stdin.read())')"
@@ -348,6 +374,7 @@ check "the NAS looks again, and People comes back" "yes" "$(q "SELECT CASE WHEN 
 echo "Taken away with the AI data"
 check "Delete AI data answers" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A1")"
 check "and the people go too" "0:0" "$(q "SELECT (SELECT count(*) FROM people WHERE user_id = '$U1') || ':' || (SELECT count(*) FROM person_faces WHERE user_id = '$U1')")"
+check "and what was written on the cakes" "0" "$(q "SELECT count(*) FROM media_observations WHERE user_id = '$U1' AND written IS NOT NULL")"
 
 echo
 echo "smoke-people: $PASS passed, $FAIL failed"

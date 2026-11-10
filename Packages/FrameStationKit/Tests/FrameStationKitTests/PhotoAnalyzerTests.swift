@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreText
 import FrameStationAnalysis
 import Foundation
 import ImageIO
@@ -53,5 +54,96 @@ final class PhotoAnalyzerTests: XCTestCase {
         )
         XCTAssertEqual(observation.peopleCount, 0)
         XCTAssertFalse(PhotoAnalyzer.modelVersion.isEmpty)
+    }
+
+    // MARK: - The age written in a birthday photo
+
+    func testAnAgeIsReadFromDigitsOrdinalsAndWords() {
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["2"]), [2])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy 2nd Birthday Thomas!"]), [2])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["TWO"]), [2])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy Second Birthday"]), [2])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Sweet 16"]), [16])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Wild ONE"]), [1])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Three-Rex"]), [3])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Thomas is 2 years old"]), [2])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["(2)", "\u{201C}Two\u{201D}"]), [2], "One age, said twice")
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy Birthday Thomas"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: []), [])
+    }
+
+    func testWritingThatMightNotBeAnAgeSaysNothing() {
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["4", "0"]), [], "A 40th, its candles read apart")
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["40"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["2", "5"]), [], "A 25th, or two children's cakes")
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy 2nd Birthday", "2026"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["2", "3:45"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["$5"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["#7"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["2.5"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["2\u{00BD}"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Twenty-One"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy 6 Months"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy Half Birthday", "6"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy 2nd Anniversary"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Happy 4th of July"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["July 4th"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["May 12"]), [])
+    }
+
+    /// The restaurant example, 2026-11-10: a cupcake with a single candle is
+    /// nobody's first birthday.
+    func testAPlainCandleIsNotAOne() {
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["1"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["11"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["1", "2"]), [], "A 12th, its candles read apart")
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["1", "Happy 1st Birthday"]), [1])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["11th"]), [11])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["Eleven"]), [11])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["No one does it better"]), [])
+        XCTAssertEqual(PhotoAnalyzer.numbers(in: ["The one and only"]), [])
+    }
+
+    /// A made-up picture, drawn here and never saved: a "2" candle's worth of
+    /// digit and a line of writing on a cake, at the full-screen size the
+    /// phone reads. Not a test of how well Vision reads icing, which only
+    /// real photos can judge; this checks the reading runs end to end and
+    /// comes back as one number.
+    func testAPictureOfACakeReadsAsItsAge() async throws {
+        let width = 1536, height = 2048
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.97, green: 0.93, blue: 0.88, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        func draw(_ text: String, size: CGFloat, y: CGFloat) {
+            let font = CTFontCreateWithName("Helvetica-Bold" as CFString, size, nil)
+            let attributes = [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String):
+                    CGColor(red: 0.8, green: 0.2, blue: 0.4, alpha: 1),
+            ] as [NSAttributedString.Key: Any]
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+            let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+            context.textPosition = CGPoint(x: (CGFloat(width) - bounds.width) / 2 - bounds.minX, y: y)
+            CTLineDraw(line, context)
+        }
+        draw("2", size: 240, y: 1300)
+        draw("Happy 2nd Birthday Thomas", size: 48, y: 900)
+        let image = try XCTUnwrap(context.makeImage())
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            data, UTType.jpeg.identifier as CFString, 1, nil
+        ))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let analyzer = PhotoAnalyzer()
+        let age = try await analyzer.readNumbers(imageData: data as Data)
+        XCTAssertEqual(age, [2])
+        let nothing = try await analyzer.readNumbers(imageData: try gradientJPEG())
+        XCTAssertEqual(nothing, [])
     }
 }

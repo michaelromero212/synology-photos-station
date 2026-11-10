@@ -18,6 +18,10 @@ import Observation
 /// What leaves the phone is labels, scores and counts. The thumbnail is looked
 /// at here and discarded. See ARCHITECTURE.md, "Curated albums".
 ///
+/// Once that's caught up, and only for someone with People on, the photos the
+/// NAS calls a birthday are read for the age written in them, a few at a time
+/// (`readWriting`). Whole numbers leave the phone, never the writing.
+///
 /// Nothing about what a photo showed is logged. The diagnostics export gets
 /// counts and durations only, because that file gets shared.
 @Observable
@@ -50,6 +54,10 @@ final class CurationRunner {
     private static let batchSize = 24
     /// Thumbnails fetched at once while the previous ones are analyzed.
     private static let fetchLanes = 4
+    /// Birthday photos read per round trip. Each is a full-screen copy, which
+    /// the NAS may have to make first, so they go one at a time and few to a
+    /// batch.
+    private static let readingBatchSize = 8
     /// Held back before the first photo, so opening the app is about the grid
     /// someone came to look at, not about this.
     private static let settleDelay: Duration = .seconds(3)
@@ -139,6 +147,8 @@ final class CurationRunner {
         // the diagnostics log means something.
         var busy: TimeInterval = 0
         var sent = 0
+        var reading: TimeInterval = 0
+        var read = 0
         pass: while !Task.isCancelled {
             // Looked at again while the app stays open, so a backup finishing
             // or the phone cooling down picks this up without anyone having to
@@ -159,11 +169,25 @@ final class CurationRunner {
                 state = .waiting("Can't reach your NAS")
                 break
             }
-            // Caught up. Photos keep arriving from backup while the app is
-            // open, so look again now and then rather than stopping.
+            // Caught up. Then the birthday photos' writing, a batch at a time,
+            // with the library looked at again between batches in case backup
+            // has added photos. Photos keep arriving while the app is open, so
+            // once both are done, look again now and then rather than stopping.
             guard !page.items.isEmpty else {
-                state = .finished
-                try? await Task.sleep(for: Self.caughtUpDelay)
+                let started = Date()
+                switch await readWriting(spaceID: space.id, client: client, analyzer: analyzer) {
+                case .read(let count):
+                    read += count
+                    reading += Date().timeIntervalSince(started)
+                case .caughtUp:
+                    state = .finished
+                    try? await Task.sleep(for: Self.caughtUpDelay)
+                case .stopped:
+                    break
+                case .unreachable:
+                    state = .waiting("Can't reach your NAS")
+                    break pass
+                }
                 continue
             }
             state = .analyzing
@@ -234,6 +258,82 @@ final class CurationRunner {
                 "Curation: analyzed \(sent) photos in \(Int(busy.rounded())) s"
                     + " (\(Int((busy / Double(sent) * 1000).rounded())) ms each)"
             )
+        }
+        // A count and a duration. Never what any photo said.
+        if read > 0 {
+            Diagnostics.shared.log(
+                .measurement,
+                "Curation: read the writing in \(read) photos in \(Int(reading.rounded())) s"
+            )
+        }
+    }
+
+    private enum Reading {
+        /// Read this many and sent them.
+        case read(Int)
+        /// Nothing left to read, or a NAS from before reading.
+        case caughtUp
+        /// Stopped, or held back, mid-batch. The batch is offered again.
+        case stopped
+        case unreachable
+    }
+
+    /// One batch of the photos the NAS calls a birthday, read for the age
+    /// written in them (`PhotoAnalyzer.readNumbers`), and the numbers sent.
+    ///
+    /// Each is read from its full-screen copy, since a thumbnail is too small
+    /// for a lone "2" candle, one at a time. The NAS lists none for someone
+    /// without People. A photo gone since it was listed is sent as saying
+    /// nothing; one the NAS can't make a copy of just now, as while it
+    /// restarts, waits for a later batch. Never sent anywhere else to be read
+    /// instead.
+    @available(iOS 18.0, *)
+    private func readWriting(
+        spaceID: UUID, client: FrameStationClient, analyzer: PhotoAnalyzer
+    ) async -> Reading {
+        let page: PendingAnalysisResponse?
+        do {
+            page = try await client.pendingWriting(
+                spaceID: spaceID, readingVersion: PhotoAnalyzer.readingVersion,
+                limit: Self.readingBatchSize
+            )
+        } catch {
+            return .unreachable
+        }
+        guard let page, !page.items.isEmpty else { return .caughtUp }
+        state = .analyzing
+
+        var photos: [WrittenNumbers] = []
+        for item in page.items {
+            if Task.isCancelled || holdBack != nil { return .stopped }
+            let data: Data
+            do {
+                data = try await client.previewData(assetID: item.assetID)
+            } catch FrameStationClientError.http(status: let status, reason: _) where status == 404 || status == 410 {
+                photos.append(WrittenNumbers(assetID: item.assetID, numbers: []))
+                continue
+            } catch FrameStationClientError.http(status: _, reason: _) {
+                continue
+            } catch {
+                return .unreachable
+            }
+            let numbers = (try? await Task.detached(priority: .utility) {
+                try await analyzer.readNumbers(imageData: data)
+            }.value) ?? []
+            photos.append(WrittenNumbers(assetID: item.assetID, numbers: numbers))
+        }
+        guard !photos.isEmpty else { return .caughtUp }
+
+        do {
+            let response = try await client.submitWriting(
+                spaceID: spaceID,
+                SubmitWrittenNumbersRequest(readingVersion: PhotoAnalyzer.readingVersion, photos: photos)
+            )
+            // Nothing kept means People or curation went off since the list
+            // was made: asking again would only get the same photos back.
+            return response.accepted == 0 ? .caughtUp : .read(response.accepted)
+        } catch {
+            return .unreachable
         }
     }
 

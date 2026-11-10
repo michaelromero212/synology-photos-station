@@ -440,7 +440,13 @@ faces are used for anything.
    server sends it paths, not bytes.
 2. **Can a video frame leave?** No. Frames are decoded in memory inside the
    analyzer.
-3. **Can OCR text leave?** There is no OCR.
+3. **Can OCR text leave?** No. The NAS reads no text. A person's phone reads
+   one thing, and only for someone with People on: the age written in the
+   photos the NAS calls a birthday (a "2" candle, "2nd" on the cake, a "TWO"
+   banner), with Vision, on the phone. One whole number from 1 to 18, or
+   none, is all that reaches the NAS (`media_observations.written`). The
+   writing stays in the phone's memory for the read and is never sent, kept
+   or logged. See ARCHITECTURE.md, "Every album has a reason".
 4. **Can face information leave?** No endpoint returns a face's numbers,
    they're sealed at rest, and they're never logged. The person's own devices
    get pictures of faces cropped from their own photos, which those devices

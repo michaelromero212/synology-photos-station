@@ -1,7 +1,8 @@
 #!/bin/bash
 # Curation: what a person's devices saw in their own photographs stays theirs,
 # and the Albums page turns it into occasions, holidays that look like
-# themselves, and nothing at all when it's switched off.
+# themselves, and nothing at all when it's switched off. The age written in a
+# birthday photo is read only with People on, and kept only as a number.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-curation.sh
 #
@@ -17,6 +18,7 @@ ROOT="$SCRATCH/curation"; rm -rf "$ROOT"; mkdir -p "$ROOT/blobroot" "$ROOT/files
 ROOT=$(cd "$ROOT" && pwd -P)
 export FRAMESTATION_BLOB_ROOT="$ROOT/blobroot"
 PASS=0; FAIL=0
+q(){ psql -h 127.0.0.1 -p 55432 -U framestation -d $DB -tAqc "$1"; }
 admin(){ psql -h 127.0.0.1 -p 55432 -U framestation -d postgres -tAqc "$1"; }
 ok(){ echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad(){ echo "  ✗ $1"; echo "      expected: $2"; echo "      actual:   $3"; FAIL=$((FAIL+1)); }
@@ -269,9 +271,51 @@ check "a day named by the person is their whole day" "204" "$(code -X PUT "$API/
 check "all of it" "9" "$(party_items | jq '["total"]')"
 check "and its card says so" "Lily's day=9" "$(party_card)"
 
+echo "The age written in a birthday photo"
+# The phone reads the writing in the photos the NAS calls a birthday and sends
+# whole numbers, never the writing. Only for someone with People on, which
+# needs the NAS to analyze them; set here by hand, since no analyzer runs.
+# written <space> <auth> → the list; wrote <space> <auth> <asset> <numbers> [version] → accepted
+written(){ curl -s "$API/v1/spaces/$1/curation/written/pending?limit=50" -H "$2"; }
+wrote(){ curl -s -X POST "$API/v1/spaces/$1/curation/written" -H "$2" -H 'Content-Type: application/json' \
+  -d "{\"readingVersion\":${5:-1},\"photos\":[{\"assetID\":\"$3\",\"numbers\":$4}]}" | jq '["accepted"]'; }
+written_in(){ q "SELECT o.written FROM media_observations o JOIN assets a ON a.sha256 = o.sha256 WHERE a.id = '$1'"; }
+check "nobody's writing is read without People" "0" "$(written "$SP" "$A" | jq '["remaining"]')"
+check "nor kept" "0" "$(wrote "$SP" "$A" "${PARTY[1]}" '[2]')"
+q "UPDATE users SET nas_analysis = 'shadow' WHERE display_name IN ('Curator', 'Neighbor')" >/dev/null
+for _ in $(seq 1 30); do
+  WR=$(written "$SP" "$A"); [ "$(echo "$WR" | jq '["remaining"]')" = "6" ] && break; sleep 1
+done
+check "with People, the birthday photos are listed" "6" "$(echo "$WR" | jq '["remaining"]')"
+has "the cake at the party" "${PARTY[1]}" "$WR"
+lacks "never a screenshot, though it shows the cake" "${B[0]}" "$WR"
+lacks "nor a photo that isn't a birthday" "${H[3]}" "$WR"
+check "someone else's list is a 404" "404" "$(code "$API/v1/spaces/$SP/curation/written/pending" -H "$A2")"
+check "nor can they write to it" "404" "$(code -X POST "$API/v1/spaces/$SP/curation/written" \
+  -H "$A2" -H 'Content-Type: application/json' -d '{"readingVersion":1,"photos":[]}')"
+check "a shared library's writing isn't read" "404" "$(code "$API/v1/spaces/$SHARED/curation/written/pending" -H "$A")"
+check "a number is kept" "1" "$(wrote "$SP" "$A" "${PARTY[1]}" '[2, 0, 25, 2]')"
+check "only whole numbers from 1 to 18, each once" "{2}" "$(written_in "${PARTY[1]}")"
+check "the same reading again changes nothing" "0" "$(wrote "$SP" "$A" "${PARTY[1]}" '[5]')"
+check "a newer one replaces it" "1" "$(wrote "$SP" "$A" "${PARTY[1]}" '[3]' 2)"
+check "and says what it read" "{3}" "$(written_in "${PARTY[1]}")"
+check "a photo that says nothing is kept as read" "1" "$(wrote "$SP" "$A" "${PARTY[2]}" '[]')"
+check "and neither is listed again" "4" "$(written "$SP" "$A" | jq '["remaining"]')"
+check "nothing is kept for a photo that isn't a birthday" "0" "$(wrote "$SP" "$A" "${H[3]}" '[2]')"
+check "nor for a screenshot" "0" "$(wrote "$SP" "$A" "${B[0]}" '[2]')"
+check "nor for someone else's photo" "0" "$(wrote "$SP2" "$A2" "${PARTY[3]}" '[2]')"
+check "nor from a reading that doesn't exist" "400" "$(code -X POST "$API/v1/spaces/$SP/curation/written" \
+  -H "$A" -H 'Content-Type: application/json' -d '{"readingVersion":0,"photos":[]}')"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
+check "curation off: nothing to read" "0" "$(written "$SP" "$A" | jq '["remaining"]')"
+check "curation off: nothing kept" "0" "$(wrote "$SP" "$A" "${PARTY[3]}" '[2]')"
+curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
+q "UPDATE users SET nas_analysis = 'off' WHERE display_name IN ('Curator', 'Neighbor')" >/dev/null
+
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"
 check "nothing is left" "404" "$(code "$API/v1/spaces/$SP/assets/${B[0]}/observation" -H "$A")"
+check "not even what was written in them" "0" "$(q "SELECT count(*) FROM media_observations WHERE written IS NOT NULL")"
 check "status counts none" "0" "$(curl -s "$API/v1/curation" -H "$A" | jq '["analyzed"]')"
 check "the photos themselves are untouched" "200" "$(code "$API/v1/assets/${B[0]}/thumb?size=256" -H "$A")"
 check "and search by content finds nothing" "0" "$(found birthday)"

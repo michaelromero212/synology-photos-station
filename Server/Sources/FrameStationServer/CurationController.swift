@@ -5,6 +5,7 @@ import Vapor
 
 extension SubmitObservationsRequest: @retroactive Content {}
 extension SubmitObservationsResponse: @retroactive Content {}
+extension SubmitWrittenNumbersRequest: @retroactive Content {}
 extension PendingAnalysisResponse: @retroactive Content {}
 extension CurationSettings: @retroactive Content {}
 extension UpdateCurationSettingsRequest: @retroactive Content {}
@@ -32,6 +33,8 @@ struct CurationController: RouteCollection {
         protected.delete("curation", "data", use: deleteData)
         protected.get("spaces", ":spaceID", "curation", "pending", use: pending)
         protected.post("spaces", ":spaceID", "curation", "observations", use: submit)
+        protected.get("spaces", ":spaceID", "curation", "written", "pending", use: pendingWriting)
+        protected.post("spaces", ":spaceID", "curation", "written", use: submitWriting)
         protected.get("spaces", ":spaceID", "assets", ":assetID", "observation", use: observation)
         protected.get("spaces", ":spaceID", "assets", ":assetID", "nas-observation", use: nasObservation)
     }
@@ -367,15 +370,7 @@ struct CurationController: RouteCollection {
         let context = try await Self.context(userID: device.userID, spaceID: spaceID, on: req.sql)
         guard context.enabled else { return SubmitObservationsResponse(accepted: 0) }
 
-        struct HashRow: Decodable { let id: UUID; let sha256: String }
-        let hashes = try await req.sql.raw("""
-            SELECT a.id, a.sha256
-            FROM space_assets sa
-            JOIN assets a ON a.id = sa.asset_id
-            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
-              AND a.id = ANY(\(bind: body.observations.map(\.assetID)))
-            """).all(decoding: HashRow.self)
-        let hashByAsset = Dictionary(hashes.map { ($0.id, $0.sha256) }, uniquingKeysWith: { a, _ in a })
+        let hashByAsset = try await Self.hashes(of: body.observations.map(\.assetID), in: spaceID, on: req.sql)
 
         var accepted = 0
         for observation in body.observations {
@@ -420,6 +415,132 @@ struct CurationController: RouteCollection {
         }
         req.logger.debug("curation: stored \(accepted) of \(body.observations.count) observations")
         return SubmitObservationsResponse(accepted: accepted)
+    }
+
+    /// Each photo's hash, read from its asset row through this library, never
+    /// taken from a request. An id the library doesn't hold has none.
+    static func hashes(of assetIDs: [UUID], in spaceID: UUID, on sql: any SQLDatabase) async throws -> [UUID: String] {
+        struct HashRow: Decodable { let id: UUID; let sha256: String }
+        let hashes = try await sql.raw("""
+            SELECT a.id, a.sha256
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND a.id = ANY(\(bind: assetIDs))
+            """).all(decoding: HashRow.self)
+        return Dictionary(hashes.map { ($0.id, $0.sha256) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    // MARK: - The age written in a birthday photo
+
+    /// The photos whose writing a person's devices read: a birthday by their
+    /// devices' analysis or by the NAS's, and never a screenshot or document.
+    /// Over the person's own `media_observations o`.
+    static func birthdayPhoto(userID: UUID) -> SQLQueryString {
+        """
+        NOT o.is_utility AND NOT ('utility' = ANY(o.tags))
+        AND ('birthday' = ANY(o.tags) OR EXISTS (
+            SELECT 1 FROM nas_observations n
+            WHERE n.user_id = \(bind: userID) AND n.sha256 = o.sha256
+              AND 'birthday' = ANY(n.tags) AND NOT n.is_utility
+        ))
+        """
+    }
+
+    /// The caller's birthday photos whose writing their devices haven't read
+    /// at this version, newest first: the ones that might say how old someone
+    /// turned (`CollectionsController.writtenAge`).
+    ///
+    /// None for someone without People, whose birthdays aren't named for
+    /// anyone and so never say an age, and none while curation is off. Only
+    /// photos their devices have analyzed already, which is all of them once
+    /// the regular pass has caught up.
+    @Sendable
+    func pendingWriting(req: Request) async throws -> PendingAnalysisResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let context = try await Self.context(userID: device.userID, spaceID: spaceID, on: req.sql)
+        guard context.isPersonal else { throw Abort(.notFound, reason: "No such space.") }
+        guard context.enabled, context.showsPeople else { return PendingAnalysisResponse(items: [], remaining: 0) }
+
+        let version = min(max(req.query[Int.self, at: "readingVersion"] ?? 1, 1), 1_000)
+        let limit = min(max(req.query[Int.self, at: "limit"] ?? 8, 1), Self.maxBatch)
+        let unread: SQLQueryString = """
+            FROM space_assets sa
+            JOIN assets a ON a.id = sa.asset_id
+            JOIN media_observations o ON o.user_id = \(bind: device.userID) AND o.sha256 = a.sha256
+            WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
+              AND a.derived_at IS NOT NULL
+              AND \(unsafeRaw: TimelineController.visible)
+              AND (o.written_version IS NULL OR o.written_version < \(bind: version))
+              AND \(Self.birthdayPhoto(userID: device.userID))
+            """
+
+        struct ItemRow: Decodable { let assetID: UUID; let thumbVersion: Int }
+        let items = try await req.sql.raw("""
+            SELECT a.id AS "assetID", a.thumb_version AS "thumbVersion"
+            \(unread)
+            ORDER BY \(unsafeRaw: TimelineController.localTime) DESC, a.id
+            LIMIT \(bind: limit)
+            """).all(decoding: ItemRow.self)
+        struct CountRow: Decodable { let n: Int }
+        let remaining = try await req.sql.raw("""
+            SELECT count(*)::int AS n
+            \(unread)
+            """).first(decoding: CountRow.self)?.n ?? 0
+
+        return PendingAnalysisResponse(
+            items: items.map { PendingAnalysisItem(assetID: $0.assetID, thumbVersion: $0.thumbVersion) },
+            remaining: remaining
+        )
+    }
+
+    /// Stores the numbers a device read in the caller's birthday photos.
+    ///
+    /// As `submit` does: each photo is found through the caller's own library
+    /// and its hash read from the asset row, so an id they can't see matches
+    /// nothing. Kept only for a photo `pendingWriting` would list, and only
+    /// whole numbers from 1 to 18. A photo already read at this version keeps
+    /// its first answer; a newer version replaces an older one.
+    @Sendable
+    func submitWriting(req: Request) async throws -> SubmitObservationsResponse {
+        let device = try req.auth.require(AuthenticatedDevice.self)
+        let spaceID = try req.parameters.require("spaceID", as: UUID.self)
+        let context = try await Self.context(userID: device.userID, spaceID: spaceID, on: req.sql)
+        guard context.isPersonal else { throw Abort(.notFound, reason: "No such space.") }
+
+        let body = try req.content.decode(SubmitWrittenNumbersRequest.self)
+        guard body.photos.count <= Self.maxBatch else {
+            throw Abort(.payloadTooLarge, reason: "At most \(Self.maxBatch) photos at a time.")
+        }
+        guard (1...1_000).contains(body.readingVersion) else {
+            throw Abort(.badRequest, reason: "Unrecognized reading version.")
+        }
+        guard context.enabled, context.showsPeople else { return SubmitObservationsResponse(accepted: 0) }
+
+        let hashByAsset = try await Self.hashes(of: body.photos.map(\.assetID), in: spaceID, on: req.sql)
+        var accepted = 0
+        for photo in body.photos {
+            guard let sha256 = hashByAsset[photo.assetID] else { continue }
+            let stored = try await req.sql.raw("""
+                UPDATE media_observations o
+                SET written = \(bind: Self.sanitized(numbers: photo.numbers))::smallint[],
+                    written_version = \(bind: body.readingVersion)
+                WHERE o.user_id = \(bind: device.userID) AND o.sha256 = \(bind: sha256)
+                  AND (o.written_version IS NULL OR o.written_version < \(bind: body.readingVersion))
+                  AND \(Self.birthdayPhoto(userID: device.userID))
+                RETURNING o.sha256
+                """).first()
+            if stored != nil { accepted += 1 }
+        }
+        req.logger.debug("curation: stored the writing of \(accepted) of \(body.photos.count) photos")
+        return SubmitObservationsResponse(accepted: accepted)
+    }
+
+    /// Whole numbers from 1 to 18, each once, smallest first, and no more
+    /// than a photo could sensibly say.
+    static func sanitized(numbers: [Int]) -> [Int] {
+        Array(Set(numbers.filter { (1...18).contains($0) })).sorted().prefix(8).map { $0 }
     }
 
     /// The strongest few, with confidences clamped and names kept to what a

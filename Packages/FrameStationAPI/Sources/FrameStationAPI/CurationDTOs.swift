@@ -96,6 +96,40 @@ public struct PendingAnalysisResponse: Codable, Sendable, Hashable {
     }
 }
 
+// MARK: - The age written in a birthday photo
+//
+// For a birthday album named for whose it was, how old they turned, from what
+// the family wrote: a "2" candle, "Happy 2nd Birthday" on the cake, a "TWO"
+// banner. Devices read the writing in the photos the NAS calls a birthday,
+// for someone with People on, and send whole numbers from 1 to 18, never the
+// writing. The NAS lists those photos with `PendingAnalysisResponse` and
+// answers with `SubmitObservationsResponse`.
+
+/// The numbers written in one photograph.
+public struct WrittenNumbers: Codable, Sendable, Hashable {
+    public let assetID: UUID
+    /// Whole numbers from 1 to 18, smallest first. Empty when it says none,
+    /// or says something that isn't an age.
+    public let numbers: [Int]
+
+    public init(assetID: UUID, numbers: [Int]) {
+        self.assetID = assetID
+        self.numbers = numbers
+    }
+}
+
+public struct SubmitWrittenNumbersRequest: Codable, Sendable, Hashable {
+    /// Which version of the reading produced these. A newer one replaces an
+    /// older one; the same one never replaces itself.
+    public let readingVersion: Int
+    public let photos: [WrittenNumbers]
+
+    public init(readingVersion: Int, photos: [WrittenNumbers]) {
+        self.readingVersion = readingVersion
+        self.photos = photos
+    }
+}
+
 /// A person's curation settings, held on the server so every one of their
 /// devices follows them.
 public struct CurationSettings: Codable, Sendable, Hashable {

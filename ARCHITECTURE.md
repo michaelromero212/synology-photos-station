@@ -1251,7 +1251,8 @@ whether Christmas looked like Christmas.
 **Inference happens on the family's own devices and NAS, never in a cloud.**
 The phone runs Apple's Vision framework on each photo's 512-pixel thumbnail and
 sends back what Vision named, with confidences: `birthday_cake 0.92`. It sends
-nothing else. Apple's Private Cloud Compute model, new in the iOS 27 SDK, is
+nothing else, except one number from the few photos the NAS calls a birthday:
+the age written in them (below). Apple's Private Cloud Compute model, new in the iOS 27 SDK, is
 remote inference and is never used.
 
 Since November 2026 the NAS also looks for itself, because faces need more
@@ -1274,7 +1275,8 @@ server), so two devices analyzing the same photos can't produce two albums.
 
 **What's stored is per person and keyed by the file.** `media_observations` holds
 one row per (person, SHA-256): the labels, an aesthetic score, a utility flag
-for screenshots and documents, people and animal counts, and the derived tags.
+for screenshots and documents, people and animal counts, the derived tags, and
+for a birthday photo the age written in it, if any (`written`).
 The hash survives `rebuild`, which assigns new asset ids. The server reads it
 from the asset row and never accepts one from a client, so a hash is never a
 way to ask whether a photo exists.
@@ -1299,7 +1301,9 @@ caller's own library. Shared libraries keep their date-and-place collections.
 analyzes only while the app is open, starting a few seconds after launch. It
 holds back on cellular, in Low Power Mode, while the device runs warm and
 while backup is uploading, and fetches thumbnails outside the image cache so
-browsing never loses its cached tiles to analysis. The analyzer itself,
+browsing never loses its cached tiles to analysis. Once caught up it reads the
+birthday photos' writing, a few at a time, with the library checked again
+between batches. The analyzer itself,
 `FrameStationAnalysis`, is a package target with no dependency on the
 networking client. `AnalysisBoundaryTests` fails the build if that changes, or
 if the Private Cloud Compute model appears anywhere. The Information panel
@@ -1337,10 +1341,34 @@ An album the page makes has to say what it is, and be worth opening.
   it's whoever is in the most photos showing the cake, in two at least and
   half of those with anyone named in them. A child of the family in nearly
   as many wins over an adult, since a child's parents are at their cake too.
-  Twins, a tie, or the owner's own birthday leave the title as it was. The
-  age is how many years it's been since the child first appears in the
-  library, where that's within three weeks of a whole year (their arrival).
-  Nothing reads the numbers or writing on a cake.
+  Twins, a tie, or the owner's own birthday leave the title as it was.
+- **How old they turned is what the cake says.** Only a child of the family
+  gets an age: a son, daughter, grandchild, niece, nephew or cousin, never a
+  parent or the owner. A cupcake brought to a parent at a restaurant says
+  nothing about anyone's age (the user's example, 2026-11-10).
+  - *On the phone:* for someone with People on, once the regular pass has
+    caught up, the phone reads the writing in the photos the NAS calls a
+    birthday, never a screenshot (`PhotoAnalyzer.readNumbers`). It reads the
+    full-screen copy, since a lone "2" candle can't be read at 512 pixels. It
+    sends one whole number from 1 to 18 or none, never the writing
+    (`media_observations.written`, with its own version, so only birthday
+    photos are ever read again).
+  - *What says nothing:* a photo whose writing might not be about an age says
+    nothing at all. That covers another number ("40", "2026", "3:45"), two
+    different ages (candles read apart, or two children's cakes), a date, "6
+    months" and an anniversary. A plain candle looks like a "1" to a text
+    reader, so a bare "1" or "11" in digits says nothing on its own; "1st"
+    and "ONE" do count.
+  - *On the NAS:* each number is counted over the cake photos that show the
+    child or show no one named, so a sibling's cake doesn't count. It has to
+    be in two of them at least, and in more of them than any other number.
+    It's never younger than the time the child has been in the library, and
+    never a 4 on the Fourth of July.
+  - *First appearance:* without a number from the cake, the age is how many
+    years it's been since the child first appears in the library, where
+    that's within three weeks of a whole year (their arrival). When the two
+    disagree, the cake wins (decided 2026-11-10): first appearance is a year
+    off for anyone first photographed at their own first birthday.
 
 ### Curated albums are kept as the rules improve
 

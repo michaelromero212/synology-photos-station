@@ -16,6 +16,11 @@ written. Implementation started 2026-10-05, after the answers recorded in §8.
 - No album rows are stored yet. Detected events reuse the existing day and
   trip cards, which keeps every older app able to open them.
 - Saved albums with per-photo edits are the next phase (phase 4).
+- One kind of text is read, since 2026-11-10: the age written in a birthday
+  photo, a "2" candle or "Happy 2nd Birthday". Only for someone with People
+  on, only in the photos the NAS calls a birthday, and only a whole number
+  from 1 to 18 reaches the NAS, never the writing. See ARCHITECTURE.md,
+  "Every album has a reason".
 
 The current design is in ARCHITECTURE.md, "Curated albums". Faces, videos
 and the NAS's own analyzer, in shadow mode since 2026-11-05, are in
@@ -143,7 +148,7 @@ tvOS 18**, one release above the app's current minimums.
 | `RecognizeAnimalsRequest` | iOS 18 | Pets. |
 | `GenerateImageFeaturePrintRequest` | iOS 18 | Visual similarity, for near-duplicates and splitting a day into sub-events. This is v2: a feature print is an embedding (spec §35). |
 | `DetectLensSmudgeRequest` | iOS 26 | A quality signal for covers. |
-| `RecognizeTextRequest`, `RecognizeDocumentsRequest` | iOS 18 / iOS 26 | OCR. **Not in v1**: it carries the spec §37 risks, and 512 px thumbnails read poorly anyway. |
+| `RecognizeTextRequest`, `RecognizeDocumentsRequest` | iOS 18 / iOS 26 | OCR. **Not in v1**: it carries the spec §37 risks, and 512 px thumbnails read poorly anyway. Since 2026-11-10, `RecognizeTextRequest` reads one thing: the age written in a birthday photo, from its full-screen copy (a lone "2" candle isn't read at 512 px). Only the number leaves the phone. |
 
 The older `VN…` API reaches back to iOS 13 for classification, but aesthetics
 needs iOS 18 either way. The simplest path is to run the analyzer only on iOS 18
@@ -343,7 +348,10 @@ A worker in the style of `DerivationWorker` and `RetentionWorker`.
   the existing TLS connection with the device token. Nothing goes to any third
   party, and there are no analytics SDKs in the app.
 - **Not stored in v1:** OCR text, face data, embeddings, model-written
-  descriptions, and location beyond what `assets` already holds.
+  descriptions, and location beyond what `assets` already holds. OCR text is
+  still never stored or sent. Since 2026-11-10 a birthday photo's
+  observation can hold one whole number from 1 to 18, the age written in it
+  (`media_observations.written`).
 - **Logging:** ids, versions, durations and counts. Never labels, titles, places
   or filenames. The in-app diagnostics log is exported as Markdown and shared,
   so anything written to it leaves the house.
@@ -439,7 +447,7 @@ images, and those stay out of the repo and out of CI (spec §53, Q8).
 |---|---|---|---|
 | 1 | Can an original leave? | No. Analysis reads the phone's own Photos copy or NAS thumbnails, and sends only observations to the NAS, which already holds the original. | Network capture during analysis shows only NAS traffic. |
 | 2 | A video frame? | No. Frames are sampled in memory. | Same capture, and a code review of the frame path. |
-| 3 | OCR text? | None is produced in v1. | No text-recognition requests in the analyzer target. |
+| 3 | OCR text? | None leaves the phone. Since 2026-11-10 the phone reads the writing in the photos the NAS calls a birthday, for someone with People on, and sends one whole number from 1 to 18 or none. The writing stays in memory for the read and is never sent, kept or logged. | `PhotoAnalyzer.readNumbers` returns `[Int]` and is the only text-recognition request in the analyzer target. `testWrittenNumbersTravelAsNumbersOnly` holds the wire format to an id and numbers. |
 | 4 | Face information? | Counts only: no landmarks, embeddings or identity. | Schema review. |
 | 5 | GPS? | Observations carry none. Titles use the coarse `place_name` that already exists. | Schema review. |
 | 6 | Embeddings? | None are stored in v1. | Schema review. |

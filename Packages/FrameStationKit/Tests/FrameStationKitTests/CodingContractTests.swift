@@ -173,6 +173,22 @@ final class CodingContractTests: XCTestCase {
         XCTAssertEqual(decoded, original)
     }
 
+    /// What a phone sends about a birthday photo's writing: an id and the
+    /// numbers, and no field that could carry the writing itself.
+    func testWrittenNumbersTravelAsNumbersOnly() throws {
+        let original = SubmitWrittenNumbersRequest(
+            readingVersion: 1, photos: [WrittenNumbers(assetID: UUID(), numbers: [2])]
+        )
+        let data = try FrameStationCoding.encoder.encode(original)
+        XCTAssertEqual(try FrameStationCoding.decoder.decode(SubmitWrittenNumbersRequest.self, from: data), original)
+
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["readingVersion", "photos"])
+        let photo = try XCTUnwrap((json["photos"] as? [[String: Any]])?.first)
+        XCTAssertEqual(Set(photo.keys), ["assetID", "numbers"])
+        XCTAssertEqual(photo["numbers"] as? [Int], [2])
+    }
+
     func testPlatformCoversEveryClientTarget() {
         // The server CHECK constraint on devices.platform must stay in step.
         XCTAssertEqual(
