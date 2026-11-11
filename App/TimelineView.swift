@@ -3299,30 +3299,34 @@ struct TimelineView: View {
         // that already holds it, which is both fewer steps and the same gesture
         // the phone uses. A button that only put you *into* a mode, leaving you
         // to then go and pick something, was the longer road to the same place.
-        if !selection.isActive {
-            // The three zoom levels as one control, the way Photos does it.
-            //
-            // These were a pair of ⌘+ / ⌘− buttons, which is a *relative*
-            // control for what is really a choice between three named things:
-            // going from years to days meant pressing the same button twice
-            // and watching to see where you ended up. A segmented control
-            // shows all three, says which one you are on, and reaches any of
-            // them in one click.
-            //
-            // The labels are Apple's — "All Photos" rather than "Days" —
-            // because that is the wording anyone who has used Photos already
-            // has, and our `.day` zoom is the same thing it names.
-            ToolbarItem(placement: .principal) {
-                Picker("Zoom", selection: zoomBinding) {
-                    Text("Years").tag(TimelineZoom.year)
-                    Text("Months").tag(TimelineZoom.month)
-                    Text("All Photos").tag(TimelineZoom.day)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-                .disabled(store == nil)
+        //
+        // The three zoom levels as one control, the way Photos does it.
+        //
+        // These were a pair of ⌘+ / ⌘− buttons, which is a *relative*
+        // control for what is really a choice between three named things:
+        // going from years to days meant pressing the same button twice
+        // and watching to see where you ended up. A segmented control
+        // shows all three, says which one you are on, and reaches any of
+        // them in one click.
+        //
+        // The labels are Apple's — "All Photos" rather than "Days" —
+        // because that is the wording anyone who has used Photos already
+        // has, and our `.day` zoom is the same thing it names.
+        //
+        // Up while selecting too, as in Photos. It used to go with the rest of
+        // the browsing controls, and the bar jumped every time a selection
+        // began; but how close you are to the library has nothing to do with
+        // what's picked, which a change of zoom keeps.
+        ToolbarItem(placement: .principal) {
+            Picker("Zoom", selection: zoomBinding) {
+                Text("Years").tag(TimelineZoom.year)
+                Text("Months").tag(TimelineZoom.month)
+                Text("All Photos").tag(TimelineZoom.day)
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 260)
+            .disabled(store == nil)
         }
         #endif
 
