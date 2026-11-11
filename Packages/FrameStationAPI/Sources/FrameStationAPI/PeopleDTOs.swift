@@ -24,12 +24,21 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
     public let relation: String?
     /// The library's owner themself: "This is me".
     public let isMe: Bool
+    /// Where they go on the People page, as a `PersonTier` raw value: the
+    /// NAS decides who's suggested for a name and who waits behind More
+    /// People. Nil from a NAS older than tiers. See `place`.
+    public let tier: String?
 
     public var relationship: Relationship? { relation.flatMap(Relationship.init(rawValue:)) }
 
+    /// Where they go: an older NAS's unnamed people are all shown, as before.
+    public var place: PersonTier {
+        tier.flatMap(PersonTier.init(rawValue:)) ?? (name != nil || isMe ? .named : .suggested)
+    }
+
     public init(
         id: UUID, name: String?, photoCount: Int, face: String, questions: Int = 0,
-        relation: String? = nil, isMe: Bool = false
+        relation: String? = nil, isMe: Bool = false, tier: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -38,10 +47,11 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
         self.questions = questions
         self.relation = relation
         self.isMe = isMe
+        self.tier = tier
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, photoCount, face, questions, relation, isMe
+        case id, name, photoCount, face, questions, relation, isMe, tier
     }
 
     /// What's been added since the first People server is read as absent
@@ -56,7 +66,19 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
         questions = try c.decodeIfPresent(Int.self, forKey: .questions) ?? 0
         relation = try c.decodeIfPresent(String.self, forKey: .relation)
         isMe = try c.decodeIfPresent(Bool.self, forKey: .isMe) ?? false
+        tier = try c.decodeIfPresent(String.self, forKey: .tier)
     }
+}
+
+/// Where someone goes on the People page. The NAS decides; see
+/// `PeopleController.Tier`.
+public enum PersonTier: String, Codable, Sendable {
+    /// Named, or the owner: on top.
+    case named
+    /// Unnamed, but seen often over many days: under the named.
+    case suggested
+    /// Seen more than once: behind More People.
+    case more
 }
 
 /// Who someone is to the library's owner, in the word the owner chose. The

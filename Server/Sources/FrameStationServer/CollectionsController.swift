@@ -313,7 +313,8 @@ struct CollectionsController: RouteCollection {
         // so no row.
         let people = curation.showsPeople
             ? try await PeopleController.summaries(
-                userID: device.userID, spaceID: spaceID, limit: PeopleController.pageLimit, on: req.sql
+                userID: device.userID, spaceID: spaceID, limit: PeopleController.pageLimit,
+                withMore: false, on: req.sql
             )
             : nil
 

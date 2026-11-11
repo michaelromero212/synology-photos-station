@@ -31,10 +31,6 @@ enum PeopleMetrics {
         return 104
         #endif
     }
-
-    /// How many people the Albums page carries; see
-    /// `PeopleController.pageLimit`. A row this full may have more behind it.
-    static let pageLimit = 20
 }
 
 // MARK: - A face
@@ -174,17 +170,30 @@ struct PersonBubble: View {
 // MARK: - Everyone
 
 /// Everyone the NAS found, as a grid of faces: the named first, then the
-/// rest by how many photos they're in.
+/// unnamed the NAS thinks they know, and everyone else behind one More People
+/// row. A page of every face at once was too much to go through (his word,
+/// 2026-11-11); the NAS decides who goes where (`PersonSummary.place`).
 struct PeopleListView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
+    /// The page behind More People: just those, with no further row.
+    var onlyMore = false
 
     @State private var people: [PersonSummary]
 
-    init(session: AppSession, space: SpaceDTO, initial: [PersonSummary]) {
+    init(session: AppSession, space: SpaceDTO, initial: [PersonSummary], onlyMore: Bool = false) {
         self.session = session
         self.space = space
+        self.onlyMore = onlyMore
         _people = State(initialValue: initial)
+    }
+
+    private var shown: [PersonSummary] {
+        people.filter { onlyMore ? $0.place == .more : $0.place != .more }
+    }
+
+    private var more: [PersonSummary] {
+        onlyMore ? [] : people.filter { $0.place == .more }
     }
 
     var body: some View {
@@ -193,7 +202,7 @@ struct PeopleListView: View {
                 columns: [GridItem(.adaptive(minimum: PeopleMetrics.rowFace + 14), spacing: 14)],
                 spacing: 22
             ) {
-                ForEach(people) { person in
+                ForEach(shown) { person in
                     NavigationLink {
                         PersonView(session: session, space: space, person: person)
                     } label: {
@@ -203,8 +212,19 @@ struct PeopleListView: View {
                 }
             }
             .padding(16)
+
+            if !more.isEmpty {
+                NavigationLink {
+                    PeopleListView(session: session, space: space, initial: more, onlyMore: true)
+                } label: {
+                    MorePeopleRow(session: session, spaceID: space.id, people: more)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
         }
-        .navigationTitle("People")
+        .navigationTitle(onlyMore ? "More People" : "People")
         .floatingTabBarClearance()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -218,7 +238,45 @@ struct PeopleListView: View {
         guard let client = session.client,
               let everyone = try? await client.people(spaceID: space.id)
         else { return }
-        people = everyone
+        people = onlyMore ? everyone.filter { $0.place == .more } : everyone
+    }
+}
+
+/// The one row that stands for everyone behind More People: a few of their
+/// faces, overlapping, and how many there are.
+struct MorePeopleRow: View {
+    let session: AppSession
+    let spaceID: UUID
+    let people: [PersonSummary]
+
+    private static let face: CGFloat = 40
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: -Self.face * 0.3) {
+                ForEach(people.prefix(4)) { person in
+                    FaceCircle(session: session, spaceID: spaceID, source: .person(person), diameter: Self.face)
+                        .overlay(Circle().stroke(.background, lineWidth: 2))
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("More People")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(people.count == 1 ? "1 more person" : "\(people.count) more people")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("More People, \(people.count)")
     }
 }
 

@@ -197,6 +197,11 @@ until_true 30 all_cut
 check "each person's circle is cut before anyone asks" "yes" "$(all_cut && echo yes || echo no)"
 has "and the server says so" "of 2 face circles" "$(cat "$ROOT/server.log")"
 check "in 8 and 7 photos" "8,7" "$(echo "$PEOPLE" | python3 -c 'import sys,json; print(",".join(str(p["photoCount"]) for p in json.load(sys.stdin)["people"]))')"
+tiers(){ python3 -c 'import sys,json; print(",".join(str(p.get("tier")) for p in json.load(sys.stdin)["people"]))'; }
+# 20+ photos over 5+ days to be suggested for a name; fewer, over 2+ days,
+# waits behind More People. See PeopleController.Tier.
+check "seen on 8 and 7 days, but in under 20 photos: behind More People" "more,more" "$(echo "$PEOPLE" | tiers)"
+check "and so not on the page's People row" "0" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '["people"].__len__()')"
 check "a stranger in one photo isn't anyone" "0" "$(q "SELECT count(*) FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.width IN (661, 662, 663)")"
 check "two faces in one photo are two people" "2" "$(q "SELECT count(DISTINCT person_id) FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id = '${BOTH[0]}' AND pf.state = 'auto'")"
 E=$(q "SELECT pf.person_id FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id = '${EMMA[0]}' LIMIT 1")
@@ -205,6 +210,8 @@ J=$(q "SELECT pf.person_id FROM person_faces pf JOIN assets a ON a.sha256 = pf.s
 echo "Naming"
 check "naming answers with the person" "Emma" "$(curl -s -X PUT "$API/v1/spaces/$P1/people/$E" -H "$A1" -H 'Content-Type: application/json' -d '{"name":"  Emma "}' | jq '["name"]')"
 has "the page's People row starts with her" "Emma" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys,json; print([p.get("name") for p in json.load(sys.stdin)["people"]][0])')"
+check "named, she's on top; Jack still waits behind More People" "named,more" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | tiers)"
+check "and the row is just her" "1" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '["people"].__len__()')"
 check "her photos are a collection" "8" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=person&key=$E" -H "$A1" | jq '["total"]')"
 ITEMS=$(curl -s "$API/v1/spaces/$P1/collections/items?kind=person&key=$E" -H "$A1")
 check "newest first" "${BOTH[1]}" "$(echo "$ITEMS" | jq '["items"][0]["assetID"]')"

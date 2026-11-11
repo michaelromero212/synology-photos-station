@@ -157,11 +157,31 @@ struct PeopleController: RouteCollection {
 
     // MARK: - Summaries
 
-    /// The people to show, named first and then by how many photos they're
-    /// in. Someone unnamed needs three photos to be shown; a stranger in one
-    /// background isn't anyone.
+    /// Who someone unnamed must be to get a circle, and to be suggested for
+    /// a name. Measured on his library (2026-11-11): every person he named is
+    /// in 95+ photos across 26+ days, while 155 unnamed circles ran from a
+    /// stranger in 3 photos at one party up. A page of all of them was too
+    /// much to go through (his word), so the NAS sorts them, as Photos does,
+    /// rather than asking anyone to:
+    /// - suggested: in many photos over many days, someone they know. Up to
+    ///   `suggestedLimit`, those seen on the most days first, under the named;
+    /// - more: seen more than once, behind one More People row;
+    /// - no circle: one day only, or a handful of photos. Their photos stay,
+    ///   and they come back on their own once they turn up on other days.
+    enum Tier {
+        static let suggestedPhotos = 20
+        static let suggestedDays = 5
+        static let suggestedLimit = 18
+        static let morePhotos = 5
+        static let moreDays = 2
+    }
+
+    /// The people to show, named first, then those suggested for a name,
+    /// then the rest; see `Tier`. `withMore` false leaves out the rest, for
+    /// the Albums page's row.
     static func summaries(
-        userID: UUID, spaceID: UUID, limit: Int, only: UUID? = nil, on sql: any SQLDatabase
+        userID: UUID, spaceID: UUID, limit: Int, only: UUID? = nil, withMore: Bool = true,
+        on sql: any SQLDatabase
     ) async throws -> [PersonSummary] {
         struct Row: Decodable {
             let id: UUID
@@ -170,26 +190,57 @@ struct PeopleController: RouteCollection {
             let isMe: Bool
             let photos: Int
             let questions: Int
+            let tier: String
         }
-        let filter: SQLQueryString = only.map { "AND p.id = \(bind: $0)" } ?? ""
+        // Tiers are decided over everyone before one person is picked out,
+        // so someone's tier is the same on their own and in the list.
+        let filter: SQLQueryString = only.map { "AND t.id = \(bind: $0)" } ?? ""
+        let more: SQLQueryString = withMore ? "" : "AND t.tier <> 'more'"
         let rows = try await sql.raw("""
-            SELECT p.id, p.name, p.relation, p.is_me AS "isMe", count(DISTINCT pf.sha256)::int AS photos,
+            WITH counted AS (
+                SELECT p.id, p.name, p.relation, p.is_me,
+                       count(DISTINCT pf.sha256)::int AS photos,
+                       -- Days apart, by the clock where each was taken.
+                       count(DISTINCT a.local_captured_at::date)::int AS days
+                FROM people p
+                JOIN person_faces pf ON pf.person_id = p.id AND pf.state IN ('auto', 'confirmed')
+                JOIN assets a ON a.sha256 = pf.sha256
+                JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID)
+                                    AND sa.deleted_at IS NULL
+                WHERE p.user_id = \(bind: userID) AND NOT p.hidden
+                  AND \(unsafeRaw: TimelineController.visible)
+                GROUP BY p.id, p.name, p.relation, p.is_me
+            ), judged AS (
+                SELECT *,
+                       (name IS NOT NULL OR is_me) AS named,
+                       (name IS NULL AND NOT is_me
+                        AND photos >= \(bind: Tier.suggestedPhotos) AND days >= \(bind: Tier.suggestedDays)) AS likely
+                FROM counted
+            ), ranked AS (
+                SELECT *, row_number() OVER (PARTITION BY likely ORDER BY days DESC, photos DESC, id) AS place
+                FROM judged
+            ), t AS (
+                SELECT *,
+                       CASE WHEN named THEN 'named'
+                            WHEN likely AND place <= \(bind: Tier.suggestedLimit) THEN 'suggested'
+                            WHEN photos >= \(bind: Tier.morePhotos) AND days >= \(bind: Tier.moreDays) THEN 'more'
+                       END AS tier
+                FROM ranked
+            )
+            SELECT t.id, t.name, t.relation, t.is_me AS "isMe", t.photos, t.tier,
                    (SELECT count(*)::int FROM person_faces q
-                    WHERE q.person_id = p.id AND q.state = 'suggested') AS questions
-            FROM people p
-            JOIN person_faces pf ON pf.person_id = p.id AND pf.state IN ('auto', 'confirmed')
-            JOIN assets a ON a.sha256 = pf.sha256
-            JOIN space_assets sa ON sa.asset_id = a.id AND sa.space_id = \(bind: spaceID)
-                                AND sa.deleted_at IS NULL
-            WHERE p.user_id = \(bind: userID) AND NOT p.hidden
-              AND \(unsafeRaw: TimelineController.visible)
+                    WHERE q.person_id = t.id AND q.state = 'suggested') AS questions
+            FROM t
+            WHERE t.tier IS NOT NULL
+              \(more)
               \(filter)
-            GROUP BY p.id, p.name, p.relation, p.is_me
-            HAVING count(DISTINCT pf.sha256) >= CASE WHEN p.name IS NULL THEN 3 ELSE 1 END
             -- Family and the owner first, then everyone else named, then the
-            -- rest; the most photographed first in each.
-            ORDER BY (p.is_me OR (p.relation IS NOT NULL AND p.relation <> 'friend')) DESC,
-                     (p.name IS NOT NULL) DESC, photos DESC, p.id
+            -- suggested by how many days they're seen on, then the rest by
+            -- how many photos they're in.
+            ORDER BY CASE t.tier WHEN 'named' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,
+                     (t.is_me OR (t.relation IS NOT NULL AND t.relation <> 'friend')) DESC,
+                     CASE WHEN t.tier = 'suggested' THEN t.place ELSE 0 END,
+                     t.photos DESC, t.id
             LIMIT \(bind: limit)
             """).all(decoding: Row.self)
         guard !rows.isEmpty else { return [] }
@@ -200,7 +251,7 @@ struct PeopleController: RouteCollection {
         return rows.map {
             PersonSummary(id: $0.id, name: $0.name, photoCount: $0.photos,
                           face: cover[$0.id] ?? "none", questions: $0.name == nil ? 0 : $0.questions,
-                          relation: $0.relation, isMe: $0.isMe)
+                          relation: $0.relation, isMe: $0.isMe, tier: $0.tier)
         }
     }
 

@@ -632,8 +632,8 @@ struct AlbumsView: View {
 
     /// The people the NAS found in this library, the named first, along a row
     /// of faces the way Photos draws People. Absent for a library the NAS
-    /// doesn't analyze, from a server that predates it, and until someone has
-    /// been found in three photos.
+    /// doesn't analyze, from a server that predates it, and until the NAS
+    /// has found someone worth a circle.
     ///
     /// Right under the standing shelves: who's in the photos is the next thing
     /// people come to the page for, ahead of anything the library noticed.
@@ -644,8 +644,9 @@ struct AlbumsView: View {
                 HStack(alignment: .firstTextBaseline) {
                     sectionHeader("People")
                     Spacer(minLength: 8)
-                    // Only when there may be more than the row holds.
-                    if people.count >= PeopleMetrics.pageLimit {
+                    // Always: the row leaves out those behind More People,
+                    // so there's more on the page even when the row is short.
+                    if !people.isEmpty {
                         NavigationLink {
                             PeopleListView(session: session, space: space, initial: people)
                         } label: {
@@ -2177,7 +2178,7 @@ extension AlbumsView {
         if let people = found.people {
             macSection(
                 "people", "People",
-                destination: people.count >= PeopleMetrics.pageLimit
+                destination: !people.isEmpty
                     ? { AnyView(PeopleListView(session: session, space: space, initial: people)) }
                     : nil,
                 inset: people.isEmpty
@@ -2186,7 +2187,7 @@ extension AlbumsView {
                     MacEmptySection(
                         symbol: "person.2", title: "No People Yet",
                         message: "As your NAS looks through your photos and videos, the "
-                            + "people in them appear here, once they're in three or more."
+                            + "people you photograph most appear here."
                     )
                 } else {
                     VStack(alignment: .leading, spacing: 0) {
