@@ -1222,7 +1222,9 @@ Banks", which says the place in full.
 is that trip, or the holiday there, "Christmas in Clearwater Beach 2012"; a
 holiday at home is "Christmas 2012"; a day that was an occasion is that
 occasion. Only a day that was none of those is its place or its date. The
-place is the day's own where the photo has none.
+place is the day's own where the photo has none, and the trip is any trip,
+however long ago. Where no photo that day says where it was, a holiday a
+family travels for is still its name: "Christmas 2012".
 
 **Trips taken every year are a tradition.** The same name less its year in
 three years or more is an Over the Years card of its own: "OBX Beach Week ·

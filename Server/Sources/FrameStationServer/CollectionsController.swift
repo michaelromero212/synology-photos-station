@@ -264,8 +264,10 @@ struct CollectionsController: RouteCollection {
         let photos = curation.enabled && curation.isPersonal
             ? try await featuredPhotos(
                 spaceID: spaceID, userID: device.userID, today: today, seed: seed,
+                // Every trip, not only the forty the page lists: a photo
+                // from Christmas 2012 is from a trip far older than those.
                 naming: FeaturedDays(
-                    trips: trips, occasions: occasions.map(\.summary), holidays: holidays,
+                    trips: trips + everyTrip, occasions: occasions.map(\.summary), holidays: holidays,
                     awayHolidays: tripHolidays, home: tripsFound.away.values.lazy.compactMap(\.home).first
                 ),
                 on: req.sql
@@ -998,6 +1000,11 @@ struct CollectionsController: RouteCollection {
                 return "\(holiday) \(Whereabouts(label: place).locative) \(year)"
             }
             if let holiday = holidays[day] { return "\(holiday) \(year)" }
+            // Where no photo that day says where it was, the holiday a family
+            // travels for is still its name: "Christmas 2012", not "December
+            // 25, 2012". Only a day known to be at home asks it to look like
+            // itself.
+            if place == nil, let holiday = awayHolidays[day] { return "\(holiday) \(year)" }
             return occasions.first { CollectionsController.days(inKey: $0.key).contains(day) }?.title
         }
     }
