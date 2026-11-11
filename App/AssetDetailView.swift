@@ -1088,7 +1088,7 @@ struct AssetDetailView: View {
             }
             .scrollTargetLayout()
         }
-        .modifier(OnePageAtATime(gap: Self.pageGap))
+        .modifier(OnePageAtATime(gap: Self.pageGap, pageCount: macPages.count))
         .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -1124,6 +1124,10 @@ struct AssetDetailView: View {
         .onChange(of: displayedItem.id) { _, new in
             if scrolledID != new { scrolledID = new }
             macFocus.currentID = new
+            // For the grid, which shows this photo when the viewer closes —
+            // not the one it opened on, which a swipe may have left far
+            // behind. See `MacTimelineChrome`.
+            onFocus(displayedItem)
             // ⌘→ from a zoomed photo: the one you left drops back to fit, and
             // the pager mustn't stay locked on its account.
             macZoomed = false
@@ -2171,9 +2175,12 @@ private struct InformationSheet: View {
 private struct OnePageAtATime: ViewModifier {
     /// The black between pages. See `SwipePaging`.
     let gap: CGFloat
+    /// How many there are, for a resize to find the one showing. See
+    /// `SwipePaging.updateTarget`.
+    let pageCount: Int
 
     func body(content: Content) -> some View {
-        content.scrollTargetBehavior(SwipePaging(gap: gap))
+        content.scrollTargetBehavior(SwipePaging(gap: gap, pageCount: pageCount))
     }
 }
 #endif

@@ -21,7 +21,9 @@ struct AlbumDetailView: View {
     /// Whether this screen has asked the NAS for your libraries again. See
     /// `space(of:)`.
     @State private var refreshedSpaces = false
-    @Environment(\.dismiss) private var dismiss
+    /// Back to the Albums page, once the album has been deleted or left. See
+    /// `DismissHandle` for why it isn't read from the environment here.
+    @State private var leave = DismissHandle()
     #if os(iOS)
     @State private var showPicker = false
     /// The library's viewer, over the app. See `OverlayViewer`.
@@ -65,6 +67,7 @@ struct AlbumDetailView: View {
             }
         }
         .navigationTitle(album.name)
+        .background { DismissCatcher(handle: leave) }
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
         #if os(iOS)
@@ -299,7 +302,7 @@ struct AlbumDetailView: View {
     /// have been taken out.
     private func settingsClosed() {
         if wasDeleted {
-            dismiss()
+            leave.dismiss()
         } else {
             if let fresh = store.albums.first(where: { $0.id == album.id }) {
                 album = fresh
@@ -346,4 +349,33 @@ struct AlbumDetailView: View {
         }
     }
     #endif
+}
+
+/// The navigation stack's dismiss action, held for a screen that has to call
+/// it without reading it.
+///
+/// Reading `\.dismiss` makes a view depend on it, and while a photo is open
+/// on top of the view the stack hands out a new one on each update. Each new
+/// one re-rendered the screen under the photo, which rebuilt the photo's
+/// viewer and its toolbar, which made the stack hand out another: on a Mac,
+/// measured at a hundred times a second inside one layout pass, and the window
+/// never came back. Read by `DismissCatcher` instead, only an empty view
+/// follows it.
+@MainActor
+final class DismissHandle {
+    fileprivate var action: DismissAction?
+
+    func dismiss() { action?() }
+}
+
+/// Keeps a `DismissHandle` holding the current dismiss action.
+private struct DismissCatcher: View {
+    let handle: DismissHandle
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        // A property of a class nothing observes: no update follows from it.
+        let _ = (handle.action = dismiss)
+        Color.clear
+    }
 }

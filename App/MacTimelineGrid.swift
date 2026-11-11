@@ -108,6 +108,39 @@ struct MacGridLayout {
         return low
     }
 
+    /// The row a photograph is drawn in, given the day it belongs to.
+    func row(of id: UUID, inDay index: Int) -> MacGridRow? {
+        guard days.indices.contains(index),
+              let entry = days[index].entries.firstIndex(where: {
+                  if case .item(let item) = $0 { return item.id == id }
+                  return false
+              })
+        else { return nil }
+        let day = days[index]
+        for row in rows[rows(from: day.start, to: day.start + day.height)] {
+            if row.day == index, case .tiles(let range, _) = row.kind, range.contains(entry) {
+                return row
+            }
+        }
+        return nil
+    }
+
+    /// The first photograph in the rows from `top` to `reach` below it, and
+    /// the row it's in. Nil where those rows are still placeholders.
+    func photo(atTop top: CGFloat, reach: CGFloat) -> (id: UUID, key: String, row: MacGridRow)? {
+        for index in rows(from: top, to: top + reach) {
+            let row = rows[index]
+            guard case .tiles(let range, _) = row.kind else { continue }
+            let day = days[row.day]
+            for entry in range {
+                if case .item(let item) = day.entries[entry] {
+                    return (item.id, day.bucket.key, row)
+                }
+            }
+        }
+        return nil
+    }
+
     /// The library as the scrubber measures it: every day's start and height
     /// in content coordinates, exact rather than estimated.
     /// The day and photograph at a point, if it is on one.
@@ -403,6 +436,9 @@ final class MacGridController {
     enum Target: Equatable {
         case y(Double)
         case day(String)
+        /// A photograph, by its id and its day: on screen, and left where it
+        /// is if it already was.
+        case item(UUID, day: String)
     }
 
     struct Request: Equatable {
@@ -415,6 +451,7 @@ final class MacGridController {
 
     func scroll(toY y: Double) { send(.y(y)) }
     func jump(toDay key: String) { send(.day(key)) }
+    func reveal(item id: UUID, inDay key: String) { send(.item(id, day: key)) }
 
     private func send(_ target: Target) {
         serial += 1
@@ -434,6 +471,10 @@ enum MacGridMemory {
         /// Resting on the newest row, which is where the library opens and
         /// where it should stay as new photographs arrive.
         let atEnd: Bool
+        /// The first photograph at the top, and how far below the top its
+        /// row began. Found first: a window resized while you were elsewhere
+        /// reflows every day, and `into` would land on other photographs.
+        var photo: (id: UUID, key: String, offset: CGFloat)?
     }
 
     static var places: [UUID: Place] = [:]
@@ -671,6 +712,10 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         // the window to correct afterwards — which is the gap that used to sit
         // under the newest day after coming back from another page.
         if let place = MacGridMemory.places[space], !place.atEnd,
+           let photo = place.photo, let index = layout.dayIndex[photo.key],
+           let row = layout.row(of: photo.id, inDay: index) {
+            _position = State(initialValue: ScrollPosition(y: max(row.y - photo.offset, 0)))
+        } else if let place = MacGridMemory.places[space], !place.atEnd,
            let index = layout.dayIndex[place.day] {
             let day = layout.days[index]
             _position = State(initialValue: ScrollPosition(y: day.start + min(place.into, day.height)))
@@ -691,6 +736,12 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         /// the offset put every return a heading's height off.
         var top: CGFloat = 0
         var atEnd = true
+        /// The content's height in the last report, to tell a new layout
+        /// from a scroll. See `scrolled`.
+        var content: CGFloat = 0
+        /// The photograph last brought back from the viewer, held still
+        /// through a new layout for as long as it's on screen. See `relaid`.
+        var revealed: (id: UUID, key: String)?
         /// How much of the content fits between the toolbar and the window's
         /// bottom edge.
         var viewport: CGFloat = 0
@@ -972,10 +1023,19 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     // MARK: Scrolling
 
     private func scrolled(_ sample: ScrollSample) {
+        // The content changing height under a scroll that hasn't moved is a
+        // new layout, not a scroll, and whether it was resting on the newest
+        // row is `relaid`'s to keep, from before the change. A resize reports
+        // the new height first: read as a scroll, the newest row no longer
+        // reached the window's bottom, `relaid` let go of the end, and a photo
+        // opened from there came back six thousand points below the window.
+        let relaidOnly = abs(sample.top - tracker.top) < 0.5
+            && abs(sample.content - tracker.content) > 0.5
         tracker.visible = sample.visible
         tracker.top = sample.top
+        tracker.content = sample.content
         // Within a row's gap of the end counts as resting on it.
-        tracker.atEnd = sample.bottom >= sample.content - 24
+        if !relaidOnly { tracker.atEnd = sample.bottom >= sample.content - 24 }
         tracker.viewport = sample.bottom - sample.top
         updateWindow()
         remember()
@@ -1040,11 +1100,16 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
     private func remember() {
         guard tracker.visible.height > 0, let index = layout.day(at: tracker.top) else { return }
         let day = layout.days[index]
+        let top = layout.photo(atTop: tracker.top, reach: Self.photoReach)
         MacGridMemory.places[space] = MacGridMemory.Place(
             day: day.bucket.key, into: max(tracker.top - day.start, 0),
-            atEnd: tracker.atEnd
+            atEnd: tracker.atEnd,
+            photo: top.map { ($0.id, $0.key, $0.row.y - tracker.top) }
         )
     }
+
+    /// How far down the window to look for a photograph to hold still.
+    static var photoReach: CGFloat { 400 }
 
     /// Keeps the same photographs on screen when the layout changes under them.
     ///
@@ -1099,6 +1164,16 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
             }
             return
         }
+        // A new width or density reflows every day, so a distance into the
+        // day at the top no longer lands on the same photographs — at half
+        // the width a day is twice as tall. A photograph is held still
+        // instead: the one just brought back from the viewer while it's on
+        // screen, or else the first at the top of the window. Not for
+        // photographs arriving or leaving, which animate by the day below.
+        if !animated, let target = heldPhotoTarget(in: old, top: top) {
+            if abs(target - top) > 0.5 { move(to: target) }
+            return
+        }
         guard let index = old.day(at: top) else { return }
         let before = old.days[index]
         // The day at the top, or — if it was the one that went — the first
@@ -1112,6 +1187,27 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         if abs(target - top) > 0.5 {
             move(to: target)
         }
+    }
+
+    /// Where the scroll goes for a photograph on screen to stay where it was
+    /// through a new layout. Nil when there's none to hold: a stretch still
+    /// loading, or a photograph that has gone.
+    private func heldPhotoTarget(in old: MacGridLayout, top: CGFloat) -> CGFloat? {
+        var held: (id: UUID, key: String, y: CGFloat)?
+        if let revealed = tracker.revealed, let index = old.dayIndex[revealed.key],
+           let row = old.row(of: revealed.id, inDay: index),
+           row.y >= top, row.y + row.height <= top + tracker.viewport {
+            held = (revealed.id, revealed.key, row.y)
+        } else {
+            tracker.revealed = nil
+            if let first = old.photo(atTop: top, reach: Self.photoReach) {
+                held = (first.id, first.key, first.row.y)
+            }
+        }
+        guard let held, let index = layout.dayIndex[held.key],
+              let row = layout.row(of: held.id, inDay: index)
+        else { return nil }
+        return max(row.y - (held.y - top), 0)
     }
 
     /// Keeps the content `height` tall until a change has played — a little
@@ -1136,6 +1232,15 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
             if let index = layout.dayIndex[key] {
                 position.scrollTo(y: layout.days[index].start)
             }
+        case .item(let id, let key):
+            guard let index = layout.dayIndex[key],
+                  let row = layout.row(of: id, inDay: index)
+            else { return }
+            tracker.revealed = (id, key)
+            let top = tracker.top, viewport = tracker.viewport
+            // Already in full view: left where it is.
+            if viewport > 0, row.y >= top, row.y + row.height <= top + viewport { return }
+            position.scrollTo(y: max(row.y + row.height / 2 - viewport / 2, 0))
         }
     }
 }

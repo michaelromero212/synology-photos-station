@@ -19,6 +19,9 @@ import SwiftUI
 struct SwipePaging: ScrollTargetBehavior {
     /// The black between pages: each page is the window wide plus this.
     let gap: CGFloat
+    /// How many pages there are, to tell which one is showing from the
+    /// content's own width while a resize is under way. See `updateTarget`.
+    var pageCount = 0
 
     /// How far a swipe and its glide must carry the page for it to turn, as a
     /// share of a page: about a hand's width on a large window.
@@ -30,13 +33,42 @@ struct SwipePaging: ScrollTargetBehavior {
         let stride = context.containerSize.width + gap
         guard stride > 1 else { return }
         let travelable = max(0, context.contentSize.width - context.containerSize.width)
+        let lastPage = (travelable / stride + 0.01).rounded(.down)
+        // A resize rather than a swipe: nothing moved and nothing was thrown.
+        // SwiftUI asks on every frame of one, telling the new width before
+        // the pages have been laid out at it, so the offset is still in the
+        // old width's units. Read as a swipe, that gap was a tenth of a page
+        // or more, and every tiling of the window turned the page, leaving the
+        // photo half off the screen and the viewer naming another. Stay on the
+        // page that was showing, measured by the pages' own spacing, at the
+        // new width.
+        if let page = Self.pageShowing(
+            at: target.rect.minX, from: context.originalTarget.rect.minX,
+            speed: context.velocity.dx, contentWidth: context.contentSize.width,
+            pageCount: pageCount
+        ) {
+            target.rect.origin.x = min(max(page, 0), lastPage) * stride
+            return
+        }
         target.rect.origin.x = Self.offset(
             from: context.originalTarget.rect.minX,
             proposed: target.rect.minX,
             speed: context.velocity.dx,
             stride: stride,
-            lastPage: (travelable / stride + 0.01).rounded(.down)
+            lastPage: lastPage
         )
+    }
+
+    /// The page on screen, where the scroll view is asking about a change of
+    /// size or layout rather than a swipe: nil for a swipe.
+    static func pageShowing(
+        at proposed: CGFloat, from start: CGFloat, speed: CGFloat,
+        contentWidth: CGFloat, pageCount: Int
+    ) -> CGFloat? {
+        guard pageCount > 0, contentWidth > 0, speed == 0, abs(proposed - start) < 0.5 else {
+            return nil
+        }
+        return (proposed / (contentWidth / CGFloat(pageCount))).rounded()
     }
 
     /// Where a swipe that began at `start` ends, given where the scroll view

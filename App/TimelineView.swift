@@ -114,9 +114,16 @@ struct TimelineView: View {
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
-    /// Pops this grid when it was pushed. Unused when it is a tab's root.
-    @Environment(\.dismiss) private var dismiss
     #if os(iOS)
+    /// Pops this grid when it was pushed. Unused when it is a tab's root.
+    ///
+    /// The phone's only: nothing on a Mac calls it, and reading it there tied
+    /// the library to the navigation stack's dismiss action, which the stack
+    /// hands out afresh while a photo is open on top of it. Each new one
+    /// re-rendered the library, which rebuilt the viewer and its toolbar,
+    /// which made the stack hand out another — measured on a Mac at a hundred
+    /// times a second inside one layout pass, a window that never came back.
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
 
@@ -864,8 +871,25 @@ struct TimelineView: View {
             isDropTargeted: $isDropTargeted,
             space: space,
             session: session,
-            uploads: macUploads
+            uploads: macUploads,
+            onReturn: { macReturn(to: $0) }
         )
+    }
+
+    /// Back from the viewer: the grid shows the photo you were looking at —
+    /// the one you opened, or wherever a swipe took you — the way Photos does.
+    ///
+    /// The grid stays put behind the viewer, and resizing the window while a
+    /// photo is open reflows it there. At half the width a day is twice as
+    /// tall, so the photo you'd opened could come back thousands of points
+    /// below the window, and the grid looked as if it had stopped anywhere.
+    private func macReturn(to item: TimelineItem) {
+        guard let store,
+              let key = store.items.first(where: { _, items in
+                  items.contains { $0.id == item.id }
+              })?.key
+        else { return }
+        macGridController.reveal(item: item.id, inDay: key)
     }
 
     /// What right-click offers, over whatever is actually picked.
@@ -3711,6 +3735,10 @@ private struct MacTimelineChrome: ViewModifier {
     let space: SpaceDTO
     @Bindable var session: AppSession
     let uploads: MacUploads
+    /// The viewer closed on this photo. See `TimelineView.macReturn`.
+    let onReturn: (TimelineItem) -> Void
+    /// The photo the open viewer is showing.
+    @State private var showing: TimelineItem?
 
     func body(content: Content) -> some View {
         content
@@ -3718,8 +3746,17 @@ private struct MacTimelineChrome: ViewModifier {
                 AssetDetailView(
                     item: opened.item, space: space, session: session,
                     dayItems: opened.dayItems, pageItems: opened.pageItems,
-                    showsInfoInitially: opened.showsInfo
+                    showsInfoInitially: opened.showsInfo,
+                    onFocus: { showing = $0 }
                 )
+            }
+            .onChange(of: openItem) { old, new in
+                if let new {
+                    showing = new.item
+                } else if let shown = showing ?? old?.item {
+                    showing = nil
+                    onReturn(shown)
+                }
             }
             .fileImporter(
                 isPresented: $showFileImporter,

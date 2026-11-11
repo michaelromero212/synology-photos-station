@@ -69,7 +69,6 @@ struct SearchView: View {
     @State private var isLoadingPlaces = true
     @State private var isSearching = false
     @State private var failure: String?
-    @Environment(\.dismiss) private var dismiss
 
     private let spacing: CGFloat = PhotoGridMetrics.spacing
 
