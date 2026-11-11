@@ -494,10 +494,29 @@ enum CurationVocabulary {
 
     // MARK: - Keeping stored tags current
 
+    /// Photos re-derived per statement, and so per commit.
+    static let retagPage = 500
+
+    /// One photo's tags as `retag` writes them back, named as its statement
+    /// reads them.
+    struct Retagged: Encodable {
+        let user_id: UUID
+        let sha256: String
+        let tags: [String]
+        let terms: [String]
+        let words: [String]
+    }
+
     /// Re-derives the tags of every photo stored under an older vocabulary.
     ///
-    /// Runs once at boot, in the background, in pages, so a rules change
-    /// reaches the whole library without anyone re-analyzing a photograph.
+    /// Runs once at boot, in the background, so a rules change reaches the
+    /// whole library without anyone re-analyzing a photograph. A page at a
+    /// time, along the primary key, so each page moves on whatever the one
+    /// before it wrote, and written back in one statement per page. One
+    /// statement per photo was one commit, and so one wait on the NAS's
+    /// disks, per photo: vocabulary 6 was still going after fifteen minutes
+    /// there (2026-11-11), the Albums page half old rules and half new
+    /// meanwhile. On this Mac, 20,000 photos took 9.3 s that way.
     static func retag(on app: Application) async {
         struct Row: Decodable {
             let userID: UUID
@@ -506,6 +525,8 @@ enum CurationVocabulary {
             let peopleCount: Int
         }
         let sql = app.sql
+        let started = ContinuousClock.now
+        var after = (userID: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)), sha256: "")
         var updated = 0
         do {
             while true {
@@ -513,29 +534,40 @@ enum CurationVocabulary {
                     SELECT user_id AS "userID", sha256, labels::text AS labels,
                            people_count AS "peopleCount"
                     FROM media_observations
-                    WHERE vocabulary_version < \(bind: version)
-                    LIMIT 500
+                    WHERE (user_id, sha256) > (\(bind: after.userID), \(bind: after.sha256))
+                      AND vocabulary_version < \(bind: version)
+                    ORDER BY user_id, sha256
+                    LIMIT \(bind: retagPage)
                     """).all(decoding: Row.self)
-                if rows.isEmpty { break }
-                for row in rows {
+                guard let last = rows.last else { break }
+                after = (last.userID, last.sha256)
+                let page = rows.map { row in
                     let labels = (try? JSONDecoder().decode(
                         [ObservedLabel].self, from: Data(row.labels.utf8)
                     )) ?? []
                     let tags = tags(for: labels, peopleCount: row.peopleCount)
                     let terms = terms(labels: labels, tags: tags)
-                    try await sql.raw("""
-                        UPDATE media_observations
-                        SET tags = \(bind: tags),
-                            terms = \(bind: terms),
-                            words = \(bind: words(of: terms)),
-                            vocabulary_version = \(bind: version)
-                        WHERE user_id = \(bind: row.userID) AND sha256 = \(bind: row.sha256)
-                        """).run()
+                    return Retagged(
+                        user_id: row.userID, sha256: row.sha256, tags: tags, terms: terms, words: words(of: terms)
+                    )
                 }
+                let json = String(decoding: try JSONEncoder().encode(page), as: UTF8.self)
+                try await sql.raw("""
+                    UPDATE media_observations AS o
+                    SET tags = v.tags, terms = v.terms, words = v.words,
+                        vocabulary_version = \(bind: version)
+                    FROM jsonb_to_recordset(\(bind: json)::jsonb)
+                         AS v(user_id uuid, sha256 text, tags text[], terms text[], words text[])
+                    WHERE o.user_id = v.user_id AND o.sha256 = v.sha256
+                    """).run()
                 updated += rows.count
+                // A breath between pages, so the app's own requests come first.
+                try? await Task.sleep(for: .milliseconds(20))
             }
             if updated > 0 {
-                app.logger.info("curation: retagged \(updated) photos for vocabulary \(version)")
+                let elapsed = ContinuousClock.now - started
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                app.logger.info("curation: retagged \(updated) photos for vocabulary \(version) in \(String(format: "%.1f", seconds)) s")
             }
         } catch {
             app.logger.error("curation: retagging stopped: \(error)")

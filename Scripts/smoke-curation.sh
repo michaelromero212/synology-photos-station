@@ -382,6 +382,20 @@ check "curation off: nothing kept" "0" "$(wrote "$SP" "$A" "${PARTY[3]}" '[2]')"
 curl -s -X PUT "$API/v1/curation/settings" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null
 q "UPDATE users SET nas_analysis = 'off' WHERE display_name IN ('Curator', 'Neighbor')" >/dev/null
 
+echo "A rules change reaches what was already analyzed"
+# As if every photo had been tagged under an old vocabulary, and wrongly: the
+# boot after a rules change reads them all again, a page per statement.
+STALE=$(q "SELECT count(*) FROM media_observations")
+q "UPDATE media_observations SET tags = '{}', terms = '{}', words = '{}', vocabulary_version = 1" >/dev/null
+kill $SERVER; wait $SERVER 2>/dev/null
+"$BIN" serve --hostname 127.0.0.1 --port $PORT >> "$ROOT/server.log" 2>&1 &
+SERVER=$!
+for _ in $(seq 1 120); do curl -s -o /dev/null "$API/health" && break; sleep 0.5; done
+for _ in $(seq 1 120); do grep -q "curation: retagged" "$ROOT/server.log" && break; sleep 0.5; done
+has "every photo is read again at boot" "curation: retagged $STALE photos" "$(cat "$ROOT/server.log")"
+check "none is left on the old rules" "0" "$(q "SELECT count(*) FROM media_observations WHERE vocabulary_version = 1")"
+check "and the lake day is a lake day again" "Lake day" "$(card "$SP" "$A" 2020-05-25)"
+
 echo "Deleting the AI data"
 check "delete answers 204" "204" "$(code -X DELETE "$API/v1/curation/data" -H "$A")"
 check "nothing is left" "404" "$(code "$API/v1/spaces/$SP/assets/${B[0]}/observation" -H "$A")"

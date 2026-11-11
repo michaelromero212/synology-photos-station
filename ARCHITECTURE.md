@@ -1318,8 +1318,14 @@ also the security design for face data.
 labels to tags (cake and candles → `birthday`) and tags to occasions, with a
 version number. Tuning it after feedback is a server update rather than an app
 update, and the server re-derives stored tags at boot, so no photo is analyzed
-twice because a rule changed. Only one thing ever writes an album (the
-server), so two devices analyzing the same photos can't produce two albums.
+twice because a rule changed. It writes 500 photos per statement, so a page
+is one commit: one per photo kept the NAS's disks waiting once a photo, and
+vocabulary 6 was still being read after fifteen minutes (2026-11-11), the
+Albums page half old rules and half new meanwhile. On this Mac, 20,000 photos
+went from 9.3 s to 3.0 s, and from 20,000 commits to 40. The NAS's own
+scoring writes its pages the same way. Only one thing ever writes an album
+(the server), so two devices analyzing the same photos can't produce two
+albums.
 
 **What's stored is per person and keyed by the file.** `media_observations` holds
 one row per (person, SHA-256): the labels, an aesthetic score, a utility flag

@@ -259,7 +259,7 @@ actor NASScorer {
     func score(userID: UUID, sha256: String) async {
         do {
             let rows = try await stored(where: "n.user_id = \(bind: userID) AND n.sha256 = \(bind: sha256)")
-            for row in rows { try await save(row) }
+            try await save(rows)
         } catch {
             app.logger.error("analysis: couldn't score \(sha256.prefix(8)): \(String(reflecting: error))")
         }
@@ -279,29 +279,55 @@ actor NASScorer {
             """).all(decoding: Stored.self)
     }
 
-    private func save(_ row: Stored) async throws {
-        // Scenes from another model would be scored against the wrong
-        // vectors; they wait for concepts made from theirs.
-        guard row.models.contains("scene=\(concepts.visionModel)"), let scene = row.scene else { return }
-        let logits = concepts.logits(scene: scene.littleEndianFloats(), frames: row.frames)
-        let observation = NASScoring.observation(
-            logits: logits, concepts: concepts, calibration: calibration, peopleCount: row.people
-        )
-        let labels = String(decoding: try JSONEncoder().encode(observation.labels), as: UTF8.self)
+    /// One file's scores as `save` writes them, named as its statement reads
+    /// them.
+    private struct Scored: Encodable {
+        let user_id: UUID
+        let sha256: String
+        let labels: [ObservedLabel]
+        let people_count: Int
+        let tags: [String]
+        let terms: [String]
+        let words: [String]
+    }
+
+    /// Scores files and writes them all in one statement, so a page is one
+    /// commit rather than one per file, which on the NAS's disks was a wait
+    /// per file (see `CurationVocabulary.retag`). Returns how many it wrote.
+    @discardableResult
+    private func save(_ rows: [Stored]) async throws -> Int {
+        let scored: [Scored] = rows.compactMap { row in
+            // Scenes from another model would be scored against the wrong
+            // vectors; they wait for concepts made from theirs.
+            guard row.models.contains("scene=\(concepts.visionModel)"), let scene = row.scene else { return nil }
+            let logits = concepts.logits(scene: scene.littleEndianFloats(), frames: row.frames)
+            let observation = NASScoring.observation(
+                logits: logits, concepts: concepts, calibration: calibration, peopleCount: row.people
+            )
+            return Scored(
+                user_id: row.userID, sha256: row.sha256, labels: observation.labels,
+                people_count: observation.peopleCount, tags: observation.tags,
+                terms: observation.terms, words: observation.words
+            )
+        }
+        guard !scored.isEmpty else { return 0 }
+        let json = String(decoding: try JSONEncoder().encode(scored), as: UTF8.self)
         try await app.sql.raw("""
             INSERT INTO nas_observations
                 (user_id, sha256, labels, people_count, tags, terms, words,
                  vocabulary_version, scoring, scored_at)
-            VALUES (\(bind: row.userID), \(bind: row.sha256), \(bind: labels)::jsonb,
-                    \(bind: observation.peopleCount), \(bind: observation.tags),
-                    \(bind: observation.terms), \(bind: observation.words),
-                    \(bind: CurationVocabulary.version), \(bind: scoring), now())
+            SELECT v.user_id, v.sha256, v.labels, v.people_count, v.tags, v.terms, v.words,
+                   \(bind: CurationVocabulary.version), \(bind: scoring), now()
+            FROM jsonb_to_recordset(\(bind: json)::jsonb)
+                 AS v(user_id uuid, sha256 text, labels jsonb, people_count smallint,
+                      tags text[], terms text[], words text[])
             ON CONFLICT (user_id, sha256) DO UPDATE SET
                 labels = EXCLUDED.labels, people_count = EXCLUDED.people_count,
                 tags = EXCLUDED.tags, terms = EXCLUDED.terms, words = EXCLUDED.words,
                 vocabulary_version = EXCLUDED.vocabulary_version,
                 scoring = EXCLUDED.scoring, scored_at = now()
             """).run()
+        return scored.count
     }
 
     /// Whatever an older concept set, calibration or vocabulary scored, a
@@ -318,8 +344,10 @@ actor NASScorer {
                 AND n.models LIKE \(bind: "%scene=\(concepts.visionModel)%")
                 """, limit: 200)
             if rows.isEmpty { break }
-            for row in rows { try await save(row) }
-            done += rows.count
+            // A page with nothing it can score would come back every time.
+            let saved = try await save(rows)
+            guard saved > 0 else { break }
+            done += saved
             try await Task.sleep(for: .milliseconds(50))
         }
         if done > 0 {
