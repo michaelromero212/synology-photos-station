@@ -1,3 +1,4 @@
+import FrameStationAPI
 import Foundation
 import SQLKit
 import Vapor
@@ -19,7 +20,7 @@ struct AnalysisCommand: AsyncCommandGroup {
     var commands: [String: any AnyAsyncCommand] {
         [
             "status": Status(), "enroll": Enroll(), "remove": Remove(), "verify": Verify(),
-            "time-grouping": TimeGrouping(),
+            "time-grouping": TimeGrouping(), "people-matches": PeopleMatches(),
         ]
     }
 
@@ -135,6 +136,100 @@ struct AnalysisCommand: AsyncCommandGroup {
                 "\(signature.faces) faces: the first pass found \(plan.created.count) people in \(firstTook); "
                 + "the next placed \(again.newAuto.count) more faces in \(secondTook)."
             )
+        }
+    }
+
+    /// What folding unnamed people into the people someone named would do,
+    /// before anything does it. For each unnamed person with a circle: where
+    /// they are on the People page, the named person they look most like and
+    /// how much, the runner-up, and what each would get under the proposed
+    /// thresholds. Then, for scale, how alike the named people are to each
+    /// other: siblings set the floor for anything done without asking.
+    /// Reads only; writes and logs nothing.
+    ///
+    ///     sudo docker compose exec server ./FrameStationServer analysis people-matches "Michael Romero"
+    struct PeopleMatches: AsyncCommand {
+        struct Signature: CommandSignature {
+            @Argument(name: "person", help: "Display name, DSM account name or id")
+            var person: String
+        }
+        var help: String { "Report which unnamed people look like someone named. Changes nothing." }
+
+        /// Proposed, to be set from what this prints.
+        static let fold: Float = 0.62
+        static let foldMargin: Float = 0.08
+        static let ask: Float = 0.45
+
+        func run(using context: CommandContext, signature: Signature) async throws {
+            let app = context.application
+            let sql = app.sql
+            let console = context.console
+            let person = try await AnalysisCommand.find(signature.person, sql: sql)
+            struct Space: Decodable { let id: UUID }
+            guard let space = try await sql.raw("""
+                SELECT s.id FROM spaces s
+                JOIN space_members m ON m.space_id = s.id AND m.user_id = \(bind: person.id)
+                WHERE s.kind = 'personal' LIMIT 1
+                """).first(decoding: Space.self)
+            else { throw Abort(.notFound, reason: "\(person.name) has no personal library.") }
+
+            let blobRoot = Environment.get("FRAMESTATION_BLOB_ROOT") ?? "/data"
+            let seal = try FaceSeal.existing(secretsDirectory: (blobRoot as NSString).appendingPathComponent("secrets"))
+            let clusterer = PeopleClusterer(app: app, seal: seal)
+            let (library, _) = try await clusterer.load(person.id)
+            let likeness = PeopleClusterer.likenesses(library)
+
+            // The page as the app draws it, so each one can be found there.
+            let page = try await PeopleController.summaries(
+                userID: person.id, spaceID: space.id, limit: PeopleController.listLimit, on: sql
+            )
+            let names = Dictionary(uniqueKeysWithValues: page.compactMap { p in p.name.map { (p.id, $0) } })
+            var position: [UUID: String] = [:]
+            var counts: [PersonTier: Int] = [:]
+            for p in page {
+                counts[p.place, default: 0] += 1
+                switch p.place {
+                case .named: position[p.id] = "named"
+                case .suggested: position[p.id] = "Suggested #\(counts[p.place]!)"
+                case .more: position[p.id] = "More People #\(counts[p.place]!)"
+                }
+            }
+            func pct(_ s: Float) -> String { String(format: "%.2f", s) }
+            func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
+
+            console.info("\(person.name): \(library.faces.count) faces, \(names.count) named, "
+                + "\(counts[.suggested] ?? 0) suggested, \(counts[.more] ?? 0) under More People.")
+            console.info("Proposed: fold in at \(pct(Self.fold))+ and \(pct(Self.foldMargin)) clear of the runner-up; ask at \(pct(Self.ask))+.")
+            console.info("")
+            console.info(pad("Where", 18) + pad("Photos", 8) + pad("Looks most like", 26) + pad("Runner-up", 26) + "Would")
+            var tally: [String: Int] = [:]
+            for p in page where p.place != .named {
+                // Never someone they're in a photo with, or someone the owner
+                // already said a face of theirs isn't.
+                let list = (likeness[p.id] ?? []).filter { !$0.together && $0.rejected == 0 }
+                guard let best = list.first else {
+                    tally["-", default: 0] += 1
+                    continue
+                }
+                let second = list.dropFirst().first
+                let margin = best.similarity - (second?.similarity ?? -1)
+                let would = best.similarity >= Self.fold && margin >= Self.foldMargin ? "fold in"
+                    : best.similarity >= Self.ask ? "ask" : "-"
+                tally[would, default: 0] += 1
+                guard would != "-" else { continue }
+                console.info(pad(position[p.id] ?? "?", 18) + pad("\(p.photoCount)", 8)
+                    + pad("\(names[best.person] ?? "?") \(pct(best.similarity))", 26)
+                    + pad(second.map { "\(names[$0.person] ?? "?") \(pct($0.similarity))" } ?? "", 26) + would)
+            }
+            console.info("")
+            console.info("Would fold in \(tally["fold in"] ?? 0), ask about \(tally["ask"] ?? 0), leave \(tally["-"] ?? 0).")
+            console.info("")
+            console.info("Named people and the other named person they look most like (siblings set the floor):")
+            for p in page where p.place == .named {
+                guard let best = likeness[p.id]?.first(where: { !$0.together }) ?? likeness[p.id]?.first else { continue }
+                console.info("  " + pad(p.name ?? "?", 24) + "\(names[best.person] ?? "?") \(pct(best.similarity))"
+                    + (best.together ? " (in photos together)" : ""))
+            }
         }
     }
 

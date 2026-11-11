@@ -168,7 +168,7 @@ actor PeopleClusterer {
         var suggestions: [(face: Int, person: UUID, similarity: Float)] = []
     }
 
-    private struct Membership: Decodable {
+    struct Membership: Decodable, Sendable {
         let sha256: String
         let ordinal: Int
         let personID: UUID
@@ -177,6 +177,27 @@ actor PeopleClusterer {
 
     func refresh(userID: UUID) async throws {
         let started = ContinuousClock.now
+        let (library, orphans) = try await load(userID)
+
+        // Off this actor, so a person naming someone never waits on a pass.
+        let input = library
+        let plan = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: Self.plan(input))
+            }
+        }
+
+        try await write(userID: userID, library: library, plan: plan, orphans: orphans)
+        let elapsed = ContinuousClock.now - started
+        let ms = Int(Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15)
+        if !plan.newAuto.isEmpty || !plan.created.isEmpty || !plan.merges.isEmpty {
+            app.logger.info("people: \(plan.newAuto.count) faces placed, \(plan.created.count) new people, \(plan.merges.count) merged, \(plan.suggestions.count) questions, \(library.faces.count) faces in \(ms) ms")
+        }
+    }
+
+    /// One library as it stands: its faces, opened, and who each one is.
+    /// Reads only.
+    func load(_ userID: UUID) async throws -> (library: Library, orphans: [Membership]) {
         var library = try await loadFaces(userID)
         let byKey = Dictionary(uniqueKeysWithValues: library.faces.indices.map { (library.faces[$0].key, $0) })
 
@@ -208,21 +229,47 @@ actor PeopleClusterer {
                 break
             }
         }
+        return (library, orphans)
+    }
 
-        // Off this actor, so a person naming someone never waits on a pass.
-        let input = library
-        let plan = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.plan(input))
+    /// How alike two people are, for `analysis people-matches`: cosine
+    /// between their average faces, and how many of the first's faces the
+    /// owner said aren't the second.
+    struct Likeness: Sendable {
+        let person: UUID
+        let similarity: Float
+        let rejected: Int
+        /// The two share a photo frame, so they can't be one person.
+        let together: Bool
+    }
+
+    /// For each person, everyone named, closest first. Pure, reads and
+    /// writes nothing; a report of what folding unnamed people into named
+    /// ones would do, before anything does it.
+    static func likenesses(_ library: Library) -> [UUID: [Likeness]] {
+        guard library.vectors.count == library.faces.count * dimensions else { return [:] }
+        var centroids = Centroids()
+        for id in library.people { _ = centroids.append(id: id, named: library.named.contains(id)) }
+        var out: [UUID: [Likeness]] = [:]
+        library.vectors.withUnsafeBufferPointer { buffer in
+            let vectors = buffer.baseAddress!
+            for m in library.members { centroids.add(m.face, to: m.person, faces: library.faces, vectors: vectors) }
+            let named = (0..<centroids.count).filter { centroids.named[$0] && centroids.counts[$0] > 0 }
+            for g in 0..<centroids.count where centroids.counts[g] > 0 {
+                guard let id = centroids.ids[g] else { continue }
+                var list: [Likeness] = []
+                for n in named where n != g {
+                    guard let other = centroids.ids[n] else { continue }
+                    let rejected = centroids.members[g].filter { library.rejected[$0]?.contains(other) == true }.count
+                    list.append(Likeness(
+                        person: other, similarity: centroids.similarity(g, n), rejected: rejected,
+                        together: !centroids.frames[g].isDisjoint(with: centroids.frames[n])
+                    ))
+                }
+                out[id] = list.sorted { $0.similarity > $1.similarity }
             }
         }
-
-        try await write(userID: userID, library: library, plan: plan, orphans: orphans)
-        let elapsed = ContinuousClock.now - started
-        let ms = Int(Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15)
-        if !plan.newAuto.isEmpty || !plan.created.isEmpty || !plan.merges.isEmpty {
-            app.logger.info("people: \(plan.newAuto.count) faces placed, \(plan.created.count) new people, \(plan.merges.count) merged, \(plan.suggestions.count) questions, \(library.faces.count) faces in \(ms) ms")
-        }
+        return out
     }
 
     // MARK: - Grouping

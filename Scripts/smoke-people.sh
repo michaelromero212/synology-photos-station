@@ -210,6 +210,12 @@ J=$(q "SELECT pf.person_id FROM person_faces pf JOIN assets a ON a.sha256 = pf.s
 echo "Naming"
 check "naming answers with the person" "Emma" "$(curl -s -X PUT "$API/v1/spaces/$P1/people/$E" -H "$A1" -H 'Content-Type: application/json' -d '{"name":"  Emma "}' | jq '["name"]')"
 has "the page's People row starts with her" "Emma" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | python3 -c 'import sys,json; print([p.get("name") for p in json.load(sys.stdin)["people"]][0])')"
+BEFORE=$(q "SELECT count(*) || '/' || count(DISTINCT person_id) FROM person_faces")
+MATCHES=$(cli analysis people-matches Owner 2>&1)
+has "the matches report counts the library" "1 named, 0 suggested, 1 under More People" "$MATCHES"
+has "Jack looks like no one named, so he's left alone" "Would fold in 0, ask about 0, leave 1" "$MATCHES"
+has "and it lists the named people" "Named people and the other named person" "$MATCHES"
+check "the report changes nothing" "$BEFORE" "$(q "SELECT count(*) || '/' || count(DISTINCT person_id) FROM person_faces")"
 check "named, she's on top; Jack still waits behind More People" "named,more" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | tiers)"
 check "and the row is just her" "1" "$(curl -s "$API/v1/spaces/$P1/collections?date=2026-10-12" -H "$A1" | jq '["people"].__len__()')"
 check "her photos are a collection" "8" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=person&key=$E" -H "$A1" | jq '["total"]')"
