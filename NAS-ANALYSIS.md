@@ -357,6 +357,17 @@ faces are used for anything.
      their best one anyway. A face small in its photo is cut from a bigger
      render of it (up to 4,096 pixels, never past the photo's own size), so
      the circle is real pixels rather than enlarged ones. Crop version 4.
+   - **Circles cut ahead** (`FaceCropWarmer`, 2026-11-10). Cutting a circle
+     takes a second or more on the NAS's Celeron, and version 4 made every
+     circle new, so scrolling People showed gray circles filling in a few
+     at a time (his screenshot). After each grouping pass, which includes
+     the first one after the server starts, everyone People lists has their
+     circle cut, in list order, one at a time at background priority
+     (`nice` 15). A circle already cut is a file check. The server logs
+     "cut N of M face circles". The apps ask again for a circle that
+     didn't come, while it's on screen (1, 2, 4, 8 and 16 seconds apart).
+     A circle scrolled away before its turn leaves the loader's line, so
+     the circles on screen come first.
    - **A photo's rotation tag, once.** The NAS's vips (8.12, in the server
      image) leaves a photo's rotation tag on the picture it has already
      stood up. So the crop's last step mustn't obey it (`--no-rotate`).
@@ -404,7 +415,8 @@ faces are used for anything.
      - `GET` and `POST people/:id/suggestions`, the questions and the answers;
      - face pictures at `people/:id/face` and `assets/:id/faces/:ordinal`,
        cropped on the NAS from the person's own photo at 256 px and kept
-       beside the thumbnails.
+       beside the thumbnails; each listed person's is cut ahead, after each
+       grouping pass.
 
      A person's photos are the collection kind `person`, newest first, 300 to
      a page.

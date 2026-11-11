@@ -61,6 +61,8 @@ actor PeopleClusterer {
     private var lastPass: [UUID: ContinuousClock.Instant] = [:]
     private var dirty: Set<UUID> = []
     private var task: Task<Void, Never>?
+    /// Makes everyone's circle after each pass. See `FaceCropWarmer`.
+    private let warmer: FaceCropWarmer
 
     /// The smoke tests shorten all three.
     init(
@@ -72,6 +74,7 @@ actor PeopleClusterer {
         self.startDelay = startDelay
         self.interval = interval
         self.settle = settle
+        self.warmer = FaceCropWarmer(app: app)
     }
 
     func start() {
@@ -79,9 +82,10 @@ actor PeopleClusterer {
         task = Task { [weak self] in await self?.run() }
     }
 
-    func stop() {
+    func stop() async {
         task?.cancel()
         task = nil
+        await warmer.stop()
     }
 
     /// Something the person decided; regroup soon.
@@ -110,6 +114,11 @@ actor PeopleClusterer {
                         try await refresh(userID: row.id)
                         seen[row.id] = row.faces
                         lastPass[row.id] = .now
+                        // Whoever the pass placed, and whatever the person
+                        // just decided, gets their circle before it's asked
+                        // for. The first pass after a start makes any that
+                        // a new crop version or cover rule left unmade.
+                        await warmer.warm(row.id)
                     }
                 }
             } catch is CancellationError {

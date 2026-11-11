@@ -648,14 +648,16 @@ enum FaceCrop {
     static let largestRender = 4096
 
     static func serve(_ req: Request, userID: UUID, sha256: String, ordinal: Int) async throws -> Response {
-        let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal)
+        let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal).url
         let response = try await req.fileio.asyncStreamFile(at: path.path)
         response.headers.replaceOrAdd(name: .contentType, value: "image/jpeg")
         response.headers.replaceOrAdd(name: .cacheControl, value: "private, max-age=86400")
         return response
     }
 
-    static func crop(app: Application, userID: UUID, sha256: String, ordinal: Int) async throws -> URL {
+    /// The face's picture, and whether it was made just now rather than
+    /// found already made. Usually made ahead by `FaceCropWarmer`.
+    static func crop(app: Application, userID: UUID, sha256: String, ordinal: Int) async throws -> (url: URL, made: Bool) {
         struct Face: Decodable { let box: [Float]; let landmarks: [Float]; let frameMS: Int? }
         guard let face = try await app.sql.raw("""
             SELECT box, landmarks, frame_ms AS "frameMS" FROM nas_faces
@@ -665,7 +667,7 @@ enum FaceCrop {
         let directory = app.blobStore.derivativeDirectory(sha256: sha256)
         let boxKey = face.box.map { String(Int(($0 * 10_000).rounded())) }.joined(separator: "-")
         let target = directory.appendingPathComponent("face\(version)-\(ordinal)-\(boxKey).jpg")
-        if FileManager.default.fileExists(atPath: target.path) { return target }
+        if FileManager.default.fileExists(atPath: target.path) { return (target, false) }
 
         struct File: Decodable { let storagePath: String?; let blobExt: String; let mediaType: String }
         guard let file = try await app.sql.raw("""
@@ -742,7 +744,7 @@ enum FaceCrop {
         )
         try? FileManager.default.removeItem(at: target)
         try FileManager.default.moveItem(at: partial, to: target)
-        return target
+        return (target, true)
     }
 
     /// The clockwise quarter turn (`vips rot`'s `d90`, `d180` or `d270`) that

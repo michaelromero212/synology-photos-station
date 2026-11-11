@@ -48,14 +48,16 @@ public actor ThumbnailLoader {
     /// directory. `nil` until the first measurement.
     private var diskBytes: Int64?
 
+    /// `session` is for tests, which answer for the NAS.
     public init(
         client: FrameStationClient,
         memoryLimitBytes: Int = 96 * 1024 * 1024,
         diskLimitBytes: Int64 = CacheLimit.default.bytes,
-        diskRoot: URL? = nil
+        diskRoot: URL? = nil,
+        session: URLSession = .shared
     ) {
         self.client = client
-        self.session = .shared
+        self.session = session
         self.memory.totalCostLimit = memoryLimitBytes
         self.previews.countLimit = 4000
         self.diskLimitBytes = diskLimitBytes
@@ -183,8 +185,12 @@ public actor ThumbnailLoader {
     /// Through here so face pictures wait in the same line as thumbnails, and
     /// the People row's circles are there the moment the page is. `persist`
     /// is off for a face asked about once, in "Is this Emma?".
+    ///
+    /// A face whose circle is gone before its turn leaves the line (see
+    /// `acquire`). Scrolling the grid of People used to queue every circle
+    /// it passed, and the ones on screen waited behind all of them.
     public func face(at url: URL, key: String, persist: Bool = true) async -> PlatformImage? {
-        await image(at: url, key: "face-\(key)", targetPixels: 256, persist: persist)
+        await image(at: url, key: "face-\(key)", targetPixels: 256, persist: persist, abandonable: true)
     }
 
     /// An already-decoded face, without suspending. See `cachedThumbnail`.
@@ -242,11 +248,21 @@ public actor ThumbnailLoader {
     /// the correct answer, not deferring them.
     private static let maxPrefetchBacklog = 24
 
-    private var active = 0
-    private var waiting: [(isPrefetch: Bool, resume: CheckedContinuation<Void, Never>)] = []
+    private struct Waiter {
+        let id: Int
+        let isPrefetch: Bool
+        /// True with a slot handed over; false for a caller who left first.
+        let resume: CheckedContinuation<Bool, Never>
+    }
 
-    /// Returns false when a prefetch should simply be abandoned.
-    private func acquire(isPrefetch: Bool) async -> Bool {
+    private var active = 0
+    private var waiting: [Waiter] = []
+    private var lastWaiter = 0
+
+    /// Returns false when a prefetch should simply be abandoned, and when an
+    /// `abandonable` caller's task is canceled before a slot comes free: it
+    /// leaves the line without a slot, so `release` is not called for it.
+    private func acquire(isPrefetch: Bool, abandonable: Bool = false) async -> Bool {
         let ceiling = isPrefetch ? Self.prefetchCeiling : Self.maxConcurrent
         if active < ceiling {
             active += 1
@@ -255,36 +271,57 @@ public actor ThumbnailLoader {
         if isPrefetch, waiting.filter({ $0.isPrefetch }).count >= Self.maxPrefetchBacklog {
             return false
         }
-        await withCheckedContinuation { continuation in
-            waiting.append((isPrefetch, continuation))
+        if abandonable, Task.isCancelled { return false }
+        lastWaiter += 1
+        let id = lastWaiter
+        // No increment after the wait: `release` hands its slot straight over
+        // rather than dropping the count and letting the woken task put it
+        // back. That gap was small but real — another caller could look in
+        // between, see room that wasn't there, and push past the ceiling.
+        guard abandonable else {
+            return await withCheckedContinuation { continuation in
+                waiting.append(Waiter(id: id, isPrefetch: isPrefetch, resume: continuation))
+            }
         }
-        // No increment here: `release` hands its slot straight over rather than
-        // dropping the count and letting the woken task put it back. That gap
-        // was small but real — another caller could look in between, see room
-        // that wasn't there, and push past the ceiling.
-        return true
+        // The waiter is in the line before this suspends, and `leave` has to
+        // run on this actor, so it always finds the waiter there, or finds it
+        // already handed a slot and leaves it be: resumed exactly once.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiting.append(Waiter(id: id, isPrefetch: isPrefetch, resume: continuation))
+            }
+        } onCancel: {
+            Task { await self.leave(id) }
+        }
+    }
+
+    /// A caller gone before its turn: a face whose circle scrolled away.
+    private func leave(_ id: Int) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).resume.resume(returning: false)
     }
 
     private func release() {
         // Visible work first, always: a queue served in arrival order would put
         // tiles from three screens away ahead of the one under the thumb.
         if let index = waiting.firstIndex(where: { !$0.isPrefetch }) {
-            waiting.remove(at: index).resume.resume()
+            waiting.remove(at: index).resume.resume(returning: true)
             return
         }
         // A prefetch may only take the slot if doing so still leaves it under
         // its own, lower ceiling.
         if active <= Self.prefetchCeiling, !waiting.isEmpty {
-            waiting.removeFirst().resume.resume()
+            waiting.removeFirst().resume.resume(returning: true)
             return
         }
         active -= 1
     }
 
     /// `persist` off keeps it out of the disk tier, both ways: for a picture
-    /// only ever wanted once.
+    /// only ever wanted once. `abandonable`: see `acquire`.
     private func image(
-        at url: URL, key: String, targetPixels: Int, isPrefetch: Bool = false, persist: Bool = true
+        at url: URL, key: String, targetPixels: Int, isPrefetch: Bool = false, persist: Bool = true,
+        abandonable: Bool = false
     ) async -> PlatformImage? {
         if let entry = memory.object(forKey: key as NSString) { return entry.image }
 
@@ -293,7 +330,7 @@ public actor ThumbnailLoader {
         // bytes, so a coalesced caller takes the image and nothing else.
         if let existing = inFlight[url] { return await existing.value.image }
 
-        guard await acquire(isPrefetch: isPrefetch) else { return nil }
+        guard await acquire(isPrefetch: isPrefetch, abandonable: abandonable) else { return nil }
         defer { release() }
 
         let task = Task<Fetched, Never> { [diskRoot, session, client] in

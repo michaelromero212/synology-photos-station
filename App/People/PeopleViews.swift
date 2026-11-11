@@ -97,11 +97,24 @@ struct FaceCircle: View {
     }
 
     private func load() async {
-        if let face = await Self.fetch(session: session, spaceID: spaceID, source: source) {
-            // No fade: the face is either there or it isn't.
-            var instant = Transaction()
-            instant.disablesAnimations = true
-            withTransaction(instant) { image = face }
+        // A nil answer is a setback, not a verdict, as for the grid's tiles
+        // (see PhotoCell): a face the NAS was still cutting when the request
+        // gave up, or a connection dropped on the way, is asked for again
+        // while its circle is on screen, with a widening gap. It used to be
+        // asked for once, and a circle that missed stayed gray until the
+        // screen was left and opened again (his screenshot, 2026-11-10).
+        var gap: Duration = .seconds(1)
+        while true {
+            if let face = await Self.fetch(session: session, spaceID: spaceID, source: source) {
+                // No fade: the face is either there or it isn't.
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { image = face }
+                return
+            }
+            guard !Task.isCancelled, gap <= .seconds(16) else { return }
+            try? await Task.sleep(for: gap)
+            gap *= 2
         }
     }
 

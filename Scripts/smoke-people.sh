@@ -186,6 +186,16 @@ until_true 90 '[ "$(q "SELECT count(*) FROM nas_analysis WHERE user_id = '"'$U1'
 until_true 60 '[ "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | jq '"'"'["people"].__len__()'"'"')" = "2" ]'
 PEOPLE=$(curl -s "$API/v1/spaces/$P1/people" -H "$A1")
 check "two people found" "2" "$(echo "$PEOPLE" | jq '["people"].__len__()')"
+# Nothing has asked for a face yet: each person's circle is cut after the
+# grouping pass, so scrolling People finds them all made. See FaceCropWarmer.
+# A face key is "<first 12 of the file's SHA-256>-<ordinal>-v<crop version>".
+is_cut(){ local sha=${1%%-*} rest=${1#*-}; local ordinal=${rest%%-*}
+  find "$ROOT/blobroot/derivatives" -type f -path "*/$sha*/face${rest##*-v}-$ordinal-*.jpg" | grep -q .; }
+FACES=$(echo "$PEOPLE" | python3 -c 'import sys,json; print(" ".join(p["face"] for p in json.load(sys.stdin)["people"]))')
+all_cut(){ for f in $FACES; do is_cut "$f" || return 1; done; }
+until_true 30 all_cut
+check "each person's circle is cut before anyone asks" "yes" "$(all_cut && echo yes || echo no)"
+has "and the server says so" "of 2 face circles" "$(cat "$ROOT/server.log")"
 check "in 8 and 7 photos" "8,7" "$(echo "$PEOPLE" | python3 -c 'import sys,json; print(",".join(str(p["photoCount"]) for p in json.load(sys.stdin)["people"]))')"
 check "a stranger in one photo isn't anyone" "0" "$(q "SELECT count(*) FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.width IN (661, 662, 663)")"
 check "two faces in one photo are two people" "2" "$(q "SELECT count(DISTINCT person_id) FROM person_faces pf JOIN assets a ON a.sha256 = pf.sha256 WHERE a.id = '${BOTH[0]}' AND pf.state = 'auto'")"
