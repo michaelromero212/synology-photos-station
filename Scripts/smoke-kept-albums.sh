@@ -188,9 +188,14 @@ lacks "a Thanksgiving their photos say wasn't one goes" "Thanksgiving 2024" "$(t
 check "and is let go" "0" "$(saved "title LIKE 'Thanksgiving%'")"
 for i in 1 2 3 4 5 6; do observe "x25$i" 1 "$TREE"; done
 has "a tree confirms Christmas" "Christmas 2024" "$(titles)"
-check "for good" "0" "$(saved "title = 'Christmas 2024' AND provisional")"
+check "no longer provisional" "0" "$(saved "title = 'Christmas 2024' AND provisional")"
+# A kept album has to fit today's rules, a confirmed holiday too (his word,
+# 2026-11-11): read again with no tree, it isn't Christmas by them.
 for i in 1 2 3 4 5 6; do observe "x25$i" 2 "$SKY"; done
-has "so a later reading that disagrees can't take it away" "Christmas 2024" "$(titles)"
+lacks "a later reading that disagrees takes it away" "Christmas 2024" "$(titles)"
+check "and lets it go" "0" "$(saved "title = 'Christmas 2024'")"
+for i in 1 2 3 4 5 6; do observe "x25$i" 3 "$TREE"; done
+has "until a reading that sees the tree brings it back" "Christmas 2024" "$(titles)"
 
 echo "The row the page opens on"
 # row → "kicker or kind: title" for each card in the top row, then a line of

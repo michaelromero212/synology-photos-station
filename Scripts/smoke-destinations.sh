@@ -96,6 +96,7 @@ ZION_CANYON="37.2502 -112.9566"; BRYCE="37.6266 -112.1677"; PAGE="36.9147 -111.4
 GRAND_CANYON="36.0544 -112.1401"
 KAANAPALI="20.9256 -156.6950"; WAILEA="20.6873 -156.4416"; HANA="20.7575 -155.9884"
 LAS_VEGAS="36.1147 -115.1728"; YOSEMITE="37.7456 -119.5936"
+LAKE_LURE="35.4279 -82.2048"
 
 # shoot <prefix> <day> <hour before the first> <count> <place>
 shoot(){
@@ -162,7 +163,9 @@ shoot n08 2023-06-08 9 4 ZURICH; shoot n09 2023-06-09 9 4 COLOSSEUM; shoot n10 2
 shoot o06 2023-03-06 9 4 KAANAPALI; shoot o07 2023-03-07 9 4 KAANAPALI; shoot o08 2023-03-08 9 4 KAANAPALI
 shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023-03-11 9 4 HANA
 shoot o12 2023-03-12 9 2 WAILEA
-check "every photo arrived" "359" "$(q "SELECT count(*) FROM assets")"
+# A week at the lake house, in a town named for its lake.
+for d in 05 06 07 08 09; do shoot "w$d-" "2024-08-$d" 9 2 LAKE_LURE; done
+check "every photo arrived" "369" "$(q "SELECT count(*) FROM assets")"
 
 DISNEY=39; OBX=45; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
@@ -245,7 +248,12 @@ observe(){
 names(){ ls "$ROOT/ids" | grep "^$1" | tr '\n' ' '; }
 check "the beach week is seen as beach" "$OBX" "$(observe '[{"id":"beach","confidence":0.9}]' $(names b))"
 check "the parks as a theme park" "21" "$(observe '[{"id":"amusement_park","confidence":0.9}]' $(names a))"
+has "a week at the lake no one has looked at is a vacation" "Lake Lure Vacation 2024" "$(trips 2026-10-12)"
+check "the lake week is seen as a lake" "10" \
+  "$(observe '[{"id":"lifejacket","confidence":0.7},{"id":"lake","confidence":0.6},{"id":"water_body","confidence":0.5}]' $(names w))"
 T=$(trips 2026-10-12)
+has "a week at the lake house is the family's lake week" "Lake Lure Week 2024" "$T"
+lacks "without saying Lake twice" "Lake Lure Lake" "$T"
 has "a beach week seen as beach is still OBX Beach Week" "OBX Beach Week 2025" "$T"
 has "and Christmas at the beach is Christmas, tree or not" "Christmas in the Outer Banks 2019" "$T"
 has "a theme park trip to Walt Disney World is the family's WDW vacation" "WDW Vacation 2025" "$T"
@@ -310,7 +318,7 @@ check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "places: named 359 photos again" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 369 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -33,6 +33,13 @@ import sys, json
 d = json.load(sys.stdin)
 cards = (d.get('allOccasions') or []) + (d.get('allTrips') or []) + d.get('days', [])
 print('|'.join(c['title'] for c in cards))"; }
+# card <space> <auth> <key> → the title of that one album on the page, or
+# nothing.
+card(){ curl -s "$API/v1/spaces/$1/collections?date=2026-10-12" -H "$2" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+cards = (d.get('allOccasions') or []) + (d.get('allTrips') or []) + d.get('days', [])
+print(next((c['title'] for c in cards if c['key'] == sys.argv[1]), ''))" "$3"; }
 
 (cd "$SERVER_DIR" && swift build >/dev/null 2>&1) || { echo "server build failed"; exit 1; }
 BIN="$(cd "$SERVER_DIR" && swift build --show-bin-path)/FrameStationServer"
@@ -253,6 +260,52 @@ for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "skate$i" $((820 + 
 T=$(titles "$SP" "$A")
 has "a rink is ice skating" "Ice skating" "$T"
 lacks "not a snow day" "Snow day" "$T"
+
+echo "Days on the water"
+# Memorial Day on a pontoon boat, as his phone's analysis saw it: Vision calls
+# life jackets "sport" and "sports equipment", and the day was "Game day" (his
+# library, 2026-11-11).
+LAKE='[{"id":"lifejacket","confidence":0.7},{"id":"sport","confidence":0.6},{"id":"sports_equipment","confidence":0.5},{"id":"lake","confidence":0.45},{"id":"water_body","confidence":0.5},{"id":"water","confidence":0.7},{"id":"swimsuit","confidence":0.4}]'
+for i in 1 2 3 4 5; do observe "$SP" "$A" "$(upload "$SP" "$A" "lake$i" $((830 + i)) "2020-05-25T1${i}:00:00Z")" "$LAKE" >/dev/null; done
+check "life jackets at a lake are a lake day, not a game" "Lake day" "$(card "$SP" "$A" 2020-05-25)"
+BOAT='[{"id":"speedboat","confidence":0.7},{"id":"river","confidence":0.6},{"id":"water","confidence":0.8}]'
+for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "boat$i" $((840 + i)) "2021-08-14T1${i}:00:00Z")" "$BOAT" >/dev/null; done
+check "a boat on a river is boating" "Boating" "$(card "$SP" "$A" 2021-08-14)"
+PARK='[{"id":"sport","confidence":0.6},{"id":"ball","confidence":0.5},{"id":"grass","confidence":0.7}]'
+for i in 1 2 3 4; do observe "$SP" "$A" "$(upload "$SP" "$A" "park$i" $((850 + i)) "2021-04-17T1${i}:00:00Z")" "$PARK" >/dev/null; done
+check "a ball game in a park is still a game" "Game day" "$(card "$SP" "$A" 2021-04-17)"
+
+echo "A day is what most of it showed"
+# Four photos of a game and six of the lake: the game came first in the list
+# of rules, and used to win.
+MIX=(); for i in 0 1 2 3 4 5 6 7 8 9; do MIX+=("$(upload "$SP" "$A" "mix$i" $((860 + i)) "2021-07-10T10:0${i}:00Z")"); done
+for x in "${MIX[@]:0:4}"; do observe "$SP" "$A" "$x" "$PARK" >/dev/null; done
+for x in "${MIX[@]:4:6}"; do observe "$SP" "$A" "$x" "$LAKE" >/dev/null; done
+check "a lake day with a game in it is a lake day" "Lake day" "$(card "$SP" "$A" 2021-07-10)"
+# Four of fishing and six of the lake: fishing came first too.
+FISH='[{"id":"fishing","confidence":0.7},{"id":"lake","confidence":0.35}]'
+MORE=(); for i in 0 1 2 3 4 5 6 7 8 9; do MORE+=("$(upload "$SP" "$A" "more$i" $((870 + i)) "2021-06-12T10:0${i}:00Z")"); done
+for x in "${MORE[@]:0:4}"; do observe "$SP" "$A" "$x" "$FISH" >/dev/null; done
+for x in "${MORE[@]:4:6}"; do observe "$SP" "$A" "$x" "$LAKE" >/dev/null; done
+check "and an hour of fishing in it doesn't name it" "Lake day" "$(card "$SP" "$A" 2021-06-12)"
+MOSTLY=(); for i in 0 1 2 3 4 5 6 7 8 9; do MOSTLY+=("$(upload "$SP" "$A" "mostly$i" $((890 + i)) "2021-06-19T10:0${i}:00Z")"); done
+for x in "${MOSTLY[@]:0:6}"; do observe "$SP" "$A" "$x" "$FISH" >/dev/null; done
+for x in "${MOSTLY[@]:6:4}"; do observe "$SP" "$A" "$x" "$LAKE" >/dev/null; done
+check "but a morning of it does" "Fishing" "$(card "$SP" "$A" 2021-06-19)"
+
+echo "Kept events, judged again"
+# As if the old rules had kept the lake day as a game.
+q "UPDATE curated_albums SET title = 'Game day', occasion = 'Game day' WHERE key = '2020-05-25'" >/dev/null
+check "a kept event that's still one takes today's name" "Lake day" "$(card "$SP" "$A" 2020-05-25)"
+check "and keeps it" "Lake day" "$(q "SELECT title FROM curated_albums WHERE key = '2020-05-25'")"
+# And a day the old rules called a game whose photos show nothing by today's.
+SKYDAY=(); for i in 1 2 3 4; do SKYDAY+=("$(upload "$SP" "$A" "sky$i" $((900 + i)) "2021-10-02T1${i}:00:00Z")"); done
+for x in "${SKYDAY[@]}"; do observe "$SP" "$A" "$x" "$SKY" >/dev/null; done
+OWNER=$(q "SELECT user_id FROM space_members WHERE space_id = '$SP' LIMIT 1")
+q "INSERT INTO curated_albums (space_id, user_id, kind, key, title, occasion, is_event)
+   VALUES ('$SP', '$OWNER', 'day', '2021-10-02', 'Game day', 'Game day', true)" >/dev/null
+check "a kept event today's rules find none in goes" "" "$(card "$SP" "$A" 2021-10-02)"
+check "for good" "0" "$(q "SELECT count(*) FROM curated_albums WHERE key = '2021-10-02'")"
 
 echo "The party, not the rest of the day"
 # A morning at a pool across town, then a party at home: people arriving an

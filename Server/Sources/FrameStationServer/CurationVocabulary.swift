@@ -30,7 +30,12 @@ enum CurationVocabulary {
     ///    climbing, fishing. A family's bowling night was "Game day in West
     ///    Gate" (his library, 2026-11-10), because bowling is a sport and has
     ///    balls; "Game day" is now only for a game.
-    static let version = 5
+    /// 6: a lake day is a lake day. Vision calls life jackets "sport" and
+    ///    "sports equipment", and Memorial Day on a pontoon boat was "Game
+    ///    day" (his library, 2026-11-11). "Sport" alone no longer makes a
+    ///    game, nothing on or by the water is one, lakes have their own days
+    ///    and stays, and "On the water" is "Boating".
+    static let version = 6
 
     // MARK: - Labels to tags
 
@@ -95,12 +100,20 @@ enum CurationVocabulary {
         Rule("go_karts", strong: ["go_kart": 0.3]),
         Rule("climbing", strong: ["rock_climbing": 0.3]),
         Rule("fishing", strong: ["fishing": 0.3]),
-        // A game nobody can say more of. Not an outing with a ball in it.
+        // A game nobody can say more of: a stadium, a scoreboard, a meet, or
+        // a sport with a ball in it. Never "sport" on its own, which Vision
+        // says of anything active, life jackets included. Not an outing with
+        // a ball in it, nor anything on or by the water.
         Rule("sports",
-             strong: ["sport": 0.4, "stadium": 0.3, "athletics": 0.3, "scoreboard": 0.3],
-             supporting: ["ball": 0.3, "ballgames": 0.3, "sports_equipment": 0.3],
+             strong: ["stadium": 0.3, "athletics": 0.3, "scoreboard": 0.3],
+             supporting: ["sport": 0.4, "ball": 0.3, "ballgames": 0.3, "sports_equipment": 0.3],
              unless: ["bowling": 0.3, "billiards": 0.3, "ice_skating": 0.3, "rollerskating": 0.3,
-                      "go_kart": 0.3, "rock_climbing": 0.3, "fishing": 0.3, "skateboarding": 0.3]),
+                      "go_kart": 0.3, "rock_climbing": 0.3, "fishing": 0.3, "skateboarding": 0.3,
+                      "skiing": 0.3, "snowboarding": 0.3,
+                      "lifejacket": 0.3, "lake": 0.3, "water_body": 0.3, "boat": 0.3,
+                      "watercraft": 0.3, "swimsuit": 0.3, "swimming": 0.3, "pool": 0.3,
+                      "beach": 0.3, "watersport": 0.3, "wakeboarding": 0.3, "jetski": 0.3,
+                      "surfing": 0.3, "kayak": 0.3, "canoe": 0.3]),
 
         // Outings.
         Rule("amusement_park",
@@ -131,10 +144,25 @@ enum CurationVocabulary {
         Rule("pool",
              strong: ["pool": 0.4],
              supporting: ["swimming": 0.3, "swimsuit": 0.3]),
+        // A day at a lake: on the boat, off the dock, behind the boat. Vision
+        // has no word for water skiing or tubing; it says "watersport",
+        // "wakeboarding" or "jetski", or only life jackets and water. Not the
+        // ocean, a pool or a river: those are the beach, the pool and boating.
+        Rule("lake",
+             strong: ["lake": 0.5, "boathouse": 0.4],
+             supporting: ["lake": 0.3, "dock": 0.3, "lifejacket": 0.3, "swimsuit": 0.3,
+                          "swimming": 0.3, "water_body": 0.3, "boat": 0.3, "watercraft": 0.3,
+                          "watersport": 0.3, "wakeboarding": 0.3, "jetski": 0.3],
+             unless: ["ocean": 0.3, "beach": 0.3, "shore": 0.3, "sand": 0.3, "pool": 0.4,
+                      "river": 0.4]),
+        // Out on a boat. At a lake the day is a lake day, which takes in the
+        // boat; see `events`.
         Rule("boating",
              strong: ["sailboat": 0.3, "kayak": 0.3, "canoe": 0.3, "speedboat": 0.3,
-                      "rowboat": 0.3, "cruise_ship": 0.3],
-             supporting: ["boat": 0.3, "lake": 0.3, "river": 0.3]),
+                      "rowboat": 0.3, "cruise_ship": 0.3, "yacht": 0.3, "houseboat": 0.3,
+                      "jetski": 0.3, "rafting": 0.3],
+             supporting: ["boat": 0.3, "watercraft": 0.3, "lake": 0.3, "river": 0.3, "dock": 0.3,
+                          "pier": 0.3, "harbour": 0.3, "lifejacket": 0.3, "water_body": 0.3]),
 
         // Holiday evidence. Never a card on their own; see `holidayEvidence`.
         Rule("christmas",
@@ -377,24 +405,45 @@ enum CurationVocabulary {
         Event("snow", "Snow day", trip: "Snow trip", share: 0.3),
         Event("hiking", "A hike", trip: "Hiking trip", share: 0.3),
         Event("beach", "Beach day", trip: "Beach trip", share: 0.3),
+        Event("lake", "Lake day", trip: "Lake trip", share: 0.3),
         Event("pool", "Pool day", share: 0.3),
-        Event("boating", "On the water", trip: "Boating trip", share: 0.3),
+        Event("boating", "Boating", trip: "Boating trip", share: 0.3),
     ]
 
-    /// What a day, or a trip, was: the first of `events` its photos clear the
-    /// bars for, in their order, with one exception. A graduation and a
+    /// What makes a day what it was however little of it it took: a
+    /// birthday is a few minutes of candles in an afternoon.
+    static let lifeEvents: Set<String> = ["wedding", "graduation", "birthday"]
+
+    /// Says only that a game was played, so it names a day only when
+    /// nothing else can.
+    static let anyGame = "sports"
+
+    /// What a day, or a trip, was.
+    ///
+    /// A wedding, a graduation or a birthday first, in that order, however
+    /// little of the day it took, with one exception: a graduation and a
     /// wedding both run to gowns, ceremonies and people in their best
-    /// clothes, and a day of one can clear the other's bar too. Where both
-    /// clear, the one more of the photos show is the one it was.
+    /// clothes, so where both clear, the one more of the photos show is the
+    /// one it was.
+    ///
+    /// Otherwise what most of the photos show, of everything that cleared its
+    /// bar: the theme is what the day was about, not whichever rule came
+    /// first. A lake day whose life jackets looked sporty was "Game day" when
+    /// the first rule won (his library, 2026-11-11). Ties go to the earlier
+    /// in `events`, and "Game day" only names a day nothing else does.
     static func event(clearing: (Event) -> Bool, count: (String) -> Int) -> Event? {
         let cleared = events.filter(clearing)
-        guard let first = cleared.first else { return nil }
-        if first.tag == "wedding",
-           let graduation = cleared.first(where: { $0.tag == "graduation" }),
-           count("graduation") >= count("wedding") {
-            return graduation
+        if let first = cleared.first(where: { lifeEvents.contains($0.tag) }) {
+            if first.tag == "wedding",
+               let graduation = cleared.first(where: { $0.tag == "graduation" }),
+               count("graduation") >= count("wedding") {
+                return graduation
+            }
+            return first
         }
-        return first
+        // `max` keeps the first of equals, so a tie goes to the earlier.
+        return cleared.filter { $0.tag != anyGame }.max { count($0.tag) < count($1.tag) }
+            ?? cleared.first { $0.tag == anyGame }
     }
 
     /// A trip takes a kind on a smaller share than a day: a week away is

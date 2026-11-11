@@ -195,7 +195,11 @@ struct CollectionsController: RouteCollection {
                 // A holiday shown on its date alone is the person's analysis
                 // still to come, which can withdraw it.
                 unseen: Set(calendar.filter { Self.looksLike($1, on: $0, by: evidence) == nil }.keys),
-                unlike: Set(calendar.keys).subtracting(holidays.keys)
+                unlike: Set(calendar.keys).subtracting(holidays.keys),
+                // A kept event album on one of these has lost its reason.
+                noEvent: Set(evidence.filter { day, seen in
+                    seen.isAnalyzed && events[day] == nil && holidays[day] == nil
+                }.keys)
             ),
             limit: Self.allOccasionsLimit, seed: seed
         )
@@ -1514,6 +1518,10 @@ struct CollectionsController: RouteCollection {
                 ?? "\(holiday.name) Road Trip \(holiday.year)"
         } else {
             var kind = tripKind(event: event, implies: where_?.implies ?? [], days: run.count, weekend: weekend)
+            // "Lake Anna Weekend", not "Lake Anna Lake Weekend".
+            if kind.hasPrefix("Lake "), let place = where_?.title, isLakeName(place) {
+                kind = String(kind.dropFirst("Lake ".count))
+            }
             // Days on the road that no place holds most of.
             if where_ == nil { kind = "Road Trip" }
             let year = ordered.first.map { String($0.day.prefix(4)) } ?? ""
@@ -1550,6 +1558,10 @@ struct CollectionsController: RouteCollection {
         if tag == "beach" || implies.contains("beach") {
             return days >= 5 ? "Beach Week" : weekend ? "Beach Weekend" : "Beach Trip"
         }
+        // A stay at the lake house, said the same way.
+        if tag == "lake" || implies.contains("lake") {
+            return days >= 5 ? "Lake Week" : weekend ? "Lake Weekend" : "Lake Trip"
+        }
         if implies.contains("snow") { return "Ski Trip" }
         if implies.contains("amusement_park") { return weekend ? "Weekend" : "Vacation" }
         if let tag, let kind = tripKinds[tag] { return kind }
@@ -1565,12 +1577,25 @@ struct CollectionsController: RouteCollection {
     ]
 
     /// Every kind a trip's name can end in before its year, longest first, to
-    /// read a name back. See `tripPlace(inTitle:)`.
+    /// read a name back. See `tripPlace(inTitle:)`. A lake stay is read as
+    /// its last word, so the place keeps "Lake": "McHenry Lake" from
+    /// "McHenry Lake Week 2021", and "Smith Mountain Lake" from "Smith
+    /// Mountain Lake Week 2021", whose kind was "Week".
     static let tripKindWords = [
         "Theme Park Trip", "Weekend Away", "Beach Weekend", "Fishing Trip", "Camping Trip",
         "Boating Trip", "Hiking Trip", "Beach Week", "Beach Trip", "Graduation", "Golf Trip",
-        "Snow Trip", "Road Trip", "Ski Trip", "Vacation", "Wedding", "Weekend", "Trip",
+        "Snow Trip", "Road Trip", "Ski Trip", "Vacation", "Wedding", "Weekend", "Week", "Trip",
     ]
+
+    /// Whether a place is named for its lake: "Lake Anna", "Smith Mountain
+    /// Lake", "Lake of the Woods". A day on its water is *at* it, and a stay
+    /// there doesn't say "Lake" twice.
+    static func isLakeName(_ name: String) -> Bool {
+        name.hasPrefix("Lake ") || name.hasSuffix(" Lake")
+    }
+
+    /// Days on the water, which happen *at* a lake rather than in it.
+    static let waterEvents: Set<String> = ["lake", "boating", "fishing"]
 
     /// "OBX Beach Week" and 2025, from "OBX Beach Week 2025". Nil for a name
     /// that doesn't end in a year: a holiday's ("Christmas 2023 in
@@ -2342,8 +2367,14 @@ struct CollectionsController: RouteCollection {
         } else if let event = event(in: run, events: events) {
             // What the photographs showed, where the person's own devices
             // looked: "Birthday party in Culpeper". Earned the same way as
-            // every rule below, so it outranks them.
-            title = inPlace(event.title, place)
+            // every rule below, so it outranks them. A day on the water at a
+            // place named for its lake is at it: "Lake day at Lake Anna".
+            if waterEvents.contains(event.tag), let place,
+               case let town = Whereabouts(label: place).name, isLakeName(town) {
+                title = "\(event.title) at \(town)"
+            } else {
+                title = inPlace(event.title, place)
+            }
         } else if run.span > 1 {
             // Only when it can say where, or what kind of stretch it was. A
             // weekend is a thing; "four days" is a measurement.

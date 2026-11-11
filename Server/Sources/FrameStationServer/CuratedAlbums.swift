@@ -133,6 +133,9 @@ struct CuratedAlbums {
         var unseen: Set<String> = []
         /// Holiday days their devices looked at and found weren't.
         var unlike: Set<String> = []
+        /// Days their devices have looked at and found no event in by
+        /// today's rules, holidays aside.
+        var noEvent: Set<String> = []
     }
 
     /// Nil when they couldn't be read. The page then shows what the rules
@@ -330,9 +333,18 @@ struct CuratedAlbums {
         if row.isNamed {
             return days.contains { standing.named[$0] != nil } ? .shown : .goes
         }
-        // Shown on its date alone, and their own devices have since found it
-        // wasn't that holiday. Their photos, not a change of rules.
-        if row.isHoliday, row.provisional, days.contains(where: standing.unlike.contains) {
+        // A holiday their own devices have looked at that doesn't look like
+        // itself by today's rules, whether it was shown on its date alone or
+        // confirmed by an earlier reading. A kept album has to fit the rules
+        // as they are now, or it goes (his word, 2026-11-11).
+        if row.isHoliday, days.contains(where: standing.unlike.contains) {
+            return .goes
+        }
+        // Kept as an event, and today's rules find none in any of its days:
+        // its reason went with the rule that gave it. One that's still an
+        // event, by today's rules, is found again and takes today's name
+        // instead ("Game day" became "Lake day", his library, 2026-11-11).
+        if row.isEvent, !days.isEmpty, days.allSatisfy(standing.noEvent.contains) {
             return .goes
         }
         if (row.isEvent && !standing.showEvents) || (row.isHoliday && !standing.showHolidays) {

@@ -1203,6 +1203,9 @@ from what the place is, then from how long it was:
 - a wedding or a graduation: "Charleston Wedding 2023";
 - the beach, seen in the photos or at a beach place (the Outer Banks, Myrtle
   Beach): "Beach Week" for five days or more, "Beach Weekend", "Beach Trip";
+- a lake, seen in the photos (the lake house): "Lake Week", "Lake Weekend",
+  "Lake Trip", without saying "Lake" twice at a place named for its lake:
+  "Lake Anna Weekend 2022";
 - a ski place: "Ski Trip"; a theme park: "Vacation", or "Weekend";
 - golf, camping, hiking, boating, snow or a theme park the place doesn't say:
   "Golf Trip" and the like;
@@ -1387,6 +1390,20 @@ An album the page makes has to say what it is, and be worth opening.
   Roller skating, Go-karts, Climbing, Fishing. "Game day" is only for a game,
   never for an outing that happens to be a sport with balls in it: a family's
   bowling night was "Game day in West Gate" (vocabulary 5, 2026-11-10).
+- **A day is what most of it shows.** A wedding, a graduation or a birthday
+  names a day however little of it they took. Otherwise, of everything that
+  clears its bar, the theme most of the photos show wins, and "Game day" only
+  names a day nothing else does. Vision calls life jackets "sport" and
+  "sports equipment", so "sport" alone is no longer a game, and nothing on or
+  by the water is one: Memorial Day on a pontoon boat was "Game day" when the
+  first rule in the list won (vocabulary 6, 2026-11-11).
+- **Days on the water:** "Lake day" (boats, docks, life jackets, skiing and
+  tubing, which Vision calls "watersport", swimming at a lake), "Boating" off
+  a lake, "Beach day", "Pool day". At a place named for its lake, they're at
+  it: "Lake day at Lake Anna".
+- **Kept events are judged again.** A kept event album whose days their
+  devices have looked at, and in which today's rules find no event, goes. One
+  that's still an event takes today's name: "Game day" became "Lake day".
 - **An event's album is the event,** not the day it fell on (`EventScope`).
   The day splits into stretches wherever photos pause for half an hour. The
   stretches whose photos show the event stay, and so does a stretch beside
@@ -1438,7 +1455,10 @@ events the phone learns to see. Left at that, each improvement could retitle,
 split or quietly drop an album someone had come to know. Apple's Photos keeps
 its memories and trips across iOS updates, and `CuratedAlbums` does the same.
 **Improvements may rename, refine and add. They may not drop,** except an album
-with no reason to be one.
+with no reason to be one. Since 2026-11-11 that's judged by today's rules: an
+album the app made and kept has to fit them, or it goes (his word: "it does
+not make sense ... that we keep any outdated albums that do not fit the current
+rules"). Albums and names people made never go.
 
 **Saved the first time it's shown.** `curated_albums` holds one row per album,
 per person, per library, under a stable id. Trips are saved, and so are
@@ -1459,11 +1479,14 @@ photos are counted again on each visit. It goes only when:
 - a trip now covers its days, and shows those photos;
 - it was a day the person named and they took the name back. That's their
   decision, not a rule change;
-- it was a holiday shown on its date alone, and the person's own analysis has
-  since found the day wasn't that holiday (no tree on Christmas). Shown
-  before analysis, a holiday is `provisional`. Once their analysis confirms
-  it, the flag clears for good, and a later reading that disagrees, such as
-  a stricter vocabulary, can't take it away;
+- it was a holiday, and the person's own analysis finds by today's rules
+  that the day doesn't look like it (no tree on Christmas). Shown before
+  analysis, a holiday is `provisional` and waits for that analysis. A holiday
+  an earlier reading confirmed goes the same way when a later reading, or a
+  stricter vocabulary, disagrees (since 2026-11-11; it used to stay);
+- it was an event, and today's rules find no event in any of its days, which
+  the person's analysis has looked at. One that's still an event takes
+  today's name: a lake day kept as "Game day" became "Lake day" (2026-11-11);
 - it's too thin to open: fewer moments than an album of its kind needs (see
   "Every album has a reason"), unless the person named it. Its photos in
   Recently Deleted count, so deleting some for a while doesn't let it go;
