@@ -37,6 +37,9 @@ enum Holidays {
     /// holiday. See `YearlyPatterns`.
     static let fixedMonthDays: Set<String> = Set(fixed.map(\.monthDay))
 
+    /// Every holiday's name, for telling a holiday's album by its title.
+    static let names: Set<String> = Set(table(forYears: [2024]).values)
+
     /// Days that move, and the rule that finds them.
     ///
     /// Easter is the awkward one — it is neither a fixed date nor an nth

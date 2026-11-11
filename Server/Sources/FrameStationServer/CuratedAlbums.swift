@@ -68,6 +68,26 @@ struct CuratedAlbums {
                 recursAnnually: recursAnnually, provisional: provisional
             )
         }
+
+        /// The same album under another title.
+        func renamed(_ title: String) -> Saved {
+            Saved(
+                id: id, kind: kind, key: key, title: title, subtitle: subtitle, occasion: occasion,
+                isEvent: isEvent, isHoliday: isHoliday, isNamed: isNamed, recursAnnually: recursAnnually,
+                provisional: provisional, hidden: hidden
+            )
+        }
+    }
+
+    /// What today's rules make of a kept trip they no longer find. See
+    /// `CollectionsController.judgeKept`.
+    enum TripVerdict {
+        /// From further back than today's rules read: kept as it was.
+        case unknown
+        /// Not a trip by today's rules: let go, as "Trip 2022" was.
+        case notATrip
+        /// Still a trip, under today's name.
+        case trip(CollectionSummary)
     }
 
     /// An album as the rules found it, as it's saved.
@@ -138,7 +158,8 @@ struct CuratedAlbums {
     /// The trips to show: today's, each kept as the album it was before, and
     /// those the rules no longer find, as they were. Newest first.
     func keep(
-        trips found: [CollectionSummary], saved all: [Saved]?, limit: Int, seed: String
+        trips found: [CollectionSummary], saved all: [Saved]?, limit: Int, seed: String,
+        rejudge: (String) -> TripVerdict = { _ in .unknown }
     ) async -> [CollectionSummary] {
         guard let all else { return found }
         let kind = CollectionKind.trip.rawValue
@@ -160,24 +181,43 @@ struct CuratedAlbums {
 
         // What the rules no longer find. A trip whose days today's trips now
         // cover was merged into one of them, which still shows its photos.
+        // Any other is judged again by today's rules: one that isn't a trip
+        // at all goes, and one that still is takes today's name, so nothing
+        // older lingers under a name or a reason the rules have outgrown
+        // (his word, 2026-11-10).
         let paired = Set(pairs.values.map(\.id))
         let unpaired = saved.filter { !paired.contains($0.id) && !$0.hidden }
         var waiting: [Saved] = []
+        // Not trips by today's rules. Each goes once its photos are counted
+        // and some are still in the library; one whose photos are all in
+        // Recently Deleted waits for them, as every album does, since today's
+        // rules can't see them either.
+        var notTrips = Set<UUID>()
         if !unpaired.isEmpty {
             let covered = Set(shown.flatMap { CollectionsController.days(inKey: $0.key) })
             for row in unpaired {
                 if covered.isSuperset(of: CollectionsController.days(inKey: row.key)) {
                     changes.deletes.append(row.id)
-                } else {
+                    continue
+                }
+                switch rejudge(row.key) {
+                case .unknown:
                     waiting.append(row)
+                case .notATrip:
+                    notTrips.insert(row.id)
+                    waiting.append(row)
+                case .trip(let today):
+                    changes.update(row, to: Album(kind: kind, key: row.key, title: today.title, subtitle: row.subtitle))
+                    waiting.append(row.renamed(today.title))
                 }
             }
         }
 
         let restored = await restore(Self.within(limit, of: shown.map(\.key), waiting), seed: seed)
         changes.deletes += restored.gone
+        changes.deletes += restored.kept.map(\.0.id).filter(notTrips.contains)
         await write(changes)
-        shown += restored.kept.map { row, photos in
+        shown += restored.kept.filter { !notTrips.contains($0.0.id) }.map { row, photos in
             CollectionSummary(
                 kind: .trip, key: row.key, title: row.title, subtitle: row.subtitle,
                 count: photos.count, coverAssetIDs: photos.coverAssetIDs

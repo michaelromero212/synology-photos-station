@@ -123,6 +123,8 @@ shoot rt1 2021-08-02 9 7 LAS_VEGAS; shoot rt2 2021-08-03 9 7 GRAND_CANYON; shoot
 # Two days of a few photos from four states: photos from all over, not a trip.
 shoot sc1v 2020-02-10 9 2 LAS_VEGAS; shoot sc1y 2020-02-10 13 2 YOSEMITE
 shoot sc2g 2020-02-11 9 2 GRAND_CANYON; shoot sc2z 2020-02-11 13 2 ZION_CANYON
+# Christmas in Duck: the beach, and no tree.
+for d in 23 24 25 26; do shoot "bx$d-" "2019-12-$d" 9 2 DUCK; done
 # A week in Duck the two Julys before too: the family's beach week. A photo
 # a day, so home is still where most of the library is.
 for y in 23 24; do for d in 08 09 10 11 12 13 14; do shoot "b$y$d-" "20$y-07-$d" 9 1 DUCK; done; done
@@ -160,9 +162,9 @@ shoot n08 2023-06-08 9 4 ZURICH; shoot n09 2023-06-09 9 4 COLOSSEUM; shoot n10 2
 shoot o06 2023-03-06 9 4 KAANAPALI; shoot o07 2023-03-07 9 4 KAANAPALI; shoot o08 2023-03-08 9 4 KAANAPALI
 shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023-03-11 9 4 HANA
 shoot o12 2023-03-12 9 2 WAILEA
-check "every photo arrived" "351" "$(q "SELECT count(*) FROM assets")"
+check "every photo arrived" "359" "$(q "SELECT count(*) FROM assets")"
 
-DISNEY=39; OBX=37; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
+DISNEY=39; OBX=45; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
 echo "Filing"
 check "a photo at Epcot is filed under Walt Disney World" "Walt Disney World, Florida" \
@@ -204,7 +206,7 @@ has "four days at the parks are what the family calls them" "WDW Vacation 2025" 
 has "a week in Duck is OBX Beach Week" "OBX Beach Week 2025" "$T"
 has "every year of it" "OBX Beach Week 2024|OBX Beach Week 2023" "$(echo "$T" | tr '|' '\n' | grep '^OBX' | tail -2 | paste -sd'|' -)"
 has "Universal, Disney World and SeaWorld from Kissimmee is an Orlando vacation" "Orlando Vacation 2024" "$T"
-has "Christmas there is named for both" "Christmas 2023 at Walt Disney World" "$T"
+has "Christmas there is named for both" "Christmas at Walt Disney World 2023" "$T"
 has "a town most of a trip was in names it, the drive down and all" "Asheville Trip 2024" "$T"
 has "four days across Paris's arrondissements are a Paris trip" "Paris Trip 2024" "$T"
 has "and three across London's boroughs, a London trip" "London Trip 2023" "$T"
@@ -245,6 +247,7 @@ check "the beach week is seen as beach" "$OBX" "$(observe '[{"id":"beach","confi
 check "the parks as a theme park" "21" "$(observe '[{"id":"amusement_park","confidence":0.9}]' $(names a))"
 T=$(trips 2026-10-12)
 has "a beach week seen as beach is still OBX Beach Week" "OBX Beach Week 2025" "$T"
+has "and Christmas at the beach is Christmas, tree or not" "Christmas in the Outer Banks 2019" "$T"
 has "a theme park trip to Walt Disney World is the family's WDW vacation" "WDW Vacation 2025" "$T"
 lacks "and isn't called a theme park trip" "Theme Park Trip" "$T"
 check "a year after the beach trip, you were in the Outer Banks" "A year ago you were in the Outer Banks" \
@@ -307,7 +310,7 @@ check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "places: named 351 photos again" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 359 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

@@ -1209,10 +1209,20 @@ from what the place is, then from how long it was:
 - otherwise five days or more is a "Vacation", two or three over a weekend a
   "Weekend", and anything else a "Trip".
 
-A week or less over a holiday keeps the holiday's name: "Christmas 2023 in
-Asheville". The page reads a trip's place back from its name (`tripPlace`), for
+A week or less over a holiday is named for it, year last like every trip:
+"Christmas in Asheville 2023". The holidays a family travels for (Christmas,
+New Year's, Thanksgiving, Easter, the Fourth) count away from home whatever
+the photos show: Christmas at the beach has no tree, and is still "Christmas
+in Clearwater Beach 2012" (his word, 2026-11-10). At home a holiday still has
+to look like itself. The page reads a trip's place back from its name (`tripPlace`), for
 one trip per place in its rows and for "A year ago you were in the Outer
 Banks", which says the place in full.
+
+**A featured photo says what its day was** (`FeaturedDays`): a day of a trip
+is that trip, or the holiday there, "Christmas in Clearwater Beach 2012"; a
+holiday at home is "Christmas 2012"; a day that was an occasion is that
+occasion. Only a day that was none of those is its place or its date. The
+place is the day's own where the photo has none.
 
 **Trips taken every year are a tradition.** The same name less its year in
 three years or more is an Over the Years card of its own: "OBX Beach Week ·
@@ -1454,7 +1464,14 @@ photos are counted again on each visit. It goes only when:
   a stricter vocabulary, can't take it away;
 - it's too thin to open: fewer moments than an album of its kind needs (see
   "Every album has a reason"), unless the person named it. Its photos in
-  Recently Deleted count, so deleting some for a while doesn't let it go.
+  Recently Deleted count, so deleting some for a while doesn't let it go;
+- it's a trip today's rules no longer find, and its days aren't a trip by
+  them either: most of them not away, or nowhere in particular. "Trip 2022"
+  lingered that way after the rules stopped making it (his word,
+  2026-11-10). One whose days still make a trip takes today's name instead,
+  so an old "Five days in Orlando" becomes "Orlando Vacation 2024". A trip
+  from further back than the thousand days away the rules read stays as it
+  was.
 
 An album from a setting the person switched off (holidays, or curation) waits
 until the setting is back on. A prompt never takes a kept album's place.

@@ -208,7 +208,7 @@ check "the one away is just its holiday's days" "2023-12-24..2023-12-25" \
   "$(T keys holiday:Christmas | tr '|' '\n' | grep 2023)"
 check "which open on their photos" "10" \
   "$(curl -s "$API/v1/spaces/$SPACE/collections/items?kind=day&key=2023-12-24..2023-12-25" -H "$AUTH" | jq '["total"]')"
-has "while the trip keeps its own name" "Christmas 2023 in Asheville" "$(T trips)"
+has "while the trip keeps its own name" "Christmas in Asheville 2023" "$(T trips)"
 lacks "and Holidays & Occasions still doesn't list its days twice" "Christmas 2023|" "$(T occasions)|"
 check "two Thanksgivings are a tradition" "2 years · 2024–2025" "$(T field holiday:Thanksgiving subtitle)"
 lacks "one Halloween isn't" "Halloween" "$(T titles)"

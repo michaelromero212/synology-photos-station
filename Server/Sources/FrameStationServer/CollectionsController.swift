@@ -131,14 +131,28 @@ struct CollectionsController: RouteCollection {
 
         // Every trip the library holds, for the ones a family takes every
         // year (see `tripTraditions`); the page and See All show the latest.
-        let everyTrip = try await trips(
+        // A trip over a holiday a family travels for is that holiday's,
+        // tree or not: Christmas at the beach has none, and is still what the
+        // family calls "Christmas in Clearwater Beach" (his word, 2026-11-10).
+        let tripHolidays = holidays.merging(
+            calendar.filter { YearlyPatterns.gatherings.contains(YearlyPatterns.family(of: $0.value)) },
+            uniquingKeysWith: { evidenced, _ in evidenced }
+        )
+        let tripsFound = try await trips(
             spaceID: spaceID, seed: seed, userID: device.userID,
-            holidays: holidays, evidence: evidence, geocoder: req.application.geocoder,
+            holidays: tripHolidays, evidence: evidence, geocoder: req.application.geocoder,
             on: req.sql
         )
+        let everyTrip = tripsFound.cards
         let trips = await keeper.keep(
             trips: Array(everyTrip.prefix(Self.allTripsLimit)),
-            saved: saved, limit: Self.allTripsLimit, seed: seed
+            saved: saved, limit: Self.allTripsLimit, seed: seed,
+            rejudge: { key in
+                Self.judgeKept(
+                    trip: key, in: tripsFound, holidays: tripHolidays, evidence: evidence,
+                    geocoder: req.application.geocoder
+                )
+            }
         )
 
         // Days already inside a trip are not also occasions of their own. Two
@@ -249,7 +263,12 @@ struct CollectionsController: RouteCollection {
         // all an older app draws.
         let photos = curation.enabled && curation.isPersonal
             ? try await featuredPhotos(
-                spaceID: spaceID, userID: device.userID, today: today, seed: seed, on: req.sql
+                spaceID: spaceID, userID: device.userID, today: today, seed: seed,
+                naming: FeaturedDays(
+                    trips: trips, occasions: occasions.map(\.summary), holidays: holidays,
+                    awayHolidays: tripHolidays, home: tripsFound.away.values.lazy.compactMap(\.home).first
+                ),
+                on: req.sql
             )
             : []
         var featured = Self.featuredRow(
@@ -886,7 +905,8 @@ struct CollectionsController: RouteCollection {
     /// Only where the person's devices have analyzed the library; without
     /// their ratings, "featured" would only mean "random".
     private func featuredPhotos(
-        spaceID: UUID, userID: UUID, today: Date, seed: String, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, today: Date, seed: String, naming: FeaturedDays = FeaturedDays(),
+        on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         struct PhotoRow: Decodable {
             let id: UUID
@@ -896,6 +916,7 @@ struct CollectionsController: RouteCollection {
         struct CountRow: Decodable {
             let day: String
             let count: Int
+            let place: String?
         }
         guard let cutoff = Self.utc.date(byAdding: .day, value: -30, to: today) else { return [] }
         let local = TimelineController.localTime
@@ -920,7 +941,8 @@ struct CollectionsController: RouteCollection {
         guard !picked.isEmpty else { return [] }
 
         let counts = try await sql.raw("""
-            SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day, count(*)::int AS count
+            SELECT to_char(\(unsafeRaw: local), 'YYYY-MM-DD') AS day, count(*)::int AS count,
+                   mode() WITHIN GROUP (ORDER BY \(unsafeRaw: TimelineController.placeName)) AS place
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
             WHERE sa.space_id = \(bind: spaceID) AND sa.deleted_at IS NULL
@@ -928,18 +950,55 @@ struct CollectionsController: RouteCollection {
               AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD') = ANY(\(bind: picked.map(\.day))::text[])
             GROUP BY 1
             """).all(decoding: CountRow.self)
-        let byDay = Dictionary(counts.map { ($0.day, $0.count) }, uniquingKeysWith: { first, _ in first })
+        let byDay = Dictionary(counts.map { ($0.day, $0) }, uniquingKeysWith: { first, _ in first })
 
         return picked.map { photo in
             let date = Self.longDay(photo.day) ?? photo.day
+            let place = photo.place ?? byDay[photo.day]?.place
+            let title = naming.title(of: photo.day, place: place) ?? photo.place ?? date
             return CollectionSummary(
                 kind: .day, key: photo.day,
-                title: photo.place ?? date,
-                subtitle: photo.place == nil ? nil : date,
-                count: byDay[photo.day] ?? 1,
+                title: title,
+                subtitle: title == date ? nil : date,
+                count: byDay[photo.day]?.count ?? 1,
                 coverAssetIDs: [photo.id],
                 kicker: "FEATURED PHOTO"
             )
+        }
+    }
+
+    /// What a featured photo's day was, so its card says so: "Christmas in
+    /// Clearwater Beach 2012" rather than "December 25, 2012" (his word,
+    /// 2026-11-10).
+    struct FeaturedDays {
+        var trips: [CollectionSummary] = []
+        var occasions: [CollectionSummary] = []
+        /// The holidays that looked like themselves, for a day at home: a
+        /// Thanksgiving whose photos say it wasn't one isn't called one.
+        var holidays: [String: String] = [:]
+        /// And as a trip takes them, for a day away: the ones a family
+        /// travels for, whatever the photos show.
+        var awayHolidays: [String: String] = [:]
+        /// The place the library holds most of.
+        var home: String?
+
+        /// A day of a trip is that trip, or, on a holiday, the holiday where
+        /// the trip was: "Christmas in Clearwater Beach 2012". A holiday at
+        /// home is "Christmas 2012", and one spent somewhere else says where.
+        /// A day that was an occasion is that occasion. Nil for any other day.
+        func title(of day: String, place: String?) -> String? {
+            let year = String(day.prefix(4))
+            if let trip = trips.first(where: { CollectionsController.days(inKey: $0.key).contains(day) }) {
+                guard let holiday = awayHolidays[day] else { return trip.title }
+                guard let word = CollectionsController.tripPlace(inTitle: trip.title) else { return "\(holiday) \(year)" }
+                let there = Destinations.place(titled: word).map(Whereabouts.init) ?? Whereabouts(name: word)
+                return "\(holiday) \(there.locative) \(year)"
+            }
+            if let place, let home, place != home, let holiday = awayHolidays[day] {
+                return "\(holiday) \(Whereabouts(label: place).locative) \(year)"
+            }
+            if let holiday = holidays[day] { return "\(holiday) \(year)" }
+            return occasions.first { CollectionsController.days(inKey: $0.key).contains(day) }?.title
         }
     }
 
@@ -1217,7 +1276,7 @@ struct CollectionsController: RouteCollection {
         spaceID: UUID, seed: String, userID: UUID, holidays: [String: String],
         evidence: [String: DayEvidence] = [:], geocoder: Geocoder? = nil,
         on sql: any SQLDatabase
-    ) async throws -> [CollectionSummary] {
+    ) async throws -> TripsFound {
         let local = TimelineController.localTime
         let rows = try await sql.raw("""
             WITH located AS (
@@ -1327,17 +1386,8 @@ struct CollectionsController: RouteCollection {
         // reaches further back than the page does. Day trips count against it
         // too, and a family that drives to the coast most weekends used those
         // up within a couple of years.
-        // And a trip is somewhere: days away that no place holds most of are
-        // photos from all over, not a trip anyone took. Unless there are days
-        // and days of them, which is a road trip.
-        return Self.tripRuns(from: rows)
-            .filter { run in
-                let moments = run.reduce(0) { $0 + ($1.moments ?? $1.count) }
-                guard run.count >= 2, run.reduce(0, { $0 + $1.count }) >= Self.minimumItems,
-                      moments >= Self.tripMoments else { return false }
-                return Self.whereabouts(of: run, geocoder: geocoder) != nil
-                    || (run.count >= Self.roadTripDays && moments >= Self.roadTripMoments)
-            }
+        let cards = Self.tripRuns(from: rows)
+            .filter { Self.isTrip($0, geocoder: geocoder) }
             .map {
                 Self.describeTrip(
                     $0, holidays: holidays,
@@ -1345,6 +1395,50 @@ struct CollectionsController: RouteCollection {
                     geocoder: geocoder
                 )
             }
+        return TripsFound(
+            cards: cards,
+            away: Dictionary(rows.map { ($0.day, $0) }, uniquingKeysWith: { first, _ in first }),
+            since: rows.count >= 1000 ? rows.last?.day : nil
+        )
+    }
+
+    /// The trips found, and the days away they were found from.
+    struct TripsFound {
+        var cards: [CollectionSummary] = []
+        /// Each day most of whose photos were taken away, the latest thousand.
+        var away: [String: TripDay] = [:]
+        /// How far back `away` reaches, where it stopped at its limit; nil
+        /// where it holds every day away the library has.
+        var since: String?
+    }
+
+    /// Whether days away make a trip. It has to be somewhere: days away that
+    /// no place holds most of are photos from all over, not a trip anyone
+    /// took, unless there are days and days of them, which is a road trip.
+    static func isTrip(_ run: [TripDay], geocoder: Geocoder?) -> Bool {
+        let moments = run.reduce(0) { $0 + ($1.moments ?? $1.count) }
+        guard run.count >= 2, run.reduce(0, { $0 + $1.count }) >= minimumItems,
+              moments >= tripMoments else { return false }
+        return whereabouts(of: run, geocoder: geocoder) != nil
+            || (run.count >= roadTripDays && moments >= roadTripMoments)
+    }
+
+    /// What today's rules make of a trip kept from before that they no longer
+    /// find: still a trip, under today's name; not one at all, as "Trip 2022"
+    /// wasn't (his word, 2026-11-10); or from further back than the days read,
+    /// which can't be told.
+    static func judgeKept(
+        trip key: String, in found: TripsFound, holidays: [String: String],
+        evidence: [String: DayEvidence], geocoder: Geocoder?
+    ) -> CuratedAlbums.TripVerdict {
+        let days = days(inKey: key)
+        guard !days.isEmpty else { return .unknown }
+        if let since = found.since, days.allSatisfy({ $0 < since }) { return .unknown }
+        let run = days.compactMap { found.away[$0] }.sorted { $0.day > $1.day }
+        guard run.count * 2 > days.count, isTrip(run, geocoder: geocoder) else { return .notATrip }
+        return .trip(describeTrip(
+            run, holidays: holidays, event: tripEvent(days: run.map(\.day), evidence: evidence), geocoder: geocoder
+        ))
     }
 
     /// How far from home stops being an errand.
@@ -1402,12 +1496,15 @@ struct CollectionsController: RouteCollection {
         let holiday = run.count <= 7
             ? run.filter { holidays[$0.day] != nil }
                 .max { $0.count < $1.count }
-                .flatMap { day in holidays[day.day].map { "\($0) \(day.day.prefix(4))" } }
+                .flatMap { day in holidays[day.day].map { (name: $0, year: String(day.day.prefix(4))) } }
             : nil
 
         let title: String
         if let holiday {
-            title = where_.map { "\(holiday) \($0.locative)" } ?? "\(holiday) away from home"
+            // "Christmas in Clearwater Beach 2012": the place in full, as it's
+            // said in a sentence, and the year last, as every trip's is.
+            title = where_.map { "\(holiday.name) \($0.locative) \(holiday.year)" }
+                ?? "\(holiday.name) Road Trip \(holiday.year)"
         } else {
             var kind = tripKind(event: event, implies: where_?.implies ?? [], days: run.count, weekend: weekend)
             // Days on the road that no place holds most of.
@@ -1486,8 +1583,15 @@ struct CollectionsController: RouteCollection {
                 let place = name.dropLast(kind.count).trimmingCharacters(in: .whitespaces)
                 return place.isEmpty ? nil : place
             }
+            // A holiday's: "Asheville" from "Christmas in Asheville 2023".
+            return whereabouts(inTitle: name)?.place
         }
         return whereabouts(inTitle: title)?.place
+    }
+
+    /// Whether a trip is named for a holiday: "Christmas in Asheville 2023".
+    static func isHolidayTrip(_ title: String) -> Bool {
+        Holidays.names.contains { title.hasPrefix($0 + " ") }
     }
 
     /// Where a trip or a day was, as a title says it.
@@ -2538,7 +2642,7 @@ struct CollectionsController: RouteCollection {
     /// name.
     static func tripTraditions(_ trips: [CollectionSummary], today: Date, turn: Int) -> [Tradition] {
         var byName: [String: [(trip: CollectionSummary, year: Int)]] = [:]
-        for trip in trips where trip.kind == .trip {
+        for trip in trips where trip.kind == .trip && !isHolidayTrip(trip.title) {
             guard let (name, year) = yearless(trip.title), tripPlace(inTitle: trip.title) != nil else { continue }
             byName[name, default: []].append((trip, year))
         }

@@ -144,12 +144,18 @@ check "as the same album, with its new dates" "2024-09-09..2024-09-12" \
   "$(q "SELECT key FROM curated_albums WHERE id = '$ASHEVILLE_ID'")"
 check "not a second one" "2" "$(saved "kind = 'trip'")"
 
-echo "No longer found"
+echo "No longer a trip"
+# Its photos turn out to have been taken at home: by today's rules it was
+# never a trip, and its kept album goes, as "Trip 2022" did in his library
+# (2026-11-10).
 q "UPDATE assets SET lat = 38.4716, lon = -77.9967, destination = NULL, place_name = 'Culpeper, Virginia'
    WHERE id IN (SELECT asset_id FROM space_assets WHERE filename LIKE 'd1%')" >/dev/null
-check "the rules no longer find the Disney trip, and it stays" "2025-03-10..2025-03-13 20" \
-  "$(card "WDW Vacation 2025")"
-check "its photos still open" "20" "$(curl -s "$API/v1/spaces/$SPACE/collections/items?kind=trip&key=2025-03-10..2025-03-13" -H "$AUTH" | jq '["total"]')"
+lacks "a trip whose photos were at home all along isn't kept as one" "WDW Vacation 2025" "$(titles)"
+check "its record goes" "0" "$(saved "title LIKE 'WDW%'")"
+check "while its photos stay in the library" "20" "$(curl -s "$API/v1/spaces/$SPACE/collections/items?kind=trip&key=2025-03-10..2025-03-13" -H "$AUTH" | jq '["total"]')"
+q "UPDATE assets SET lat = 28.4194, lon = -81.5812, destination = 'Walt Disney World, Florida'
+   WHERE id IN (SELECT asset_id FROM space_assets WHERE filename LIKE 'd1%')" >/dev/null
+check "back where they were taken, it's a trip again" "2025-03-10..2025-03-13 20" "$(card "WDW Vacation 2025")"
 
 echo "Switched off"
 settings '{"holidays":false}'
@@ -203,6 +209,19 @@ has "photos the person's own phone rated well are featured" "FEATURED PHOTO: " "
 check "several cards, none twice, the first the one an older app shows, none repeated below" \
   "True True True" "$(echo "$R" | tail -1 | cut -d' ' -f2-)"
 check "and no more than six" "1" "$(echo "$R" | tail -1 | awk '{print ($1 > 1 && $1 <= 6)}')"
+# A featured photo's card says what its day was, never just the date: Christmas
+# Day is "Christmas 2024", a day of cake is its birthday party, and a
+# Thanksgiving the photos said wasn't one isn't called that.
+check "a featured photo's card says what its day was" "True" \
+  "$(curl -s "$API/v1/spaces/$SPACE/collections?date=2026-10-12" -H "$AUTH" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+cards = [c for c in d.get("featured") or [] if c.get("kicker") == "FEATURED PHOTO"]
+rules = {"2024-12-25": lambda t: t == "Christmas 2024",
+         "2024-11-28": lambda t: not t.startswith("Thanksgiving"),
+         "2022-08-14": lambda t: t.startswith("Birthday"),
+         "2023-08-14": lambda t: t.startswith("Birthday")}
+print(bool(cards) and all(rules.get(c["key"], lambda t: True)(c["title"]) for c in cards))')"
 
 echo "Named by the person"
 name(){ code -X PUT "$API/v1/spaces/$SPACE/collections/name" -H "$AUTH" -H 'Content-Type: application/json' \
