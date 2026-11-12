@@ -79,6 +79,11 @@ services:
       # doesn't analyze; with the analyzer stopped or missing, it carries on and
       # waits for it.
       FRAMESTATION_ANALYZER_SOCKET: /run/framestation-analyzer/analyzer.sock
+      # People: several looks per person, and unnamed groups folded into the
+      # people someone named (NAS-ANALYSIS.md §7). Set to 0 in .env and
+      # grouping is as it was before looks. Run `analysis people-matches`
+      # first to see what it would do.
+      FRAMESTATION_PEOPLE_LOOKS: ${FRAMESTATION_PEOPLE_LOOKS:-1}
     # Root, because the layout above writes into each person's DSM home and
     # hands the file to them with chown — both of which a non-root container
     # cannot do. The image itself runs as vapor:vapor and is happy to; this

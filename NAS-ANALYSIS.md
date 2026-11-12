@@ -438,8 +438,10 @@ faces are used for anything.
        the whole group ("Is this Emma too?") is planned, in place of opening
        each circle.
    - **The switch.** `FRAMESTATION_PEOPLE_LOOKS=1` in the server's
-     environment. Off, grouping is exactly as before. It stays off until the
-     owner has read the dry run for their own library.
+     environment. Off, grouping is exactly as before. The server leaves it
+     off unless told; `docker-compose.yml` turns it on (since 2026-11-12,
+     after the owner checked the dry run's folds on his own library), and
+     `FRAMESTATION_PEOPLE_LOOKS=0` in `.env` turns it back off.
    - **The dry run.** `analysis people-matches "<name>"` (§8) now also shows
      what a pass with looks on would do: the faces it would place, the groups
      it would fold and into whom, each named person's looks, and how long the
