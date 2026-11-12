@@ -1080,6 +1080,16 @@ struct RecentlyDeletedView: View {
     /// The item open full size. See `DeletedItemViewer`.
     @State private var opened: TimelineItem?
     #endif
+    #if os(macOS)
+    /// For telling a double-click (open) from a click (select), and where a
+    /// Shift-click range starts. See `macClick`.
+    @State private var lastClickAt = Date.distantPast
+    @State private var lastClickedID: UUID?
+    @State private var anchorID: UUID?
+    /// What went wrong last, shown under the count. Successes say nothing,
+    /// as in Photos: the tiles leaving the grid are the answer.
+    @State private var failure: String?
+    #endif
     #if os(iOS)
     /// The library's viewer, over the app. See `OverlayViewer`.
     @Environment(\.overlayViewer) private var overlay
@@ -1097,6 +1107,29 @@ struct RecentlyDeletedView: View {
             #endif
             #if os(tvOS)
             .floatingTabBarClearance()
+            #elseif os(macOS)
+            // Photos on the Mac: no Select mode. A click picks, the toolbar's
+            // Recover and Delete act on what's picked — Delete All when nothing
+            // is — and the subtitle says how many and when they're from.
+            .navigationSubtitle(macSubtitle)
+            .toolbar { macToolbar }
+            .background { macShortcuts }
+            .alert(
+                macDeleteTitle,
+                isPresented: Binding(
+                    get: { confirming != nil },
+                    set: { if !$0 { confirming = nil } }
+                ),
+                presenting: confirming
+            ) { action in
+                Button("Delete From NAS", role: .destructive) { perform(action) }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("This action can't be undone.")
+            }
+            .sheet(item: $opened) { item in
+                viewer(opening: item).frame(minWidth: 760, minHeight: 560)
+            }
             #else
             // The floating tab bar steps aside while selecting and the bar with
             // Recover and Delete takes its place — the same exchange the library
@@ -1170,7 +1203,11 @@ struct RecentlyDeletedView: View {
                 )
             }
         } else {
+            #if os(macOS)
+            macGrid
+            #else
             grid
+            #endif
         }
     }
 
@@ -1477,11 +1514,286 @@ struct RecentlyDeletedView: View {
                 }
             } catch {
                 notice = "That didn't finish: \(error.localizedDescription)"
+                #if os(macOS)
+                failure = notice
+                #endif
             }
             working = nil
             endSelection()
             await load()
         }
+    }
+    #endif
+
+    #if os(macOS)
+    // MARK: - Mac
+
+    /// Square tiles with the days left written under each, and the count and
+    /// what it means at the foot of the window — Photos' own layout for this
+    /// room on the Mac.
+    private var macGrid: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(
+                                .adaptive(minimum: 160, maximum: 240),
+                                spacing: 2, alignment: .top
+                            )
+                        ],
+                        spacing: 2
+                    ) {
+                        ForEach(items) { item in macTile(item) }
+                    }
+                    .padding(.horizontal, 2)
+                    Spacer(minLength: 24)
+                    macFooter
+                }
+                .frame(minHeight: proxy.size.height)
+                // A click between tiles clears the selection, as in Photos.
+                // The tiles' own clicks win over this one.
+                .contentShape(Rectangle())
+                .onTapGesture { picked.removeAll() }
+            }
+        }
+    }
+
+    /// Picked the way the library grid shows it: the check at the corner and
+    /// the accent border.
+    private func macTile(_ item: TimelineItem) -> some View {
+        let isPicked = picked.contains(item.assetID)
+        return VStack(spacing: 6) {
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    GeometryReader { proxy in
+                        PhotoCell(item: item, loader: session.loader, size: proxy.size)
+                    }
+                }
+                .clipped()
+                .overlay(alignment: .topLeading) {
+                    if isPicked { SelectionMark(isPicked: true).padding(5) }
+                }
+                .overlay {
+                    if isPicked {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.accentColor, lineWidth: 3)
+                    }
+                }
+            Text(macDaysLeft(item))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.bottom, 12)
+        .contentShape(Rectangle())
+        .onTapGesture { macClick(item) }
+        .contextMenu { macMenu(for: item) }
+        .accessibilityAddTraits(isPicked ? .isSelected : [])
+    }
+
+    private func macDaysLeft(_ item: TimelineItem) -> String {
+        guard let days = item.daysUntilPurge else { return "" }
+        switch days {
+        case ...0: return "Deleting today"
+        case 1: return "1 day left"
+        default: return "\(days) days left"
+        }
+    }
+
+    /// The count, what the captions mean, and anything that went wrong.
+    private var macFooter: some View {
+        VStack(spacing: 4) {
+            Text(macCount(items, total: items.count))
+                .font(.headline)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+            Text(
+                "Each item shows the days left before it's deleted. After that, "
+                + "it's removed from your NAS for good."
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            if let failure {
+                Text(failure)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .padding(.top, 4)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 480)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 20)
+    }
+
+    /// A click picks, ⌘ adds or removes, ⇧ picks the run from the last click,
+    /// and a second click soon after opens — the library grid's rules. A
+    /// viewer of the library can open items but not pick them.
+    private func macClick(_ item: TimelineItem) {
+        guard !isWorking else { return }
+        let now = Date()
+        let isSecondClick = lastClickedID == item.id
+            && now.timeIntervalSince(lastClickAt) <= NSEvent.doubleClickInterval
+        lastClickAt = now
+        lastClickedID = item.id
+
+        if isSecondClick {
+            lastClickedID = nil
+            if session.supports(ServerCapability.deletedPreview) { opened = item }
+            return
+        }
+        guard canEdit else { return }
+        failure = nil
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command) {
+            if picked.contains(item.assetID) {
+                picked.remove(item.assetID)
+            } else {
+                picked.insert(item.assetID)
+            }
+            anchorID = item.assetID
+        } else if flags.contains(.shift),
+                  let anchorID,
+                  let from = items.firstIndex(where: { $0.assetID == anchorID }),
+                  let to = items.firstIndex(where: { $0.assetID == item.assetID }) {
+            picked.formUnion(items[min(from, to)...max(from, to)].map(\.assetID))
+        } else {
+            picked = [item.assetID]
+            anchorID = item.assetID
+        }
+    }
+
+    /// Right-click on a picked tile acts on everything picked; on any other
+    /// tile, on that one alone — the Finder's rule. The selection is set when
+    /// an item is chosen, never while the menu is drawn.
+    @ViewBuilder
+    private func macMenu(for item: TimelineItem) -> some View {
+        if canEdit {
+            let targets: Set<UUID> = picked.contains(item.assetID) ? picked : [item.assetID]
+            let chosen = items.filter { targets.contains($0.assetID) }
+            Button {
+                picked = targets
+                perform(.recover(all: false))
+            } label: {
+                Label("Recover", systemImage: "arrow.uturn.backward")
+            }
+            Button(role: .destructive) {
+                picked = targets
+                confirming = .delete(all: false)
+            } label: {
+                Label("Delete \(macCount(chosen, total: chosen.count))…", systemImage: "trash")
+            }
+        }
+        if session.supports(ServerCapability.deletedPreview) {
+            Divider()
+            Button("Open") { opened = item }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var macToolbar: some ToolbarContent {
+        if canEdit {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Recover") { perform(.recover(all: false)) }
+                    .disabled(picked.isEmpty || isWorking)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    confirming = .delete(all: picked.isEmpty)
+                } label: {
+                    if working != nil {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(
+                            picked.isEmpty
+                                ? "Delete All"
+                                : "Delete \(macCount(macPickedItems, total: picked.count))"
+                        )
+                    }
+                }
+                .disabled(items.isEmpty || isWorking)
+            }
+        }
+    }
+
+    /// Keys with no button of their own: ⌘A, Delete (with or without ⌘) and
+    /// Escape to let go of the selection.
+    private var macShortcuts: some View {
+        ZStack {
+            Button("Select All") { picked = Set(items.map(\.assetID)) }
+                .keyboardShortcut("a", modifiers: .command)
+            Button("Delete") { if !picked.isEmpty { confirming = .delete(all: false) } }
+                .keyboardShortcut(.delete, modifiers: [])
+            Button("Delete") { if !picked.isEmpty { confirming = .delete(all: false) } }
+                .keyboardShortcut(.delete, modifiers: .command)
+            Button("Deselect") { picked.removeAll() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .disabled(!canEdit || isWorking || items.isEmpty)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+
+    private var macPickedItems: [TimelineItem] {
+        items.filter { picked.contains($0.assetID) }
+    }
+
+    /// "29 Photos", "3 Videos", "5 Items" — Photos names the kind when
+    /// they're all one kind.
+    private func macCount(_ subset: [TimelineItem], total: Int) -> String {
+        "\(total.formatted()) \(macNoun(subset, plural: total != 1))"
+    }
+
+    private func macNoun(_ subset: [TimelineItem], plural: Bool) -> String {
+        let noun: String
+        if !subset.isEmpty, subset.allSatisfy({ $0.mediaType == .video }) {
+            noun = "Video"
+        } else if !subset.isEmpty, subset.allSatisfy({ $0.mediaType != .video }) {
+            noun = "Photo"
+        } else {
+            noun = "Item"
+        }
+        return plural ? noun + "s" : noun
+    }
+
+    /// "29 Photos · September 2026", or "5 Photos Selected · …".
+    private var macSubtitle: String {
+        guard !items.isEmpty else { return "" }
+        let count = picked.isEmpty
+            ? macCount(items, total: items.count)
+            : macCount(macPickedItems, total: picked.count) + " Selected"
+        let range = macDateRange
+        return range.isEmpty ? count : "\(count) · \(range)"
+    }
+
+    /// When the items were taken: "September 2026", "June – September 2026",
+    /// "June 2025 – September 2026".
+    private var macDateRange: String {
+        let dates = items.map(\.capturedAt)
+        guard let first = dates.min(), let last = dates.max() else { return "" }
+        let calendar = Calendar.current
+        let monthYear = Date.FormatStyle().month(.wide).year()
+        let sameYear = calendar.isDate(first, equalTo: last, toGranularity: .year)
+        if sameYear, calendar.isDate(first, equalTo: last, toGranularity: .month) {
+            return first.formatted(monthYear)
+        }
+        let start = sameYear
+            ? first.formatted(Date.FormatStyle().month(.wide))
+            : first.formatted(monthYear)
+        return "\(start) – \(last.formatted(monthYear))"
+    }
+
+    /// "Are you sure you want to delete 29 photos permanently?"
+    private var macDeleteTitle: String {
+        let subset = picked.isEmpty ? items : macPickedItems
+        let n = picked.isEmpty ? items.count : picked.count
+        let what = n == 1
+            ? "this \(macNoun(subset, plural: false).lowercased())"
+            : "\(n.formatted()) \(macNoun(subset, plural: true).lowercased())"
+        return "Are you sure you want to delete \(what) permanently?"
     }
     #endif
 
