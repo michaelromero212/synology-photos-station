@@ -185,7 +185,12 @@ func configure(_ app: Application) async throws {
                     app: app, seal: seal,
                     startDelay: seconds("FRAMESTATION_PEOPLE_START_DELAY", 45),
                     interval: seconds("FRAMESTATION_PEOPLE_INTERVAL", 60),
-                    settle: seconds("FRAMESTATION_PEOPLE_SETTLE", 900)
+                    settle: seconds("FRAMESTATION_PEOPLE_SETTLE", 900),
+                    // Several looks per person, and unnamed groups folded
+                    // into named people. Off unless switched on.
+                    looks: ["1", "true", "on"].contains(
+                        Environment.get("FRAMESTATION_PEOPLE_LOOKS")?.lowercased() ?? ""
+                    )
                 )
                 app.lifecycle.use(AnalysisWorkerLifecycle())
                 app.logger.info("analysis: expecting the analyzer at \(socket)")

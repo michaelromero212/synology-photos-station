@@ -393,6 +393,55 @@ faces are used for anything.
      - Names are in `people` and who is whose in `person_faces` (migration
        0038), keyed by file and face rather than by a face row, so a name
        outlives a model upgrade.
+     - Looks, below, sort each person's own faces by these same rules, behind
+       a switch.
+   - **Looks (built 2026-11-12, off until switched on).**
+     - Why: one average face blurs a person who looks different over the
+       years, such as a toddler and the same child at eight, or with and
+       without glasses. When the owner merged a small group into a big named
+       person, the average stayed almost all the big look. New faces of the
+       small look then fell under 0.50 and started yet another unnamed group.
+       The owner kept answering "Same Person" for someone already named.
+     - What: each grouping pass sorts each person's own faces into looks, by
+       the same rules that group strangers. A face joins a look at 0.50, and
+       looks at 0.62 become one. A look counts once it has four faces in
+       three files. A new face may join a person by their closest look as
+       well as by their average. The bars are unchanged: 0.50, or 0.56 for a
+       face under 40 px.
+     - Guard: a look other than the person's main one (the look with the most
+       faces) is set aside if it is at least as like someone else as it is
+       like the main look. Someone else is anyone the owner named, or anyone
+       in a photo with the person. An unnamed group that is never seen with
+       them may be one more look of theirs, so it doesn't count as someone
+       else. This keeps a few of a sibling's faces that crept in from pulling
+       in the rest of the sibling. A look set aside is simply not used.
+     - Looks are worked out afresh each pass and never stored, so they also
+       recover merges the owner made before this existed. No migration.
+   - **Folding (same switch).**
+     - An unnamed group folds into a named person when it is at least 0.62
+       like them, the same bar at which two unnamed groups become one, by
+       their average or any of their looks. It must also be at least 0.08
+       clear of every other named person.
+     - Never when the two share a photo, since they can't be one person. Never
+       when the owner said a face of the group isn't that person. Never a
+       hidden person, on either side.
+     - Two named people are still never merged.
+     - A fold can make another possible, so after a pass that merged anyone
+       the NAS runs another at the next interval, at most ten in a row.
+     - A group between 0.45 and 0.62 is left alone for now. One question for
+       the whole group ("Is this Emma too?") is planned, in place of opening
+       each circle.
+   - **The switch.** `FRAMESTATION_PEOPLE_LOOKS=1` in the server's
+     environment. Off, grouping is exactly as before. It stays off until the
+     owner has read the dry run for their own library.
+   - **The dry run.** `analysis people-matches "<name>"` (§8) now also shows
+     what a pass with looks on would do: the faces it would place, the groups
+     it would fold and into whom, each named person's looks, and how long the
+     pass took. It reads only.
+   - **Tests.** `Scripts/smoke-people-looks.sh` reproduces the repeat with
+     looks off, where a merged-in look's new photos start a new unnamed
+     person. It shows that with looks on the group folds in and new photos
+     join on their own.
    - **Cost.** A pass grows with the square of the faces waiting, since most
      strangers are a group of one.
      - On a Mac, release build, stand-in faces with four in ten strangers: a
@@ -454,6 +503,9 @@ faces are used for anything.
     with the key in `secrets/`, for after a restore.
   - `analysis time-grouping <faces>`: times People's grouping on made-up
     faces, a first pass and the one after. Reads and writes nothing.
+  - `analysis people-matches "<name>"`: reports which unnamed people look like
+    someone named, and what a pass with looks on would do. Reads and writes
+    nothing.
 - **People** regroup at most every 15 minutes while a library's faces are
   still coming in (`FRAMESTATION_PEOPLE_SETTLE`, in seconds), and within a
   minute of a decision.

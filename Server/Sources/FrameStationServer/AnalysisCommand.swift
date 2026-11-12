@@ -155,9 +155,7 @@ struct AnalysisCommand: AsyncCommandGroup {
         }
         var help: String { "Report which unnamed people look like someone named. Changes nothing." }
 
-        /// Proposed, to be set from what this prints.
-        static let fold: Float = 0.62
-        static let foldMargin: Float = 0.08
+        /// Only a proposal for questions; folding uses the clusterer's own numbers.
         static let ask: Float = 0.45
 
         func run(using context: CommandContext, signature: Signature) async throws {
@@ -178,6 +176,9 @@ struct AnalysisCommand: AsyncCommandGroup {
             let clusterer = PeopleClusterer(app: app, seal: seal)
             let (library, _) = try await clusterer.load(person.id)
             let likeness = PeopleClusterer.likenesses(library)
+            let withLooks = PeopleClusterer.likenesses(library, looks: true)
+            let fold = PeopleClusterer.fold
+            let foldMargin = PeopleClusterer.foldMargin
 
             // The page as the app draws it, so each one can be found there.
             let page = try await PeopleController.summaries(
@@ -185,9 +186,11 @@ struct AnalysisCommand: AsyncCommandGroup {
             )
             let names = Dictionary(uniqueKeysWithValues: page.compactMap { p in p.name.map { (p.id, $0) } })
             var position: [UUID: String] = [:]
+            var photos: [UUID: Int] = [:]
             var counts: [PersonTier: Int] = [:]
             for p in page {
                 counts[p.place, default: 0] += 1
+                photos[p.id] = p.photoCount
                 switch p.place {
                 case .named: position[p.id] = "named"
                 case .suggested: position[p.id] = "Suggested #\(counts[p.place]!)"
@@ -199,34 +202,96 @@ struct AnalysisCommand: AsyncCommandGroup {
 
             console.info("\(person.name): \(library.faces.count) faces, \(names.count) named, "
                 + "\(counts[.suggested] ?? 0) suggested, \(counts[.more] ?? 0) under More People.")
-            console.info("Proposed: fold in at \(pct(Self.fold))+ and \(pct(Self.foldMargin)) clear of the runner-up; ask at \(pct(Self.ask))+.")
+            console.info("Proposed: fold in at \(pct(fold))+ and \(pct(foldMargin)) clear of the runner-up; ask at \(pct(Self.ask))+.")
             console.info("")
-            console.info(pad("Where", 18) + pad("Photos", 8) + pad("Looks most like", 26) + pad("Runner-up", 26) + "Would")
+            console.info(pad("Where", 18) + pad("Photos", 8) + pad("Looks most like", 26) + pad("Runner-up", 26) + pad("Would", 10)
+                + pad("With looks", 26) + "Would with looks")
             var tally: [String: Int] = [:]
+            var tallyLooks: [String: Int] = [:]
             for p in page where p.place != .named {
                 // Never someone they're in a photo with, or someone the owner
                 // already said a face of theirs isn't.
                 let list = (likeness[p.id] ?? []).filter { !$0.together && $0.rejected == 0 }
-                guard let best = list.first else {
-                    tally["-", default: 0] += 1
-                    continue
+                var would = "-"
+                var best: PeopleClusterer.Likeness?
+                var second: PeopleClusterer.Likeness?
+                if let first = list.first {
+                    best = first
+                    second = list.dropFirst().first
+                    let margin = first.similarity - (second?.similarity ?? -1)
+                    would = first.similarity >= fold && margin >= foldMargin ? "fold in"
+                        : first.similarity >= Self.ask ? "ask" : "-"
                 }
-                let second = list.dropFirst().first
-                let margin = best.similarity - (second?.similarity ?? -1)
-                let would = best.similarity >= Self.fold && margin >= Self.foldMargin ? "fold in"
-                    : best.similarity >= Self.ask ? "ask" : "-"
                 tally[would, default: 0] += 1
-                guard would != "-" else { continue }
+
+                // With looks, as the real fold decides: the closest of
+                // everyone named, the runner-up among all of them, and then
+                // whether the closest is allowed.
+                let all = withLooks[p.id] ?? []
+                let closest = all.first
+                var wouldLooks = "-"
+                if let closest {
+                    let margin = closest.similarity - (all.dropFirst().first?.similarity ?? -1)
+                    let allowed = !closest.together && closest.rejected == 0
+                        && !library.hidden.contains(p.id) && !library.hidden.contains(closest.person)
+                    if allowed, closest.similarity >= fold, margin >= foldMargin {
+                        wouldLooks = "fold in"
+                    } else if let ask = all.first(where: { !$0.together && $0.rejected == 0 }), ask.similarity >= Self.ask {
+                        wouldLooks = "ask"
+                    }
+                }
+                tallyLooks[wouldLooks, default: 0] += 1
+                guard would != "-" || wouldLooks != "-" else { continue }
                 console.info(pad(position[p.id] ?? "?", 18) + pad("\(p.photoCount)", 8)
-                    + pad("\(names[best.person] ?? "?") \(pct(best.similarity))", 26)
-                    + pad(second.map { "\(names[$0.person] ?? "?") \(pct($0.similarity))" } ?? "", 26) + would)
+                    + pad(best.map { "\(names[$0.person] ?? "?") \(pct($0.similarity))" } ?? "", 26)
+                    + pad(second.map { "\(names[$0.person] ?? "?") \(pct($0.similarity))" } ?? "", 26)
+                    + pad(would, 10)
+                    + pad(closest.map { "\(names[$0.person] ?? "?") \(pct($0.similarity))" } ?? "", 26) + wouldLooks)
             }
             console.info("")
             console.info("Would fold in \(tally["fold in"] ?? 0), ask about \(tally["ask"] ?? 0), leave \(tally["-"] ?? 0).")
+            console.info("With looks: would fold in \(tallyLooks["fold in"] ?? 0), ask about \(tallyLooks["ask"] ?? 0), leave \(tallyLooks["-"] ?? 0).")
+
+            // The real pass, both ways. Pure, so nothing is written.
+            console.info("")
+            console.info("One pass over this library as it stands (only the first pass; later passes may fold more):")
+            func ms(_ d: Duration) -> Int { Int(Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15) }
+            let startedPlain = ContinuousClock.now
+            let plain = PeopleClusterer.plan(library, looks: false)
+            let plainMS = ms(ContinuousClock.now - startedPlain)
+            let startedLooks = ContinuousClock.now
+            let planLooks = PeopleClusterer.plan(library, looks: true)
+            let looksMS = ms(ContinuousClock.now - startedLooks)
+            let toNamed = planLooks.newAuto.filter { library.named.contains($0.person) }.count
+            console.info("  Looks off: \(plain.newAuto.count) faces placed, \(plain.created.count) new people, "
+                + "\(plain.merges.count) merged, \(plain.folds.count) folded, \(plain.suggestions.count) questions, \(plainMS) ms")
+            console.info("  Looks on:  \(planLooks.newAuto.count) faces placed (\(toNamed) to named people), \(planLooks.created.count) new people, "
+                + "\(planLooks.merges.count) merged, \(planLooks.folds.count) folded, \(planLooks.suggestions.count) questions, \(looksMS) ms")
+
+            if !planLooks.folds.isEmpty {
+                console.info("")
+                console.info("Folds with looks on:")
+                console.info("  " + pad("Where", 18) + pad("Photos", 8) + pad("Into", 24) + "Likeness")
+                for f in planLooks.folds {
+                    console.info("  " + pad(position[f.from] ?? "new group", 18) + pad(photos[f.from].map(String.init) ?? "-", 8)
+                        + pad(names[f.into] ?? "?", 24) + pct(f.similarity))
+                }
+            }
+
+            let lookCounts = planLooks.looks.filter { $0.value.looks >= 2 && names[$0.key] != nil }
+                .sorted { (names[$0.key] ?? "") < (names[$1.key] ?? "") }
+            if !lookCounts.isEmpty {
+                console.info("")
+                console.info("Named people with more than one look:")
+                for (id, count) in lookCounts {
+                    console.info("  \(names[id] ?? "?"): \(count.looks) looks, \(count.setAside) set aside")
+                }
+            }
+
             console.info("")
             console.info("Named people and the other named person they look most like (siblings set the floor):")
             for p in page where p.place == .named {
-                guard let best = likeness[p.id]?.first(where: { !$0.together }) ?? likeness[p.id]?.first else { continue }
+                guard let best = likeness[p.id]?.first else { continue }
                 console.info("  " + pad(p.name ?? "?", 24) + "\(names[best.person] ?? "?") \(pct(best.similarity))"
                     + (best.together ? " (in photos together)" : ""))
             }
