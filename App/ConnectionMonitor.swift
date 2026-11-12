@@ -88,6 +88,16 @@ final class ConnectionMonitor {
     /// outage stopped it rather than waiting for the next background window.
     var onReconnect: (@MainActor () async -> Void)?
 
+    /// Called when a path that cost money gives way to one that doesn't:
+    /// cellular to Wi-Fi, on the way back into the house. A backup waiting
+    /// under "Wi-Fi Only" starts on it.
+    ///
+    /// `onReconnect` never covered this. Going from Wi-Fi to cellular and back
+    /// the NAS stays reachable, so the state never leaves `.online` and there
+    /// is no edge back to it: a backup that said "Waiting for Wi-Fi" with the
+    /// app open went on saying it on Wi-Fi, until something else started a run.
+    var onUnmetered: (@MainActor () async -> Void)?
+
     /// Read late rather than held: the client changes on sign-in and sign-out,
     /// and a captured one would go stale.
     private let client: @MainActor () -> FrameStationClient?
@@ -164,10 +174,14 @@ final class ConnectionMonitor {
                             + (constrained ? ", low data mode" : "")
                     )
                 }
+                let becameUnmetered = self.isMetered && !metered && satisfied
                 self.lastSatisfied = satisfied
                 self.lastInterface = interface
                 self.isMetered = metered
                 self.pathChanged(satisfied: satisfied)
+                if becameUnmetered, let onUnmetered = self.onUnmetered {
+                    Task { @MainActor in await onUnmetered() }
+                }
             }
         }
         path.start(queue: DispatchQueue(label: "com.michaelromero.FrameStation.path"))

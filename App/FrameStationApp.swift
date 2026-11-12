@@ -29,8 +29,15 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         BackgroundTransfers.shared.reconnect()
         // Through the runtime, which builds what a run needs if iOS launched
         // the app just for this — see `BackupRuntime`.
-        BackupScheduler.register {
-            _ = await BackupRuntime.shared.wake()
+        BackupScheduler.register { window in
+            // Written down for the same reason the silent push's wake-up is:
+            // whether iOS woke a closed app, and what came of it, is the first
+            // thing to ask of a backup that fell behind.
+            await Diagnostics.shared.log(.backup, "woken by iOS to back up (\(window) window)")
+            let moved = await BackupRuntime.shared.wake()
+            await Diagnostics.shared.log(
+                .backup, moved ? "background window moved photographs" : "background window found nothing to do"
+            )
         }
         return true
     }

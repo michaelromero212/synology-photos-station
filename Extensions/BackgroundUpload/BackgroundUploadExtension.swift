@@ -22,6 +22,11 @@ import Synchronization
 /// front, so what the server needs to know about a photo travels with it in a
 /// header. See `BackgroundUploadController` on the server.
 ///
+/// A file iOS couldn't send is queued again on a later run, spaced out and a
+/// bounded number of times (`BackgroundRetry`). iOS itself retries once and
+/// then lets go, and that used to be the end of it until the app was opened:
+/// a NAS down for a day left a day of photos on the phone.
+///
 /// Only photos the app hasn't seen. The app moves the mark forward whenever it
 /// looks at the library itself, and it takes in what this sent, so neither
 /// sends a photo the other already has. When both do anyway, which can happen
@@ -47,6 +52,9 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
             try await settle()
             if stopping.load(ordering: .acquiring) { return .processing }
             let more = try await makeJobs(setup: setup, token: credentials.token, base: base)
+            if stopping.load(ordering: .acquiring) { return .processing }
+            // After the new photos: those have never had a go.
+            try await requeueFailed(setup: setup, token: credentials.token, base: base)
             return more ? .processing : .completed
         } catch PHPhotosError.limitExceeded {
             // As many in flight as iOS holds. It calls again as they finish.
@@ -81,6 +89,8 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
             let job = failed.object(at: index)
             if let error = job.error as? URLError,
                [.userAuthenticationRequired, .badServerResponse].contains(error.code) {
+                // Not the same again straight away. Whether it's tried later
+                // is `settle`'s to say.
                 continue
             }
             retrying.append(job)
@@ -121,6 +131,24 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
                     version: made?.version,
                     finishedAt: Date()
                 ))
+                // To queue again later, unless it went or the sign-in was
+                // turned away, which trying again won't change. A bad answer
+                // is tried again: with the NAS's server stopped, the box in
+                // front of it answers for it, and that's an outage like any
+                // other.
+                if job.state == .failed, !Self.isRefusedSignIn(job.error) {
+                    let now = Date()
+                    var failed = progress.failed ?? [:]
+                    failed[key] = .init(
+                        liveGroupID: made?.liveGroupID ?? failed[key]?.liveGroupID,
+                        failures: (made?.failures ?? 0) + 1,
+                        firstFailedAt: made?.firstFailedAt ?? now,
+                        lastFailedAt: now
+                    )
+                    progress.failed = failed
+                } else {
+                    progress.failed?[key] = nil
+                }
             }
         }
         for job in jobs where job.state == .failed {
@@ -131,6 +159,10 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
                 PHAssetResourceUploadJobChangeRequest(for: job)?.acknowledge()
             }
         }
+    }
+
+    private static func isRefusedSignIn(_ error: (any Error)?) -> Bool {
+        (error as? URLError)?.code == .userAuthenticationRequired
     }
 
     /// The ledger key of the file a job sent, for a job made before this
@@ -195,14 +227,27 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
 
     /// The jobs for one photo: the file the app would send, and a Live
     /// Photo's motion with it, both carrying one group id.
+    ///
+    /// `again` is for a photo with files that failed, by their keys: only those
+    /// are sent, under the group id the pair first went with, so a half that
+    /// arrives late still joins the half already on the NAS.
     private func makeJobs(
-        for asset: PHAsset, setup: BackgroundUploadShared.Setup, token: String, base: URL
+        for asset: PHAsset, setup: BackgroundUploadShared.Setup, token: String, base: URL,
+        again: [String: BackgroundUploadShared.Failure]? = nil
     ) async throws {
         guard let candidate = PhotoLibraryScanner.describe(asset),
               let primary = PhotoLibraryScanner.primaryResource(for: asset)
-        else { return }
+        else {
+            forget(again)
+            return
+        }
         let motion = setup.includeVideos ? PhotoLibraryScanner.livePhotoResource(for: asset) : nil
-        let liveGroupID = motion.map { _ in UUID() }
+        let liveGroupID: UUID?
+        if let again {
+            liveGroupID = again.values.lazy.compactMap(\.liveGroupID).first
+        } else {
+            liveGroupID = motion.map { _ in UUID() }
+        }
 
         var photo = UploadDescriptor(asset: asset, candidate: candidate)
         photo.liveGroupID = liveGroupID
@@ -229,6 +274,18 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
             )
             files.append((key, motion, try request(half, spaceID: setup.spaceID, token: token, base: base), nil))
         }
+        if let again {
+            // The motion only with its group: without one it would land as a
+            // video of its own.
+            files.removeAll {
+                again[$0.key] == nil
+                    || (BackupKey.kind($0.key) == .pairedVideo && liveGroupID == nil)
+            }
+            guard !files.isEmpty else {
+                forget(again)
+                return
+            }
+        }
 
         let made = Placeholders()
         try await PHPhotoLibrary.shared().performChanges {
@@ -239,7 +296,9 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
                 if let id = change.placeholderForCreatedAssetResourceUploadJob?.localIdentifier {
                     made.add(id, .init(
                         key: file.key, liveGroupID: liveGroupID, version: file.version,
-                        createdAt: Date()
+                        createdAt: Date(),
+                        failures: again?[file.key]?.failures,
+                        firstFailedAt: again?[file.key]?.firstFailedAt
                     ))
                 }
             }
@@ -248,8 +307,49 @@ final class BackgroundUploadExtension: PHBackgroundResourceUploadJobExtension {
         BackgroundUploadShared.updateProgress { progress in
             progress.jobs.merge(jobs) { _, new in new }
             progress.handled[asset.localIdentifier] = Date()
+            // In a job's hands again, which carries the count from here.
+            for key in (again ?? [:]).keys { progress.failed?[key] = nil }
         }
-        logger.info("queued \(files.count) file(s) for background upload")
+        logger.info("queued \(files.count) file(s) for background upload\(again == nil ? "" : ", again")")
+    }
+
+    // MARK: - Files that failed
+
+    /// Queues again the files iOS couldn't send, once each has waited its
+    /// turn. See `BackgroundRetry`.
+    ///
+    /// A photo deleted since, or one the settings no longer cover, is let go.
+    /// So is one the app sent itself in the meantime: it takes the failure off
+    /// this list when its own upload lands (`BackgroundUploads.sent`).
+    private func requeueFailed(
+        setup: BackgroundUploadShared.Setup, token: String, base: URL
+    ) async throws {
+        let now = Date()
+        let due = (BackgroundUploadShared.readProgress().failed ?? [:]).filter { $0.value.isDue(at: now) }
+        guard !due.isEmpty else { return }
+        let scope = setup.scope
+        let byPhoto = Dictionary(grouping: due.keys) { BackupKey.photo($0) }
+        for (photo, keys) in byPhoto {
+            if stopping.load(ordering: .acquiring) { return }
+            let again = due.filter { keys.contains($0.key) }
+            guard let asset = PhotoLibraryScanner.asset(for: photo),
+                  PhotoLibraryScanner.isBackedUp(asset),
+                  scope.includes(isVideo: asset.mediaType == .video, takenAt: asset.creationDate)
+            else {
+                forget(again)
+                continue
+            }
+            try await makeJobs(for: asset, setup: setup, token: token, base: base, again: again)
+        }
+    }
+
+    /// Takes failures off the list without queueing them: there's nothing
+    /// here to send for them any more.
+    private func forget(_ failures: [String: BackgroundUploadShared.Failure]?) {
+        guard let failures, !failures.isEmpty else { return }
+        BackgroundUploadShared.updateProgress { progress in
+            for key in failures.keys { progress.failed?[key] = nil }
+        }
     }
 
     /// Where iOS sends one file, and what the NAS should know about it.

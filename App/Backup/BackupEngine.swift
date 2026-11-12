@@ -908,8 +908,13 @@ final class BackupEngine {
     /// because this gate is the only thing standing between an unattended backup
     /// and someone's data allowance, it failed open — quietly, in the direction
     /// that costs money. `isMetered` takes the radio's word as well as the flag's.
+    ///
+    /// And not before the path has reported at all. Until then `isMetered` is
+    /// only its permissive default, and a wake-up in the background builds the
+    /// monitor a moment before it asks: `waitForPath` gives it two seconds,
+    /// and past that this used to take the default's word and send.
     private var allowedOnCurrentNetwork: Bool {
-        !settings.wifiOnly || !connection.isMetered
+        !settings.wifiOnly || (connection.hasReportedPath && !connection.isMetered)
     }
 
     /// Re-links this phone's photos to the assets they became on the NAS.
@@ -1148,6 +1153,23 @@ final class BackupEngine {
         let context = ModelContext(container)
         reclaimInterrupted(context)
         guard nextItem(context) != nil else { return }
+        await start()
+    }
+
+    /// Starts what was waiting for Wi-Fi, now that the phone is on it. See
+    /// `ConnectionMonitor.onUnmetered`.
+    ///
+    /// Only that: with nothing waiting, a phone coming home shouldn't run an
+    /// empty backup and report to the NAS for it.
+    func networkBecameUnmetered() async {
+        guard settings.enabled, settings.wifiOnly else { return }
+        // No suspension from here to `start()` marking itself running, as in
+        // `resume`.
+        guard runTask == nil, !isRunning, maySend, hasDestination else { return }
+        let context = ModelContext(container)
+        reclaimInterrupted(context)
+        guard nextItem(context) != nil else { return }
+        Diagnostics.shared.log(.backup, "on Wi-Fi again, so carrying on with the backup")
         await start()
     }
 
@@ -1444,6 +1466,9 @@ final class BackupEngine {
             item.completedAt = Date()
             item.lastError = nil
             try? context.save()
+            // If iOS had failed to send this one in the background, it needn't
+            // try again.
+            BackgroundUploads.sent(key: item.localIdentifier)
             // Holds the tile until the grid has the server's copy — see
             // `PendingUploads.Landed`. Recorded before `drainLane` rebuilds
             // `queued` without this row, so there is no moment with neither.

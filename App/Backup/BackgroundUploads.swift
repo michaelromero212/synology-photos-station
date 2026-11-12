@@ -21,6 +21,11 @@ enum BackgroundUploads {
     /// What `/health` said, by address, asked once per launch.
     private static var capable: [URL: Bool] = [:]
 
+    /// The files the extension means to queue again, as of the last `absorb`.
+    /// Kept so that `sent` costs nothing for the thousands of files that were
+    /// never on the list.
+    private static var failedKeys: Set<String> = []
+
     /// Brings iOS's background uploads in line with backup's settings and the
     /// sign-in. Called when either changes, and at launch.
     static func sync(settings: BackupSettings, session: AppSession) async {
@@ -63,6 +68,7 @@ enum BackgroundUploads {
                 BackgroundUploadShared.updateProgress {
                     $0.mark = now
                     $0.jobs = [:]
+                    $0.failed = nil
                 }
                 try library.enableUploadJobExtension(with: options)
                 Diagnostics.shared.log(.backup, "background uploads on")
@@ -104,6 +110,7 @@ enum BackgroundUploads {
         BackgroundUploadShared.clearSetup()
         BackgroundUploadShared.updateProgress { $0 = .init() }
         capable = [:]
+        failedKeys = []
     }
 
     /// The app has read the library's changes up to `mark`, so the extension
@@ -123,11 +130,25 @@ enum BackgroundUploads {
     /// under that id, so it still pairs with the half already on the NAS.
     /// Without its row it would never go at all: the backup sets aside any
     /// photo it already has a row for.
+    ///
+    /// A file iOS couldn't send stays on the extension's list to queue again
+    /// (`BackgroundRetry`) as well as getting its row here, so whichever of
+    /// the two runs first sends it. Once it's here, by either, it comes off
+    /// that list.
     static func absorb(into context: ModelContext) async {
-        guard let results = BackgroundUploadShared.updateProgress({ progress -> [BackgroundUploadShared.Result] in
+        guard let taken = BackgroundUploadShared.updateProgress({ progress
+            -> (results: [BackgroundUploadShared.Result], failed: [String]) in
             defer { progress.results = [] }
-            return progress.results
-        }), !results.isEmpty else { return }
+            return (progress.results, Array((progress.failed ?? [:]).keys))
+        }) else { return }
+        failedKeys = Set(taken.failed)
+        if !taken.results.isEmpty { await take(taken.results, into: context) }
+        // Sent by the app since the extension gave up on them, in a run that
+        // didn't know they were on its list.
+        forget(taken.failed.filter { existingRow($0, in: context)?.state == .done })
+    }
+
+    private static func take(_ results: [BackgroundUploadShared.Result], into context: ModelContext) async {
 
         let byPhoto = Dictionary(grouping: results) { BackupKey.photo($0.key) }
         // Off the main actor, as the backup's own queueing is. Describing reads
@@ -183,6 +204,27 @@ enum BackgroundUploads {
         if taken > 0 {
             Diagnostics.shared.log(.backup, "took in \(taken) file(s) sent in the background")
         }
+        let missed = results.filter { !$0.succeeded }.count
+        if missed > 0 {
+            Diagnostics.shared.log(
+                .backup, "iOS couldn't send \(missed) file(s) in the background; they're queued here too"
+            )
+        }
+    }
+
+    /// The app's own upload of a file has landed, so the extension needn't
+    /// queue it again.
+    static func sent(key: String) {
+        guard failedKeys.contains(key) else { return }
+        forget([key])
+    }
+
+    private static func forget(_ keys: [String]) {
+        guard !keys.isEmpty else { return }
+        BackgroundUploadShared.updateProgress { progress in
+            for key in keys { progress.failed?[key] = nil }
+        }
+        failedKeys.subtract(keys)
     }
 
     private static func existingRow(_ key: String, in context: ModelContext) -> BackupItem? {

@@ -50,6 +50,11 @@ final class BackupRuntime {
             await created?.start()
             await self?.onReconnect?()
         }
+        // And where leaving Wi-Fi stopped it. That isn't a reconnect: the NAS
+        // was reachable throughout, over cellular.
+        monitor.onUnmetered = { [weak created] in
+            await created?.networkBecameUnmetered()
+        }
         // Before the first grid draws, and whether or not backup is on: this is
         // what lets a tile whose thumbnail the NAS hasn't made yet be drawn from
         // the copy still on the phone. See `LocalOriginals`.
@@ -78,6 +83,11 @@ final class BackupRuntime {
     func wake() async -> Bool {
         let settings = BackupSettings.load()
         guard settings.enabled else { return false }
+        // The next window, booked before anything can go wrong with this one.
+        // It used to be booked only at the end of a run that got that far, so
+        // a wake-up that found the sign-in unreadable, or a window iOS ended
+        // early, was the last one there was until the app was opened.
+        BackupScheduler.schedule(requiresPower: settings.chargingOnly)
         let session = AppSession.shared
         if session.phase == .launching { _ = await session.restore() }
         guard session.phase == .connected else {

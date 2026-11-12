@@ -115,6 +115,29 @@ enum BackgroundUploadShared {
         /// sent twice even after the app has taken in its result. Kept for a
         /// month.
         var handled: [String: Date] = [:]
+        /// Files iOS couldn't send, by ledger key, for the extension to queue
+        /// again. See `BackgroundRetry`. Optional so that a progress file
+        /// written before this existed still reads: a key that's missing
+        /// fails the whole decode, and the mark would go with it.
+        var failed: [String: Failure]?
+    }
+
+    /// One file iOS gave up on, until it's queued again or the app sends it.
+    struct Failure: Codable {
+        /// The group its Live Photo's other half went under, so the two still
+        /// pair when this one arrives late.
+        let liveGroupID: UUID?
+        /// How many jobs have failed for it.
+        let failures: Int
+        let firstFailedAt: Date
+        let lastFailedAt: Date
+
+        func isDue(at now: Date) -> Bool {
+            BackgroundRetry.isDue(
+                failures: failures, firstFailedAt: firstFailedAt,
+                lastFailedAt: lastFailedAt, now: now
+            )
+        }
     }
 
     /// One file iOS is sending.
@@ -129,6 +152,10 @@ enum BackgroundUploadShared {
         /// `BackupItem.sentVersion`.
         let version: String?
         let createdAt: Date
+        /// For a file queued again: how many jobs failed for it before this
+        /// one, and when the first did. Nil the first time.
+        var failures: Int? = nil
+        var firstFailedAt: Date? = nil
     }
 
     /// One file iOS has finished with.
@@ -175,6 +202,17 @@ enum BackgroundUploadShared {
             answer = change(&progress)
             let month = Date().addingTimeInterval(-30 * 86_400)
             progress.handled = progress.handled.filter { $0.value > month }
+            // And failures the extension has stopped trying. The app has had
+            // them as its own since they first failed.
+            let now = Date()
+            if let failed = progress.failed {
+                let live = failed.filter {
+                    !BackgroundRetry.isSpent(
+                        failures: $0.value.failures, firstFailedAt: $0.value.firstFailedAt, now: now
+                    )
+                }
+                progress.failed = live.isEmpty ? nil : live
+            }
             if let data = try? FrameStationCoding.encoder.encode(progress) {
                 try? data.write(to: url, options: .atomic)
             }

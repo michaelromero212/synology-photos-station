@@ -345,10 +345,11 @@ configuration.
 ### The silent push: waking a backup iOS has forgotten about
 
 The second thing push is for, and the one that took longest to admit was
-missing. A backup runs inside the windows iOS grants a `BGProcessingTask`, and
-iOS grants them on its own schedule — often overnight on charge, sometimes not
-for most of a day. A first backup of a few thousand photographs therefore
-arrives in fits and starts across days, and the person watching it concludes the
+missing. A backup runs inside the windows iOS grants: a `BGProcessingTask`, and a
+shorter `BGAppRefreshTask` that comes more often. iOS grants both on its own
+schedule — often overnight on charge, sometimes not for most of a day. A first
+backup of a few thousand photographs therefore arrives in fits and starts across
+days, and the person watching it concludes the
 app has stopped. Synology's client has had a `content-available` push for exactly
 this since the beginning; `BackupNudger` is ours.
 
@@ -379,7 +380,8 @@ rescued. And the background task now *awaits* the run before reporting itself
 complete: it used to start the work and call `setTaskCompleted` within
 milliseconds, which told iOS the window had been used while nothing had been
 sent, so every window was thrown away and the record showed a long line of
-successful background runs.
+successful background runs. A window iOS ends first is the one exception: that
+is answered at once, because an app that keeps iOS waiting is ended.
 
 Delivery is best-effort by definition — Apple may delay, coalesce or drop it, and
 none of that comes back. Nothing here is required for a backup to finish; the
@@ -456,12 +458,18 @@ That's why the upload can `await` a background task: if the continuation dies
 with the process, the work still finishes. The `await` is a convenience for the
 common case, not the correctness mechanism.
 
-Wake-ups use `BGProcessingTask`, not `BGAppRefreshTask` — refresh tasks get
-seconds, processing tasks get minutes and can require external power, which is
-what backing up a phone actually needs. iOS decides when, typically overnight on
-charge. The next window is requested at the end of each run, since only one
-request can be pending at a time, and scheduling is torn down when backup is
-switched off so the app isn't woken to do nothing.
+Wake-ups use two kinds of request, and both run the same wake-up
+(`BackupRuntime.wake`). A `BGProcessingTask` gets minutes and can require external
+power, which is what a backlog needs; iOS decides when, typically overnight on
+charge. A `BGAppRefreshTask` gets about half a minute, but iOS grants it far more
+often through the day, which is enough to notice new photos and start the small
+ones. The next pair is booked at the start of each wake-up, not the end. Booked
+at the end, a window iOS ended early, or a wake-up that found the phone signed
+out, left nothing booked, and background backup stopped until the app was
+opened. When iOS ends a window before
+the run finishes, the task is answered at once and the run carries on, as a
+silent push's does. Scheduling is torn down when backup is switched off so the
+app isn't woken to do nothing.
 
 
 ### Isolation: an asset id is not a capability
@@ -911,7 +919,22 @@ conditions allow. Each run:
 1. retries what failed in transit, once;
 2. records what finished, for the app, and acknowledges it;
 3. makes a job for each photo added since its mark, plus a Live Photo's motion
-   under one group id, then moves the mark past them.
+   under one group id, then moves the mark past them;
+4. queues again the files iOS couldn't send, once each has waited its turn.
+
+iOS retries a failed job once and then lets it go, and at first that was the
+end of it for the extension too: the file got a row in the app's queue and
+waited for the app. A NAS that was down for a day left a day of photos on a
+phone nobody had opened. The extension now keeps a list of those files in its
+progress and makes a new job for each on a later run, under the group id a Live
+Photo's pair first went with. `BackgroundRetry` (FrameStationKit, with tests)
+says when: a quarter of an hour after the first failure, doubling to half a day,
+ten failures or a week at most. The waits are there because a run is no sign
+the trouble has passed: iOS runs the extension when a photo is taken. Only a
+refused sign-in is never tried again. A bad answer is, because with the server
+stopped it's the NAS's reverse proxy that answers. Apple doesn't document
+whether a file may have a second job once its first was acknowledged; nothing
+in the API prevents it, and it stays unproven until seen on a phone.
 
 It compiles the app's own `PhotoLibraryScanner` and `UploadDescriptor`, so it
 sends the same files with the same details the app would. It shares three
@@ -928,6 +951,9 @@ The two never send the same photo on purpose:
   failed is queued under the group id its other half went with.
 - Right before the app sends a file, it cancels any job iOS hasn't finished
   for it.
+- When the app's own upload of a file lands, it takes that file off the
+  extension's list of failures (`BackgroundUploads.sent`), so it isn't queued
+  again.
 
 When both send anyway, the advisory lock above keeps one copy.
 
@@ -992,7 +1018,8 @@ The hardest part of the project. Constraints, not preferences:
   `PHAssetResourceManager.writeData(for:toFile:)` before it can be sent, which
   costs disk and time. Reserve headroom and clean up aggressively.
 - **`BGProcessingTaskRequest`** for catch-up scans — opportunistic, typically
-  on charger + Wi-Fi. Not guaranteed. `BGAppRefreshTask` for short checks.
+  on charger + Wi-Fi. Not guaranteed. `BGAppRefreshTaskRequest` runs the same
+  wake-up for about half a minute, more often through the day.
 - **`PHPhotoLibrary.fetchPersistentChanges(since:)`** (iOS 16+) with a persisted
   `PHPersistentChangeToken` is what detects edits, deletions, and additions that
   happened **while the app was dead**. Handle `persistentChangeTokenExpired` by
@@ -1015,6 +1042,13 @@ being killed mid-upload at any point.
 
 **Settings:** master backup toggle, Wi-Fi only, charging only, include videos,
 which space is the backup target.
+
+"Wi-Fi Only" is enforced by the engine as well as by iOS. A send waits until the
+network path has reported at all and says it is unmetered, so a cold background
+launch can't send on the permissive default before the path has answered. A
+backup waiting for Wi-Fi starts when the phone moves from cellular to Wi-Fi while
+the app is running (`ConnectionMonitor.onUnmetered`). The reconnect hook doesn't
+cover that move, because the NAS stays reachable over cellular.
 
 ### Asset states shown in the UI
 
