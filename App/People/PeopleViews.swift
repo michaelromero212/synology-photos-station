@@ -150,9 +150,9 @@ struct PersonBubble: View {
             // under every face, named or not, so the faces line up along the
             // row. A cut-off "Michael Ro…" looked unfinished (his word,
             // 2026-11-10).
-            Text(person.name ?? " ")
+            Text(caption)
                 .font(.footnote.weight(.medium))
-                .foregroundStyle(.primary)
+                .foregroundStyle(maybeFirstName == nil ? .primary : .secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(2, reservesSpace: true)
                 // Only a name too long for two lines shrinks, and only a
@@ -162,8 +162,34 @@ struct PersonBubble: View {
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(person.name ?? "Someone without a name")
+        .accessibilityLabel(label)
         .accessibilityValue(PersonView.countLine(person.photoCount))
+    }
+
+    /// For someone unnamed the NAS has a question about: the first name of
+    /// who they may be. Never on a television, which only shows People.
+    private var maybeFirstName: String? {
+        #if os(tvOS)
+        return nil
+        #else
+        guard person.name == nil, let maybe = person.maybe else { return nil }
+        return maybe.name.split(separator: " ").first.map(String.init)
+        #endif
+    }
+
+    private var caption: String {
+        if let name = person.name { return name }
+        if let first = maybeFirstName { return "\(first)?" }
+        return " "
+    }
+
+    private var label: String {
+        #if !os(tvOS)
+        if person.name == nil, let maybe = person.maybe {
+            return "Someone without a name, maybe \(maybe.name)"
+        }
+        #endif
+        return person.name ?? "Someone without a name"
     }
 }
 
@@ -280,6 +306,30 @@ struct MorePeopleRow: View {
     }
 }
 
+/// The navigation stack's dismiss action, held so `PersonView` can go back
+/// without reading `\.dismiss`. That page pushes the photo viewer, and on a
+/// Mac a view that reads it is re-rendered by every new action the stack
+/// hands out while the viewer is open, endlessly (see `DismissHandle`).
+@MainActor
+final class PageLeave {
+    fileprivate var action: DismissAction?
+
+    func dismiss() { action?() }
+}
+
+/// Keeps a `PageLeave` holding the current dismiss action; only this view
+/// depends on it, and it draws nothing.
+private struct PageLeaveCatcher: View {
+    let handle: PageLeave
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        // A property of a class nothing observes: no update follows from it.
+        let _ = (handle.action = dismiss)
+        Color.clear
+    }
+}
+
 // MARK: - Someone's page
 
 /// Everything someone is in, newest first, with their name and the person's
@@ -298,6 +348,13 @@ struct PersonView: View {
     @State private var reviewing = false
     @State private var merging = false
     @State private var failure: String?
+    /// A "Yes" or "No" to the group's question is on its way.
+    @State private var answering = false
+    /// The NAS has no such question (404): left off for this visit.
+    @State private var questionHidden = false
+    /// Goes back to the list; see `PageLeave` for why it isn't read from the
+    /// environment here.
+    @State private var leave = PageLeave()
     /// Moves when "Is this Emma?" closes with answers, so the grid loads
     /// once rather than once an answer.
     @State private var reviewed = 0
@@ -338,6 +395,7 @@ struct PersonView: View {
             revision: reviewed
         )
         #if !os(tvOS)
+        .background { PageLeaveCatcher(handle: leave) }
         .toolbar {
             ToolbarItem(placement: .primaryAction) { menu }
         }
@@ -380,6 +438,11 @@ struct PersonView: View {
 
     private var header: some View {
         VStack(spacing: 10) {
+            #if !os(tvOS)
+            if person.name == nil, let maybe = person.maybe, !questionHidden {
+                maybeCard(maybe)
+            }
+            #endif
             FaceCircle(
                 session: session, spaceID: space.id, source: .person(person),
                 diameter: PeopleMetrics.headerFace
@@ -419,6 +482,65 @@ struct PersonView: View {
     }
 
     #if !os(tvOS)
+    /// "Is this Kathy Deem?" for the whole group, answered with one tap.
+    private func maybeCard(_ maybe: PersonMaybe) -> some View {
+        let stand = PersonSummary(id: maybe.id, name: maybe.name, photoCount: 0, face: maybe.face)
+        return HStack(spacing: 12) {
+            FaceCircle(session: session, spaceID: space.id, source: .person(stand), diameter: 40)
+            Text("Is this \(maybe.name)?")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("No") { Task { await answer(maybe, isPerson: false) } }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("No, not \(maybe.name)")
+            Button("Yes") { Task { await answer(maybe, isPerson: true) } }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel("Yes, this is \(maybe.name)")
+        }
+        .controlSize(.small)
+        .disabled(answering)
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 16)
+        .frame(maxWidth: 520)
+        .padding(.bottom, 6)
+    }
+
+    /// Yes folds the group into the named person and goes back to the list,
+    /// which is told to load again; no keeps the page and drops the card.
+    private func answer(_ maybe: PersonMaybe, isPerson: Bool) async {
+        guard let client = session.client, !answering else { return }
+        answering = true
+        defer { answering = false }
+        do {
+            let answered = try await client.answerMaybe(
+                spaceID: space.id, groupID: person.id, maybe, isPerson: isPerson
+            )
+            failure = nil
+            // The answer doesn't count as a library change (see
+            // `AppSession.noteWrite`), so the Albums page is told.
+            session.collectionsStore(for: space.id).expire()
+            if isPerson {
+                leave.dismiss()
+            } else {
+                person = answered
+            }
+        } catch FrameStationClientError.http(status: 404, reason: _) {
+            // A NAS from before these questions.
+            questionHidden = true
+        } catch FrameStationClientError.http(status: 409, reason: _) {
+            // Named in the meantime: the page is whoever they are now.
+            if let fresh = try? await client.people(spaceID: space.id).first(where: { $0.id == person.id }) {
+                person = fresh
+            } else {
+                leave.dismiss()
+            }
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+
     private var menu: some View {
         Menu {
             Button {

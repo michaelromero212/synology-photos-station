@@ -70,6 +70,21 @@ extension FrameStationClient {
         )
     }
 
+    /// Yes or no to "Is this Emma?" for a whole unnamed group, as
+    /// `PersonSummary.maybe` asked it. Yes merges the group into the named
+    /// person and answers with them; no answers with the group, now without
+    /// the question. 404 is a NAS from before these questions, 409 a group
+    /// that was named in the meantime.
+    @discardableResult
+    public func answerMaybe(
+        spaceID: UUID, groupID: UUID, _ maybe: PersonMaybe, isPerson: Bool
+    ) async throws -> PersonSummary {
+        try await post(
+            "v1/spaces/\(spaceID)/people/\(groupID)/maybe",
+            body: PersonMaybeAnswer(personID: maybe.id, isPerson: isPerson)
+        )
+    }
+
     /// Who someone is to the owner, or nil to take it back.
     public func setRelationship(
         spaceID: UUID, personID: UUID, _ relationship: Relationship?

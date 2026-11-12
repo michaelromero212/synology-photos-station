@@ -25,6 +25,7 @@ struct PeopleController: RouteCollection {
         people.get(use: list)
         people.put(":personID", use: name)
         people.post(":personID", "merge", use: merge)
+        people.post(":personID", "maybe", use: answerMaybe)
         people.post(":personID", "remove", use: remove)
         people.get(":personID", "suggestions", use: suggestions)
         people.post(":personID", "suggestions", use: answer)
@@ -179,6 +180,15 @@ struct PeopleController: RouteCollection {
     /// The people to show, named first, then those suggested for a name,
     /// then the rest; see `Tier`. `withMore` false leaves out the rest, for
     /// the Albums page's row.
+    ///
+    /// Someone unnamed the NAS has a question about ("Is this Emma?", see
+    /// `PeopleClusterer`) carries it as `maybe`, and if they'd be listed at
+    /// all, they're suggested ahead of everyone else suggested, the closest
+    /// first, within the same `Tier.suggestedLimit`. So the page never has
+    /// more unnamed circles than before, and the ones with a question come
+    /// first. A question is shown only while the named person is still the
+    /// owner's, named and not hidden, and no face of the group has been said
+    /// not to be them, whatever the last pass wrote.
     static func summaries(
         userID: UUID, spaceID: UUID, limit: Int, only: UUID? = nil, withMore: Bool = true,
         on sql: any SQLDatabase
@@ -191,14 +201,22 @@ struct PeopleController: RouteCollection {
             let photos: Int
             let questions: Int
             let tier: String
+            let maybeID: UUID?
+            let maybeName: String?
         }
         // Tiers are decided over everyone before one person is picked out,
         // so someone's tier is the same on their own and in the list.
+        //
+        // The question costs this page load little: `maybe_id` comes along
+        // in the one scan of people that's already made, and the named
+        // person is looked up by key, after the counting, only for the few
+        // rows that have one. The check that the owner hasn't said no reads
+        // only the named person's rejected faces, by index, and only then.
         let filter: SQLQueryString = only.map { "AND t.id = \(bind: $0)" } ?? ""
         let more: SQLQueryString = withMore ? "" : "AND t.tier <> 'more'"
         let rows = try await sql.raw("""
             WITH counted AS (
-                SELECT p.id, p.name, p.relation, p.is_me,
+                SELECT p.id, p.name, p.relation, p.is_me, p.maybe_id, p.maybe_similarity,
                        count(DISTINCT pf.sha256)::int AS photos,
                        -- Days apart, by the clock where each was taken.
                        count(DISTINCT a.local_captured_at::date)::int AS days
@@ -209,25 +227,41 @@ struct PeopleController: RouteCollection {
                                     AND sa.deleted_at IS NULL
                 WHERE p.user_id = \(bind: userID) AND NOT p.hidden
                   AND \(unsafeRaw: TimelineController.visible)
-                GROUP BY p.id, p.name, p.relation, p.is_me
+                GROUP BY p.id, p.name, p.relation, p.is_me, p.maybe_id, p.maybe_similarity
             ), judged AS (
-                SELECT *,
-                       (name IS NOT NULL OR is_me) AS named,
-                       (name IS NULL AND NOT is_me
-                        AND photos >= \(bind: Tier.suggestedPhotos) AND days >= \(bind: Tier.suggestedDays)) AS likely
-                FROM counted
+                SELECT c.*,
+                       (c.name IS NOT NULL OR c.is_me) AS named,
+                       (c.name IS NULL AND NOT c.is_me
+                        AND c.photos >= \(bind: Tier.suggestedPhotos) AND c.days >= \(bind: Tier.suggestedDays)) AS likely,
+                       m.id AS asked, m.name AS asked_name,
+                       -- Someone who'd be listed anyway, with a question.
+                       (m.id IS NOT NULL
+                        AND c.photos >= \(bind: Tier.morePhotos) AND c.days >= \(bind: Tier.moreDays)) AS asking
+                FROM counted c
+                LEFT JOIN people m ON m.id = c.maybe_id AND c.name IS NULL AND NOT c.is_me
+                                  AND m.user_id = \(bind: userID) AND m.name IS NOT NULL AND NOT m.hidden
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM person_faces r
+                                      JOIN person_faces g ON g.user_id = r.user_id AND g.sha256 = r.sha256
+                                                         AND g.ordinal = r.ordinal AND g.person_id = c.id
+                                                         AND g.state IN ('auto', 'confirmed')
+                                      WHERE r.person_id = m.id AND r.state = 'rejected')
             ), ranked AS (
-                SELECT *, row_number() OVER (PARTITION BY likely ORDER BY days DESC, photos DESC, id) AS place
+                SELECT *, row_number() OVER (
+                           PARTITION BY (asking OR likely)
+                           ORDER BY asking DESC, CASE WHEN asking THEN maybe_similarity END DESC NULLS LAST,
+                                    days DESC, photos DESC, id) AS place
                 FROM judged
             ), t AS (
                 SELECT *,
                        CASE WHEN named THEN 'named'
-                            WHEN likely AND place <= \(bind: Tier.suggestedLimit) THEN 'suggested'
+                            WHEN (likely OR asking) AND place <= \(bind: Tier.suggestedLimit) THEN 'suggested'
                             WHEN photos >= \(bind: Tier.morePhotos) AND days >= \(bind: Tier.moreDays) THEN 'more'
                        END AS tier
                 FROM ranked
             )
             SELECT t.id, t.name, t.relation, t.is_me AS "isMe", t.photos, t.tier,
+                   t.asked AS "maybeID", t.asked_name AS "maybeName",
                    (SELECT count(*)::int FROM person_faces q
                     WHERE q.person_id = t.id AND q.state = 'suggested') AS questions
             FROM t
@@ -235,9 +269,12 @@ struct PeopleController: RouteCollection {
               \(more)
               \(filter)
             -- Family and the owner first, then everyone else named, then the
+            -- suggested with a question, the closest first, then the other
             -- suggested by how many days they're seen on, then the rest by
             -- how many photos they're in.
             ORDER BY CASE t.tier WHEN 'named' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,
+                     (t.tier = 'suggested' AND t.asking) DESC,
+                     CASE WHEN t.tier = 'suggested' AND t.asking THEN t.place ELSE 0 END,
                      (t.is_me OR (t.relation IS NOT NULL AND t.relation <> 'friend')) DESC,
                      CASE WHEN t.tier = 'suggested' THEN t.place ELSE 0 END,
                      t.photos DESC, t.id
@@ -245,13 +282,20 @@ struct PeopleController: RouteCollection {
             """).all(decoding: Row.self)
         guard !rows.isEmpty else { return [] }
 
-        // The face that stands for each: a clean headshot. See `covers`.
-        let cover = try await Self.covers(of: rows.map(\.id), userID: userID, spaceID: spaceID, on: sql)
+        // The face that stands for each: a clean headshot. See `covers`. A
+        // question's named person is almost always in the list already, so
+        // this seldom looks for anyone more.
+        let wanted = Array(Set(rows.map(\.id) + rows.compactMap(\.maybeID)))
+        let cover = try await Self.covers(of: wanted, userID: userID, spaceID: spaceID, on: sql)
             .mapValues { "\($0.sha256.prefix(12))-\($0.ordinal)-v\(FaceCrop.version)" }
-        return rows.map {
-            PersonSummary(id: $0.id, name: $0.name, photoCount: $0.photos,
-                          face: cover[$0.id] ?? "none", questions: $0.name == nil ? 0 : $0.questions,
-                          relation: $0.relation, isMe: $0.isMe, tier: $0.tier)
+        return rows.map { row in
+            var maybe: PersonMaybe?
+            if let id = row.maybeID, let name = row.maybeName {
+                maybe = PersonMaybe(id: id, name: name, face: cover[id] ?? "none")
+            }
+            return PersonSummary(id: row.id, name: row.name, photoCount: row.photos,
+                                 face: cover[row.id] ?? "none", questions: row.name == nil ? 0 : row.questions,
+                                 relation: row.relation, isMe: row.isMe, tier: row.tier, maybe: maybe)
         }
     }
 
@@ -291,6 +335,9 @@ struct PeopleController: RouteCollection {
         try await req.sql.raw("""
             UPDATE people
             SET name = \(bind: name), named_at = CASE WHEN \(bind: name)::text IS NULL THEN NULL ELSE now() END,
+                -- A question about who they are is answered by naming them;
+                -- if the name is taken back, the next pass asks afresh.
+                maybe_id = NULL, maybe_similarity = NULL,
                 updated_at = now()
             WHERE id = \(bind: personID) AND user_id = \(bind: userID)
             """).run()
@@ -314,23 +361,7 @@ struct PeopleController: RouteCollection {
         try await req.withPinnedConnection { sql in
             try await sql.raw("BEGIN").run()
             do {
-                // What the owner decided about the other person comes along;
-                // where both have a decision about one face, this person's
-                // stands.
-                try await sql.raw("""
-                    INSERT INTO person_faces (user_id, sha256, ordinal, person_id, state, similarity, box, decided_at)
-                    SELECT user_id, sha256, ordinal, \(bind: personID),
-                           CASE WHEN state = 'suggested' THEN 'suggested' ELSE state END,
-                           similarity, box, decided_at
-                    FROM person_faces WHERE person_id = \(bind: other)
-                    ON CONFLICT DO NOTHING
-                    """).run()
-                try await sql.raw("""
-                    UPDATE people SET name = COALESCE(name, (SELECT name FROM people WHERE id = \(bind: other))),
-                                      updated_at = now()
-                    WHERE id = \(bind: personID)
-                    """).run()
-                try await sql.raw("DELETE FROM people WHERE id = \(bind: other) AND user_id = \(bind: userID)").run()
+                try await Self.merge(other, into: personID, userID: userID, on: sql)
                 try await sql.raw("COMMIT").run()
             } catch {
                 try? await sql.raw("ROLLBACK").run()
@@ -339,6 +370,109 @@ struct PeopleController: RouteCollection {
         }
         await req.application.storage[PeopleClustererKey.self]?.touch(userID)
         return try await summary(req, userID: userID, spaceID: spaceID, personID: personID)
+    }
+
+    /// The owner says `other` and `person` are one: everything of `other`'s
+    /// becomes `person`'s, and `other` goes. For the merge endpoint and a yes
+    /// to "Is this Emma?"; run inside the caller's transaction. Never for
+    /// the NAS's own merges, which never override the owner (see
+    /// `PeopleClusterer.write`).
+    ///
+    /// The owner's latest word wins. Each face that is `other`'s (auto or
+    /// confirmed) becomes `person`'s even where the owner earlier said it
+    /// isn't `person`, or it was only a question for them: otherwise a no
+    /// tapped by mistake would quietly drop every such face out of a later
+    /// "Same Person". What the owner decided about `other` otherwise comes
+    /// along only where `person` has nothing about that face, so a face
+    /// confirmed for `person` is never made rejected by it.
+    static func merge(_ other: UUID, into person: UUID, userID: UUID, on sql: any SQLDatabase) async throws {
+        try await sql.raw("""
+            INSERT INTO person_faces (user_id, sha256, ordinal, person_id, state, similarity, box, decided_at)
+            SELECT user_id, sha256, ordinal, \(bind: person), state, similarity, box, decided_at
+            FROM person_faces
+            WHERE person_id = \(bind: other) AND user_id = \(bind: userID) AND state IN ('auto', 'confirmed')
+            ON CONFLICT (user_id, sha256, ordinal, person_id)
+            DO UPDATE SET state = EXCLUDED.state, similarity = EXCLUDED.similarity, decided_at = now()
+            WHERE person_faces.state IN ('rejected', 'suggested')
+               OR (person_faces.state = 'auto' AND EXCLUDED.state = 'confirmed')
+            """).run()
+        try await sql.raw("""
+            INSERT INTO person_faces (user_id, sha256, ordinal, person_id, state, similarity, box, decided_at)
+            SELECT user_id, sha256, ordinal, \(bind: person), state, similarity, box, decided_at
+            FROM person_faces
+            WHERE person_id = \(bind: other) AND user_id = \(bind: userID) AND state IN ('rejected', 'suggested')
+            ON CONFLICT DO NOTHING
+            """).run()
+        // Their question, if they had one, was about who they were before
+        // this; the next pass asks afresh.
+        try await sql.raw("""
+            UPDATE people SET name = COALESCE(name, (SELECT name FROM people WHERE id = \(bind: other))),
+                              maybe_id = NULL, maybe_similarity = NULL,
+                              updated_at = now()
+            WHERE id = \(bind: person) AND user_id = \(bind: userID)
+            """).run()
+        try await sql.raw("DELETE FROM people WHERE id = \(bind: other) AND user_id = \(bind: userID)").run()
+    }
+
+    /// The owner's answer to "Is this Emma?" for a whole unnamed group (see
+    /// `PersonSummary.maybe`), sent for the group with the named person the
+    /// app showed. Taken whatever the NAS asks now: it's the owner's word.
+    ///
+    /// Yes is the owner merging the group into the named person, and answers
+    /// with the named person. No says none of the group's faces is them:
+    /// each gets a rejected row for them, so the NAS never puts those faces
+    /// with them, folds the group into them, or asks about them again. It
+    /// answers with the group.
+    @Sendable
+    func answerMaybe(req: Request) async throws -> PersonSummary {
+        let (userID, spaceID) = try await Self.requireOwnLibrary(req)
+        let groupID = try await Self.requirePerson(req, userID: userID)
+        let body = try req.content.decode(PersonMaybeAnswer.self)
+        let named = body.personID
+        guard named != groupID else { throw Abort(.badRequest, reason: "That's the same person.") }
+        try await req.withPinnedConnection { sql in
+            try await sql.raw("BEGIN").run()
+            do {
+                // Both locked, so a pass or another answer can't merge, name
+                // or take either away in between.
+                struct Person: Decodable { let id: UUID; let named: Bool; let hidden: Bool }
+                let both = try await sql.raw("""
+                    SELECT id, (name IS NOT NULL OR is_me) AS named, hidden FROM people
+                    WHERE id IN (\(bind: groupID), \(bind: named)) AND user_id = \(bind: userID)
+                    ORDER BY id
+                    FOR UPDATE
+                    """).all(decoding: Person.self)
+                guard let group = both.first(where: { $0.id == groupID }) else { throw Abort(.notFound) }
+                guard let person = both.first(where: { $0.id == named }),
+                      person.named, !person.hidden
+                else { throw Abort(.notFound) }
+                guard !group.named else { throw Abort(.conflict, reason: "They have a name already.") }
+                if body.isPerson {
+                    try await Self.merge(groupID, into: named, userID: userID, on: sql)
+                } else {
+                    try await sql.raw("""
+                        INSERT INTO person_faces (user_id, sha256, ordinal, person_id, state, similarity, box, decided_at)
+                        SELECT user_id, sha256, ordinal, \(bind: named), 'rejected', NULL, box, now()
+                        FROM person_faces
+                        WHERE person_id = \(bind: groupID) AND user_id = \(bind: userID)
+                          AND state IN ('auto', 'confirmed')
+                        ON CONFLICT (user_id, sha256, ordinal, person_id)
+                        DO UPDATE SET state = 'rejected', similarity = NULL, decided_at = now()
+                        WHERE person_faces.state = 'suggested'
+                        """).run()
+                    try await sql.raw("""
+                        UPDATE people SET maybe_id = NULL, maybe_similarity = NULL
+                        WHERE id = \(bind: groupID) AND user_id = \(bind: userID)
+                        """).run()
+                }
+                try await sql.raw("COMMIT").run()
+            } catch {
+                try? await sql.raw("ROLLBACK").run()
+                throw error
+            }
+        }
+        await req.application.storage[PeopleClustererKey.self]?.touch(userID)
+        return try await summary(req, userID: userID, spaceID: spaceID, personID: body.isPerson ? named : groupID)
     }
 
     /// "Not this person." The faces they're in, in these photos, leave this

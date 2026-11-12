@@ -37,6 +37,16 @@ import Vapor
 /// looks do. Never one photographed with them, and never one with a face
 /// the person said isn't them.
 ///
+/// **Asking** (also only with `looks` on). An unnamed group that doesn't fold
+/// but is at least `ask` like a named person it could be, by the same
+/// likeness and the same rules as folding, is a question for the whole
+/// group: "Is this Emma?" One question per group, about the named person it's
+/// most like, kept in `people.maybe_id` (migration 0041) and set afresh each
+/// pass. A yes is the owner merging the group into them; a no says each of
+/// the group's faces isn't them, so the NAS never asks it again and asks
+/// about the next closest, if anyone is close enough. Only a question: the
+/// NAS never acts on one itself.
+///
 /// The person's word is final:
 /// - two faces in one photo are never one person;
 /// - a face they said no to never joins that person again;
@@ -74,6 +84,11 @@ actor PeopleClusterer {
     /// named, so two brothers who look alike are left for the person to
     /// tell apart.
     static let foldMargin: Float = 0.08
+    /// With looks on, an unnamed group that doesn't fold but is this like a
+    /// named person it could be is a question for the owner: one tap for the
+    /// whole group. Under it, the likeness says too little to ask. On his
+    /// library (2026-11-12), 22 unnamed groups sat between this and `fold`.
+    static let ask: Float = 0.45
     static let minScore: Float = 0.85
     /// Faces at least this big (in the 1,280-pixel render) can start a person.
     static let seedPixels = 40
@@ -218,6 +233,11 @@ actor PeopleClusterer {
         /// The merges into a named person, with how alike the two were.
         /// Each is in `merges` too. Empty with looks off.
         var folds: [(from: UUID, into: UUID, similarity: Float)] = []
+        /// Unnamed people still standing after the folds, each with the
+        /// named person it's most like of those it could be, when that's at
+        /// least `ask`: "Is this Emma?" for the whole group. At most one per
+        /// unnamed person. Empty with looks off, which clears every question.
+        var asks: [(person: UUID, maybe: UUID, similarity: Float)] = []
         /// Each person's looks, for a report. Empty with looks off.
         var looks: [UUID: LookCount] = [:]
     }
@@ -256,6 +276,7 @@ actor PeopleClusterer {
         try await write(userID: userID, library: library, plan: plan, orphans: orphans)
         // Looks are fixed for a pass, so one fold can make the next possible
         // only on the pass after. Run again soon until a pass merges no one.
+        // A question changes nothing about who's whose, so asks don't count.
         // Each merge takes an unnamed person away for good, so this ends; the
         // cap is there in case it somehow doesn't, and then the ordinary
         // schedule carries on.
@@ -268,7 +289,7 @@ actor PeopleClusterer {
         let elapsed = ContinuousClock.now - started
         let ms = Int(Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15)
         if !plan.newAuto.isEmpty || !plan.created.isEmpty || !plan.merges.isEmpty {
-            app.logger.info("people: \(plan.newAuto.count) faces placed, \(plan.created.count) new people, \(plan.merges.count) merged, \(plan.suggestions.count) questions, \(library.faces.count) faces in \(ms) ms")
+            app.logger.info("people: \(plan.newAuto.count) faces placed, \(plan.created.count) new people, \(plan.merges.count) merged, \(plan.suggestions.count) questions, \(plan.asks.count) groups to ask about, \(library.faces.count) faces in \(ms) ms")
         }
     }
 
@@ -757,6 +778,31 @@ actor PeopleClusterer {
                     gone.insert(u)
                     centroids.absorb(u, into: best.g)
                 }
+
+                // Who to ask about: each unnamed person left, and the named
+                // person they're most like of those they could be, by the
+                // fold's likeness and with the fold's rules (never someone
+                // they're photographed with, someone the owner said one of
+                // their faces isn't, or anyone hidden). No margin and no
+                // agreement between average and looks is needed, since the
+                // owner decides; a no rules that person out, and the next pass
+                // asks about the next closest if they clear `ask`.
+                for u in people where !centroids.named[u] && !gone.contains(u) && centroids.counts[u] > 0 {
+                    guard let idU = centroids.ids[u], !library.hidden.contains(idU) else { continue }
+                    var best: (id: UUID, similarity: Float)?
+                    for n in named {
+                        guard let idN = centroids.ids[n], !library.hidden.contains(idN),
+                              centroids.frames[u].isDisjoint(with: centroids.frames[n]),
+                              !centroids.members[u].contains(where: { library.rejected[$0]?.contains(idN) == true })
+                        else { continue }
+                        var s = centroids.similarity(u, n)
+                        for l in looks.usable[n] { s = max(s, looks.centroids.similarity(l, to: centroids, u)) }
+                        if s > (best?.similarity ?? -1) { best = (idN, s) }
+                    }
+                    if let best, best.similarity >= ask {
+                        plan.asks.append((person: idU, maybe: best.id, similarity: best.similarity))
+                    }
+                }
             }
 
             // Questions for the people they named.
@@ -919,11 +965,14 @@ actor PeopleClusterer {
                     // Only someone still unnamed is merged away. The person
                     // may have named them while the pass ran, and then
                     // their faces must not be copied to anyone; the lock
-                    // keeps a naming from landing in between.
+                    // keeps a naming from landing in between. Nor the one
+                    // the owner said is them, named or not: "This is me" is
+                    // the owner's word, and merging them away would undo it.
                     struct Unnamed: Decodable { let id: UUID }
                     guard try await sql.raw("""
                         SELECT id FROM people
                         WHERE id = \(bind: merge.from) AND user_id = \(bind: userID) AND name IS NULL
+                          AND NOT is_me
                         FOR UPDATE
                         """).first(decoding: Unnamed.self) != nil
                     else { continue }
@@ -959,12 +1008,58 @@ actor PeopleClusterer {
                       AND NOT EXISTS (SELECT 1 FROM person_faces pf
                                       WHERE pf.person_id = p.id AND pf.state IN ('auto', 'confirmed'))
                     """).run()
+                try await Self.writeAsks(plan.asks, userID: userID, on: sql)
                 try await sql.raw("COMMIT").run()
             } catch {
                 try? await sql.raw("ROLLBACK").run()
                 throw error
             }
         }
+    }
+
+    /// Makes the user's questions (`people.maybe_id`) what this pass asks:
+    /// every other one goes, and each ask is set where it isn't already. Last
+    /// in the pass's transaction, after every `person_faces` change, so it
+    /// takes the `people` rows in the same order the owner's answer does.
+    ///
+    /// Each is set only where the group is still unnamed and isn't the owner,
+    /// and the named person is still named, not hidden, and the user's, and
+    /// no face of the group was said not to be them: the owner may have
+    /// named someone or answered no while the pass ran. `updated_at` is left alone,
+    /// since a question isn't a change to anyone.
+    private static func writeAsks(
+        _ asks: [(person: UUID, maybe: UUID, similarity: Float)], userID: UUID, on sql: any SQLDatabase
+    ) async throws {
+        guard !asks.isEmpty else {
+            try await sql.raw("""
+                UPDATE people SET maybe_id = NULL, maybe_similarity = NULL
+                WHERE user_id = \(bind: userID) AND maybe_id IS NOT NULL
+                """).run()
+            return
+        }
+        let ids = asks.map(\.person)
+        let maybes = asks.map(\.maybe)
+        let similarities = AnalysisWorker.realArray(asks.map(\.similarity))
+        try await sql.raw("""
+            UPDATE people p SET maybe_id = NULL, maybe_similarity = NULL
+            WHERE p.user_id = \(bind: userID) AND p.maybe_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM unnest(\(bind: ids)::uuid[], \(bind: maybes)::uuid[]) AS a(id, maybe)
+                              WHERE a.id = p.id AND a.maybe = p.maybe_id)
+            """).run()
+        try await sql.raw("""
+            UPDATE people p SET maybe_id = a.maybe, maybe_similarity = a.similarity
+            FROM unnest(\(bind: ids)::uuid[], \(bind: maybes)::uuid[], \(bind: similarities)::real[])
+                 AS a(id, maybe, similarity)
+            JOIN people n ON n.id = a.maybe
+            WHERE p.id = a.id AND p.user_id = \(bind: userID) AND p.name IS NULL AND NOT p.is_me
+              AND n.user_id = \(bind: userID) AND n.name IS NOT NULL AND NOT n.hidden
+              AND (p.maybe_id IS DISTINCT FROM a.maybe OR p.maybe_similarity IS DISTINCT FROM a.similarity)
+              AND NOT EXISTS (SELECT 1 FROM person_faces m
+                              JOIN person_faces r ON r.user_id = m.user_id AND r.sha256 = m.sha256
+                                                 AND r.ordinal = m.ordinal AND r.person_id = a.maybe
+                                                 AND r.state = 'rejected'
+                              WHERE m.person_id = p.id AND m.state IN ('auto', 'confirmed'))
+            """).run()
     }
 }
 

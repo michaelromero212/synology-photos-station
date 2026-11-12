@@ -28,6 +28,11 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
     /// NAS decides who's suggested for a name and who waits behind More
     /// People. Nil from a NAS older than tiers. See `place`.
     public let tier: String?
+    /// For someone unnamed, the named person the NAS thinks they may be:
+    /// one question for the whole group, answered with
+    /// `PersonMaybeAnswer`. Nil when there's nothing to ask, for anyone
+    /// named, and from a NAS older than these questions.
+    public let maybe: PersonMaybe?
 
     public var relationship: Relationship? { relation.flatMap(Relationship.init(rawValue:)) }
 
@@ -38,7 +43,7 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
 
     public init(
         id: UUID, name: String?, photoCount: Int, face: String, questions: Int = 0,
-        relation: String? = nil, isMe: Bool = false, tier: String? = nil
+        relation: String? = nil, isMe: Bool = false, tier: String? = nil, maybe: PersonMaybe? = nil
     ) {
         self.id = id
         self.name = name
@@ -48,10 +53,11 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
         self.relation = relation
         self.isMe = isMe
         self.tier = tier
+        self.maybe = maybe
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, photoCount, face, questions, relation, isMe, tier
+        case id, name, photoCount, face, questions, relation, isMe, tier, maybe
     }
 
     /// What's been added since the first People server is read as absent
@@ -67,6 +73,39 @@ public struct PersonSummary: Codable, Sendable, Hashable, Identifiable {
         relation = try c.decodeIfPresent(String.self, forKey: .relation)
         isMe = try c.decodeIfPresent(Bool.self, forKey: .isMe) ?? false
         tier = try c.decodeIfPresent(String.self, forKey: .tier)
+        maybe = try c.decodeIfPresent(PersonMaybe.self, forKey: .maybe)
+    }
+}
+
+/// The named person an unnamed one may be: "Is this Emma?" for the whole
+/// group. Always someone in the same library, named and shown.
+public struct PersonMaybe: Codable, Sendable, Hashable {
+    /// The named person.
+    public let id: UUID
+    public let name: String
+    /// Which face stands for them, the same key as their own
+    /// `PersonSummary.face`.
+    public let face: String
+
+    public init(id: UUID, name: String, face: String) {
+        self.id = id
+        self.name = name
+        self.face = face
+    }
+}
+
+/// The owner's answer to `PersonSummary.maybe`, sent for the unnamed person.
+/// Yes is the same as merging the whole group into the named person. No says
+/// none of the group's faces is them, so the NAS never puts those faces with
+/// them or asks about the group for them again.
+public struct PersonMaybeAnswer: Codable, Sendable, Hashable {
+    /// The named person the app showed, `PersonMaybe.id`.
+    public let personID: UUID
+    public let isPerson: Bool
+
+    public init(personID: UUID, isPerson: Bool) {
+        self.personID = personID
+        self.isPerson = isPerson
     }
 }
 

@@ -383,13 +383,16 @@ faces are used for anything.
      - At 0.50 or closer, a face joins that person (0.56 for a face under
        40 px, which is blurrier).
      - At 0.40 to someone named, it becomes a question for them, at most 60
-       each.
+       each. These are about one face that has no group. A whole unnamed
+       group is asked about once, at 0.45; see Asking, below.
      - The rest wait. Four alike in three files become a new, unnamed
        person, and unnamed people at 0.62 become one.
      - Only faces with a detection score of 0.85 and at least 24 px count.
      - The person's word is final: two faces in one frame are never one
        person, a "no" is never asked again, the NAS never merges two named
-       people, and nothing confirmed is undone.
+       people, and nothing confirmed is undone. Only the owner changes
+       their own answer: merging two people themself takes back an earlier
+       "no" for those faces (see Asking).
      - Names are in `people` and who is whose in `person_faces` (migration
        0038), keyed by file and face rather than by a face row, so a name
        outlives a model upgrade.
@@ -434,9 +437,40 @@ faces are used for anything.
      - Two named people are still never merged.
      - A fold can make another possible, so after a pass that merged anyone
        the NAS runs another at the next interval, at most ten in a row.
-     - A group between 0.45 and 0.62 is left alone for now. One question for
-       the whole group ("Is this Emma too?") is planned, in place of opening
-       each circle.
+     - A group between 0.45 and 0.62 gets one question for the whole group;
+       see Asking, below.
+   - **Asking (built 2026-11-12, same switch).**
+     - Why: on the owner's library, folding took 3 of 101 unnamed groups.
+       Another 22 sat between 0.45 and 0.62 from someone named. Each needed
+       the owner to open the circle, tap Add Name, type the name and confirm
+       "Same Person".
+     - What: each pass, an unnamed group that didn't fold and is at least
+       0.45 like a named person it could be (by their average or a look) is
+       recorded as maybe them. Never one it shares a photo with, never one
+       the owner said a face of the group isn't, never a hidden one. One
+       candidate per group: the closest.
+     - Stored in `people.maybe_id` and `people.maybe_similarity` (migration
+       0041). Set afresh each pass, and cleared when there is nothing to ask.
+       With looks off, everything is cleared.
+     - The People list carries it as `PersonSummary.maybe`: the named
+       person's id, name and face key, never the likeness. Older apps ignore
+       it.
+     - Where it shows: a group with a question takes one of the 18 suggested
+       places ahead of the other suggested people, closest first, so the page
+       never grows and the questions come first. Beyond 18, a group keeps its
+       usual place and its question.
+     - Yes merges the whole group into the named person. No gives each of the
+       group's faces a rejected row for that person, so the NAS never puts
+       those faces with them, folds the group into them, or asks about them
+       again. The next pass may ask about the next closest person.
+     - The owner's latest word wins. When the owner merges two people (Merge
+       With…, Same Person, or Yes), the absorbed group's own faces become the
+       survivor's, even where the owner earlier said they weren't. A No tapped
+       by mistake can be put right that way. The NAS's own merges and folds
+       never override the owner.
+     - Someone marked "This Is Me" is treated as named even without a name:
+       never asked about, and never merged away by the NAS.
+     - Naming a group clears its question.
    - **The switch.** `FRAMESTATION_PEOPLE_LOOKS=1` in the server's
      environment. Off, grouping is exactly as before. The server leaves it
      off unless told; `docker-compose.yml` turns it on (since 2026-11-12,
@@ -449,7 +483,9 @@ faces are used for anything.
    - **Tests.** `Scripts/smoke-people-looks.sh` reproduces the repeat with
      looks off, where a merged-in look's new photos start a new unnamed
      person. It shows that with looks on the group folds in and new photos
-     join on their own.
+     join on their own. `Scripts/smoke-people-asks.sh` covers the questions:
+       who is asked about, yes, no, the next candidate after a no, a merge
+       after a no, and that looks off clears them.
    - **Cost.** A pass grows with the square of the faces waiting, since most
      strangers are a group of one.
      - On a Mac, release build, stand-in faces with four in ten strangers: a
@@ -470,6 +506,8 @@ faces are used for anything.
      - `POST people/:id/merge`;
      - `POST people/:id/remove`, which is "Not Emma";
      - `GET` and `POST people/:id/suggestions`, the questions and the answers;
+     - `POST people/:id/maybe` answers the question for a whole group: yes or
+       no, with the named person the app showed;
      - face pictures at `people/:id/face` and `assets/:id/faces/:ordinal`,
        cropped on the NAS from the person's own photo at 256 px and kept
        beside the thumbnails; each listed person's is cut ahead, after each
@@ -487,6 +525,10 @@ faces are used for anything.
      - Typing a name someone already has asks whether they're the same
        person.
      - The Apple TV shows the people and their names, without editing.
+     - An unnamed circle with a question shows the first name and a question
+       mark ("Emma?"). Its page has "Is this Emma?" with Yes and No above the
+       photos; Add Name stays for when it's someone else. The Apple TV doesn't
+       show questions.
    - **Shadow mode included.** People shows for anyone the NAS analyzes,
      shadow or on. It replaces nothing the phones do, so there's nothing to
      preview it against.
