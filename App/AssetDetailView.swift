@@ -344,6 +344,9 @@ struct AssetDetailView: View {
     /// naming itself, so every page the scroll view built thought it was the
     /// one being watched, and opened a player of its own.
     @State private var macFocus: PagerFocus
+    /// The pages' real width, and whether the window is changing size. See
+    /// `PagerMetrics`.
+    @State private var pagerMetrics = PagerMetrics()
     /// Whether the photo on screen is zoomed in. While it is, two fingers pan
     /// the photo rather than turn the page. See `MacZoomableImage`.
     @State private var macZoomed = false
@@ -1042,6 +1045,10 @@ struct AssetDetailView: View {
     /// left half of it as a 12-point black border around every picture.
     static let pageGap: CGFloat = 24
 
+    /// Narrower than any window the viewer really opens in, and wider than
+    /// the square SwiftUI lays a pushed view out in first. See `macPager`.
+    static let pagerMinimumWidth: CGFloat = 160
+
     private var macPager: some View {
         // Apple's viewer: the photograph fills the whole main area, and a small
         // gap parts two pictures as you swipe.
@@ -1061,6 +1068,12 @@ struct AssetDetailView: View {
         // by the gap. So a picture at rest fills the window edge to edge, and
         // the gap shows as `pageGap` of black between two pictures mid-swipe.
         GeometryReader { outer in
+        // Nothing until the pager has its real size. Pushing the viewer lays
+        // it out once at a hundred points square first, and the pages the
+        // lazy stack built then taught it the wrong width for every page it
+        // hadn't built: opening a photo two hundred pages in put it seven
+        // hundred points off until a later pass found it again.
+        if outer.size.width > Self.pagerMinimumWidth {
         ScrollViewReader { reader in
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
@@ -1084,11 +1097,17 @@ struct AssetDetailView: View {
                     .padding(.trailing, outer.safeAreaInsets.trailing)
                     .containerRelativeFrame([.horizontal, .vertical])
                     .padding(.trailing, Self.pageGap)
+                    // What a swipe steps by. Measured rather than worked out
+                    // from the window: a tiled window has laid each page out
+                    // a point wider than it.
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                        pagerMetrics.stride = width
+                    }
                 }
             }
             .scrollTargetLayout()
         }
-        .modifier(OnePageAtATime(gap: Self.pageGap, pageCount: macPages.count))
+        .modifier(OnePageAtATime(gap: Self.pageGap, metrics: pagerMetrics))
         .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
@@ -1109,14 +1128,32 @@ struct AssetDetailView: View {
         // which paging honors, so photos sat 230 points right of center.
         .ignoresSafeArea(.container, edges: .horizontal)
         .background(Color.black)
-        // Back onto the page if the window itself is resized: paging keeps the
-        // offset it had, and an offset is a multiple of the old width.
+        // Back onto the photo when the window changes size — tiled to half
+        // the screen, out of full screen, opened at all (the viewer is laid
+        // out once small as it's pushed). By the photo's own frame, by its id:
+        // the stack is lazy, and where it puts a page that far in is only
+        // known once it has laid it out. Again once the size has held still,
+        // for the frames that arrive after the last change.
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in
+            let metrics = pagerMetrics
+            metrics.isResizing = true
             reader.scrollTo(displayedItem.id, anchor: .leading)
+            metrics.settle?.cancel()
+            metrics.settle = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                metrics.isResizing = false
+                if scrolledID != displayedItem.id { scrolledID = displayedItem.id }
+                reader.scrollTo(displayedItem.id, anchor: .leading)
+            }
+        }
         }
         }
         }
         .onChange(of: scrolledID) { _, new in
+            // Mid-resize the scroll view names whatever page its old offset
+            // falls on in the new layout. Nobody turned to it.
+            guard !pagerMetrics.isResizing else { return }
             guard let new, new != displayedItem.id,
                   let match = macPages.first(where: { $0.id == new }) else { return }
             displayedItem = match
@@ -2175,12 +2212,11 @@ private struct InformationSheet: View {
 private struct OnePageAtATime: ViewModifier {
     /// The black between pages. See `SwipePaging`.
     let gap: CGFloat
-    /// How many there are, for a resize to find the one showing. See
-    /// `SwipePaging.updateTarget`.
-    let pageCount: Int
+    /// The pages' measured width. See `PagerMetrics`.
+    let metrics: PagerMetrics
 
     func body(content: Content) -> some View {
-        content.scrollTargetBehavior(SwipePaging(gap: gap, pageCount: pageCount))
+        content.scrollTargetBehavior(SwipePaging(gap: gap, metrics: metrics))
     }
 }
 #endif
