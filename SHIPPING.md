@@ -25,6 +25,14 @@ will take it. The server has its own document — see DEPLOY.md.
 A version bump (`MARKETING_VERSION`) is only needed when the version people see
 should change. The build number goes up every single time.
 
+**Once it has processed, every time:**
+
+6. Add it to the **Family Testing** group, iOS and Mac. Who is in the group
+   doesn't change here.
+7. Fill in **What to Test**: a few plain lines for family on what changed and
+   what to try.
+8. **Expire the builds before it**, so no one stays on an old one.
+
 ## What the project already satisfies
 
 Each of these was missing or wrong once, and each would have cost an upload.
