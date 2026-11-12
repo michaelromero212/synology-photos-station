@@ -232,8 +232,10 @@ struct AnalysisCommand: AsyncCommandGroup {
                 var wouldLooks = "-"
                 if let closest {
                     let margin = closest.similarity - (all.dropFirst().first?.similarity ?? -1)
+                    // The averages have to point to the same person.
                     let allowed = !closest.together && closest.rejected == 0
                         && !library.hidden.contains(p.id) && !library.hidden.contains(closest.person)
+                        && likeness[p.id]?.first?.person == closest.person
                     if allowed, closest.similarity >= fold, margin >= foldMargin {
                         wouldLooks = "fold in"
                     } else if let ask = all.first(where: { !$0.together && $0.rejected == 0 }), ask.similarity >= Self.ask {

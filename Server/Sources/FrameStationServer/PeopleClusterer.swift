@@ -33,7 +33,8 @@ import Vapor
 /// **Folding** (also only with `looks` on). An unnamed group as like a named
 /// person as two unnamed groups must be to merge (`fold`), and clearly more
 /// like them than anyone else named (`foldMargin`), is that person, and
-/// joins them. Never one photographed with them, and never one with a face
+/// joins them. The average faces have to point to the same person as the
+/// looks do. Never one photographed with them, and never one with a face
 /// the person said isn't them.
 ///
 /// The person's word is final:
@@ -728,8 +729,15 @@ actor PeopleClusterer {
                     guard !named.isEmpty, let idU = centroids.ids[u], !library.hidden.contains(idU) else { continue }
                     var best: (g: Int, similarity: Float)?
                     var second: Float = -1
+                    // Who they're most like by average alone. A look is a
+                    // tighter thing than an average and scores higher, so
+                    // one look can put a group over the bar for someone the
+                    // averages don't point to. Then the two disagree, and
+                    // it's left for the person to say.
+                    var byAverage: (g: Int, similarity: Float)?
                     for n in named {
                         var s = centroids.similarity(u, n)
+                        if s > (byAverage?.similarity ?? -1) { byAverage = (n, s) }
                         for l in looks.usable[n] { s = max(s, looks.centroids.similarity(l, to: centroids, u)) }
                         if let b = best, s <= b.similarity {
                             second = max(second, s)
@@ -739,6 +747,7 @@ actor PeopleClusterer {
                         }
                     }
                     guard let best, best.similarity >= fold, best.similarity - second >= foldMargin,
+                          byAverage?.g == best.g,
                           let idN = centroids.ids[best.g], !library.hidden.contains(idN),
                           centroids.frames[u].isDisjoint(with: centroids.frames[best.g]),
                           !centroids.members[u].contains(where: { library.rejected[$0]?.contains(idN) == true })

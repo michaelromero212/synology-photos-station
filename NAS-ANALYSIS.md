@@ -422,6 +422,12 @@ faces are used for anything.
        like them, the same bar at which two unnamed groups become one, by
        their average or any of their looks. It must also be at least 0.08
        clear of every other named person.
+     - The averages must point to the same person as the looks. A look is
+       tighter than an average and scores higher, so one look can lift a
+       group over the bar for someone the averages don't point to. On the
+       owner's library (2026-11-12) a 33-photo group was 0.49 like one
+       person by average and 0.64 like another by a look. Such a group is
+       left for the owner to say.
      - Never when the two share a photo, since they can't be one person. Never
        when the owner said a face of the group isn't that person. Never a
        hidden person, on either side.
