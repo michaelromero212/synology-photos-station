@@ -76,6 +76,9 @@ final class ViewerStage {
     @ObservationIgnored fileprivate weak var flightLayer: UIView?
     /// The photo in flight, while there is one.
     @ObservationIgnored private var flight: UIImageView?
+    /// The window the viewer is drawn in on iPhone, while it is up. See
+    /// `ViewerWindow`.
+    @ObservationIgnored fileprivate weak var viewerWindow: UIWindow?
 
     /// Quick, with no bounce to speak of — a photo settling, not a ball
     /// landing. The same springs SwiftUI's `.spring(response:dampingFraction:)`
@@ -115,13 +118,34 @@ final class ViewerStage {
             fadeBackdrop(to: 1, duration: 0.2)
             return
         }
-        let target = fitted(aspect: Self.shape(of: image, else: photo.item.aspectRatio))
+        let aspect = Self.shape(of: image, else: photo.item.aspectRatio)
+        let target = fitted(aspect: aspect)
         fly(image, from: tile, to: target, spring: Self.openSpring, backdrop: 1) { [weak self] landed in
             guard let self, self.isPresented, !self.isClosing else { return }
-            self.showsViewer = true
-            // Taken down a frame later, once the viewer is drawn in its place.
-            NextFrame.run { [weak self] in self?.removeFlight(landed) }
+            // Opened with the phone already on its side: the viewer's window
+            // has come up turned, and the photo has landed the grid's way up.
+            // It turns to meet the viewer rather than being swapped for a
+            // picture a quarter turn round from it.
+            let turn = self.turn
+            guard turn != 0 else {
+                self.handOver(from: landed)
+                return
+            }
+            self.fly(
+                image, from: target, to: self.displayedFrame(aspect: aspect, turn: turn),
+                turn: (0, turn), spring: Self.openSpring, backdrop: 1
+            ) { [weak self] landed in
+                guard let self, self.isPresented, !self.isClosing else { return }
+                self.handOver(from: landed)
+            }
         }
+    }
+
+    /// The viewer takes over from the photo that flew in.
+    private func handOver(from landed: UIImageView?) {
+        showsViewer = true
+        // Taken down a frame later, once the viewer is drawn in its place.
+        NextFrame.run { [weak self] in self?.removeFlight(landed) }
     }
 
     /// Moves the empty place in the grid to the photo now on screen.
@@ -183,7 +207,7 @@ final class ViewerStage {
         willClose()
         // A viewer turned with the phone shows its photo turned. The flight
         // starts the same way and rights itself on the way to the tile.
-        let turn = CGFloat(MediaTilt.shared.angle * .pi / 180)
+        let turn = turn
         let start = displayedFrame(aspect: Self.shape(of: image, else: item.aspectRatio), turn: turn)
         // Asked for before anything moves: this is what scrolls the grid to
         // the tile, if it has to, while the viewer still covers it.
@@ -260,7 +284,7 @@ final class ViewerStage {
     ///
     /// `velocity` is where the finger was taking the photo, in points per
     /// second. `turn` is the angle it starts and ends at, for a photo shown
-    /// turned with the phone — see `MediaTilt`.
+    /// turned with the phone — see `ViewerWindow`.
     private func fly(
         _ image: UIImage, from start: CGRect, to end: CGRect,
         velocity: CGPoint = .zero, turn: (from: CGFloat, to: CGFloat) = (0, 0),
@@ -487,10 +511,30 @@ final class ViewerStage {
         )
     }
 
+    /// How far round the viewer is from the grid, in radians: a quarter turn
+    /// either way while the phone is on its side, nothing otherwise.
+    ///
+    /// The grid's window never turns and the viewer's does — see
+    /// `ViewerWindow` — and photos fly in the grid's. So a photo leaving a
+    /// turned viewer starts out turned by this much, as the grid sees it.
+    /// Zero on iPad, where there is one window and all of it turns.
+    private var turn: CGFloat {
+        guard let window = viewerWindow, !window.isHidden,
+              window.bounds.width > window.bounds.height
+        else { return 0 }
+        switch window.windowScene?.interfaceOrientation {
+        // Home edge to the right: the phone went anticlockwise, so what it
+        // shows is clockwise of the grid by the same amount.
+        case .landscapeRight: return .pi / 2
+        case .landscapeLeft: return -.pi / 2
+        default: return 0
+        }
+    }
+
     /// Where the photo is now, before it is turned: fitted to the screen — to
     /// the screen on its side, when the viewer is turned with the phone — and
     /// moved and shrunk by a drag. Matches `scaleEffect` about the center,
-    /// then `offset`, inside `videoTilt`'s turn, which is applied to the
+    /// then `offset`, in the viewer's own window; its turn is applied to the
     /// flight separately.
     private func displayedFrame(aspect: Double, turn: CGFloat) -> CGRect {
         let screen = screen
@@ -537,8 +581,19 @@ struct ViewerStageView<Viewer: View>: View {
                 .allowsHitTesting(false)
 
             if let opened = stage.opened {
-                viewer(opened)
-                    .modifier(StagedViewerVisibility(stage: stage))
+                if ViewerWindow.isUsed {
+                    // On iPhone the viewer is drawn in a window of its own,
+                    // which turns with the phone while this one stays put.
+                    ViewerWindowPortal(stage: stage) {
+                        viewer(opened)
+                            .modifier(StagedViewerVisibility(stage: stage))
+                    }
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                } else {
+                    viewer(opened)
+                        .modifier(StagedViewerVisibility(stage: stage))
+                }
             }
 
             StageCanvas(stage: stage, role: .flights)
@@ -548,6 +603,174 @@ struct ViewerStageView<Viewer: View>: View {
             FlightShield(stage: stage)
         }
         .allowsHitTesting(stage.isPresented)
+    }
+}
+
+// MARK: - The viewer's window
+
+/// The window the viewer is drawn in on iPhone: the one part of the app that
+/// turns with the phone.
+///
+/// The app is a portrait app — the grid, its bars and the tab bar never lie on
+/// their side. A photo or a clip should still fill the screen when the phone
+/// is turned, and both earlier ways of getting that were wrong:
+///
+/// - Letting the app's one window turn while the viewer was open took the grid
+///   round with it, underneath, and it showed lying on its side through every
+///   drag down and every close.
+/// - Turning the viewer by hand inside a window that never moved looked right
+///   until anything of the system's appeared. The clock stayed along the top
+///   of a portrait screen, sheets and menus came up sideways, the picture
+///   stopped short of the screen's ends because the safe area was still a
+///   portrait one, and a screenshot came out portrait with the picture lying
+///   across it.
+///
+/// A window turns by itself. This one holds the viewer and nothing else, sits
+/// over the grid's, and is the only one allowed landscape — see the app
+/// delegate — so the system turns it, with its clock, its safe area and
+/// everything presented from it, and never touches the grid's. Measured: the
+/// grid's window gets no rotation and no layout pass when the phone turns.
+///
+/// It is clear. The black behind the viewer and the photo that flies between
+/// tile and screen stay in the grid's window, under this one, where the tiles
+/// they fly to and from are; `ViewerStage.turn` is how far round the two
+/// windows are from each other.
+///
+/// iPhone only. iPad's one window turns freely, the grid with it, so the
+/// viewer there is drawn straight into the stage.
+final class ViewerWindow: UIWindow {
+    static var isUsed: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    /// Upside down is left out, as it is for the app as a whole.
+    static let orientations: UIInterfaceOrientationMask = .allButUpsideDown
+}
+
+private final class ViewerWindowHost: UIHostingController<AnyView> {
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        ViewerWindow.orientations
+    }
+}
+
+/// Draws its content in a `ViewerWindow` for as long as it is in the view
+/// tree, and takes up no room where it stands.
+private struct ViewerWindowPortal<Content: View>: UIViewRepresentable {
+    let stage: ViewerStage
+    @ViewBuilder let content: () -> Content
+    /// Everything the content would have been handed had it been drawn here:
+    /// the session, the model container, the color scheme. A window starts
+    /// with none of it.
+    @Environment(\.self) private var environment
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> Anchor {
+        let anchor = Anchor()
+        anchor.isUserInteractionEnabled = false
+        let coordinator = context.coordinator
+        coordinator.stage = stage
+        coordinator.update(root, scheme: environment.colorScheme)
+        anchor.onWindow = { [weak coordinator] window in
+            // A turn of the run loop later: this is called in the middle of
+            // SwiftUI laying out, which is no time to put up a window.
+            DispatchQueue.main.async { coordinator?.attach(over: window) }
+        }
+        return anchor
+    }
+
+    func updateUIView(_ anchor: Anchor, context: Context) {
+        context.coordinator.update(root, scheme: environment.colorScheme)
+    }
+
+    static func dismantleUIView(_ anchor: Anchor, coordinator: Coordinator) {
+        anchor.onWindow = nil
+        coordinator.detach()
+    }
+
+    private var root: AnyView {
+        AnyView(ViewerWindowRoot(inherited: environment, content: content()))
+    }
+
+    /// A view whose only job is to say which window it has landed in.
+    final class Anchor: UIView {
+        var onWindow: ((UIWindow) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if let window { onWindow?(window) }
+        }
+    }
+
+    @MainActor
+    final class Coordinator {
+        weak var stage: ViewerStage?
+        private var root = AnyView(EmptyView())
+        private var scheme = ColorScheme.dark
+        private var window: ViewerWindow?
+        private var isDetached = false
+        /// The grid's window, which gets the keyboard back when this goes.
+        private weak var below: UIWindow?
+
+        func update(_ root: AnyView, scheme: ColorScheme) {
+            self.root = root
+            self.scheme = scheme
+            guard let window else { return }
+            (window.rootViewController as? ViewerWindowHost)?.rootView = root
+            window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+        }
+
+        func attach(over main: UIWindow) {
+            guard window == nil, !isDetached, let scene = main.windowScene else { return }
+            let host = ViewerWindowHost(rootView: root)
+            host.view.backgroundColor = .clear
+            let window = ViewerWindow(windowScene: scene)
+            window.backgroundColor = .clear
+            window.windowLevel = main.windowLevel + 1
+            // What the system draws for it — menus, sheets, the share sheet —
+            // in the app's light or dark, which a new window knows nothing of.
+            window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+            window.rootViewController = host
+            self.window = window
+            below = main
+            stage?.viewerWindow = window
+            // Key, so it has the keyboard for its sheets, and so its clock and
+            // its orientation are the ones the system goes by while it is up.
+            window.makeKeyAndVisible()
+        }
+
+        func detach() {
+            isDetached = true
+            guard let window else { return }
+            self.window = nil
+            if stage?.viewerWindow === window { stage?.viewerWindow = nil }
+            window.isHidden = true
+            window.rootViewController = nil
+            window.windowScene = nil
+            below?.makeKey()
+        }
+    }
+}
+
+/// What a `ViewerWindow` draws: the viewer, given back the environment it was
+/// built in.
+private struct ViewerWindowRoot<Content: View>: View {
+    let inherited: EnvironmentValues
+    let content: Content
+    // This window's own, which differ from the grid's the moment it turns.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    var body: some View {
+        content
+            .environment(\.self, environment)
+            // Menus and dialogs readable over any photo, as in the grid's
+            // window. See `PopupContrast`.
+            .popupContrast()
+    }
+
+    private var environment: EnvironmentValues {
+        var values = inherited
+        values.horizontalSizeClass = horizontalSizeClass
+        values.verticalSizeClass = verticalSizeClass
+        return values
     }
 }
 

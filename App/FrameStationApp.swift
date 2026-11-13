@@ -158,33 +158,35 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate {
         MainActor.assumeIsolated { PushRegistrar.shared.didFailToRegister(error) }
     }
 
-    /// The iPhone app is portrait, full stop.
+    /// The iPhone app is portrait, and its photo viewer turns with the phone.
     ///
-    /// Letting the *window* turn landscape so a video could fill the screen was
-    /// the obvious way to do it, and it was wrong: the whole app came round with
-    /// it, so the grid, the chrome and the tab bar all lay on their side. Only
-    /// the picture should turn. `MediaTilt` rotates the clip inside a window
-    /// that never moves — see `VideoPlayerView`.
+    /// Letting the app's *window* turn landscape so a video could fill the
+    /// screen was the obvious way to do it, and it was wrong: the whole app
+    /// came round with it, so the grid, the chrome and the tab bar all lay on
+    /// their side. So the viewer has a window to itself, and that one alone is
+    /// allowed landscape. See `ViewerWindow`.
     func application(
         _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         // iPad rotates freely — it multitasks and lives in every orientation.
-        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+        if UIDevice.current.userInterfaceIdiom == .pad { return .all }
+        return window is ViewerWindow ? ViewerWindow.orientations : .portrait
     }
 }
 
-/// Which way the phone is actually being held.
+/// Which way the phone is actually being held, for a viewer that isn't in a
+/// window of its own.
 ///
-/// The window is locked portrait, so nothing in UIKit turns when you rotate the
-/// device — which is the point: the grid and its chrome must stay upright. But a
-/// video still wants to fill the screen when you turn the phone sideways, and
-/// the only way to do that in a window that never rotates is to rotate the clip
-/// ourselves. This reports the physical tilt so `VideoPlayerView` can.
+/// On iPhone the library's viewer is drawn in `ViewerWindow`, which the system
+/// turns, and none of this is used. Search still pushes its viewer inside the
+/// app's own window, which is locked portrait, so nothing there turns by
+/// itself: the only way to fill the screen with a landscape clip is to rotate
+/// it by hand. This reports the physical tilt so `videoTilt` can.
 ///
 /// Reads the accelerometer-backed device orientation rather than the interface
-/// orientation, because the interface orientation is now always portrait and
-/// would tell us nothing.
+/// orientation, because that window's interface orientation is always portrait
+/// and would tell us nothing.
 @Observable
 @MainActor
 final class MediaTilt {

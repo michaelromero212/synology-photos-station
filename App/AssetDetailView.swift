@@ -293,6 +293,11 @@ struct AssetDetailView: View {
     /// Outlives any one page, which is the point: a video prepared as a
     /// neighbour must still be prepared when you arrive at it.
     @State private var preloader = VideoPreloader()
+    #if os(iOS) || os(macOS)
+    /// One clip dissolving into the next, for auto-play and the Next and
+    /// Previous Video buttons. See `VideoHandoff`.
+    @State private var handoff = VideoHandoff()
+    #endif
     @State private var showInfo = false
     #if os(iOS)
     /// Which page is on screen, keyed by placement id.
@@ -302,8 +307,18 @@ struct AssetDetailView: View {
     /// from a rebuilt root view.
     @State private var focus: PagerFocus
     private var currentID: UUID { focus.currentID }
-    /// Which way the phone is being held. The window never turns; the clip does.
+    /// Which way the phone is being held, for a viewer that has to turn itself.
     private var tilt: MediaTilt { .shared }
+    /// Whether this viewer turns its own picture when the phone goes sideways.
+    ///
+    /// Only where nothing else will: on iPhone, pushed inside the app's own
+    /// window, which is locked portrait — search still opens it that way. Over
+    /// a grid it is in `ViewerWindow`, which the system turns; on iPad the
+    /// app's window turns. Turned by hand there as well, the picture went
+    /// round twice.
+    private var turnsByHand: Bool {
+        stage == nil && UIDevice.current.userInterfaceIdiom == .phone
+    }
     @State private var showChrome = true
     /// True while the open photo is zoomed past its resting size. The chrome
     /// gets out of the way when it is.
@@ -350,6 +365,9 @@ struct AssetDetailView: View {
     /// Whether the photo on screen is zoomed in. While it is, two fingers pan
     /// the photo rather than turn the page. See `MacZoomableImage`.
     @State private var macZoomed = false
+    /// Where the page on screen draws its picture, in `pagerSpace`. See the
+    /// hand-over layer in `macPager`.
+    @State private var macPictureFrame: CGRect = .zero
     /// The zoom keys' way to the photo on screen.
     @State private var macZoom = MacPhotoZoom()
     /// Whether the clip's controls are up. They come up as the pointer moves
@@ -478,8 +496,12 @@ struct AssetDetailView: View {
                         Spacer(minLength: 0)
                         bottomChrome
                     }
+                    // The clip coming in, from the moment it starts to: the
+                    // one it follows has ended, and its transport would sit
+                    // on a replay button over a picture that is playing.
                     if currentItem.mediaType == .video,
-                       let player = preloader.existing(currentItem.assetID) {
+                       let player = handoff.incoming
+                        ?? preloader.existing(currentItem.assetID) {
                         VideoControls(model: player)
                             .modifier(TransportYieldsToPhotos(focus: focus))
                             .transition(.opacity)
@@ -491,7 +513,8 @@ struct AssetDetailView: View {
             }
         }
         .overlay { toastLayer }
-        // The whole viewer turns, not the picture inside it.
+        // Where the viewer has to turn itself — see `turnsByHand` — the whole
+        // of it turns, not the picture inside it.
         //
         // Rotating only the player layer and the chrome left the pager itself
         // unrotated, so a page transition — and the swipe that drives it — still
@@ -500,23 +523,25 @@ struct AssetDetailView: View {
         // rotation takes the composed viewer with it and the transition matches
         // what the viewer sees.
         //
-        // Unconditional, so photos turn too. That is the Apple Photos behavior
-        // and the only coherent one available: the pager carries stills and
-        // clips in the same stack, and gating on media type would snap the whole
+        // For photos as well as clips. That is the Apple Photos behavior and
+        // the only coherent one available: the pager carries stills and clips
+        // in the same stack, and gating on media type would snap the whole
         // view upright mid-swipe on reaching a photo.
-        .videoTilt()
+        .videoTilt(turnsByHand)
         .animation(.easeInOut(duration: 0.22), value: showChrome)
         .animation(.easeInOut(duration: 0.22), value: isZoomed)
         .statusBarHidden(!showChrome)
-        // The window stays portrait; only the clip turns. Watching the tilt
-        // costs an accelerometer subscription, so it runs while the viewer is
-        // open and stops with it. See `MediaTilt`.
+        // Watching the tilt costs an accelerometer subscription, so it runs
+        // while a viewer that needs it is open and stops with it. See
+        // `MediaTilt`.
         .onAppear {
-            tilt.start()
+            if turnsByHand { tilt.start() }
             GridChrome.shared.viewerOpened(tabBarToken)
+            preloader.watching(currentItem.mediaType == .video ? currentItem.assetID : nil)
         }
         .onDisappear {
-            tilt.stop()
+            if turnsByHand { tilt.stop() }
+            handoff.cancel()
             // The slideshow covers the viewer rather than closing it, and it
             // comes back when the slideshow ends: nothing below is true yet.
             guard !showSlideshow else { return }
@@ -609,7 +634,26 @@ struct AssetDetailView: View {
 
     private func goToAdjacentVideo(forward: Bool) {
         guard let target = adjacentVideo(forward: forward) else { return }
-        displayedItem = target
+        handOver(to: target)
+    }
+
+    /// Goes to another clip the way a player does: on a Mac the new one fades
+    /// in over the old, already playing, and the pager moves underneath. See
+    /// `VideoHandoff`. A television's player is AVKit's, which draws itself,
+    /// so there the clip is simply changed.
+    private func handOver(to next: TimelineItem) {
+        #if os(macOS)
+        let model = preloader.model(for: next.assetID)
+        let client = session.client
+        let quality = PlaybackSettings.resolvedQuality(isLocal: NetworkLocality.shared.isLocal)
+        handoff.begin(to: next.id, model: model) {
+            await model.prepare(assetID: next.assetID, client: client, quality: quality)
+        } land: {
+            displayedItem = next
+        }
+        #else
+        displayedItem = next
+        #endif
     }
 
     /// Autoplay's hop to the next clip — the non-iOS twin of the iOS
@@ -623,7 +667,7 @@ struct AssetDetailView: View {
     private func advanceToNextVideo(after finished: TimelineItem) {
         guard PlaybackSettings.autoPlayNextVideo, finished.id == displayedItem.id else { return }
         guard let next = adjacentVideo(forward: true) else { return }
-        displayedItem = next
+        handOver(to: next)
     }
 
     var body: some View {
@@ -902,8 +946,27 @@ struct AssetDetailView: View {
             leave()
             return
         }
-        // Cut, not slide: the next clip should simply start. See `PagerFocus.cut`.
-        focus.cut(to: next)
+        // Not a slide: the next clip fades in over this one's last frame,
+        // already playing. See `handOver`.
+        handOver(to: next)
+    }
+
+    /// Goes to another clip the way a player does, rather than the way a
+    /// person swipes: the new clip fades in over the old one, already playing,
+    /// and the pager cuts to its page underneath once it covers the screen.
+    /// See `VideoHandoff` and `PagerFocus.cut`.
+    private func handOver(to id: UUID) {
+        guard let next = pages.first(where: { $0.id == id }) else { return }
+        // Claimed here, in answer to a clip ending or a button, never in the
+        // body: claiming reorders the preloader's cache. See `AssetPage.clip`.
+        let model = preloader.model(for: next.assetID)
+        let client = session.client
+        let quality = PlaybackSettings.resolvedQuality(isLocal: NetworkLocality.shared.isLocal)
+        handoff.begin(to: id, model: model) {
+            await model.prepare(assetID: next.assetID, client: client, quality: quality)
+        } land: {
+            focus.cut(to: id)
+        }
     }
 
     /// Stops at the end of the day by returning nil — the last clip stays on
@@ -932,12 +995,48 @@ struct AssetDetailView: View {
     /// on the last one rather than doing nothing when pressed.
     private var hasNextVideo: Bool { nextVideoID(after: currentID) != nil }
 
+    /// What `warmNextVideo` runs again for: another clip on screen, or the
+    /// connection coming free.
+    private struct NextVideoWarmth: Equatable {
+        let current: UUID
+        let linkIsBusy: Bool
+    }
+
+    /// Gets the next clip of the day buffering while this one plays.
+    ///
+    /// The pages either side warm themselves. Auto-play jumps past any
+    /// photographs in between, to a page the pager hasn't built, so that clip
+    /// is asked for here — and the one after this can then fade in the moment
+    /// this ends, rather than after a request. See `VideoHandoff`.
+    ///
+    /// Away from home, only once the clip on screen has what it needs, as the
+    /// neighbors do, and only with auto-play on: it is a few seconds of video
+    /// that nobody may watch.
+    private func warmNextVideo() async {
+        guard currentItem.mediaType == .video, !preloader.isLinkBusy,
+              let next = nextVideoID(after: currentID),
+              let item = pages.first(where: { $0.id == next })
+        else { return }
+        let isLocal = NetworkLocality.shared.isLocal
+        if isLocal != true {
+            guard PlaybackSettings.autoPlayNextVideo else { return }
+            // The beat a neighbor waits, for the clip on screen to claim the
+            // connection first. See `AssetPage.waitForTurn`.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, !preloader.isLinkBusy else { return }
+        }
+        preloader.warm(
+            assetID: item.assetID, client: session.client,
+            quality: PlaybackSettings.resolvedQuality(isLocal: isLocal)
+        )
+    }
+
     private func goToAdjacentVideo(forward: Bool) {
         guard currentItem.mediaType == .video else { return }
         guard let target = videoID(from: currentID, forward: forward) else { return }
         // The skip buttons are the same hop auto-play makes, pressed by hand,
-        // so they cut the same way — a player's next-track control, not a swipe.
-        focus.cut(to: target)
+        // so they go the same way — a player's next-track control, not a swipe.
+        handOver(to: target)
     }
 
     /// `dayItems` when the grid supplied it. The fallback matters for the
@@ -993,12 +1092,27 @@ struct AssetDetailView: View {
             )
         }
         .ignoresSafeArea()
+        // The next clip, fading in over this one as it ends. Inside the drag
+        // below, so that a clip dragged down mid-dissolve goes as one picture.
+        .overlay { VideoHandoffLayer(handoff: handoff).ignoresSafeArea() }
         // Where a drag down has taken the photo. Nothing moves otherwise.
         .modifier(StageFollowsDrag(stage: stage))
+        // A swipe started while one clip was giving way to the next: the
+        // person has taken over, and the pager is theirs.
+        .onChange(of: focus.heading?.id) { _, heading in
+            if heading != nil { handoff.cancel() }
+        }
+        // The next clip of the day gets ready while this one plays. See
+        // `warmNextVideo`.
+        .task(id: NextVideoWarmth(current: currentID, linkIsBusy: preloader.isLinkBusy)) {
+            await warmNextVideo()
+        }
         // A photo left zoomed shouldn't hold the pager hostage once you've
         // swiped away from it.
         .onChange(of: currentID) { _, _ in
             isZoomed = false
+            // Arrived somewhere other than the clip that was coming in.
+            if handoff.incomingID != currentID { handoff.cancel() }
             // Whatever you just left stops. Nil on a photo, so swiping from a
             // clip to a still silences it too.
             preloader.playOnly(
@@ -1049,6 +1163,10 @@ struct AssetDetailView: View {
     /// the square SwiftUI lays a pushed view out in first. See `macPager`.
     static let pagerMinimumWidth: CGFloat = 160
 
+    /// The pager's own coordinate space, which the page on screen reports its
+    /// picture's frame in.
+    static let pagerSpace = "MacPager"
+
     private var macPager: some View {
         // Apple's viewer: the photograph fills the whole main area, and a small
         // gap parts two pictures as you swipe.
@@ -1092,6 +1210,13 @@ struct AssetDetailView: View {
                         isZoomed: $macZoomed,
                         macZoom: macZoom
                     )
+                    // Where the page on screen draws its picture, for the next
+                    // clip to fade in over exactly. See `macPictureFrame`.
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .named(Self.pagerSpace))
+                    } action: { frame in
+                        if page.id == displayedItem.id { macPictureFrame = frame }
+                    }
                     // Beside the sidebar, inside the page. See below.
                     .padding(.leading, outer.safeAreaInsets.leading)
                     .padding(.trailing, outer.safeAreaInsets.trailing)
@@ -1108,7 +1233,12 @@ struct AssetDetailView: View {
             .scrollTargetLayout()
         }
         .modifier(OnePageAtATime(gap: Self.pageGap, metrics: pagerMetrics))
-        .scrollPosition(id: $scrolledID)
+        // Leading, as every page rests: its gap trails it off the window's
+        // edge. With no anchor a jump to a page — Next Video, auto-play —
+        // left it sixteen points left of where a swipe or opening it puts it,
+        // measured, and a clip fading in over the last one slid that far as
+        // its page took over.
+        .scrollPosition(id: $scrolledID, anchor: .leading)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
         // A zoomed photo keeps the swipe: it pans, and the page stays put
@@ -1161,6 +1291,10 @@ struct AssetDetailView: View {
         .onChange(of: displayedItem.id) { _, new in
             if scrolledID != new { scrolledID = new }
             macFocus.currentID = new
+            // Arrived somewhere other than the clip that was coming in: a
+            // swipe, or an arrow key, while one clip was giving way to the
+            // next.
+            if handoff.incomingID != new { handoff.cancel() }
             // For the grid, which shows this photo when the viewer closes —
             // not the one it opened on, which a swipe may have left far
             // behind. See `MacTimelineChrome`.
@@ -1179,10 +1313,25 @@ struct AssetDetailView: View {
         // Warm the pictures on either side of the one opened, so the very first
         // swipe is smooth rather than the only rough one.
         .onAppear {
+            preloader.watching(displayedItem.mediaType == .video ? displayedItem.assetID : nil)
             warmNeighbours(around: displayedItem.id)
             warmNextVideo()
             pokeControls()
         }
+        .onDisappear { handoff.cancel() }
+        // The next clip, fading in over this one as it ends, in the very
+        // rectangle the page on screen draws its picture in — which is where
+        // the next clip's page will draw it once the pager moves. Worked out
+        // from the window instead, it missed twice: centered on the space
+        // beside the sidebar, a tall clip faded in sixteen points right of
+        // where its page put it and slid over as the page took over; padded
+        // like a page, it counted the sidebar twice.
+        .overlay(alignment: .topLeading) {
+            VideoHandoffLayer(handoff: handoff)
+                .frame(width: macPictureFrame.width, height: macPictureFrame.height)
+                .offset(x: macPictureFrame.minX, y: macPictureFrame.minY)
+        }
+        .coordinateSpace(name: Self.pagerSpace)
         // The phone's transport, at the viewer rather than on a page for the
         // phone's reason: it reads whichever clip is current, so it follows
         // every advance — Next Video, auto-play, a swipe.
@@ -1210,8 +1359,9 @@ struct AssetDetailView: View {
 
     @ViewBuilder
     private var macVideoControls: some View {
+        // The clip coming in, while one is: the one it follows has ended.
         if displayedItem.mediaType == .video,
-           let playback = preloader.existing(displayedItem.assetID) {
+           let playback = handoff.incoming ?? preloader.existing(displayedItem.assetID) {
             let showing = macControlsShown || !playback.isPlaying
             VideoControls(model: playback)
                 .opacity(showing ? 1 : 0)
@@ -1336,6 +1486,7 @@ struct AssetDetailView: View {
     private func leave(velocity: CGSize = .zero, flyingBack: Bool = true) {
         GridChrome.shared.viewerClosed(tabBarToken)
         focusReport?.cancel()
+        handoff.cancel()
         // Over the grid: the photo flies back into its tile, which the stage
         // asks the grid to bring on screen first. See `ViewerStage.close`.
         if let stage {

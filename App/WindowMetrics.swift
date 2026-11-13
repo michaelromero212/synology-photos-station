@@ -87,6 +87,11 @@ enum WindowMetrics {
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
+            // Never the photo viewer's window. It is the key one while a photo
+            // is open, and it turns with the phone: asked then, it answered
+            // with a landscape screen's insets for a grid that is never
+            // anything but portrait.
+            .filter { !($0 is ViewerWindow) }
         // The key window when there is one, because on iPad a detached or
         // secondary window can be a different size; otherwise anything, because
         // a wrong-by-a-hair inset beats a zero by a mile.

@@ -54,6 +54,10 @@ final class VideoPlaybackModel {
     private(set) var position: Double = 0
     private(set) var isPlaying = false
     private(set) var hasFinished = false
+    /// Whether the page this clip belongs to has its picture on screen: its
+    /// own layer, with a frame in it. `VideoHandoff` waits for this before it
+    /// gets out of the way. Not observed — it is only ever asked.
+    @ObservationIgnored var isShownOnPage = false
     /// Read off the video track. Used for stepping, and it is why odd rates —
     /// 23.976, 59.94, a slow-motion 240 — all behave.
     private(set) var nominalFrameRate: Float = 30
@@ -1193,6 +1197,7 @@ final class VideoPlaybackModel {
         #endif
         player?.pause()
         player = nil
+        isShownOnPage = false
         isPlaying = false
         onLinkFree?()
     }
@@ -1268,6 +1273,7 @@ struct VideoPlayerView: View {
                 // just this layer left the pager sliding the portrait way
                 // underneath a turned picture. See `AssetDetailView`.
                 PlayerLayerView(player: player) {
+                    model.isShownOnPage = true
                     withAnimation(.easeOut(duration: 0.2)) { showsFirstFrame = true }
                 }
                 .overlay { skipZones }
@@ -1279,6 +1285,7 @@ struct VideoPlayerView: View {
                 // when it has a picture, so the poster went as soon as there was
                 // a player and every clip opened on black.
                 MacPlayerView(player: player) {
+                    model.isShownOnPage = true
                     withAnimation(.easeOut(duration: 0.2)) { showsFirstFrame = true }
                 }
                 #else
@@ -1368,7 +1375,10 @@ struct VideoPlayerView: View {
             guard state == .online, isActive else { return }
             model.connectionReturned()
         }
-        .onDisappear { model.pause() }
+        .onDisappear {
+            model.isShownOnPage = false
+            model.pause()
+        }
         // The model already tracks this for the replay button; the viewer
         // above needs the same edge to decide whether anything follows.
         .onChange(of: model.hasFinished) { _, finished in
@@ -1461,6 +1471,170 @@ struct PlayerLayerView: UIViewRepresentable {
 #endif
 
 #if os(iOS) || os(macOS)
+/// One clip giving way to the next: the next one fades in, already playing,
+/// over the last frame of the one that has just ended.
+///
+/// Auto-play used to cut. The pager jumped to the next clip's page, which
+/// drew that clip's poster — a frame from a second or so in — until the
+/// player had a frame of its own, and then faded the poster away: the last
+/// frame of one clip, a still from the middle of the next, then the next from
+/// its beginning. Three pictures and two jumps, and between a wide clip and a
+/// tall one the box changed shape in a single frame as well.
+///
+/// Now nothing moves until there is something to show. The clip that ended
+/// stays where it stopped. The next one is put up over it, out of sight,
+/// and started; when its first frame is on the glass it is faded in — black
+/// behind it, so a tall clip covers what is left of a wide one — and only
+/// then does the viewer go to its page, underneath, where nobody can see the
+/// page put itself together. Once the page has the picture too, this goes.
+///
+/// A clip that isn't ready in `patience` isn't waited for: the viewer goes
+/// to its page as it always did, where it waits behind its poster.
+@Observable
+@MainActor
+final class VideoHandoff {
+    /// The clip coming in, from the moment the one before it ends until its
+    /// own page has it on screen.
+    private(set) var incoming: VideoPlaybackModel?
+    /// The item it belongs to.
+    private(set) var incomingID: UUID?
+    /// Whether it has been asked to play, which is when its layer goes up.
+    /// Not before: a clip being come back to still holds the frame it was
+    /// left on, and would show that first.
+    private(set) var isRolling = false
+    /// Whether it is faded in over the clip it follows.
+    private(set) var isShown = false
+
+    @ObservationIgnored private var land: (() -> Void)?
+    @ObservationIgnored private var hasLanded = false
+    @ObservationIgnored private var sequence: Task<Void, Never>?
+
+    /// Long enough to read as one clip becoming the next, short enough that a
+    /// run of five-second clips isn't mostly dissolve.
+    static let fade: Double = 0.45
+    /// How long the last frame is held for the next clip's first.
+    static let patience: Double = 1.0
+
+    /// Starts `model` and brings it in over whatever is on screen.
+    ///
+    /// - Parameters:
+    ///   - prepare: gets the clip its link, if it hasn't one. Returns at once
+    ///     for a clip warmed ahead, which is the usual case.
+    ///   - land: takes the viewer to the clip's own page. Called once, when
+    ///     the clip covers the screen — or when it has been waited for long
+    ///     enough.
+    func begin(
+        to id: UUID, model: VideoPlaybackModel,
+        prepare: @escaping @MainActor () async -> Void,
+        land: @escaping () -> Void
+    ) {
+        cancel()
+        incoming = model
+        incomingID = id
+        self.land = land
+        sequence = Task { [weak self] in
+            await prepare()
+            guard let self, !Task.isCancelled else { return }
+            model.start()
+            self.isRolling = true
+            try? await Task.sleep(for: .seconds(Self.patience))
+            guard !Task.isCancelled, !self.isShown else { return }
+            Diagnostics.shared.log(
+                .playback, "Next clip not ready in time: going to its page without a dissolve"
+            )
+            self.landNow()
+            self.clear()
+        }
+    }
+
+    /// The layer over the viewer has the incoming clip's first frame.
+    func firstFrame() {
+        guard incoming != nil, isRolling, !isShown else { return }
+        sequence?.cancel()
+        isShown = true
+        sequence = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.fade))
+            guard let self, !Task.isCancelled else { return }
+            self.landNow()
+            // Until the page underneath has the picture as well. Taken away
+            // sooner, this uncovered the page's poster for the moment before
+            // its layer drew.
+            let model = self.incoming
+            let deadline = ContinuousClock.now + .milliseconds(800)
+            while model?.isShownOnPage != true, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard !Task.isCancelled else { return }
+            }
+            // And until the page's poster has finished fading off it.
+            try? await Task.sleep(for: .milliseconds(260))
+            guard !Task.isCancelled else { return }
+            self.clear()
+        }
+    }
+
+    /// The viewer went somewhere else: a swipe, a close, another clip asked
+    /// for. A clip that never reached its page is stopped where it is.
+    func cancel() {
+        guard incoming != nil else { return }
+        sequence?.cancel()
+        if !hasLanded { incoming?.pause() }
+        clear()
+    }
+
+    private func landNow() {
+        guard !hasLanded else { return }
+        hasLanded = true
+        land?()
+    }
+
+    private func clear() {
+        sequence = nil
+        incoming = nil
+        incomingID = nil
+        isRolling = false
+        isShown = false
+        hasLanded = false
+        land = nil
+    }
+}
+
+/// The incoming clip of a `VideoHandoff`, over the viewer: clear until it has
+/// a frame, then faded in.
+///
+/// Reads the handoff itself, so that fading it in redraws this and not the
+/// viewer it is drawn over.
+struct VideoHandoffLayer: View {
+    let handoff: VideoHandoff
+
+    var body: some View {
+        if let model = handoff.incoming {
+            ZStack {
+                // Behind the clip, so one of another shape leaves nothing of
+                // the last showing round its edges.
+                Color.black
+                if handoff.isRolling, let player = model.player {
+                    #if os(iOS)
+                    PlayerLayerView(player: player) { handoff.firstFrame() }
+                    #else
+                    MacPlayerView(player: player) { handoff.firstFrame() }
+                    #endif
+                }
+            }
+            // Faded as one picture. Without it the opacity reaches the black
+            // and the clip separately: half-faded black dimmed the clip going
+            // out before the one coming in covered it, and every dissolve
+            // between two wide clips sank 15% in the middle, measured.
+            .compositingGroup()
+            .opacity(handoff.isShown ? 1 : 0)
+            // Its own animation rather than a `withAnimation` round the
+            // change: the viewer it sits in animates other things by value,
+            // and those can take a transaction over.
+            .animation(.easeInOut(duration: VideoHandoff.fade), value: handoff.isShown)
+            .allowsHitTesting(false)
+        }
+    }
+}
+
 /// Playback controls: a transport row centered on the video itself, and a
 /// single row underneath — elapsed time, the scrubber, time remaining and mute —
 /// on a pill of dark glass, as Photos draws its own.
@@ -1472,6 +1646,14 @@ struct VideoControls: View {
     private static let glassTint = Color.viewerGlassTint
 
     @State private var isMuted = false
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// A phone on its side: turned landscape in the viewer's own window, which
+    /// is short top to bottom, or a pushed viewer turned by hand.
+    private var isSideways: Bool {
+        verticalSizeClass == .compact || MediaTilt.shared.isSideways
+    }
+    #endif
 
     var body: some View {
         ZStack {
@@ -1574,7 +1756,7 @@ struct VideoControls: View {
         // layer is only as tall as the screen is wide — so the portrait figure
         // pushed the scrubber almost into the middle of the picture.
         #if os(iOS)
-        .padding(.bottom, MediaTilt.shared.isSideways ? 56 : 104)
+        .padding(.bottom, isSideways ? 56 : 104)
         #else
         // A window has no action bar along the bottom — its verbs are in the
         // toolbar — so the pill sits where Photos puts its own.
@@ -1644,40 +1826,47 @@ private struct Scrubber: View {
 #endif
 
 #if os(iOS)
-/// Turns the clip — and only the clip — when the phone is held sideways.
+/// Turns a viewer by hand when the phone is held sideways, where nothing else
+/// will.
 ///
-/// The window is locked portrait so the grid, the chrome and the tab bar never
-/// lie on their side. Nothing therefore rotates on its own, which means filling
-/// the screen with a landscape video is something we have to do by hand: swap
-/// the box's width and height, spin it, then drop it back into the portrait
-/// bounds centered, so it pivots on the middle of the screen and lands on the
-/// glass rather than being cropped to the portrait box it was drawn into.
+/// Over a grid the viewer is in a window of its own that the system turns —
+/// see `ViewerWindow` — and this does nothing. A viewer pushed inside the
+/// app's own window is in one locked portrait, so filling the screen with a
+/// landscape video is something we have to do ourselves: swap the box's width
+/// and height, spin it, then drop it back into the portrait bounds centered,
+/// so it pivots on the middle of the screen and lands on the glass rather than
+/// being cropped to the portrait box it was drawn into.
 private struct VideoTilt: ViewModifier {
+    let isOn: Bool
     // Shared rather than passed in: the pager keeps each page's controller, so
     // a value handed to a page would freeze at what it was when the page was
     // built. See `MediaTilt`.
     private var tilt: MediaTilt { .shared }
 
     func body(content: Content) -> some View {
-        GeometryReader { geo in
-            let sideways = tilt.isSideways
+        if isOn {
+            GeometryReader { geo in
+                let sideways = tilt.isSideways
+                content
+                    .frame(
+                        width: sideways ? geo.size.height : geo.size.width,
+                        height: sideways ? geo.size.width : geo.size.height
+                    )
+                    .rotationEffect(.degrees(tilt.angle))
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .animation(.easeInOut(duration: 0.28), value: tilt.angle)
+            }
+        } else {
             content
-                .frame(
-                    width: sideways ? geo.size.height : geo.size.width,
-                    height: sideways ? geo.size.width : geo.size.height
-                )
-                .rotationEffect(.degrees(tilt.angle))
-                .frame(width: geo.size.width, height: geo.size.height)
-                .animation(.easeInOut(duration: 0.28), value: tilt.angle)
         }
     }
 }
 
 extension View {
-    /// Turns with the phone. For the player layer and for the chrome drawn over
-    /// it — controls that stayed upright while the clip turned read as broken,
-    /// so the two travel together.
-    func videoTilt() -> some View { modifier(VideoTilt()) }
+    /// Turns with the phone, by hand. For the player layer and for the chrome
+    /// drawn over it — controls that stayed upright while the clip turned read
+    /// as broken, so the two travel together.
+    func videoTilt(_ isOn: Bool) -> some View { modifier(VideoTilt(isOn: isOn)) }
 }
 #endif
 

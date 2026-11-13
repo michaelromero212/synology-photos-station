@@ -49,6 +49,13 @@ final class VideoPreloader {
     /// The clip holding the connection, so a neighbor pausing can't release a
     /// claim that was never its own.
     private var linkOwner: UUID?
+    /// The clip being watched, which is never the one let go of to make room.
+    ///
+    /// Room is made for the least recently asked for, and the clip on screen
+    /// is asked for once, as it opens — before its neighbors, and before the
+    /// next clip of the day is warmed for auto-play. With four wanted and room
+    /// for three, the one playing was the oldest.
+    @ObservationIgnored private var onScreen: UUID?
 
     /// Claims a model, creating one if this is the first ask.
     ///
@@ -122,6 +129,7 @@ final class VideoPreloader {
     /// left would free the link for a moment and the pages around the new one
     /// would start loading straight into it.
     func playOnly(_ assetID: UUID?) {
+        onScreen = assetID
         if let assetID {
             claimLink(for: assetID)
         } else if let owner = linkOwner {
@@ -132,6 +140,12 @@ final class VideoPreloader {
         }
     }
 
+    /// Says which clip is on screen without stopping the others — for a viewer
+    /// opening on one, before anything has been left.
+    func watching(_ assetID: UUID?) {
+        onScreen = assetID
+    }
+
     private func touch(_ assetID: UUID) {
         recency.removeAll { $0 == assetID }
         recency.append(assetID)
@@ -139,7 +153,8 @@ final class VideoPreloader {
 
     private func evictIfNeeded() {
         while recency.count > Self.capacity {
-            let oldest = recency.removeFirst()
+            guard let index = recency.firstIndex(where: { $0 != onScreen }) else { return }
+            let oldest = recency.remove(at: index)
             // Tearing the player down rather than dropping the reference: an
             // AVPlayer left holding a buffered item keeps memory and, on a
             // stream, a connection.
