@@ -1091,8 +1091,6 @@ struct RecentlyDeletedView: View {
     @State private var anchorID: UUID?
     #endif
     #if os(iOS)
-    /// The ⓘ beside the count: what the numbers on the tiles mean.
-    @State private var showsAbout = false
     /// The library's viewer, over the app. See `OverlayViewer`.
     @Environment(\.overlayViewer) private var overlay
     @State private var tiles = GridTiles()
@@ -1222,38 +1220,17 @@ struct RecentlyDeletedView: View {
         }
     }
 
-    /// The count under the title, as Photos has it — "🗑 4 Items ⓘ", the ⓘ
-    /// saying what the numbers on the tiles mean — and anything that failed.
-    /// Successes say nothing: the tiles leaving the grid are the answer.
+    /// Under the title. On the iPhone nothing but what went wrong, when
+    /// something did: he wanted the page clean, just the title and the
+    /// photos, so no count. Successes say nothing either — the tiles leaving
+    /// the grid are the answer. The television keeps its count and the line
+    /// explaining the days, since it has no other place to say so.
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Label(items.count == 1 ? "1 Item" : "\(items.count) Items", systemImage: "trash")
-                    .font(.headline)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                #if os(iOS)
-                Button {
-                    showsAbout = true
-                } label: {
-                    Image(systemName: "info.circle")
-                        .font(.body)
-                }
-                .accessibilityLabel("About Recently Deleted")
-                .popover(isPresented: $showsAbout) {
-                    Text(
-                        "Items show the days left before they're deleted. After that, "
-                        + "they're removed from your NAS for good."
-                    )
-                    .font(.subheadline)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 280)
-                    .padding()
-                    .presentationCompactAdaptation(.popover)
-                }
-                #endif
-            }
             #if os(tvOS)
+            Label(items.count == 1 ? "1 Item" : "\(items.count) Items", systemImage: "trash")
+                .font(.headline)
+                .monospacedDigit()
             Text("Each item shows the days left before it's deleted for good.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
