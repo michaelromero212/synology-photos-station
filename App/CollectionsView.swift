@@ -1079,6 +1079,9 @@ struct RecentlyDeletedView: View {
     @State private var confirming: Action?
     /// The item open full size. See `DeletedItemViewer`.
     @State private var opened: TimelineItem?
+    /// What went wrong last, shown under the count. Successes say nothing,
+    /// as in Photos: the tiles leaving the grid are the answer.
+    @State private var failure: String?
     #endif
     #if os(macOS)
     /// For telling a double-click (open) from a click (select), and where a
@@ -1086,11 +1089,10 @@ struct RecentlyDeletedView: View {
     @State private var lastClickAt = Date.distantPast
     @State private var lastClickedID: UUID?
     @State private var anchorID: UUID?
-    /// What went wrong last, shown under the count. Successes say nothing,
-    /// as in Photos: the tiles leaving the grid are the answer.
-    @State private var failure: String?
     #endif
     #if os(iOS)
+    /// The ⓘ beside the count: what the numbers on the tiles mean.
+    @State private var showsAbout = false
     /// The library's viewer, over the app. See `OverlayViewer`.
     @Environment(\.overlayViewer) private var overlay
     @State private var tiles = GridTiles()
@@ -1102,7 +1104,8 @@ struct RecentlyDeletedView: View {
         content
             .navigationTitle("Recently Deleted")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            // Large, as Photos titles this room, with the count under it.
+            .navigationBarTitleDisplayMode(.large)
             .sensoryFeedback(.selection, trigger: picked)
             #endif
             #if os(tvOS)
@@ -1131,46 +1134,17 @@ struct RecentlyDeletedView: View {
                 viewer(opening: item).frame(minWidth: 760, minHeight: 560)
             }
             #else
-            // The floating tab bar steps aside while selecting and the bar with
-            // Recover and Delete takes its place — the same exchange the library
-            // grid makes. See `FloatingTabBar`.
+            // Photos on the iPhone: Select turns on picking; the floating tab
+            // bar steps aside for a pill that says what's picked, and Delete
+            // and Recover live in the ••• menu, which asks before anything
+            // goes for good. See `FloatingTabBar`.
             .floatingTabBarClearance(when: !isSelecting)
             .floatingTabBarHidden(while: isSelecting)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if isSelecting { actionBar }
+                if isSelecting { selectionPill }
             }
-            .navigationBarBackButtonHidden(isSelecting)
             .toolbar { toolbar }
-            // Permanent delete skips the 29-day net, so it always asks first.
-            // Recovering what you picked doesn't — putting a photo back is
-            // undone by deleting it again — but Recover All asks, because
-            // everything is a lot to put back by accident.
-            .confirmationDialog(
-                confirmationTitle,
-                isPresented: Binding(
-                    get: { confirming != nil },
-                    set: { if !$0 { confirming = nil } }
-                ),
-                titleVisibility: .visible,
-                presenting: confirming
-            ) { action in
-                switch action {
-                case .delete:
-                    Button("Delete Permanently", role: .destructive) { perform(action) }
-                case .recover:
-                    Button("Recover All") { perform(action) }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: { action in
-                Text(confirmationMessage(action))
-            }
-            #if os(iOS)
             .fullScreenCover(item: $opened) { item in viewer(opening: item) }
-            #else
-            .sheet(item: $opened) { item in
-                viewer(opening: item).frame(minWidth: 760, minHeight: 560)
-            }
-            #endif
             #endif
             .task {
                 // Whether a tap can open an item. Asked once per sign-in.
@@ -1248,27 +1222,53 @@ struct RecentlyDeletedView: View {
         }
     }
 
-    /// The count, what the numbers on the tiles mean, and what just happened.
+    /// The count under the title, as Photos has it — "🗑 4 Items ⓘ", the ⓘ
+    /// saying what the numbers on the tiles mean — and anything that failed.
+    /// Successes say nothing: the tiles leaving the grid are the answer.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let notice {
-                Label(notice, systemImage: "checkmark.circle.fill")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Label(items.count == 1 ? "1 Item" : "\(items.count) Items", systemImage: "trash")
+                    .font(.headline)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                #if os(iOS)
+                Button {
+                    showsAbout = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.body)
+                }
+                .accessibilityLabel("About Recently Deleted")
+                .popover(isPresented: $showsAbout) {
+                    Text(
+                        "Items show the days left before they're deleted. After that, "
+                        + "they're removed from your NAS for good."
+                    )
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 280)
+                    .padding()
+                    .presentationCompactAdaptation(.popover)
+                }
+                #endif
             }
-            Text(items.count == 1 ? "1 Item" : "\(items.count) Items")
-                .font(.headline)
-                .monospacedDigit()
-                .contentTransition(.numericText())
+            #if os(tvOS)
             Text("Each item shows the days left before it's deleted for good.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            #else
+            if let failure {
+                Text(failure)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+            #endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 16)
+        .padding(.top, 2)
+        .padding(.bottom, 12)
     }
 
     @ViewBuilder
@@ -1284,18 +1284,41 @@ struct RecentlyDeletedView: View {
             .overlay(alignment: .bottomLeading) { daysBadge(item) }
     }
     #else
-    /// Styled exactly as the library grid styles a selection: the circle at the
-    /// top left, a picked tile dimmed. The countdown sits above the dimming so
-    /// it stays readable on a tile you have chosen.
+    /// Photos' tile here: the days left written across the foot of the
+    /// picture, and on a picked tile the check in that corner instead.
     private func tile(_ item: TimelineItem, size: CGSize) -> some View {
         let isPicked = picked.contains(item.assetID)
         return PhotoCell(item: item, loader: session.loader, size: size)
             .overlay {
-                if isPicked { Rectangle().fill(.black.opacity(0.25)) }
+                if isPicked { Rectangle().fill(.white.opacity(0.15)) }
             }
-            .overlay(alignment: .bottomLeading) { daysBadge(item) }
-            .overlay(alignment: .topLeading) {
-                if isSelecting { SelectionMark(isPicked: isPicked).padding(5) }
+            .overlay(alignment: .bottom) {
+                // A soft fade under the count, as Photos has, so white text
+                // reads on a light picture too.
+                if !isPicked, item.daysUntilPurge != nil {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.45)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: min(size.height * 0.35, 48))
+                    .allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if !isPicked, let days = item.daysUntilPurge {
+                    Text(days <= 0 ? "Today" : days == 1 ? "1 day" : "\(days) days")
+                        .font(.subheadline)
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.6), radius: 3)
+                        .padding(.bottom, 6)
+                        .accessibilityLabel(
+                            days == 1 ? "Deleted forever in 1 day" : "Deleted forever in \(days) days"
+                        )
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if isPicked { SelectionMark(isPicked: true).padding(6) }
             }
             #if os(iOS)
             .stagedTile(item.id, in: tiles, stage: overlay?.stage)
@@ -1375,26 +1398,29 @@ struct RecentlyDeletedView: View {
         picked.removeAll()
     }
 
+    #if os(iOS)
+    /// Select, and while selecting the ••• menu and ×, as in Photos. The menu
+    /// holds Delete and Recover — Delete All and Recover All with nothing
+    /// picked — and the question before a permanent delete pops out of it.
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if isSelecting {
-            ToolbarItem(placement: .navigation) {
-                Button(allPicked ? "Deselect All" : "Select All") {
-                    picked = allPicked ? [] : Set(items.map(\.assetID))
+            ToolbarItem(placement: .primaryAction) {
+                actionsMenu
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    endSelection()
+                } label: {
+                    Image(systemName: "xmark")
                 }
-                .keyboardShortcut("a", modifiers: .command)
+                .accessibilityLabel("Done Selecting")
                 .disabled(isWorking)
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Cancel") { endSelection() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isWorking)
-            }
-        }
-        if !isSelecting, canEdit {
+        } else if canEdit {
             ToolbarItem(placement: .primaryAction) {
                 Button("Select") {
-                    notice = nil
+                    failure = nil
                     isSelecting = true
                 }
                 .disabled(items.isEmpty)
@@ -1402,82 +1428,128 @@ struct RecentlyDeletedView: View {
         }
     }
 
-    /// Delete on the left, destructive; Recover on the right, the way out of
-    /// this room — the arrangement Photos uses. With nothing picked they act
-    /// on everything, which is what the page's two jobs actually are.
-    private var actionBar: some View {
-        HStack(spacing: 0) {
-            Button {
-                confirming = .delete(all: picked.isEmpty)
-            } label: {
-                Text(picked.isEmpty ? "Delete All" : "Delete")
-                    .frame(maxWidth: .infinity)
-            }
-            .foregroundStyle(.red)
-
-            Group {
-                if working != nil {
-                    ProgressView()
-                } else {
-                    Text(picked.isEmpty ? "Select Items" : "\(picked.count) Selected")
-                        .font(.subheadline.weight(.semibold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
+    private var actionsMenu: some View {
+        Menu {
+            if picked.isEmpty {
+                Button(role: .destructive) {
+                    confirming = .delete(all: true)
+                } label: {
+                    Label("Delete All", systemImage: "trash")
                 }
-            }
-            .frame(maxWidth: .infinity)
-
-            Button {
-                if picked.isEmpty {
+                Button {
                     confirming = .recover(all: true)
-                } else {
-                    perform(.recover(all: false))
+                } label: {
+                    Label("Recover All", systemImage: "arrow.up.bin")
                 }
-            } label: {
-                Text(picked.isEmpty ? "Recover All" : "Recover")
-                    .fontWeight(.semibold)
-                    .frame(maxWidth: .infinity)
+            } else {
+                Button(role: .destructive) {
+                    confirming = .delete(all: false)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                // Putting back what you picked doesn't ask: deleting it
+                // again undoes it.
+                Button {
+                    perform(.recover(all: false))
+                } label: {
+                    Label("Recover", systemImage: "arrow.up.bin")
+                }
             }
-            .foregroundStyle(.tint)
+        } label: {
+            if isWorking {
+                ProgressView()
+            } else {
+                Image(systemName: "ellipsis")
+            }
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 14)
-        .glassBackground(
-            in: RoundedRectangle(cornerRadius: 26, style: .continuous),
-            interactive: false,
-            fallback: .regularMaterial
-        )
-        .padding(.horizontal, 12)
-        .padding(.bottom, 4)
+        .accessibilityLabel("Actions")
         .disabled(isWorking || items.isEmpty)
+        // Attached to the menu so it points from there, the way Photos'
+        // "These photos will be permanently deleted" does.
+        .confirmationDialog(
+            "",
+            isPresented: Binding(
+                get: { confirming != nil },
+                set: { if !$0 { confirming = nil } }
+            ),
+            titleVisibility: .hidden,
+            presenting: confirming
+        ) { action in
+            switch action {
+            case .delete:
+                Button("Delete From NAS", role: .destructive) { perform(action) }
+            case .recover:
+                Button("Recover \(countText(targetItems, total: targetCount))") { perform(action) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { action in
+            Text(confirmationMessage(action))
+        }
     }
 
-    /// How many a confirmation is about: what is picked, or everything.
+    /// "Select Items", then "2 Photos Selected" — where the tab bar was.
+    private var selectionPill: some View {
+        Group {
+            if isWorking {
+                ProgressView()
+            } else {
+                Text(
+                    picked.isEmpty
+                        ? "Select Items"
+                        : countText(pickedItems, total: picked.count) + " Selected"
+                )
+                .monospacedDigit()
+                .contentTransition(.numericText())
+            }
+        }
+        .font(.headline)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .glassBackground(in: Capsule(), interactive: false, fallback: .regularMaterial)
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 8)
+    }
+
+    /// What a confirmation is about: what is picked, or everything.
+    private var targetItems: [TimelineItem] { picked.isEmpty ? items : pickedItems }
     private var targetCount: Int { picked.isEmpty ? items.count : picked.count }
 
-    private var confirmationTitle: String {
-        let n = targetCount
-        switch confirming {
-        case .delete:
-            return n == 1 ? "Delete this item permanently?" : "Delete \(n) items permanently?"
-        case .recover:
-            return n == 1 ? "Recover this item?" : "Recover all \(n) items?"
-        case nil:
-            return ""
-        }
-    }
-
     private func confirmationMessage(_ action: Action) -> String {
+        let n = targetCount
+        let noun = kindNoun(targetItems, plural: n != 1).lowercased()
         switch action {
         case .delete:
-            return "This can't be undone. "
-                + (targetCount == 1 ? "It's" : "They're")
-                + " removed from your NAS right away, without waiting out the "
-                + "\(Retention.days)-day window."
+            return n == 1
+                ? "This \(noun) will be permanently deleted. This action can't be undone."
+                : "These \(noun) will be permanently deleted. This action can't be undone."
         case .recover:
-            return "They go back to \(space.name), where they were."
+            return n == 1
+                ? "This \(noun) goes back to \(space.name)."
+                : "These \(noun) go back to \(space.name)."
         }
+    }
+    #endif
+
+    private var pickedItems: [TimelineItem] {
+        items.filter { picked.contains($0.assetID) }
+    }
+
+    /// "29 Photos", "3 Videos", "5 Items" — Photos names the kind when
+    /// they're all one kind.
+    private func countText(_ subset: [TimelineItem], total: Int) -> String {
+        "\(total.formatted()) \(kindNoun(subset, plural: total != 1))"
+    }
+
+    private func kindNoun(_ subset: [TimelineItem], plural: Bool) -> String {
+        let noun: String
+        if !subset.isEmpty, subset.allSatisfy({ $0.mediaType == .video }) {
+            noun = "Video"
+        } else if !subset.isEmpty, subset.allSatisfy({ $0.mediaType != .video }) {
+            noun = "Photo"
+        } else {
+            noun = "Item"
+        }
+        return plural ? noun + "s" : noun
     }
 
     private func perform(_ action: Action) {
@@ -1486,6 +1558,7 @@ struct RecentlyDeletedView: View {
         let first = all ? items.map(\.assetID) : Array(picked)
         guard !first.isEmpty else { return }
         working = action
+        failure = nil
         Task {
             var batch = first
             var total = 0
@@ -1514,9 +1587,7 @@ struct RecentlyDeletedView: View {
                 }
             } catch {
                 notice = "That didn't finish: \(error.localizedDescription)"
-                #if os(macOS)
                 failure = notice
-                #endif
             }
             working = nil
             endSelection()
@@ -1605,7 +1676,7 @@ struct RecentlyDeletedView: View {
     /// The count, what the captions mean, and anything that went wrong.
     private var macFooter: some View {
         VStack(spacing: 4) {
-            Text(macCount(items, total: items.count))
+            Text(countText(items, total: items.count))
                 .font(.headline)
                 .monospacedDigit()
                 .contentTransition(.numericText())
@@ -1683,7 +1754,7 @@ struct RecentlyDeletedView: View {
                 picked = targets
                 confirming = .delete(all: false)
             } label: {
-                Label("Delete \(macCount(chosen, total: chosen.count))…", systemImage: "trash")
+                Label("Delete \(countText(chosen, total: chosen.count))…", systemImage: "trash")
             }
         }
         if session.supports(ServerCapability.deletedPreview) {
@@ -1709,7 +1780,7 @@ struct RecentlyDeletedView: View {
                         Text(
                             picked.isEmpty
                                 ? "Delete All"
-                                : "Delete \(macCount(macPickedItems, total: picked.count))"
+                                : "Delete \(countText(pickedItems, total: picked.count))"
                         )
                     }
                 }
@@ -1737,34 +1808,12 @@ struct RecentlyDeletedView: View {
         .accessibilityHidden(true)
     }
 
-    private var macPickedItems: [TimelineItem] {
-        items.filter { picked.contains($0.assetID) }
-    }
-
-    /// "29 Photos", "3 Videos", "5 Items" — Photos names the kind when
-    /// they're all one kind.
-    private func macCount(_ subset: [TimelineItem], total: Int) -> String {
-        "\(total.formatted()) \(macNoun(subset, plural: total != 1))"
-    }
-
-    private func macNoun(_ subset: [TimelineItem], plural: Bool) -> String {
-        let noun: String
-        if !subset.isEmpty, subset.allSatisfy({ $0.mediaType == .video }) {
-            noun = "Video"
-        } else if !subset.isEmpty, subset.allSatisfy({ $0.mediaType != .video }) {
-            noun = "Photo"
-        } else {
-            noun = "Item"
-        }
-        return plural ? noun + "s" : noun
-    }
-
     /// "29 Photos · September 2026", or "5 Photos Selected · …".
     private var macSubtitle: String {
         guard !items.isEmpty else { return "" }
         let count = picked.isEmpty
-            ? macCount(items, total: items.count)
-            : macCount(macPickedItems, total: picked.count) + " Selected"
+            ? countText(items, total: items.count)
+            : countText(pickedItems, total: picked.count) + " Selected"
         let range = macDateRange
         return range.isEmpty ? count : "\(count) · \(range)"
     }
@@ -1788,11 +1837,11 @@ struct RecentlyDeletedView: View {
 
     /// "Are you sure you want to delete 29 photos permanently?"
     private var macDeleteTitle: String {
-        let subset = picked.isEmpty ? items : macPickedItems
+        let subset = picked.isEmpty ? items : pickedItems
         let n = picked.isEmpty ? items.count : picked.count
         let what = n == 1
-            ? "this \(macNoun(subset, plural: false).lowercased())"
-            : "\(n.formatted()) \(macNoun(subset, plural: true).lowercased())"
+            ? "this \(kindNoun(subset, plural: false).lowercased())"
+            : "\(n.formatted()) \(kindNoun(subset, plural: true).lowercased())"
         return "Are you sure you want to delete \(what) permanently?"
     }
     #endif
