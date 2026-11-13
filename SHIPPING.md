@@ -5,33 +5,64 @@ will take it. The server has its own document — see DEPLOY.md.
 
 ## Every upload, in order
 
-1. **Bump the build number.** `CURRENT_PROJECT_VERSION` in `project.yml`, not in
-   Xcode's General tab — XcodeGen overwrites that on every generate. App Store
-   Connect refuses a build number it has already seen against the same version,
-   and it tells you *after* the upload rather than before it.
-2. `xcodegen generate`
-3. Xcode → **Product → Archive**, with the scheme set to `FrameStation-iOS` and
-   the destination to **Any iOS Device**. A simulator destination grays Archive
-   out, which is the usual reason it looks broken.
-4. Organizer → **Distribute App → TestFlight & App Store**. If Xcode offers to
-   manage the version and build number, it renumbers the upload when the build
-   number is taken, and `project.yml` falls behind without a word: an archive
-   of build 2 went up as build 3 that way on October 23. Bumping first keeps the
-   two the same.
-5. Answer the export-compliance question **No**. `ITSAppUsesNonExemptEncryption`
-   is already `false` in the plist, so this should not be asked at all; if it
-   is, the answer is still no. HTTPS and hashing are both exempt.
+1. **Claim the build number: `Scripts/build-number.sh claim`.** Never pick it
+   by hand or from memory. It takes one above the highest number anywhere on
+   this Mac — every `CURRENT_PROJECT_VERSION` ever committed on any branch
+   (origin's too), `project.yml` in every worktree, every archive and the
+   number each of its uploads went up as, and every earlier claim — then
+   writes it to `project.yml` and records it, under a lock, so two sessions
+   shipping at once can't take the same number. Commit it on its own as
+   "Build N for TestFlight: …" and archive from that commit.
+   `Scripts/build-number.sh next` shows the number and where the current
+   highest was seen, without changing anything.
+
+   Why: App Store Connect refuses a build number it has already seen against
+   the same version, and says so only *after* the archive and the upload. On
+   November 13 two sessions shipped side by side: one used 34 and 35 while the
+   other still had 34 as next, and then the iPhone's 36 was refused because
+   App Store Connect already had a 36 that nothing here recorded. The script
+   can't see App Store Connect itself. If an upload is still refused as a
+   "Redundant Binary Upload", claim again — the refused number is past — and
+   archive again. Never reuse a number, and never let Xcode renumber.
+
+   The number lives in `project.yml`, not Xcode's General tab, which XcodeGen
+   overwrites on every generate.
+
+   **Every upload is both apps, iPhone and Mac, from the same commit under the
+   same number** — even when only one of them changed. Shipping one alone left
+   them on different numbers with different code (on November 13 the Mac was
+   on 36 and the iPhone on 37), and then nobody can say which build has which
+   fix. If one platform's upload fails, fix it and upload that platform under
+   the same number; if its number is refused, claim a new number and send both
+   again.
+2. **Ship both apps: `Scripts/ship-testflight.sh`.** From a clean, committed
+   tree, it archives the iPhone and the Mac app from HEAD in a fresh worktree
+   (so nothing uncommitted — yours or another session's — gets in), checks
+   both archives carry the claimed number and the iPhone its upload
+   extension, and uploads both. It refuses a number nobody claimed, or one
+   already uploaded from this Mac, and says plainly if either upload failed.
+
+   By hand, only if the script can't be used: `xcodegen generate`, then in
+   Xcode **Product → Archive** for `FrameStation-iOS` on **Any iOS Device** and
+   again for `FrameStation-macOS`, then Organizer → **Distribute App →
+   TestFlight & App Store** for each. If Xcode offers to manage the version and
+   build number, turn it off: it renumbers the upload when the number is taken
+   and `project.yml` falls behind without a word — an archive of build 2 went
+   up as build 3 that way on October 23.
+3. If asked about export compliance, the answer is **No**.
+   `ITSAppUsesNonExemptEncryption` is already `false` in the plist, so it
+   should not be asked at all. HTTPS and hashing are both exempt.
 
 A version bump (`MARKETING_VERSION`) is only needed when the version people see
 should change. The build number goes up every single time.
 
 **Once it has processed, every time:**
 
-6. Add it to the **Family Testing** group, iOS and Mac. Who is in the group
-   doesn't change here.
-7. Fill in **What to Test**: a few plain lines for family on what changed and
+4. Add it to the **Family Testing** group, iOS and Mac — the same number on
+   both. Who is in the group doesn't change here.
+5. Fill in **What to Test**: a few plain lines for family on what changed and
    what to try.
-8. **Expire the builds before it**, so no one stays on an old one.
+6. **Expire the builds before it**, on both, so no one stays on an old one.
 
 ## What the project already satisfies
 
