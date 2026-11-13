@@ -320,6 +320,14 @@ struct TimelineView: View {
         // status bar respected now has to say so.
         .overlay(alignment: .top) { TopEdgeFade(topInset: windowTopInset) }
         .overlay(alignment: .top) { floatingTopBar.padding(.top, windowTopInset) }
+        // Where the controls were, once they have slid away: the date of the
+        // day passing under the top edge, the way Photos keeps its date up.
+        // Its own view, so a day turning over redraws one label and not the
+        // timeline.
+        .overlay(alignment: .topLeading) {
+            TopDayLabel(progress: scrollProgress, shown: barHidden && !selection.isActive)
+                .padding(.top, windowTopInset)
+        }
         // Nothing floats at the bottom any more. The connection banner did,
         // over the grid alone; it is `ConnectionPill` now, over every tab.
         #endif
@@ -3634,6 +3642,73 @@ private struct HeightReader: View {
                 .onChange(of: proxy.size.height) { _, next in height = next }
         }
     }
+}
+
+/// The date that takes the floating bar's place once it has slid away — the
+/// day whose photographs are passing under the top edge.
+///
+/// The bar leaves by sliding up and fading; this arrives in the same beat by
+/// rising a few points out of a slight blur, so the corner hands over from one
+/// to the other instead of going empty in between. A day turning over while it
+/// is up rolls its digits rather than swapping the whole line.
+private struct TopDayLabel: View {
+    let progress: ScrollProgress
+    let shown: Bool
+
+    var body: some View {
+        let title = progress.topDay.flatMap(Self.title(forKey:))
+        Text(title ?? " ")
+            .font(.title2.weight(.bold))
+            .foregroundStyle(.primary)
+            .shadow(color: .black.opacity(0.25), radius: 6, y: 1)
+            .lineLimit(1)
+            .contentTransition(.numericText())
+            .animation(.smooth(duration: 0.3), value: title)
+            .padding(.horizontal, 20)
+            .frame(height: TopEdgeFade.barHeight)
+            .opacity(shown && title != nil ? 1 : 0)
+            .blur(radius: shown ? 0 : 4)
+            .offset(y: shown ? 0 : 10)
+            .animation(.smooth(duration: 0.32), value: shown)
+            .allowsHitTesting(false)
+            .accessibilityHidden(!shown)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// "Nov 13, 2026", "November 2026" or "2026", by the key's own shape.
+    /// Formatters kept: this runs each time a day crosses the top edge.
+    static func title(forKey key: String) -> String? {
+        switch key.count {
+        case 10:
+            return dayParser.date(from: key).map { dayFormat.string(from: $0) }
+        case 7:
+            return monthParser.date(from: key).map { monthFormat.string(from: $0) }
+        case 4:
+            return key
+        default:
+            return nil
+        }
+    }
+
+    private static func parser(_ format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = format
+        return formatter
+    }
+
+    private static func display(_ template: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter
+    }
+
+    private static let dayParser = parser("yyyy-MM-dd")
+    private static let monthParser = parser("yyyy-MM")
+    private static let dayFormat = display("MMMdyyyy")
+    private static let monthFormat = display("MMMMyyyy")
 }
 
 private struct TopEdgeFade: View {

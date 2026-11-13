@@ -320,6 +320,20 @@ final class ScrollProgress {
     /// (never per frame), so the one view that reads it is cheap to invalidate.
     var topBarHidden = false
 
+    /// The day key ("yyyy-MM-dd", or "yyyy-MM"/"yyyy" zoomed out) whose
+    /// photographs sit just under the floating bar, for the date that takes
+    /// the bar's place once it slides away.
+    ///
+    /// Separate from `topKey` on purpose: setting that one switches the
+    /// scrubber onto the manifest arithmetic, which the UIKit grid must not do.
+    /// Observed, but it changes only when a day boundary crosses the top edge,
+    /// and only `TopDayLabel` reads it — never the grid's own body.
+    var topDay: String?
+
+    func noteTopDay(_ key: String?) {
+        if topDay != key { topDay = key }
+    }
+
     /// Where the grid is in the *library*, rather than in the scroll view's idea
     /// of itself. Nil when there is no manifest to go on.
     ///

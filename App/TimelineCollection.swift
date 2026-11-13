@@ -1533,6 +1533,11 @@ struct TimelineCollection: UIViewRepresentable {
                 insetTop: Double(view.contentInset.top)
             )
             parent.progress.apply(report)
+            // The day just under the bar: `contentY` is the line the top inset
+            // ends on, which is where the floating bar's bottom edge sits.
+            if let section = layout.section(at: max(offset, 0)), keys.indices.contains(section) {
+                parent.progress.noteTopDay(keys[section])
+            }
             LayoutWatch.shared.saw(report, from: parent.progress.scrollID)
         }
 
