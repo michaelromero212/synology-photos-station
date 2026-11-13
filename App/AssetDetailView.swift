@@ -365,9 +365,9 @@ struct AssetDetailView: View {
     /// Whether the photo on screen is zoomed in. While it is, two fingers pan
     /// the photo rather than turn the page. See `MacZoomableImage`.
     @State private var macZoomed = false
-    /// Where the page on screen draws its picture, in `pagerSpace`. See the
-    /// hand-over layer in `macPager`.
-    @State private var macPictureFrame: CGRect = .zero
+    /// Where the page on screen draws its picture, in `pagerSpace`. See
+    /// `MacPictureFrame`.
+    @State private var macPictureFrame = MacPictureFrame()
     /// The zoom keys' way to the photo on screen.
     @State private var macZoom = MacPhotoZoom()
     /// Whether the clip's controls are up. They come up as the pointer moves
@@ -1215,7 +1215,7 @@ struct AssetDetailView: View {
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .named(Self.pagerSpace))
                     } action: { frame in
-                        if page.id == displayedItem.id { macPictureFrame = frame }
+                        if page.id == displayedItem.id { macPictureFrame.rect = frame }
                     }
                     // Beside the sidebar, inside the page. See below.
                     .padding(.leading, outer.safeAreaInsets.leading)
@@ -1233,12 +1233,13 @@ struct AssetDetailView: View {
             .scrollTargetLayout()
         }
         .modifier(OnePageAtATime(gap: Self.pageGap, metrics: pagerMetrics))
-        // Leading, as every page rests: its gap trails it off the window's
-        // edge. With no anchor a jump to a page — Next Video, auto-play —
-        // left it sixteen points left of where a swipe or opening it puts it,
-        // measured, and a clip fading in over the last one slid that far as
-        // its page took over.
-        .scrollPosition(id: $scrolledID, anchor: .leading)
+        .pagerRestTracking(pagerMetrics)
+        // No anchor. With `.leading` here (build 33) the scroll view placed
+        // pages by their estimated positions as a swipe changed the page it
+        // reported, and reversing a swipe threw the pager some sixty pages
+        // through the library, measured. Jumps — Next Video, auto-play — go
+        // to the page's leading edge themselves; see the `onChange` below.
+        .scrollPosition(id: $scrolledID)
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize)
         // A zoomed photo keeps the swipe: it pans, and the page stays put
@@ -1264,6 +1265,16 @@ struct AssetDetailView: View {
         // the stack is lazy, and where it puts a page that far in is only
         // known once it has laid it out. Again once the size has held still,
         // for the frames that arrive after the last change.
+        // A page chosen rather than swiped to — Next Video, auto-play, the
+        // arrow keys: brought in to rest as a swiped page does, its leading
+        // edge at the window's, with its gap trailing off the far side.
+        // Setting `scrolledID` instead put it sixteen points left of that,
+        // and a clip fading in over the last one slid that far as its page
+        // took over. A swiped page is already where the scroll view says.
+        .onChange(of: displayedItem.id) { _, new in
+            guard scrolledID != new else { return }
+            reader.scrollTo(new, anchor: .leading)
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in
             let metrics = pagerMetrics
             metrics.isResizing = true
@@ -1289,7 +1300,6 @@ struct AssetDetailView: View {
             displayedItem = match
         }
         .onChange(of: displayedItem.id) { _, new in
-            if scrolledID != new { scrolledID = new }
             macFocus.currentID = new
             // Arrived somewhere other than the clip that was coming in: a
             // swipe, or an arrow key, while one clip was giving way to the
@@ -1327,9 +1337,7 @@ struct AssetDetailView: View {
         // where its page put it and slid over as the page took over; padded
         // like a page, it counted the sidebar twice.
         .overlay(alignment: .topLeading) {
-            VideoHandoffLayer(handoff: handoff)
-                .frame(width: macPictureFrame.width, height: macPictureFrame.height)
-                .offset(x: macPictureFrame.minX, y: macPictureFrame.minY)
+            MacHandoffOverlay(handoff: handoff, picture: macPictureFrame)
         }
         .coordinateSpace(name: Self.pagerSpace)
         // The phone's transport, at the viewer rather than on a page for the
@@ -2358,6 +2366,35 @@ private struct InformationSheet: View {
 }
 
 #if os(macOS)
+/// Where the page on screen draws its picture, kept where nothing watches it.
+///
+/// It changes on every frame of a swipe, as the page slides. Held in the
+/// viewer's state, each change redrew the viewer, and every redraw asked the
+/// pager again where the swipe should end — measuring "where it began" from
+/// wherever the page had got to by then. So a swipe turned a page, then
+/// another from part way through, then another: one swipe ran on through the
+/// library by itself (build 33), and a nudge left the page 28 points off.
+/// Written here, read only by `MacHandoffOverlay` as a clip begins to fade in.
+final class MacPictureFrame {
+    var rect: CGRect = .zero
+}
+
+/// The next clip fading in, framed where the page on screen draws its picture.
+/// A view of its own so that a fade starting redraws this and not the pager.
+private struct MacHandoffOverlay: View {
+    let handoff: VideoHandoff
+    let picture: MacPictureFrame
+
+    var body: some View {
+        if handoff.incoming != nil {
+            let rect = picture.rect
+            VideoHandoffLayer(handoff: handoff)
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+}
+
 /// Snaps to the start of a page, one page per swipe — what `.paging` does,
 /// but by the pages' own width rather than the window's. See `macPager`.
 private struct OnePageAtATime: ViewModifier {

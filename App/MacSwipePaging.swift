@@ -42,11 +42,21 @@ struct SwipePaging: ScrollTargetBehavior {
         let stride = measured > 1 ? measured : context.containerSize.width + gap
         guard stride > 1 else { return }
         let travelable = max(0, context.contentSize.width - context.containerSize.width)
-        if let aim = Self.aim(
-            from: context.originalTarget.rect.minX, proposed: target.rect.minX,
+        // Where this swipe began: the page it was resting on, held for the
+        // whole swipe. SwiftUI asks again while the page is still moving —
+        // whenever the viewer redraws or the lazy stack re-measures — and each
+        // time it reports the swipe as beginning wherever the page has got to.
+        // Stepped from there, a swipe turned a page, then another from part
+        // way through, and ran on through the library by itself. Measured
+        // from the page it really began on, every answer is the same page.
+        let start = metrics.swipeStart ?? context.originalTarget.rect.minX
+        let aimed = Self.aim(
+            from: start, proposed: target.rect.minX,
             speed: context.velocity.dx, stride: stride, travelable: travelable
-        ) {
+        )
+        if let aim = aimed {
             target.rect.origin.x = aim
+            metrics.swipeBegan(at: start, headedFor: aim)
         }
     }
 
@@ -88,5 +98,60 @@ final class PagerMetrics: @unchecked Sendable {
     /// the new layout — not a page anyone turned to.
     var isResizing = false
     var settle: Task<Void, Never>?
+
+    /// Where the swipe under way began, and the page it is headed for. Both
+    /// nil at rest. Kept only where the scroll view says when it has come to
+    /// rest (macOS 15 and later): without that there is no telling a swipe
+    /// still gliding from a new one, and a stale start would send a later
+    /// swipe back to an old page.
+    private(set) var swipeStart: CGFloat?
+    private var swipeAim: CGFloat?
+    private var knowsWhenAtRest = false
+
+    func swipeBegan(at start: CGFloat, headedFor aim: CGFloat) {
+        guard knowsWhenAtRest else { return }
+        if swipeStart == nil { swipeStart = start }
+        swipeAim = aim
+    }
+
+    /// The scroll view came to rest: the next swipe starts afresh.
+    func cameToRest() {
+        knowsWhenAtRest = true
+        swipeStart = nil
+        swipeAim = nil
+    }
+
+    /// Fingers back on the trackpad. Mid-glide, the new swipe begins from the
+    /// page the last one was going to — a second flick turns a second page,
+    /// as in Photos — not from wherever the glide had reached.
+    func fingersDown() {
+        knowsWhenAtRest = true
+        swipeStart = swipeAim
+    }
+}
+
+extension View {
+    /// Tells `metrics` when a swipe starts and when the pager comes to rest.
+    func pagerRestTracking(_ metrics: PagerMetrics) -> some View {
+        modifier(PagerRestTracking(metrics: metrics))
+    }
+}
+
+private struct PagerRestTracking: ViewModifier {
+    let metrics: PagerMetrics
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                switch phase {
+                case .idle: metrics.cameToRest()
+                case .interacting: metrics.fingersDown()
+                default: break
+                }
+            }
+        } else {
+            content
+        }
+    }
 }
 #endif
