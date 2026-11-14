@@ -637,7 +637,7 @@ struct AssetDetailView: View {
         handOver(to: target)
     }
 
-    /// Goes to another clip the way a player does: on a Mac the new one fades
+    /// Goes to another clip the way a player does: on a Mac the new one cuts
     /// in over the old, already playing, and the pager moves underneath. See
     /// `VideoHandoff`. A television's player is AVKit's, which draws itself,
     /// so there the clip is simply changed.
@@ -946,13 +946,13 @@ struct AssetDetailView: View {
             leave()
             return
         }
-        // Not a slide: the next clip fades in over this one's last frame,
+        // Not a slide: a clean cut from this one's last frame to the next clip,
         // already playing. See `handOver`.
         handOver(to: next)
     }
 
     /// Goes to another clip the way a player does, rather than the way a
-    /// person swipes: the new clip fades in over the old one, already playing,
+    /// person swipes: a clean cut from the old clip to the new one, already playing,
     /// and the pager cuts to its page underneath once it covers the screen.
     /// See `VideoHandoff` and `PagerFocus.cut`.
     private func handOver(to id: UUID) {
@@ -1006,7 +1006,7 @@ struct AssetDetailView: View {
     ///
     /// The pages either side warm themselves. Auto-play jumps past any
     /// photographs in between, to a page the pager hasn't built, so that clip
-    /// is asked for here — and the one after this can then fade in the moment
+    /// is asked for here — and the one after this can then cut in the moment
     /// this ends, rather than after a request. See `VideoHandoff`.
     ///
     /// Away from home, only once the clip on screen has what it needs, as the
@@ -1092,8 +1092,8 @@ struct AssetDetailView: View {
             )
         }
         .ignoresSafeArea()
-        // The next clip, fading in over this one as it ends. Inside the drag
-        // below, so that a clip dragged down mid-dissolve goes as one picture.
+        // The next clip, cutting in over this one as it ends. Inside the drag
+        // below, so that a clip dragged down mid-switch goes as one picture.
         .overlay { VideoHandoffLayer(handoff: handoff).ignoresSafeArea() }
         // Where a drag down has taken the photo. Nothing moves otherwise.
         .modifier(StageFollowsDrag(stage: stage))
@@ -1211,7 +1211,7 @@ struct AssetDetailView: View {
                         macZoom: macZoom
                     )
                     // Where the page on screen draws its picture, for the next
-                    // clip to fade in over exactly. See `macPictureFrame`.
+                    // clip to appear over exactly. See `macPictureFrame`.
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .named(Self.pagerSpace))
                     } action: { frame in
@@ -1269,7 +1269,7 @@ struct AssetDetailView: View {
         // arrow keys: brought in to rest as a swiped page does, its leading
         // edge at the window's, with its gap trailing off the far side.
         // Setting `scrolledID` instead put it sixteen points left of that,
-        // and a clip fading in over the last one slid that far as its page
+        // and a clip coming in over the last one slid that far as its page
         // took over. A swiped page is already where the scroll view says.
         .onChange(of: displayedItem.id) { _, new in
             guard scrolledID != new else { return }
@@ -1329,7 +1329,7 @@ struct AssetDetailView: View {
             pokeControls()
         }
         .onDisappear { handoff.cancel() }
-        // The next clip, fading in over this one as it ends, in the very
+        // The next clip, cutting in over this one as it ends, in the very
         // rectangle the page on screen draws its picture in — which is where
         // the next clip's page will draw it once the pager moves. Worked out
         // from the window instead, it missed twice: centered on the space
@@ -2374,12 +2374,12 @@ private struct InformationSheet: View {
 /// wherever the page had got to by then. So a swipe turned a page, then
 /// another from part way through, then another: one swipe ran on through the
 /// library by itself (build 33), and a nudge left the page 28 points off.
-/// Written here, read only by `MacHandoffOverlay` as a clip begins to fade in.
+/// Written here, read only by `MacHandoffOverlay` as the next clip comes in.
 final class MacPictureFrame {
     var rect: CGRect = .zero
 }
 
-/// The next clip fading in, framed where the page on screen draws its picture.
+/// The next clip cutting in, framed where the page on screen draws its picture.
 /// A view of its own so that a fade starting redraws this and not the pager.
 private struct MacHandoffOverlay: View {
     let handoff: VideoHandoff

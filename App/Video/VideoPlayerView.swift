@@ -1471,8 +1471,8 @@ struct PlayerLayerView: UIViewRepresentable {
 #endif
 
 #if os(iOS) || os(macOS)
-/// One clip giving way to the next: the next one fades in, already playing,
-/// over the last frame of the one that has just ended.
+/// One clip giving way to the next: a clean cut from the last frame of the one
+/// that has just ended to the first frame of the next, already playing.
 ///
 /// Auto-play used to cut. The pager jumped to the next clip's page, which
 /// drew that clip's poster — a frame from a second or so in — until the
@@ -1483,10 +1483,14 @@ struct PlayerLayerView: UIViewRepresentable {
 ///
 /// Now nothing moves until there is something to show. The clip that ended
 /// stays where it stopped. The next one is put up over it, out of sight,
-/// and started; when its first frame is on the glass it is faded in — black
-/// behind it, so a tall clip covers what is left of a wide one — and only
-/// then does the viewer go to its page, underneath, where nobody can see the
-/// page put itself together. Once the page has the picture too, this goes.
+/// and started; the frame its first picture is ready, it is simply there —
+/// black behind it, so a tall clip covers what is left of a wide one — and
+/// the viewer goes to its page underneath, where nobody can see the page put
+/// itself together. Once the page has the picture too, this goes.
+///
+/// A cut, not a dissolve. Build 33 faded the next clip in over 0.45 seconds;
+/// he wanted the plain thing — one clip ends, the next begins — with nothing
+/// overlapping.
 ///
 /// A clip that isn't ready in `patience` isn't waited for: the viewer goes
 /// to its page as it always did, where it waits behind its poster.
@@ -1502,16 +1506,13 @@ final class VideoHandoff {
     /// Not before: a clip being come back to still holds the frame it was
     /// left on, and would show that first.
     private(set) var isRolling = false
-    /// Whether it is faded in over the clip it follows.
+    /// Whether it is on screen, over the clip it follows.
     private(set) var isShown = false
 
     @ObservationIgnored private var land: (() -> Void)?
     @ObservationIgnored private var hasLanded = false
     @ObservationIgnored private var sequence: Task<Void, Never>?
 
-    /// Long enough to read as one clip becoming the next, short enough that a
-    /// run of five-second clips isn't mostly dissolve.
-    static let fade: Double = 0.45
     /// How long the last frame is held for the next clip's first.
     static let patience: Double = 1.0
 
@@ -1540,7 +1541,7 @@ final class VideoHandoff {
             try? await Task.sleep(for: .seconds(Self.patience))
             guard !Task.isCancelled, !self.isShown else { return }
             Diagnostics.shared.log(
-                .playback, "Next clip not ready in time: going to its page without a dissolve"
+                .playback, "Next clip not ready in time: going to its page"
             )
             self.landNow()
             self.clear()
@@ -1551,11 +1552,13 @@ final class VideoHandoff {
     func firstFrame() {
         guard incoming != nil, isRolling, !isShown else { return }
         sequence?.cancel()
-        isShown = true
+        // In one frame, with nothing animating it: the viewer animates other
+        // things by value, and a change made inside one of those
+        // transactions would fade instead of cut.
+        Self.withoutAnimation { isShown = true }
+        landNow()
         sequence = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.fade))
             guard let self, !Task.isCancelled else { return }
-            self.landNow()
             // Until the page underneath has the picture as well. Taken away
             // sooner, this uncovered the page's poster for the moment before
             // its layer drew.
@@ -1568,8 +1571,16 @@ final class VideoHandoff {
             // And until the page's poster has finished fading off it.
             try? await Task.sleep(for: .milliseconds(260))
             guard !Task.isCancelled else { return }
-            self.clear()
+            // The same picture is under it by now; taken away without a
+            // transition, nothing on screen changes.
+            Self.withoutAnimation { self.clear() }
         }
+    }
+
+    private static func withoutAnimation(_ change: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction, change)
     }
 
     /// The viewer went somewhere else: a swipe, a close, another clip asked
@@ -1598,10 +1609,10 @@ final class VideoHandoff {
     }
 }
 
-/// The incoming clip of a `VideoHandoff`, over the viewer: clear until it has
-/// a frame, then faded in.
+/// The incoming clip of a `VideoHandoff`, over the viewer: invisible until it
+/// has a frame, then there all at once.
 ///
-/// Reads the handoff itself, so that fading it in redraws this and not the
+/// Reads the handoff itself, so that showing it redraws this and not the
 /// viewer it is drawn over.
 struct VideoHandoffLayer: View {
     let handoff: VideoHandoff
@@ -1620,16 +1631,9 @@ struct VideoHandoffLayer: View {
                     #endif
                 }
             }
-            // Faded as one picture. Without it the opacity reaches the black
-            // and the clip separately: half-faded black dimmed the clip going
-            // out before the one coming in covered it, and every dissolve
-            // between two wide clips sank 15% in the middle, measured.
-            .compositingGroup()
+            // Shown or not, never in between: a cut. Kept in the view tree
+            // while hidden, so its layer can decode the first frame unseen.
             .opacity(handoff.isShown ? 1 : 0)
-            // Its own animation rather than a `withAnimation` round the
-            // change: the viewer it sits in animates other things by value,
-            // and those can take a transaction over.
-            .animation(.easeInOut(duration: VideoHandoff.fade), value: handoff.isShown)
             .allowsHitTesting(false)
         }
     }
