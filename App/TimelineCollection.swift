@@ -762,6 +762,12 @@ final class TimelineGridController {
         coordinator?.scroll(toContentY: CGFloat(y))
     }
 
+    /// Glides to the newest photographs, the end the grid opens on. A second
+    /// tap on the Photos tab, the way Photos does it.
+    func scrollToNewest() {
+        coordinator?.scrollToNewest()
+    }
+
     /// Brings one tile on screen, centered, if it isn't already — and leaves
     /// the grid exactly where it is if it is. Returns whether the tile is on
     /// screen afterward.
@@ -1623,6 +1629,20 @@ struct TimelineCollection: UIViewRepresentable {
         func scroll(toContentY y: CGFloat) {
             guard hasLanded else { return }
             setContentY(y)
+        }
+
+        func scrollToNewest() {
+            guard hasLanded, let view else { return }
+            let inset = view.adjustedContentInset
+            let end = max(
+                view.contentSize.height - view.bounds.height + inset.bottom,
+                -inset.top
+            )
+            guard abs(view.contentOffset.y - end) > 1 else { return }
+            // Stops a fling in progress, which would otherwise carry on from
+            // where it was once the animation hands back.
+            view.setContentOffset(view.contentOffset, animated: false)
+            view.setContentOffset(CGPoint(x: view.contentOffset.x, y: end), animated: true)
         }
 
         func reveal(item: Int, inDay key: String) -> Bool {

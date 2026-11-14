@@ -174,6 +174,9 @@ struct FloatingTabBar<Tab: Hashable>: View {
     let items: [Item]
     @Binding var selection: Tab
     let onSearch: () -> Void
+    /// A tap on the tab already showing — the Photos tab's "take me back to
+    /// the newest".
+    var onReselect: (Tab) -> Void = { _ in }
 
     private typealias Metrics = FloatingTabBarMetrics
 
@@ -214,7 +217,10 @@ struct FloatingTabBar<Tab: Hashable>: View {
                     // A second tap on the tab you are already on is not a
                     // change, and treating it as one re-runs every `.task`
                     // keyed on the selection.
-                    guard selection != item.tab else { return }
+                    guard selection != item.tab else {
+                        onReselect(item.tab)
+                        return
+                    }
                     selection = item.tab
                 } label: {
                     label(for: item)

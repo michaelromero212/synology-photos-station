@@ -53,6 +53,9 @@ struct RootTabView: View {
 
     /// Which tab is on screen. Bound so following a share can move you.
     @State private var tab = Tabs.photos
+    /// Counts taps on the Photos tab while it is already showing; each one
+    /// sends the library grid back to the newest. See `TimelineView.newestRequests`.
+    @State private var newestRequests = 0
 
     /// What the Albums tab has pushed on top of itself.
     ///
@@ -125,7 +128,10 @@ struct RootTabView: View {
                     .init(tab: Tabs.more, title: "More", symbol: "ellipsis"),
                 ],
                 selection: $tab,
-                onSearch: { searchSpace = spaceOnScreen }
+                onSearch: { searchSpace = spaceOnScreen },
+                onReselect: { tab in
+                    if tab == Tabs.photos { newestRequests += 1 }
+                }
             )
             .modifier(TabBarStepsAside())
         }
@@ -459,7 +465,8 @@ struct RootTabView: View {
         TimelineView(
             session: session, space: space,
             engine: engine, backupSettings: $backupSettings,
-            onShared: followShare
+            onShared: followShare,
+            newestRequests: newestRequests
         )
         #else
         TimelineView(session: session, space: space)

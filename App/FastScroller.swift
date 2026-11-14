@@ -77,6 +77,7 @@ struct FastScroller: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
+                            progress.isScrubbing = true
                             #if os(iOS)
                             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                             #endif
@@ -112,6 +113,7 @@ struct FastScroller: View {
                     }
                     .onEnded { _ in
                         isDragging = false
+                        progress.isScrubbing = false
                         label = nil
                         onScrubEnd()
                     }
@@ -330,6 +332,16 @@ final class ScrollProgress {
     /// and only `TopDayLabel` reads it — never the grid's own body.
     var topDay: String?
 
+    /// True while a finger is on the scrubber's thumb.
+    ///
+    /// A scrub navigates by date, so the date stays up for the length of it:
+    /// the bar and the date trade places on swipes only. Scrubbing can still
+    /// carry the bar away (moving toward older photos, as a swipe would), but
+    /// never brings it back — not on the way down, and not on arriving at the
+    /// newest, where the bar would otherwise snatch the date away just as the
+    /// pill names the last day.
+    @ObservationIgnored var isScrubbing = false
+
     func noteTopDay(_ key: String?) {
         if topDay != key { topDay = key }
     }
@@ -389,7 +401,7 @@ final class ScrollProgress {
         // of the range, because on a large library a fraction of the scrollable
         // height is hundreds of points and the bar would return long before you
         // did.
-        if report.toEnd < 24, topBarHidden {
+        if report.toEnd < 24, topBarHidden, !isScrubbing {
             topBarHidden = false
             travel = 0
         }
@@ -431,6 +443,7 @@ final class ScrollProgress {
             travel = Swift.min(travel, 0) + delta
             if travel < -24, !topBarHidden { travel = 0; topBarHidden = true }
         } else {                                         // toward newer (down) → show
+            guard !isScrubbing else { travel = 0; return }
             travel = Swift.max(travel, 0) + delta
             if travel > 24, topBarHidden { travel = 0; topBarHidden = false }
         }

@@ -105,6 +105,10 @@ struct TimelineView: View {
     /// Clears the originals out of the space they were shared from. Held by the
     /// host because the source is a different space from this one.
     var onRemoveOriginals: (() -> Void)?
+    /// Goes up by one each time the Photos tab is tapped while already
+    /// showing; each change glides the grid back to the newest and brings the
+    /// bar back with it. A counter rather than a flag, so every tap is a change.
+    var newestRequests = 0
     #endif
 
     #if os(iOS)
@@ -352,6 +356,10 @@ struct TimelineView: View {
         // anyone was checking.
         .onDisappear {
             if review != nil { reviews?.end() }
+        }
+        .onChange(of: newestRequests) {
+            gridController.scrollToNewest()
+            scrollProgress.showTopBar()
         }
         #endif
         .toolbar { toolbar }
@@ -1273,6 +1281,7 @@ struct TimelineView: View {
     /// The one day that is definitely wanted: the one under the thumb when it
     /// was let go. Asked for immediately rather than waiting out the debounce.
     private func scrubEnded(in store: TimelineStore) {
+        scrollProgress.isScrubbing = false
         scrubLoad?.cancel()
         guard let key = scrubTarget else { return }
         scrubTarget = nil
@@ -2406,6 +2415,8 @@ struct TimelineView: View {
     private func scrubCollection(
         to bucket: TimelineBucket, target: LibrarySpan.Target?, in store: TimelineStore
     ) {
+        // The rail as well as the scrubber: see `ScrollProgress.isScrubbing`.
+        scrollProgress.isScrubbing = true
         if let target {
             gridController.scroll(toContentY: target.offset)
         } else {
