@@ -349,19 +349,12 @@ struct AssetDetailView: View {
     /// pager on these platforms to do that for them.
     @State private var displayedItem: TimelineItem
     #if os(macOS)
-    /// Which page the scroll view has settled on. Separate from
-    /// `displayedItem` because the two drive each other in opposite
-    /// directions — a swipe moves this, a button moves that.
-    @State private var scrolledID: UUID?
     /// Which page is on screen, for the pages to read — the same object the
     /// phone's pager keeps, so a clip on a Mac starts, stops and hands over to
     /// its neighbour by the same rules. Each page used to be handed a focus
-    /// naming itself, so every page the scroll view built thought it was the
+    /// naming itself, so every page the pager built thought it was the
     /// one being watched, and opened a player of its own.
     @State private var macFocus: PagerFocus
-    /// The pages' real width, and whether the window is changing size. See
-    /// `PagerMetrics`.
-    @State private var pagerMetrics = PagerMetrics()
     /// Whether the photo on screen is zoomed in. While it is, two fingers pan
     /// the photo rather than turn the page. See `MacZoomableImage`.
     @State private var macZoomed = false
@@ -406,7 +399,6 @@ struct AssetDetailView: View {
         // Set here rather than in `onAppear`: a scroll position assigned after
         // the first layout scrolls there visibly, so opening a photograph from
         // the middle of a day would flick past the ones before it.
-        self._scrolledID = State(initialValue: item.id)
         self._macFocus = State(initialValue: PagerFocus(currentID: item.id))
         #endif
         #endif
@@ -1141,22 +1133,12 @@ struct AssetDetailView: View {
         return [item]
     }
 
-    /// Two fingers, left or right.
+    /// Two fingers, left or right: one page per swipe, as in Photos. See
+    /// `MacPageStrip`.
     ///
-    /// A paging `ScrollView` rather than a swipe gesture, because on a Mac a
-    /// two-finger swipe *is* a scroll: the trackpad sends scroll events, not
-    /// drags, so a `DragGesture` would never see one. Handing the run of
-    /// photographs to a horizontal scroll view lets AppKit's own momentum and
-    /// rubber-banding carry the motion — nothing is interpreted and
-    /// re-animated on top of the fingers, which is what makes it feel immediate.
-    ///
-    /// Lazy on purpose: a day of four hundred photographs would otherwise build
-    /// four hundred image views before showing the one you opened.
     /// The black gap between two photographs mid-swipe, and only mid-swipe.
-    ///
-    /// It trails each page, past the window's edge, so at rest a photograph
-    /// runs edge to edge as in Photos. It was padding inside the page, which
-    /// left half of it as a 12-point black border around every picture.
+    /// It lies between pages, past the window's edge at rest, so a photograph
+    /// runs edge to edge as in Photos.
     static let pageGap: CGFloat = 24
 
     /// Narrower than any window the viewer really opens in, and wider than
@@ -1170,135 +1152,63 @@ struct AssetDetailView: View {
     private var macPager: some View {
         // Apple's viewer: the photograph fills the whole main area, and a small
         // gap parts two pictures as you swipe.
-        //
-        // Each page is sized to the visible region on *both* axes with
-        // `containerRelativeFrame` — width so paging snaps one screen at a time,
-        // and height so the picture fills top to bottom. Width alone was the
-        // bug: a horizontal `ScrollView` leaves the cross axis to the content,
-        // so each page collapsed to the image's fitted height and left a gulf of
-        // black beneath it — the single thing that made this look half-finished
-        // next to Photos. No `GeometryReader`: that measured the whole window
-        // and let pictures bleed under the sidebar.
-        //
-        // Each page is a screen wide plus the gap, which trails it off the
-        // window's edge, and the scroll snaps to the start of a page rather
-        // than by the screen — `.paging` snaps by the viewport and would drift
-        // by the gap. So a picture at rest fills the window edge to edge, and
-        // the gap shows as `pageGap` of black between two pictures mid-swipe.
         GeometryReader { outer in
-        // Nothing until the pager has its real size. Pushing the viewer lays
-        // it out once at a hundred points square first, and the pages the
-        // lazy stack built then taught it the wrong width for every page it
-        // hadn't built: opening a photo two hundred pages in put it seven
-        // hundred points off until a later pass found it again.
+        // Nothing until the pager has its real size: pushing the viewer lays
+        // it out once at a hundred points square first.
         if outer.size.width > Self.pagerMinimumWidth {
-        ScrollViewReader { reader in
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 0) {
-                ForEach(macPages) { page in
-                    AssetPage(
-                        model: cache.model(for: page, spaceID: space(of: page).id),
-                        session: session,
-                        focus: macFocus,
-                        preloader: preloader,
-                        showsChrome: true,
-                        onSingleTap: {},
-                        // `page`, not `displayedItem`: a neighbour the pager built
-                        // ahead can finish off-screen, and `advanceToNextVideo`
-                        // ignores it because its id isn't the one on screen.
-                        onFinished: { advanceToNextVideo(after: page) },
-                        isZoomed: $macZoomed,
-                        macZoom: macZoom
-                    )
-                    // Where the page on screen draws its picture, for the next
-                    // clip to appear over exactly. See `macPictureFrame`.
-                    .onGeometryChange(for: CGRect.self) {
-                        $0.frame(in: .named(Self.pagerSpace))
-                    } action: { frame in
-                        if page.id == displayedItem.id { macPictureFrame.rect = frame }
-                    }
-                    // Beside the sidebar, inside the page. See below.
-                    .padding(.leading, outer.safeAreaInsets.leading)
-                    .padding(.trailing, outer.safeAreaInsets.trailing)
-                    .containerRelativeFrame([.horizontal, .vertical])
-                    .padding(.trailing, Self.pageGap)
-                    // What a swipe steps by. Measured rather than worked out
-                    // from the window: a tiled window has laid each page out
-                    // a point wider than it.
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                        pagerMetrics.stride = width
-                    }
+            // The whole window wide, under the sidebar too, and never resized
+            // by it: each page keeps its picture beside the sidebar with
+            // padding of its own, which follows the sidebar as it slides. As
+            // wide as the space beside the sidebar, the pages changed width
+            // on every frame of the sidebar's animation.
+            let insets = outer.safeAreaInsets
+            let size = CGSize(
+                width: outer.size.width + insets.leading + insets.trailing,
+                height: outer.size.height
+            )
+            MacPageStrip(
+                items: macPages,
+                currentID: displayedItem.id,
+                pageSize: size,
+                gap: Self.pageGap,
+                swipeInsets: EdgeInsets(
+                    top: 0, leading: insets.leading, bottom: 0, trailing: insets.trailing
+                ),
+                // A zoomed photo keeps the swipe: it pans, and the page stays
+                // put until the photo is back to fit, as in Photos.
+                isLocked: macZoomed,
+                onTurn: { displayedItem = $0 }
+            ) { page in
+                AssetPage(
+                    model: cache.model(for: page, spaceID: space(of: page).id),
+                    session: session,
+                    focus: macFocus,
+                    preloader: preloader,
+                    showsChrome: true,
+                    onSingleTap: {},
+                    // `page`, not `displayedItem`: a neighbour built beside
+                    // the page on screen can finish off-screen, and
+                    // `advanceToNextVideo` ignores it because its id isn't
+                    // the one on screen.
+                    onFinished: { advanceToNextVideo(after: page) },
+                    isZoomed: $macZoomed,
+                    macZoom: macZoom
+                )
+                // Where the page on screen draws its picture, for the next
+                // clip to appear over exactly. See `macPictureFrame`.
+                .onGeometryChange(for: CGRect.self) {
+                    $0.frame(in: .named(Self.pagerSpace))
+                } action: { frame in
+                    if page.id == displayedItem.id { macPictureFrame.rect = frame }
                 }
+                // Beside the sidebar, inside the page.
+                .padding(.leading, insets.leading)
+                .padding(.trailing, insets.trailing)
             }
-            .scrollTargetLayout()
-        }
-        .modifier(OnePageAtATime(gap: Self.pageGap, metrics: pagerMetrics))
-        .pagerRestTracking(pagerMetrics)
-        // No anchor. With `.leading` here (build 33) the scroll view placed
-        // pages by their estimated positions as a swipe changed the page it
-        // reported, and reversing a swipe threw the pager some sixty pages
-        // through the library, measured. Jumps — Next Video, auto-play — go
-        // to the page's leading edge themselves; see the `onChange` below.
-        .scrollPosition(id: $scrolledID)
-        .scrollIndicators(.hidden)
-        .scrollBounceBehavior(.basedOnSize)
-        // A zoomed photo keeps the swipe: it pans, and the page stays put
-        // until the photo is back to fit, as in Photos.
-        .scrollDisabled(macZoomed)
-        // The whole window wide, under the sidebar too, and never resized by
-        // it. Each page keeps its picture beside the sidebar with padding of
-        // its own (above), which follows the sidebar as it slides.
-        //
-        // The pager used to be as wide as the space beside the sidebar. Then
-        // showing or hiding it changed the pages' width on every frame of the
-        // animation, and a paging offset is a multiple of the old width: for a
-        // frame each time — measured at up to 900 points — the photo beside
-        // this one showed behind the video, before a correction caught up. A
-        // scroll view the sidebar can't resize has nothing to correct. Inside
-        // the safe area it also took the sidebar's width as a leading inset,
-        // which paging honors, so photos sat 230 points right of center.
-        .ignoresSafeArea(.container, edges: .horizontal)
-        .background(Color.black)
-        // Back onto the photo when the window changes size — tiled to half
-        // the screen, out of full screen, opened at all (the viewer is laid
-        // out once small as it's pushed). By the photo's own frame, by its id:
-        // the stack is lazy, and where it puts a page that far in is only
-        // known once it has laid it out. Again once the size has held still,
-        // for the frames that arrive after the last change.
-        // A page chosen rather than swiped to — Next Video, auto-play, the
-        // arrow keys: brought in to rest as a swiped page does, its leading
-        // edge at the window's, with its gap trailing off the far side.
-        // Setting `scrolledID` instead put it sixteen points left of that,
-        // and a clip coming in over the last one slid that far as its page
-        // took over. A swiped page is already where the scroll view says.
-        .onChange(of: displayedItem.id) { _, new in
-            guard scrolledID != new else { return }
-            reader.scrollTo(new, anchor: .leading)
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { _ in
-            let metrics = pagerMetrics
-            metrics.isResizing = true
-            reader.scrollTo(displayedItem.id, anchor: .leading)
-            metrics.settle?.cancel()
-            metrics.settle = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled else { return }
-                metrics.isResizing = false
-                if scrolledID != displayedItem.id { scrolledID = displayedItem.id }
-                reader.scrollTo(displayedItem.id, anchor: .leading)
-            }
+            .offset(x: -insets.leading)
         }
         }
-        }
-        }
-        .onChange(of: scrolledID) { _, new in
-            // Mid-resize the scroll view names whatever page its old offset
-            // falls on in the new layout. Nobody turned to it.
-            guard !pagerMetrics.isResizing else { return }
-            guard let new, new != displayedItem.id,
-                  let match = macPages.first(where: { $0.id == new }) else { return }
-            displayedItem = match
-        }
+        .background(Color.black.ignoresSafeArea())
         .onChange(of: displayedItem.id) { _, new in
             macFocus.currentID = new
             // Arrived somewhere other than the clip that was coming in: a
@@ -2395,16 +2305,4 @@ private struct MacHandoffOverlay: View {
     }
 }
 
-/// Snaps to the start of a page, one page per swipe — what `.paging` does,
-/// but by the pages' own width rather than the window's. See `macPager`.
-private struct OnePageAtATime: ViewModifier {
-    /// The black between pages. See `SwipePaging`.
-    let gap: CGFloat
-    /// The pages' measured width. See `PagerMetrics`.
-    let metrics: PagerMetrics
-
-    func body(content: Content) -> some View {
-        content.scrollTargetBehavior(SwipePaging(gap: gap, metrics: metrics))
-    }
-}
 #endif
