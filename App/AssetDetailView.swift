@@ -105,9 +105,6 @@ final class AssetDetailModel {
     /// `MacZoomableImage`.
     var fullImage: PlatformImage?
     private var isLoadingFull = false
-    /// Above this a closer look makes do with the preview: a RAW original can
-    /// run to tens of megabytes.
-    static let fullResolutionLimit: Int64 = 60_000_000
     /// Decoded no larger than this on its longer side: a twelve-megapixel
     /// photo whole, and a forty-eight-megapixel one at a quarter of its
     /// pixels, rather than nearly 200 MB of bitmap for one look.
@@ -115,22 +112,13 @@ final class AssetDetailModel {
 
     func loadFullResolution(client: FrameStationClient?) async {
         guard item.mediaType == .photo, fullImage == nil, !isLoadingFull, let client else { return }
-        if let detail, detail.byteSize > Self.fullResolutionLimit { return }
         isLoadingFull = true
         defer { isLoadingFull = false }
-        guard let url = await client.originalURL(assetID: item.assetID) else { return }
-        var request = URLRequest(url: url)
-        if let header = await client.authorizationHeader() {
-            request.setValue(header, forHTTPHeaderField: "Authorization")
-        }
-        guard let fetched = try? await URLSession.shared.data(for: request),
-              (fetched.1 as? HTTPURLResponse)?.statusCode == 200 else { return }
-        let data = fetched.0
-        // Off the main thread: decoding a big HEIC on it is a visible stall.
-        let decoded = await Task.detached(priority: .userInitiated) {
-            Self.decodeForZoom(data)
-        }.value
-        guard let decoded, !Task.isCancelled else { return }
+        let pixels = max(Self.fullResolutionPixels, SharpPhoto.screenLongEdge)
+        guard let decoded = await SharpPhoto.load(
+            assetID: item.assetID, byteSize: detail?.byteSize,
+            client: client, maxPixels: pixels
+        ), !Task.isCancelled else { return }
         fullImage = decoded
     }
 
@@ -138,24 +126,30 @@ final class AssetDetailModel {
         fullImage = nil
     }
 
-    /// The original, upright and at most `fullResolutionPixels` on a side.
-    nonisolated static func decodeForZoom(_ data: Data) -> PlatformImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            // The original carries its orientation as a tag; the preview was
-            // already turned upright on the NAS.
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: fullResolutionPixels,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        else { return nil }
-        #if os(macOS)
-        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-        #else
-        return UIImage(cgImage: image)
-        #endif
+    /// The original sized to this screen, with its own color and its HDR —
+    /// what the photo really looks like, over the preview. Held for only the
+    /// few pages around the one on screen; see `SharpImageBudget`.
+    var sharpImage: PlatformImage?
+    private var isLoadingSharp = false
+
+    func loadSharp(client: FrameStationClient?) async {
+        guard item.mediaType == .photo, sharpImage == nil, !isLoadingSharp,
+              SharpPhoto.isAllowed, let client else { return }
+        isLoadingSharp = true
+        defer { isLoadingSharp = false }
+        guard let decoded = await SharpPhoto.load(
+            assetID: item.assetID, byteSize: detail?.byteSize,
+            client: client, maxPixels: SharpPhoto.screenLongEdge
+        ), !Task.isCancelled else { return }
+        SharpImageBudget.shared.admit(self, image: decoded) { [weak self] in self?.sharpImage = nil }
+        // No animation: same picture, same place, so it should simply look
+        // better — as Photos does when the original lands.
+        sharpImage = decoded
+    }
+
+    /// The best picture this model has, best first.
+    var bestImage: PlatformImage? {
+        fullImage ?? sharpImage ?? image
     }
 
     /// Fetched when the Information panel opens rather than with the photo, so
@@ -1837,7 +1831,7 @@ private struct AssetPage: View {
 
             if model.item.mediaType == .video {
                 video
-            } else if let shown = model.image ?? model.placeholder {
+            } else if let shown = model.bestImage ?? model.placeholder {
                 // One branch, deliberately. The blurred ThumbHash and the sharp
                 // preview used to be two, which meant SwiftUI tore the zoomable
                 // scroll view down and built a new one the moment the preview
@@ -1883,6 +1877,19 @@ private struct AssetPage: View {
             if !isCurrent, await !waitForTurn() { return }
             await model.loadPreview(loader: session.loader)
         }
+        // Then the original, sized to this screen — once the detail says how
+        // big it is, so a RAW past the limit is never fetched. Same gate as the
+        // preview: away from home a neighbor still yields to a clip buffering.
+        .task(id: SharpTrigger(wants: wantsPreview, hasDetail: model.detail != nil)) {
+            guard wantsPreview, model.detail != nil else { return }
+            if !isCurrent, await !waitForTurn() { return }
+            await model.loadSharp(client: session.client)
+        }
+    }
+
+    private struct SharpTrigger: Equatable {
+        let wants: Bool
+        let hasDetail: Bool
     }
 
     /// Whether this page may fetch its full-size picture now.
@@ -2021,10 +2028,17 @@ private struct AssetPage: View {
             onZoomChange: { zoomed in
                 guard isCurrent else { return }
                 withAnimation(.easeInOut(duration: 0.2)) { isZoomed = zoomed }
+                // Zoomed in, the detail Photos shows when you look closely:
+                // the original at up to 4096 px, in place.
+                if zoomed { Task { await model.loadFullResolution(client: session.client) } }
             },
             onSingleTap: onSingleTap
         )
         .ignoresSafeArea()
+        // A photo you've moved on from lets the zoom-sized original go.
+        .onChange(of: isCurrent) { _, current in
+            if !current { model.dropFullResolution() }
+        }
         #elseif os(macOS)
         if let macZoom {
             // Pinch, double-click, ⌘+ and ⌘−, as in Photos. Zoomed past what
@@ -2048,9 +2062,11 @@ private struct AssetPage: View {
             }
         } else {
             Image(nsImage: platformImage).resizable().scaledToFit()
+                .allowedDynamicRange(.high)
         }
         #else
         Image(uiImage: platformImage).resizable().scaledToFit()
+            .allowedDynamicRange(.high)
         #endif
     }
 }

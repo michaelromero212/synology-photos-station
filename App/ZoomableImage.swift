@@ -97,6 +97,9 @@ final class PhotoScrollView: UIScrollView, UIScrollViewDelegate {
         isScrollEnabled = false
 
         imageView.contentMode = .scaleAspectFit
+        // An HDR photo's highlights shown brighter than white, as Photos
+        // shows them; a photo without HDR looks the same either way.
+        imageView.preferredImageDynamicRange = .high
         imageView.isUserInteractionEnabled = true
         addSubview(imageView)
 

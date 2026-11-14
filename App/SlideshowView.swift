@@ -125,7 +125,7 @@ struct SlideshowView: View {
                         VideoPlayer(player: player)
                             .ignoresSafeArea()
                     } else {
-                        SlidePhoto(item: item, loader: session.loader)
+                        SlidePhoto(item: item, loader: session.loader, client: session.client)
                             .id(item.id)
                             .transition(.opacity)
                     }
@@ -176,12 +176,13 @@ struct SlideshowView: View {
     }
 }
 
-/// A still, held for its few seconds. Uses the preview rather than the
-/// original: a slideshow is a screen-sized thing and the 2048px render is
-/// already on the NAS.
+/// A still, held for its few seconds. The preview first, for something on
+/// screen at once, then the original sized to this screen: a slideshow is
+/// what a television mostly shows, and 2048 px stretched across 4K is soft.
 private struct SlidePhoto: View {
     let item: TimelineItem
     let loader: ThumbnailLoader?
+    let client: FrameStationClient?
 
     @State private var image: PlatformImage?
 
@@ -189,12 +190,22 @@ private struct SlidePhoto: View {
         ZStack {
             if let image {
                 Image(platformImage: image).resizable().scaledToFit()
+                    .allowedDynamicRange(.high)
             } else {
                 ProgressView().tint(.white)
             }
         }
         .task(id: item.assetID) {
             image = await loader?.preview(assetID: item.assetID)
+            guard SharpPhoto.isAllowed, let client else { return }
+            // No size known here, so the limit is the NAS's to refuse: a RAW
+            // past it simply stays on its preview.
+            if let sharp = await SharpPhoto.load(
+                assetID: item.assetID, byteSize: nil, client: client,
+                maxPixels: SharpPhoto.screenLongEdge
+            ), !Task.isCancelled {
+                image = sharp
+            }
         }
     }
 }

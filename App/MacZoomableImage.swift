@@ -247,6 +247,9 @@ final class PhotoLayerView: NSView {
         wantsLayer = true
         layer?.contentsGravity = .resizeAspect
         layer?.minificationFilter = .trilinear
+        // An HDR photo's highlights drawn brighter than white on a display
+        // that can, as Photos draws them.
+        layer?.wantsExtendedDynamicRangeContent = true
     }
 
     @available(*, unavailable)
