@@ -30,6 +30,10 @@ enum StreamLadder {
     /// The folder it lands in, inside the asset's derivative folder. Versioned,
     /// so a change to how ladders are cut can build new ones beside the old.
     static let directoryName = "stream-v1"
+    /// An HDR clip's ladder: 10-bit HEVC in the clip's own range (see
+    /// `HDRVideo`). Built beside a clip's old ladder, served in its place once
+    /// it exists, and the old one removed then.
+    static let hdrDirectoryName = "stream-v2"
     static let masterName = "master.m3u8"
 
     /// Clips leaner than this already play away from home as they are, and a
@@ -165,14 +169,27 @@ enum StreamLadder {
         case encode
     }
 
+    /// The ladder to serve: the HDR one where it has been built, else the
+    /// original one.
     static func directory(sha256: String, store: BlobStore) -> URL {
-        store.derivativeDirectory(sha256: sha256).appendingPathComponent(directoryName)
+        let hdr = directory(sha256: sha256, store: store, named: hdrDirectoryName)
+        return isBuilt(hdr) ? hdr : directory(sha256: sha256, store: store, named: directoryName)
+    }
+
+    static func directory(sha256: String, store: BlobStore, named name: String) -> URL {
+        store.derivativeDirectory(sha256: sha256).appendingPathComponent(name)
     }
 
     static func exists(sha256: String, store: BlobStore) -> Bool {
-        FileManager.default.fileExists(
-            atPath: directory(sha256: sha256, store: store).appendingPathComponent(masterName).path
-        )
+        isBuilt(directory(sha256: sha256, store: store))
+    }
+
+    static func hasHDR(sha256: String, store: BlobStore) -> Bool {
+        isBuilt(directory(sha256: sha256, store: store, named: hdrDirectoryName))
+    }
+
+    private static func isBuilt(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent(masterName).path)
     }
 
     /// The names a link may ask for. Anything else is refused before it gets
@@ -193,6 +210,9 @@ enum StreamLadder {
     /// Returns nil when the clip doesn't need one: lean enough already, or too
     /// small for more than one size.
     ///
+    /// An HDR clip (`range`) gets 10-bit HEVC where this machine has an encoder
+    /// for it, in `hdrDirectoryName`; everything else gets H.264 as before.
+    ///
     /// **Decoded once.** Every size comes out of a single ffmpeg, split after
     /// the decode, because decoding a 4K original is most of the work on this
     /// processor and doing it four times would be most of the work four times.
@@ -202,6 +222,7 @@ enum StreamLadder {
         sourceBitrate: Int?,
         sourceLongEdge: Int?,
         sourceDurationMS: Int?,
+        range: HDRVideo.Range = .sdr,
         store: BlobStore,
         logger: Logger
     ) async throws -> URL? {
@@ -209,14 +230,21 @@ enum StreamLadder {
         let planned = plan(sourceLongEdge: sourceLongEdge)
         guard !planned.isEmpty else { return nil }
 
-        let destination = directory(sha256: sha256, store: store)
-        if exists(sha256: sha256, store: store) { return destination }
+        let hdr: (range: HDRVideo.Range, encoder: HDRVideo.Encoder)?
+        if range.isHDR, let encoder = await HDRVideo.encoder() {
+            hdr = (range, encoder)
+        } else {
+            hdr = nil
+        }
+        let name = hdr == nil ? directoryName : hdrDirectoryName
+        let destination = directory(sha256: sha256, store: store, named: name)
+        if isBuilt(destination) { return destination }
 
         // Written beside, then moved into place whole, so a transcode that is
         // killed part-way — the container restarting, the NAS rebooting —
         // can't leave a folder that looks finished.
         let partial = destination.deletingLastPathComponent()
-            .appendingPathComponent(directoryName + ".partial")
+            .appendingPathComponent(name + ".partial")
         try? FileManager.default.removeItem(at: partial)
         try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: partial) }
@@ -229,9 +257,10 @@ enum StreamLadder {
         default: audio = .encode
         }
 
-        logger.info("derive \(sha256.prefix(8)): stream ladder \(planned.map(\.name).joined(separator: " "))")
+        let inHDR = hdr.map { " in HDR (\($0.range.rawValue), \($0.encoder.rawValue))" } ?? ""
+        logger.info("derive \(sha256.prefix(8)): stream ladder \(planned.map(\.name).joined(separator: " "))\(inHDR)")
         let transcode = arguments(
-            source: blob, rungs: planned, rates: rates, audio: audio, into: partial
+            source: blob, rungs: planned, rates: rates, audio: audio, hdr: hdr, into: partial
         )
         let timeout = max(3600, Double(sourceDurationMS ?? 0) / 1000 * 30)
         // Held to two cores where it can be, like the rendition before it: a
@@ -255,7 +284,7 @@ enum StreamLadder {
             else { throw DerivativeError.ladderFailed(blob.lastPathComponent) }
             try normalized(written, name: rung.name)
                 .write(to: playlist, atomically: true, encoding: .utf8)
-            built.append(Built(rung: rung, pieces: pieces, probe: probe))
+            built.append(Built(rung: rung, pieces: pieces, probe: probe, range: hdr?.range ?? .sdr))
         }
         // Pieces that don't start at the same instants in every size would
         // make a player stumble each time it changed size. Built to line up;
@@ -271,6 +300,13 @@ enum StreamLadder {
             .write(to: partial.appendingPathComponent(masterName), atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: partial, to: destination)
+        // The HDR ladder is served from now on; the 8-bit one it replaced is
+        // only taking space.
+        if hdr != nil {
+            try? FileManager.default.removeItem(
+                at: directory(sha256: sha256, store: store, named: directoryName)
+            )
+        }
         return destination
     }
 
@@ -278,7 +314,8 @@ enum StreamLadder {
     /// per size.
     static func arguments(
         source: URL, rungs planned: [Rung], rates: (top: FrameRate, rest: FrameRate),
-        audio: Audio, into directory: URL
+        audio: Audio, hdr: (range: HDRVideo.Range, encoder: HDRVideo.Encoder)? = nil,
+        into directory: URL
     ) -> [String] {
         let intervals = keyframeIntervals(top: rates.top, rest: rates.rest)
         // Constant frame rate first, at the largest size's rate, so every size
@@ -290,11 +327,15 @@ enum StreamLadder {
             let halved = index > 0 && rates.rest != rates.top
             graph += ";[s\(index)]" + (halved ? "fps=\(rates.rest.filter)," : "")
                 + "scale=\(rung.longEdge):\(rung.longEdge)"
-                + ":force_original_aspect_ratio=decrease:force_divisible_by=2[o\(index)]"
+                + ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+                // HDR: kept at 10 bits, and handed to the encoder's device.
+                + (hdr.map { ",format=p010le" + HDRVideo.uploadFilter(for: $0.encoder) } ?? "")
+                + "[o\(index)]"
         }
 
-        var command = [
-            "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        var command = ["-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
+        if let hdr { command += HDRVideo.inputArguments(for: hdr.encoder) }
+        command += [
             // Before the input, the decoder's threads; see `Derivatives.playbackThreads`.
             "-threads", String(Derivatives.playbackThreads), "-i", source.path,
             "-filter_complex", graph,
@@ -306,18 +347,24 @@ enum StreamLadder {
             // audio and metadata tracks this ffmpeg can't decode or doesn't
             // need. See `Derivatives.makePlaybackRendition`.
             if audio != .none { command += ["-map", "0:a:0"] }
-            command += [
-                "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
-                "-crf", "23", "-maxrate", String(rung.maxrate),
-                // A one-second buffer, so no one-second piece can run far
-                // over the cap the playlist promises.
-                "-bufsize", String(rung.maxrate),
-                "-pix_fmt", "yuv420p",
-                // A keyframe exactly every piece and nowhere else, which is
-                // what makes every size's pieces start together.
-                "-g", String(interval), "-keyint_min", String(interval), "-sc_threshold", "0",
-                "-threads", String(Derivatives.playbackThreads),
-            ]
+            if let hdr {
+                command += HDRVideo.encodeArguments(
+                    for: hdr.encoder, rung: rung, range: hdr.range, keyframeInterval: interval
+                )
+            } else {
+                command += [
+                    "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+                    "-crf", "23", "-maxrate", String(rung.maxrate),
+                    // A one-second buffer, so no one-second piece can run far
+                    // over the cap the playlist promises.
+                    "-bufsize", String(rung.maxrate),
+                    "-pix_fmt", "yuv420p",
+                    // A keyframe exactly every piece and nowhere else, which is
+                    // what makes every size's pieces start together.
+                    "-g", String(interval), "-keyint_min", String(interval), "-sc_threshold", "0",
+                    "-threads", String(Derivatives.playbackThreads),
+                ]
+            }
             switch audio {
             case .none: break
             case .copy: command += ["-c:a", "copy"]
@@ -388,6 +435,7 @@ enum StreamLadder {
         let codecs: String
         let peakBitrate: Int
         let averageBitrate: Int
+        var range: HDRVideo.Range = .sdr
     }
 
     /// The playlist a player opens first: every size, with what each needs from
@@ -408,6 +456,9 @@ enum StreamLadder {
                     + ",CODECS=\"\(variant.codecs)\""
                     + ",RESOLUTION=\(variant.width)x\(variant.height)"
                     + String(format: ",FRAME-RATE=%.3f", variant.frameRate)
+                    // Only for HDR, where a player needs it to choose; an SDR
+                    // playlist stays byte for byte what it was.
+                    + (variant.range.isHDR ? ",VIDEO-RANGE=\(variant.range.playlistValue)" : "")
             )
             lines.append(variant.name + ".m3u8")
         }
@@ -418,12 +469,14 @@ enum StreamLadder {
         let rung: Rung
         let pieces: MediaPlaylist
         let probe: Probe
+        let range: HDRVideo.Range
 
         var variant: Variant {
             Variant(
                 name: rung.name, width: probe.width, height: probe.height,
                 frameRate: probe.frameRate, codecs: probe.codecs,
-                peakBitrate: pieces.peakBitrate, averageBitrate: pieces.averageBitrate
+                peakBitrate: pieces.peakBitrate, averageBitrate: pieces.averageBitrate,
+                range: range
             )
         }
     }
@@ -462,10 +515,15 @@ enum StreamLadder {
         ), let parsed = try? JSONDecoder().decode(ProbeOutput.self, from: output.stdout)
         else { return nil }
         guard let video = parsed.streams.first(where: { $0.codec_type == "video" }),
-              video.codec_name == "h264", let width = video.width, let height = video.height,
-              let level = video.level
+              let width = video.width, let height = video.height, let level = video.level
         else { return nil }
-        var codecs = [avcCodec(profile: video.profile, level: level)]
+        let videoCodec: String
+        switch video.codec_name {
+        case "h264": videoCodec = avcCodec(profile: video.profile, level: level)
+        case "hevc": videoCodec = hevcCodec(profile: video.profile, level: level)
+        default: return nil
+        }
+        var codecs = [videoCodec]
         if let audio = parsed.streams.first(where: { $0.codec_type == "audio" }) {
             codecs.append(aacCodec(profile: audio.profile))
         }
@@ -487,6 +545,13 @@ enum StreamLadder {
         default: (idc, constraints) = (100, 0x00)
         }
         return String(format: "avc1.%02x%02x%02x", idc, constraints, level)
+    }
+
+    /// "hvc1.", the profile and its compatibility flags, the tier and level
+    /// (ffprobe's level is already the spec's level times 30), and the
+    /// constraint byte: "hvc1.2.4.L123.B0" for a 10-bit 1080p size.
+    static func hevcCodec(profile: String?, level: Int) -> String {
+        profile == "Main 10" ? "hvc1.2.4.L\(level).B0" : "hvc1.1.6.L\(level).B0"
     }
 
     static func aacCodec(profile: String?) -> String {

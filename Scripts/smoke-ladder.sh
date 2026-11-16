@@ -197,5 +197,47 @@ q "UPDATE space_assets SET purged_at = now() WHERE asset_id = '$FOURK'" >/dev/nu
 check "and one deleted for good stops on the next piece" "404" "$(code "$BASE/v432.m3u8")"
 
 echo
+echo "HDR: an iPhone's 10-bit HLG clip gets a 10-bit HEVC ladder"
+# Optional, as there is no HDR clip in the dev library: point
+# FRAMESTATION_HDR_CLIP at a few seconds of one (an iPhone 12 or later's).
+if [ -n "${FRAMESTATION_HDR_CLIP:-}" ]; then
+  cp "$FRAMESTATION_HDR_CLIP" "$ROOT/files/hdr.mov"
+  HDR=$(upload "$ROOT/files/hdr.mov" video/quicktime 1920 1080)
+  for _ in $(seq 1 240); do
+    [ "$(q "SELECT state FROM derivation_jobs WHERE kind = 'ladder' AND asset_id = '$HDR'")" = "done" ] && break
+    sleep 0.5
+  done
+  check "its ladder job finishes" "done" "$(q "SELECT state FROM derivation_jobs WHERE kind = 'ladder' AND asset_id = '$HDR'")"
+  check "it's recorded as HDR" "hdr" "$(q "SELECT dynamic_range FROM assets WHERE id = '$HDR'")"
+  check "and the SDR clips as standard" "standard" "$(q "SELECT dynamic_range FROM assets WHERE id = '$HD'")"
+  HDIR=$(dir "$HDR" | sed 's#/stream-v1$#/stream-v2#')
+  check "built beside the old folder name, as stream-v2" "yes" "$([ -s "$HDIR/master.m3u8" ] && echo yes || echo no)"
+  check "with no 8-bit ladder left beside it" "no" "$([ -e "$(dir "$HDR")" ] && echo yes || echo no)"
+  HMASTER=$(cat "$HDIR/master.m3u8")
+  check "every size says HLG" "$(grep -c '^#EXT-X-STREAM-INF' "$HDIR/master.m3u8")" "$(grep -c 'VIDEO-RANGE=HLG' "$HDIR/master.m3u8")"
+  has "and 10-bit HEVC" 'CODECS="hvc1.2.4.L' "$HMASTER"
+  check "the SDR ladder's playlist says neither" "no" "$(grep -q 'VIDEO-RANGE' "$LADDER/master.m3u8" 2>/dev/null && echo yes || echo no)"
+  PROBE=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,codec_tag_string,profile,pix_fmt,color_primaries,color_transfer \
+    -of default=nw=1:nk=1 "$HDIR/v1080.m4s" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+  check "the 1080p size is 10-bit HEVC in HLG, tagged for Apple" "hevc Main 10 hvc1 yuv420p10le arib-std-b67 bt2020" \
+    "$(echo "$PROBE" | awk '{print $1, $2, $3, $4, $5, $6, $7}')"
+  python3 - "$HDIR" > "$ROOT/hcuts.txt" <<'PY'
+import sys, os
+base = sys.argv[1]
+for name in sorted(n[:-5] for n in os.listdir(base) if n.endswith(".m3u8") and n != "master.m3u8"):
+    d = [round(float(l[8:].split(",")[0]), 3) for l in open(f"{base}/{name}.m3u8") if l.startswith("#EXTINF:")]
+    print(name, ",".join(map(str, d)))
+PY
+  check "its sizes cut at the same instants" "1" "$(awk '{print $2}' "$ROOT/hcuts.txt" | sort -u | wc -l | tr -d ' ')"
+  HURL=$(link "$HDR" mobile yes | jq '["url"]')
+  check "an app is handed the HDR ladder" "$(shasum -a 256 < "$HDIR/master.m3u8")" "$(curl -s "$HURL" | shasum -a 256)"
+  check "and its pieces play through the link" "200" "$(code "${HURL%/master.m3u8}/v720.m3u8")"
+  # For a look in a real player afterward: the run's own files are removed.
+  [ -n "${FRAMESTATION_KEEP_HDR:-}" ] && rm -rf "$FRAMESTATION_KEEP_HDR" && cp -R "$HDIR" "$FRAMESTATION_KEEP_HDR"
+else
+  echo "  - skipped: set FRAMESTATION_HDR_CLIP to run it"
+fi
+
+echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

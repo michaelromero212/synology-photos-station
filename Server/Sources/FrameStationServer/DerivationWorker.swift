@@ -360,12 +360,23 @@ actor DerivationWorker {
                       let shape = try await VideoShape.read(asset.id, on: app.sql),
                       !shape.isHidden
                 else { break }
+                // Recorded first, whatever the ladder then decides: it is what
+                // tells the boot pass which clips still want an HDR ladder (see
+                // `MetadataBackfill.requeueHDRLadders`), and what the
+                // Information panel shows.
+                let range = await HDRVideo.range(blob)
+                try await app.sql.raw("""
+                    UPDATE assets SET dynamic_range = \(bind: range.recorded)
+                    WHERE id = \(bind: asset.id)
+                      AND dynamic_range IS DISTINCT FROM \(bind: range.recorded)
+                    """).run()
                 _ = try await StreamLadder.make(
                     blob: blob,
                     sha256: asset.sha256,
                     sourceBitrate: shape.bitrate,
                     sourceLongEdge: shape.longEdge,
                     sourceDurationMS: shape.durationMS,
+                    range: range,
                     store: app.blobStore,
                     logger: app.logger
                 )

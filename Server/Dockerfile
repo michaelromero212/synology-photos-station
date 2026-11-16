@@ -107,6 +107,15 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
     && apt-get -q install -y --no-install-recommends \
          libvips-tools libheif1 libheif-plugin-libde265 libexif12 exiftool ffmpeg \
+    # Intel's media driver, the build with its encoders: what lets an HDR clip's
+    # away-from-home ladder be 10-bit HEVC made by the NAS processor itself
+    # (see HDRVideo.swift). The free build only decodes HEVC on a J4125, and
+    # 10-bit HEVC in software takes twice as long as the 8-bit H.264 it
+    # replaces. It is in multiverse, and does nothing without the GPU passed
+    # in (docker-compose.yml): the server then makes the H.264 ladder as before.
+    && add-apt-repository -y multiverse \
+    && apt-get -q update \
+    && apt-get -q install -y --no-install-recommends intel-media-va-driver-non-free \
     && apt-get -q purge -y software-properties-common gpg-agent \
     && apt-get -q autoremove -y \
     && rm -rf /var/lib/apt/lists/*

@@ -278,6 +278,8 @@ func startBackgroundWork(_ app: Application) async {
     Task { await MetadataBackfill.enqueueMissingLadders(on: app) }
     // And rebuild any whose folder has since vanished.
     Task { await MetadataBackfill.requeueVanishedLadders(on: app) }
+    // And give HDR clips their 10-bit ladder, where there's an encoder for it.
+    Task { await MetadataBackfill.requeueHDRLadders(on: app) }
     // Take apart the old hardlink tree under the blob root, which kept the
     // bytes of permanently deleted photos on disk. Once it is gone this is
     // a single failed `stat` per boot.

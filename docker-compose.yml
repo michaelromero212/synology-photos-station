@@ -97,6 +97,11 @@ services:
     # Set FRAMESTATION_USER=vapor:vapor to decline — uploads still work, they
     # just stay in the blob store and never reach anyone's home directory.
     user: ${FRAMESTATION_USER:-0:0}
+    # The processor's video engine, for HDR clips' 10-bit HEVC ladders (see
+    # HDRVideo.swift). Without it those clips get the 8-bit H.264 ladder, as
+    # before. Comment it out on a host with no /dev/dri.
+    devices:
+      - /dev/dri:/dev/dri
     extra_hosts:
       # Lets the container resolve the NAS itself. If your DSM version doesn't
       # support host-gateway, set FRAMESTATION_DSM_URL to the NAS's LAN IP.

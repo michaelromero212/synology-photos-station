@@ -294,6 +294,50 @@ enum MetadataBackfill {
         }
     }
 
+    /// Queues an HDR ladder for every HDR clip that only has the 8-bit one,
+    /// once this machine can encode them (`HDRVideo.encoder`).
+    ///
+    /// A clip whose range was never read (`dynamic_range` NULL — every video
+    /// from before HDR ladders) goes back in line too: its job reads the range
+    /// and records it, and an SDR clip whose ladder already exists stops
+    /// there, an ffprobe later. So each clip is looked at once, and only the
+    /// HDR ones are transcoded again. Newest first, like every ladder.
+    static func requeueHDRLadders(on app: Application) async {
+        guard await HDRVideo.encoder() != nil else { return }
+        struct Row: Decodable {
+            let id: UUID
+            let sha256: String
+            let dynamicRange: String?
+        }
+        do {
+            let rows = try await app.sql.raw("""
+                SELECT a.id, a.sha256, a.dynamic_range AS "dynamicRange"
+                FROM assets a
+                JOIN derivation_jobs j ON j.asset_id = a.id
+                WHERE a.media_type = 'video'
+                  AND (a.dynamic_range IS NULL OR a.dynamic_range = 'hdr')
+                  AND j.kind = \(bind: StreamLadder.jobKind)
+                  AND j.state = 'done'
+                  AND \(unsafeRaw: TimelineController.visible)
+                  AND a.duration_ms > 0
+                  AND (a.byte_size * 8000 / a.duration_ms) >= \(bind: StreamLadder.bitrateThreshold)
+                """).all(decoding: Row.self)
+            let wanted = rows.filter {
+                $0.dynamicRange == nil || !StreamLadder.hasHDR(sha256: $0.sha256, store: app.blobStore)
+            }.map(\.id)
+            guard !wanted.isEmpty else { return }
+            try await app.sql.raw("""
+                UPDATE derivation_jobs
+                SET state = 'pending', attempts = 0, last_error = NULL
+                WHERE kind = \(bind: StreamLadder.jobKind)
+                  AND asset_id = ANY(\(bind: wanted)::uuid[])
+                """).run()
+            app.logger.info("stream ladder: \(wanted.count) clips queued to check for HDR")
+        } catch {
+            app.logger.error("HDR ladder re-queue failed: \(String(reflecting: error))")
+        }
+    }
+
     /// Queues the stream ladder for every video that should have one.
     ///
     /// The whole library at once, not a few hundred a boot: the worker takes
