@@ -206,7 +206,8 @@ struct AddToAlbumSheet: View {
                 detail: album.isSharedWithPeople
                     ? "\(ShareWording.card(for: album, me: session.user?.id)) · \(count)" : count,
                 cover: album.coverAssetID,
-                placeholder: album.isFamily ? "person.2.crop.square.stack" : "rectangle.stack"
+                // The mark a shared library's row has, and the sidebar's.
+                placeholder: album.isFamily ? "person.2" : "rectangle.stack"
             )
         }
     }
@@ -214,7 +215,7 @@ struct AddToAlbumSheet: View {
     private func libraryRow(_ space: SpaceDTO) -> some View {
         let summary = store.libraries.first { $0.id == space.id }
         let members = summary?.memberCount ?? space.memberCount
-        let people = members == 1 ? "Just you" : "\(members) people"
+        let people = ShareWording.people(count: members)
         let items = summary.map { "\($0.itemCount.formatted()) item\($0.itemCount == 1 ? "" : "s")" }
         return Button {
             confirmingLibrary = space

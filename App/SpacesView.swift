@@ -613,13 +613,18 @@ struct SpaceMembersView: View {
 /// contents depend on three booleans, and leaving that inside the `ForEach`
 /// inside the `Section` inside the `List` is how this file starts failing to
 /// type-check in reasonable time.
-private struct MemberRow: View {
+///
+/// A shared library's Edit and a shared album's draw their people with this,
+/// so the two read alike.
+struct MemberRow: View {
     let member: SpaceMemberDTO
     let isYou: Bool
     let canManage: Bool
     /// Nil where blocking isn't offered: yourself, or a NAS without it.
     let isBlocked: Bool?
-    let onRole: (SpaceRole) -> Void
+    /// Nil where there's no role to choose: everyone in a shared album adds
+    /// to it, so its menu offers Remove alone.
+    let onRole: ((SpaceRole) -> Void)?
     let onRemove: () -> Void
     /// True to block, false to unblock.
     let onBlock: (Bool) -> Void
@@ -650,25 +655,27 @@ private struct MemberRow: View {
                 // Both offered, with the current one ticked, so the menu says
                 // where this person stands as well as where they could be
                 // moved to.
-                Button {
-                    onRole(.contributor)
-                } label: {
-                    if member.role == .contributor {
-                        Label("Contributor", systemImage: "checkmark")
-                    } else {
-                        Text("Contributor")
+                if let onRole {
+                    Button {
+                        onRole(.contributor)
+                    } label: {
+                        if member.role == .contributor {
+                            Label("Contributor", systemImage: "checkmark")
+                        } else {
+                            Text("Contributor")
+                        }
                     }
-                }
-                Button {
-                    onRole(.viewer)
-                } label: {
-                    if member.role == .viewer {
-                        Label("Viewer", systemImage: "checkmark")
-                    } else {
-                        Text("Viewer")
+                    Button {
+                        onRole(.viewer)
+                    } label: {
+                        if member.role == .viewer {
+                            Label("Viewer", systemImage: "checkmark")
+                        } else {
+                            Text("Viewer")
+                        }
                     }
+                    Divider()
                 }
-                Divider()
                 Button("Remove", role: .destructive, action: onRemove)
             }
             if let isBlocked {

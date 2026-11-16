@@ -151,12 +151,12 @@ struct MacRootView: View {
                             Label(space.name, systemImage: "person.2")
                                 .tag(MacDestination.space(space.id))
                         case .album(let album):
-                            Label(
-                                album.name,
-                                systemImage: album.isSharedWithPeople
-                                    ? "rectangle.stack.badge.person.crop" : "rectangle.stack"
-                            )
-                            .tag(MacDestination.album(album.id))
+                            // The same two people as a library's row, as on
+                            // the cards: under this heading they're all
+                            // shared albums, and a different mark made one
+                            // look like a different kind of thing.
+                            Label(album.name, systemImage: "person.2")
+                                .tag(MacDestination.album(album.id))
                         }
                     }
                 }

@@ -1436,7 +1436,7 @@ extension AlbumCard {
     /// photo for a cover. Without a summary from the NAS, just who.
     init(library space: SpaceDTO, summary: SharedLibrarySummary?, side: CGFloat, loader: ThumbnailLoader?) {
         let members = summary?.memberCount ?? space.memberCount
-        let people = members == 1 ? "Just you" : "\(members) people"
+        let people = ShareWording.people(count: members)
         self.init(
             title: space.name,
             details: summary.map { "\(people) · \(Self.count($0.itemCount))" } ?? people,
@@ -1673,25 +1673,18 @@ enum ShareWording {
             + "under Shared Albums."
     }
 
-    /// The line on an album's card: who it's with, or who it's from. First
-    /// names, so it fits a card with the count after it: "With Jane Roe and
-    /// Mover Test" left no room for one.
+    /// The line on an album's card: how many people are in it, you included —
+    /// "4 people", the way a shared library's card counts its members, so the
+    /// two cards side by side under Shared Albums read alike. It named them
+    /// ("With Lorie and 2 others"), which made one card count people and the
+    /// next one list them.
     static func card(for album: AlbumDTO, me: UUID?) -> String {
-        if let owner = album.owner, owner.id != me {
-            return "From \(firstName(owner))"
-        }
-        let people = album.people ?? []
-        switch people.count {
-        case 0: return "Shared"
-        case 1: return "With \(firstName(people[0]))"
-        case 2: return "With \(firstName(people[0])) and \(firstName(people[1]))"
-        default: return "With \(firstName(people[0])) and \(people.count - 1) others"
-        }
+        people(count: (album.people?.count ?? 0) + 1)
     }
 
-    /// "Jane" for Jane Roe: the name up to its first space.
-    static func firstName(_ person: UserDTO) -> String {
-        person.displayName.split(separator: " ").first.map(String.init) ?? person.displayName
+    /// "4 people", or "Just you" — for an album and a library alike.
+    static func people(count: Int) -> String {
+        count <= 1 ? "Just you" : "\(count) people"
     }
 
     /// Everyone an album could be shared with: the household, without you.
@@ -1704,9 +1697,18 @@ enum ShareWording {
     }
 }
 
-/// An album's settings, from the Edit button in its own grid: its name, who
-/// it's shared with, and deleting it — or, for one somebody shared with you,
-/// who's in it and leaving it. Someone who can't change it is told who can.
+/// An album's settings, from the Edit button in its own grid, laid out the way
+/// a shared library's are (`SpaceMembersView`): its name, who's in it and what
+/// each added, people to add, and deleting or leaving it — one Done, and each
+/// change made as it's chosen. The two sheets were different screens for the
+/// same question, a Form with a checklist and Save beside a list with Done,
+/// and an album shared with the family should feel no different to edit than
+/// the family's library.
+///
+/// Who's in it and their counts come from the album's own space, the answer a
+/// library's Edit draws from. Changing who's in it goes through the album
+/// (`AlbumStore.setPeople`), never the library calls: sharing an album copies
+/// its photos and tells its people, which adding someone to a space doesn't.
 struct AlbumSettingsSheet: View {
     @Bindable var session: AppSession
     let album: AlbumDTO
@@ -1721,12 +1723,18 @@ struct AlbumSettingsSheet: View {
     @State private var name: String
     @State private var household: [UserDTO]?
     @State private var householdFailed = false
-    @State private var picked: Set<UUID>
+    /// Who's in it and what each added. Nil until the NAS answers.
+    @State private var roster: [SpaceMemberDTO]?
+    @State private var rosterFailed = false
+    /// Who you've blocked, for the ⋯ beside each person. Nil where blocking
+    /// isn't offered.
+    @State private var blocked: Set<UUID>?
     @State private var isSaving = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
-    @State private var confirmShare = false
-    @State private var confirmUnshare = false
+    @State private var confirmingAdd: UserDTO?
+    @State private var confirmingRemoval: SpaceMemberDTO?
+    @State private var confirmingBlock: SpaceMemberDTO?
     /// Photos reported in an album you shared, waiting on you.
     @State private var reports: [ContentReportDTO] = []
     @State private var failure: String?
@@ -1742,8 +1750,11 @@ struct AlbumSettingsSheet: View {
         self.onDeleted = onDeleted
         self.onDone = onDone
         _name = State(initialValue: album.name)
-        _picked = State(initialValue: Set((album.people ?? []).map(\.id)))
     }
+
+    /// The album as the list has it now. People added or taken out here
+    /// change it, and `album` is how it was when the sheet opened.
+    private var current: AlbumDTO { store.albums.first { $0.id == album.id } ?? album }
 
     private var trimmed: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1752,58 +1763,23 @@ struct AlbumSettingsSheet: View {
     /// Whether who it's shared with is yours to choose here: an album you
     /// manage that isn't a library's, on a NAS that shares albums with people.
     private var choosesPeople: Bool {
-        album.mayManage && !album.isLibraryAlbum
+        current.mayManage && !current.isLibraryAlbum
             && (session.supports(ServerCapability.peopleAlbums) || store.supportsPeople)
     }
 
-    private var nameChanged: Bool { !trimmed.isEmpty && trimmed != album.name }
-    private var peopleChanged: Bool { picked != Set((album.people ?? []).map(\.id)) }
+    private var nameChanged: Bool { !trimmed.isEmpty && trimmed != current.name }
 
-    /// Who the album is shared with now, by name.
-    private var current: [UserDTO] { album.people ?? [] }
-
-    /// Who's been picked, by name, in the household's order.
-    private var pickedPeople: [UserDTO] {
-        (household ?? current).filter { picked.contains($0.id) }
-    }
+    /// Everyone it's shared with but you.
+    private var people: [UserDTO] { current.people ?? [] }
 
     var body: some View {
         NavigationStack {
-            Form {
-                if album.mayManage && !reports.isEmpty { reportsSection }
-                Section {
-                    if album.mayManage {
-                        TextField("Name", text: $name)
-                    } else {
-                        Text(album.name)
-                    }
-                } header: {
-                    Text("Name")
-                } footer: {
-                    if let whoSees { Text(whoSees) }
-                }
-                if choosesPeople {
-                    SharePeopleSection(
-                        people: household, failed: householdFailed, picked: $picked
-                    )
-                } else if album.isSharedWithPeople {
-                    membersSection
-                }
-                if album.mayManage {
-                    Section {
-                        Button("Delete Album", role: .destructive) { confirmDelete = true }
-                    }
-                } else if album.isSharedWithPeople {
-                    Section {
-                        Button("Leave Album", role: .destructive) { confirmLeave = true }
-                    }
-                } else {
-                    Section {
-                    } footer: {
-                        Text("Only the person who made this album, or the owner of "
-                            + "\(library ?? "its shared library"), can rename or delete it.")
-                    }
-                }
+            List {
+                if current.mayManage && !reports.isEmpty { reportsSection }
+                if current.mayManage { nameSection }
+                if !current.isLibraryAlbum { membersSection }
+                if choosesPeople { addSection }
+                endSection
                 if let failure {
                     Section {
                         Label(failure, systemImage: "exclamationmark.triangle.fill")
@@ -1811,28 +1787,21 @@ struct AlbumSettingsSheet: View {
                     }
                 }
             }
-            .navigationTitle(album.isFamily ? "Shared Album" : "Album")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
+            .navigationTitle(current.name)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(album.mayManage ? "Cancel" : "Done", action: onDone)
-                }
-                if album.mayManage {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Save", action: save)
-                            .disabled(!(nameChanged || peopleChanged) || isSaving)
-                    }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: finish).disabled(isSaving)
                 }
             }
             .task { await load() }
+            // Again when sharing gives it a space of its own, or takes it away.
+            .task(id: current.spaceID) { await loadRoster() }
             .confirmationDialog(
-                "Delete “\(album.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
+                "Delete “\(current.name)”?", isPresented: $confirmDelete, titleVisibility: .visible
             ) {
                 Button("Delete Album", role: .destructive) {
                     Task {
-                        if await store.delete(album) {
+                        if await store.delete(current) {
                             onDeleted()
                             onDone()
                         } else {
@@ -1841,14 +1810,14 @@ struct AlbumSettingsSheet: View {
                     }
                 }
             } message: {
-                Text(album.deletionMessage(library: library))
+                Text(current.deletionMessage(library: library))
             }
             .confirmationDialog(
-                "Leave “\(album.name)”?", isPresented: $confirmLeave, titleVisibility: .visible
+                "Leave “\(current.name)”?", isPresented: $confirmLeave, titleVisibility: .visible
             ) {
                 Button("Leave Album", role: .destructive) {
                     Task {
-                        if await store.leave(album) {
+                        if await store.leave(current) {
                             onDeleted()
                             onDone()
                         } else {
@@ -1859,53 +1828,191 @@ struct AlbumSettingsSheet: View {
             } message: {
                 Text("You won't see it anymore. Photos you added stay in it for the others.")
             }
+            // Asked, as a library asks: it opens the whole album to them,
+            // what's already in it as well as what comes next.
             .confirmationDialog(
-                "Share “\(album.name)”?", isPresented: $confirmShare, titleVisibility: .visible
-            ) {
-                Button("Share") { commit() }
-            } message: {
-                Text("\(ShareWording.names(pickedPeople)) will see its "
-                    + "\(AlbumCard.count(album.itemCount)) and can add their own. "
-                    + "It moves to Shared Albums.")
-            }
-            .confirmationDialog(
-                "Stop sharing “\(album.name)”?", isPresented: $confirmUnshare,
+                addTitle, isPresented: .init(
+                    get: { confirmingAdd != nil },
+                    set: { if !$0 { confirmingAdd = nil } }
+                ),
                 titleVisibility: .visible
             ) {
-                Button("Stop Sharing", role: .destructive) { commit() }
+                Button(current.isSharedWithPeople ? "Add" : "Share") {
+                    guard let person = confirmingAdd else { return }
+                    confirmingAdd = nil
+                    setPeople(people.map(\.id) + [person.id])
+                }
+                Button("Cancel", role: .cancel) { confirmingAdd = nil }
             } message: {
-                Text("\(ShareWording.names(current)) won't see it anymore. It will be yours "
-                    + "alone, under Albums.")
+                Text(addMessage)
+            }
+            .confirmationDialog(
+                "Remove \(confirmingRemoval?.user.displayName ?? "")?",
+                isPresented: .init(
+                    get: { confirmingRemoval != nil },
+                    set: { if !$0 { confirmingRemoval = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Remove", role: .destructive) {
+                    guard let target = confirmingRemoval else { return }
+                    confirmingRemoval = nil
+                    remove(target)
+                }
+                Button("Cancel", role: .cancel) { confirmingRemoval = nil }
+            } message: {
+                Text(removalMessage)
+            }
+            .confirmationDialog(
+                "Block \(confirmingBlock?.user.displayName ?? "")?",
+                isPresented: .init(
+                    get: { confirmingBlock != nil },
+                    set: { if !$0 { confirmingBlock = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Block", role: .destructive) {
+                    guard let target = confirmingBlock else { return }
+                    confirmingBlock = nil
+                    Task { await setBlocked(true, target.user.id) }
+                }
+                Button("Cancel", role: .cancel) { confirmingBlock = nil }
+            } message: {
+                Text(BlockWording.consequences)
             }
         }
+        .settingsSheetSize()
     }
 
-    /// Who sees it, under its name, where the people picker isn't saying so.
-    private var whoSees: String? {
-        if album.isLibraryAlbum {
-            return "Everyone in \(library ?? "its shared library") can see this album. "
-                + "It's under Shared Albums."
+    // MARK: - Sections
+
+    private var nameSection: some View {
+        Section("Name") {
+            #if os(tvOS)
+            Text(name)
+            #else
+            TextField("Name", text: $name)
+                .submitLabel(.done)
+                .onSubmit { Task { _ = await rename() } }
+            #endif
         }
-        if album.isSharedWithPeople || choosesPeople { return nil }
-        return "Only you can see this album. It's under Albums."
     }
 
-    /// Who's in an album somebody shared with you. Theirs to change.
+    /// Everyone in it, you included, with what each added — the rows a
+    /// library's Edit draws, and the same ⋯ beside each: Remove for the
+    /// album's maker, Block for anyone. Yours alone, it's just you.
     private var membersSection: some View {
-        let owner = album.owner
-        let others = current.filter { $0.id != owner?.id }
-        return Section {
-            if let owner {
-                LabeledContent("Shared by", value: owner.displayName)
-            }
-            ForEach(others) { person in
-                Text(person.displayName)
+        Section {
+            if let roster {
+                ForEach(roster) { member in
+                    let isYou = member.user.id == session.user?.id
+                    MemberRow(
+                        member: member,
+                        isYou: isYou,
+                        canManage: current.mayManage && member.role != .owner,
+                        isBlocked: isYou ? nil : blocked.map { $0.contains(member.user.id) },
+                        onRole: nil,
+                        onRemove: { confirmingRemoval = member },
+                        onBlock: { block in
+                            if block {
+                                confirmingBlock = member
+                            } else {
+                                Task { await setBlocked(false, member.user.id) }
+                            }
+                        }
+                    )
+                }
+            } else if rosterFailed {
+                Text("Couldn't load who's in it. Try again in a moment.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView().frame(maxWidth: .infinity)
             }
         } header: {
-            Text("Shared With")
+            Text("Members")
         } footer: {
-            Text("Everyone here can see this album and add to it. Only "
-                + "\(owner?.displayName ?? "the person who made it") can change who's in it.")
+            Text(membersFooter)
+        }
+    }
+
+    private var membersFooter: String {
+        guard current.isSharedWithPeople else {
+            return "Only you can see this album. It's under Albums."
+        }
+        if current.mayManage { return "Everyone here can see this album and add to it." }
+        return "Everyone here can see this album and add to it. Only "
+            + "\(current.owner?.displayName ?? "the person who made it") can change who's in it."
+    }
+
+    /// Everyone else on the NAS, to bring in, the way a library's Edit lists
+    /// them. Always there for the album's maker, saying why when there's no
+    /// one to add.
+    private var addSection: some View {
+        let inIt = Set(people.map(\.id))
+        let candidates = (household ?? []).filter { !inIt.contains($0.id) }
+        return Section {
+            if householdFailed {
+                Text("Couldn't load who's on this NAS. Try again in a moment.")
+                    .foregroundStyle(.secondary)
+            } else if household == nil {
+                ProgressView().frame(maxWidth: .infinity)
+            } else if candidates.isEmpty {
+                Text(household?.isEmpty == false
+                    ? "Everyone with an account on this NAS is already here."
+                    : "No one else has an account on this NAS yet. Once someone signs in "
+                        + "to FrameStation on their own device, they'll be here to add.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(candidates) { user in
+                Button {
+                    confirmingAdd = user
+                } label: {
+                    HStack {
+                        // `Color`, not the hierarchical styles: inside a button
+                        // those resolve against the accent tint.
+                        Text(user.displayName)
+                            .foregroundStyle(Color.primary)
+                        Spacer()
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .disabled(isSaving)
+                .accessibilityLabel("Add \(user.displayName)")
+            }
+        } header: {
+            Text("Add People")
+        } footer: {
+            if !candidates.isEmpty {
+                Text("They'll see everything here and can add their own.")
+            }
+        }
+    }
+
+    /// Deleting it, for its maker; leaving it, for anyone it was shared with.
+    @ViewBuilder
+    private var endSection: some View {
+        if current.mayManage {
+            Section {
+                Button("Delete Album", role: .destructive) { confirmDelete = true }
+            } footer: {
+                if current.isLibraryAlbum {
+                    Text("Everyone in \(library ?? "its shared library") can see this album. "
+                        + "It's under Shared Albums.")
+                }
+            }
+        } else if current.isSharedWithPeople {
+            Section {
+                Button("Leave Album", role: .destructive) { confirmLeave = true }
+            }
+        } else {
+            Section {
+            } footer: {
+                Text("Only the person who made this album, or the owner of "
+                    + "\(library ?? "its shared library"), can rename or delete it.")
+            }
         }
     }
 
@@ -1928,53 +2035,152 @@ struct AlbumSettingsSheet: View {
         }
     }
 
+    // MARK: - Wording
+
+    private var addTitle: String {
+        let person = confirmingAdd?.displayName ?? ""
+        return current.isSharedWithPeople
+            ? "Add \(person) to \(current.name)?"
+            : "Share “\(current.name)” with \(person)?"
+    }
+
+    private var addMessage: String {
+        guard current.isSharedWithPeople else {
+            return "\(confirmingAdd?.displayName ?? "They") will see its "
+                + "\(AlbumCard.count(current.itemCount)) and can add their own. "
+                + "It moves to Shared Albums."
+        }
+        return "They'll see everything in \(current.name), including what's already here, "
+            + "and can add their own."
+    }
+
+    /// What taking this person out does. The last one out makes it yours
+    /// alone again, which is said first, as unsharing always was.
+    private var removalMessage: String {
+        guard let member = confirmingRemoval else { return "" }
+        if people.count <= 1 {
+            return "They won't see it anymore. It will be yours alone, under Albums."
+        }
+        let base = "They lose access to this album."
+        let count = member.contributedCount
+        guard count > 0 else { return base }
+        return base + " The \(count) item\(count == 1 ? "" : "s") they added stay in it."
+    }
+
+    // MARK: - Loading and changes
+
     private func load() async {
         await session.loadCapabilities()
         if choosesPeople, household == nil {
-            if let people = await ShareWording.household(session) {
-                household = people
+            if let everyone = await ShareWording.household(session) {
+                household = everyone
             } else {
                 householdFailed = true
             }
         }
-        if album.mayManage, album.isSharedWithPeople, let spaceID = album.spaceID,
-           session.supports(ServerCapability.reportAndBlock),
-           let open = try? await session.client?.openReports(spaceID: spaceID) {
+        guard session.supports(ServerCapability.reportAndBlock),
+              let client = session.client else { return }
+        if current.mayManage, current.isSharedWithPeople, let spaceID = current.spaceID,
+           let open = try? await client.openReports(spaceID: spaceID) {
             reports = open
         }
-    }
-
-    /// Sharing what was yours alone, and sharing it with nobody, are said
-    /// first; anything else just saves.
-    private func save() {
-        if peopleChanged && !album.isSharedWithPeople && !picked.isEmpty {
-            confirmShare = true
-        } else if peopleChanged && album.isSharedWithPeople && picked.isEmpty {
-            confirmUnshare = true
-        } else {
-            commit()
+        if let list = try? await client.blockedUsers() {
+            blocked = Set(list.map(\.id))
         }
     }
 
-    private func commit() {
+    /// Who's in it, from its space. Yours alone, it's you and everything in
+    /// it.
+    private func loadRoster() async {
+        guard !current.isLibraryAlbum else { return }
+        guard current.isSharedWithPeople, let spaceID = current.spaceID else {
+            roster = session.user.map {
+                [SpaceMemberDTO(
+                    user: $0, role: .owner, joinedAt: current.createdAt,
+                    contributedCount: current.itemCount
+                )]
+            } ?? []
+            return
+        }
+        guard let client = session.client else { return }
+        do {
+            roster = try await client.members(spaceID: spaceID).members
+            rosterFailed = false
+        } catch {
+            if roster == nil { rosterFailed = true }
+        }
+    }
+
+    private func setPeople(_ ids: [UUID]) {
         isSaving = true
         Task {
             defer { isSaving = false }
-            // The name first, so an album being shared is shared under it.
-            if nameChanged, !(await store.rename(album, to: trimmed)) {
+            if await store.setPeople(current, to: ids) {
+                failure = nil
+                await loadRoster()
+            } else {
                 failure = store.lastError ?? "That didn't save. Try again."
-                return
             }
-            if peopleChanged, !(await store.setPeople(album, to: Array(picked))) {
-                failure = store.lastError ?? "That didn't save. Try again."
-                return
+        }
+    }
+
+    /// Takes someone out. The last one out makes the album yours alone, and
+    /// it then opens as your own album rather than a shared one — so this
+    /// closes first rather than being closed by that change from under it.
+    private func remove(_ member: SpaceMemberDTO) {
+        let rest = people.map(\.id).filter { $0 != member.user.id }
+        guard rest.isEmpty else {
+            setPeople(rest)
+            return
+        }
+        let album = current
+        onDone()
+        Task { await store.setPeople(album, to: []) }
+    }
+
+    private func setBlocked(_ isBlocked: Bool, _ userID: UUID) async {
+        guard let client = session.client else { return }
+        do {
+            if isBlocked {
+                try await client.block(userID: userID)
+                blocked?.insert(userID)
+            } else {
+                try await client.unblock(userID: userID)
+                blocked?.remove(userID)
             }
+            session.hiddenContentChanged()
+        } catch {
+            failure = error.localizedDescription
+        }
+    }
+
+    /// Whether the name took. A blank one puts the old one back.
+    private func rename() async -> Bool {
+        guard nameChanged else {
+            name = current.name
+            return true
+        }
+        if await store.rename(current, to: trimmed) { return true }
+        failure = store.lastError ?? "That didn't save. Try again."
+        name = current.name
+        return false
+    }
+
+    /// Done keeps a name typed and not yet submitted, rather than dropping it.
+    private func finish() {
+        guard current.mayManage, nameChanged else {
             onDone()
+            return
+        }
+        isSaving = true
+        Task {
+            defer { isSaving = false }
+            if await rename() { onDone() }
         }
     }
 
     private func resolve(_ report: ContentReportDTO, removing: Bool) {
-        guard let client = session.client, let spaceID = album.spaceID else { return }
+        guard let client = session.client, let spaceID = current.spaceID else { return }
         Task {
             do {
                 if removing {
@@ -2023,11 +2229,25 @@ struct LibrarySettingsSheet: View {
                 }
             }
         }
+        .settingsSheetSize()
         .task {
             if model == nil, let client = session.client {
                 model = SpacesModel(client: client)
             }
         }
+    }
+}
+
+extension View {
+    /// The size of a library's or an album's Edit on a Mac, the same for both.
+    /// A sheet there is as big as what's in it, and a list inside a stack asks
+    /// for very little. Nothing elsewhere: a phone's sheet is the screen's.
+    func settingsSheetSize() -> some View {
+        #if os(macOS)
+        frame(minWidth: 440, idealWidth: 480, minHeight: 520, idealHeight: 600)
+        #else
+        self
+        #endif
     }
 }
 

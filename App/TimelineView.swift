@@ -343,7 +343,16 @@ struct TimelineView: View {
         // timeline.
         .overlay(alignment: .topLeading) {
             TopDayLabel(progress: scrollProgress, shown: barHidden && !selection.isActive)
+                // Beside the way back on a pushed grid, which stays put.
+                .padding(.leading, isPushed ? Self.pinnedBackWidth : 0)
                 .padding(.top, windowTopInset)
+        }
+        // A shared library's or album's way back, on its own so it stays when
+        // the rest of the bar slides away. See `barHidden`.
+        .overlay(alignment: .topLeading) {
+            if isPushed && !selection.isActive {
+                pinnedBack.padding(.top, windowTopInset)
+            }
         }
         // Nothing floats at the bottom any more. The connection banner did,
         // over the grid alone; it is `ConnectionPill` now, over every tab.
@@ -3113,23 +3122,40 @@ struct TimelineView: View {
     }
 
     #if os(iOS)
-    /// Whether the floating bar is allowed to slide away on scroll.
+    /// Whether the floating bar has slid away on scroll, leaving the top day's
+    /// date in its place.
     ///
-    /// Never, on a pushed grid, because there the bar carries the only way out.
-    ///
-    /// Hiding the navigation bar — which this whole top-edge treatment depends
-    /// on — also takes the swipe-from-the-edge that pops a screen with it.
-    /// Measured, not assumed: the same edge swipe pops a collection's grid,
-    /// which keeps its bar, and does nothing in a shared album, which doesn't.
-    /// That cost nothing while every grid was a tab with nowhere to go back to.
-    /// Now one of them is a pushed screen, and a chevron that slides away on
-    /// scroll would have left someone a few screens into a long shared album
-    /// with no exit at all until they scrolled back to the top.
-    ///
-    /// The cost is a strip of chrome over the photographs in shared albums
-    /// only. Worth it: the alternative is a room you can get stuck in.
+    /// On every grid now, a shared library's and a shared album's included.
+    /// Those kept their bar pinned, because the chevron in it was the only way
+    /// out: hiding the navigation bar — which this whole top-edge treatment
+    /// depends on — also takes the swipe-from-the-edge that pops a screen
+    /// (measured: the same swipe pops a collection's grid, which keeps its
+    /// bar, and does nothing here). But a shared album spans months and years,
+    /// and pinned, it never showed the date the personal grid shows on
+    /// scroll. So the chevron is drawn on its own (`pinnedBack`) and stays,
+    /// the date takes the rest of the bar's place beside it, and there's never
+    /// a room you can get stuck in.
     private var barHidden: Bool {
-        scrollProgress.topBarHidden && !isPushed
+        scrollProgress.topBarHidden
+    }
+
+    /// Where a pushed grid's date starts: past the pinned chevron.
+    private static let pinnedBackWidth: CGFloat = 14 + 38 + 8 - 20
+
+    /// The way back from a pushed grid, where the bar's own chevron sits, but
+    /// outside the bar so it doesn't go when the bar does.
+    private var pinnedBack: some View {
+        Button { dismiss() } label: {
+            Image(systemName: "chevron.backward")
+                .font(.body.weight(.semibold))
+                .frame(width: 38, height: 38)
+                .glassCircle(fallback: .regularMaterial)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     /// The browsing controls, floated over the top of the grid so they can
@@ -3146,16 +3172,12 @@ struct TimelineView: View {
                     // glass as its neighbours so it reads as part of the bar rather
                     // than as something left over from a navigation bar that isn't
                     // there.
+                    // Its place held, so the title stays where it was; the
+                    // chevron itself is `pinnedBack`, which doesn't slide.
                     if isPushed {
-                        Button { dismiss() } label: {
-                            Image(systemName: "chevron.backward")
-                                .font(.body.weight(.semibold))
-                                .frame(width: 38, height: 38)
-                                .glassCircle(fallback: .regularMaterial)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Back")
+                        Color.clear
+                            .frame(width: 38, height: 38)
+                            .accessibilityHidden(true)
                     }
 
                     // The personal library only, and once, which is the whole point
@@ -3987,11 +4009,6 @@ private struct SharedSettingsPresentation: ViewModifier {
             }
         } else {
             LibrarySettingsSheet(session: session, space: space) { isPresented = false }
-                #if os(macOS)
-                // A sheet on a Mac is as big as what's in it, and a list
-                // pushed inside a stack asks for very little.
-                .frame(minWidth: 440, idealWidth: 480, minHeight: 520, idealHeight: 600)
-                #endif
         }
     }
 
