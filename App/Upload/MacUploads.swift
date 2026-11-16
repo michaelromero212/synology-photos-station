@@ -29,6 +29,9 @@ final class MacUploads {
         let id = UUID()
         let url: URL
         let filename: String
+        /// The album it joins once it's in the library, if any. See
+        /// `add(_:to:joining:client:)`.
+        var album: UUID?
         var sent: Int64 = 0
         var total: Int64 = 0
         var failure: String?
@@ -98,6 +101,17 @@ final class MacUploads {
     /// would erase the first.
     private(set) var failed = 0
 
+    /// Uploaded photos waiting to join their album, by album.
+    ///
+    /// Sent in batches rather than one request per photo: a drop of a hundred
+    /// photos is four shares into the album's space, not a hundred, and the
+    /// people in it hear about one arrival rather than a stream of them.
+    private var awaitingAlbum: [UUID: [UUID]] = [:]
+    private static let albumBatch = 25
+    /// How many photos have joined an album, so the grid showing it knows to
+    /// look again: they reach the album's space a step after they upload.
+    private(set) var joinedAlbum = 0
+
     /// Clears a finished run so the toolbar indicator can stand down.
     func reset() {
         guard queue.isEmpty else { return }
@@ -119,11 +133,21 @@ final class MacUploads {
     /// Directories are walked one level deep rather than refused: dropping a
     /// folder of photographs is the obvious thing to try, and telling somebody
     /// their folder is not a file is a pedantic way to lose a gesture.
-    func add(_ urls: [URL], to spaceID: UUID, client: FrameStationClient) {
+    ///
+    /// With an album, each file goes to `spaceID` — your own library — and
+    /// then joins the album, which shares it into an album's own space. That's
+    /// how adding to an album works everywhere; an album is never where a
+    /// photo first lands.
+    func add(
+        _ urls: [URL], to spaceID: UUID, joining album: UUID? = nil,
+        client: FrameStationClient
+    ) {
         let files = urls.flatMap { Self.expand($0) }
         guard !files.isEmpty else { return }
 
-        queue.append(contentsOf: files.map { Item(url: $0, filename: $0.lastPathComponent) })
+        queue.append(contentsOf: files.map {
+            Item(url: $0, filename: $0.lastPathComponent, album: album)
+        })
         guard !isRunning else { return }
         Task { await run(spaceID: spaceID, client: client) }
     }
@@ -145,6 +169,9 @@ final class MacUploads {
                     }
                 }
             }
+            // Inside the loop, so a file dropped while the last few join their
+            // album is still picked up by the check below.
+            await sendToAlbums(client: client)
         } while queue.contains { !$0.isUploading }
     }
 
@@ -164,6 +191,14 @@ final class MacUploads {
                     completed += 1
                     recordFinished(item, .uploaded)
                 }
+                // A duplicate joins too: it's already in your library, and
+                // the album is where it was put.
+                if let album = item.album, let placement = result.spaceAssetID {
+                    awaitingAlbum[album, default: []].append(placement)
+                    if (awaitingAlbum[album]?.count ?? 0) >= Self.albumBatch {
+                        await sendToAlbums(client: client)
+                    }
+                }
             } catch {
                 // One unreadable file must not strand the rest of a drop.
                 lastError = error.localizedDescription
@@ -171,6 +206,26 @@ final class MacUploads {
                 recordFinished(item, .failed)
             }
             finish(item.id)
+        }
+    }
+
+    /// Puts what's waiting into its albums. Taken out before the request, so
+    /// a lane finishing meanwhile starts the next batch rather than resending
+    /// this one.
+    private func sendToAlbums(client: FrameStationClient) async {
+        let batches = awaitingAlbum
+        awaitingAlbum.removeAll()
+        for (album, placements) in batches where !placements.isEmpty {
+            do {
+                _ = try await client.addToAlbum(
+                    album, AlbumAssetsRequest(spaceAssetIDs: placements)
+                )
+                joinedAlbum += placements.count
+            } catch {
+                // They're safe in the library; only the album is missing
+                // them, and the popover says why.
+                lastError = error.localizedDescription
+            }
         }
     }
 

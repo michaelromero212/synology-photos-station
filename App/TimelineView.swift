@@ -84,6 +84,15 @@ struct TimelineView: View {
     /// painted over: reachable, and escapable only by someone who already knows
     /// the edge-swipe is there.
     var isPushed = false
+    /// The album shared with people whose own space this grid is showing.
+    ///
+    /// Such an album keeps its photos in a space of its own (see
+    /// `AlbumDTO.ownSpace`), so its grid is a library's grid — days, months,
+    /// years, the scrubber — the same as the shared library beside it on the
+    /// Albums page. Two things differ: Edit is the album's settings, and Add
+    /// puts photos in the album, which shares them into that space. Sent to
+    /// the space directly, they'd be in its grid and not in the album.
+    var albumID: UUID? = nil
     /// Told where a selection went, so the host can follow it there.
     ///
     /// The grid can share photos but cannot navigate to the result — it only
@@ -177,11 +186,6 @@ struct TimelineView: View {
     /// worth one reminder a day.
     @State private var showFocusedBackup = false
     @State private var showPicker = false
-    /// A shared library's settings, from Edit in its bar.
-    @State private var showLibrarySettings = false
-    /// Photos members have reported here, for the owner's Edit. See
-    /// `SpaceMembersView.reportsSection`.
-    @State private var openReports = 0
     /// "Saved to Photos", once a share has put the originals on this iPhone,
     /// or why it couldn't.
     @State private var savedToast: ToastMessage?
@@ -200,6 +204,15 @@ struct TimelineView: View {
     // a Mac has more room for a contact sheet than anything else does, and
     // "select these forty and re-date them" is the case it is best at.
     #if !os(tvOS)
+    /// A shared library's settings, or a shared album's, from Edit.
+    @State private var showLibrarySettings = false
+    /// Photos members have reported here, for the owner's Edit. See
+    /// `SpaceMembersView.reportsSection`.
+    @State private var openReports = 0
+    /// Back out of a shared library or album once it is no longer yours to
+    /// look at. See `DismissHandle` for why the Mac can't read `\.dismiss`
+    /// here.
+    @State private var leave = DismissHandle()
     @State private var showAddToAlbum = false
     @State private var showTagEditor = false
     @State private var albumResult: String?
@@ -474,11 +487,24 @@ struct TimelineView: View {
         // grid behind it *is* the confirmation, and an alert on top of that
         // makes you dismiss a dialog to look at the thing it is describing.
         .sheet(isPresented: $showPicker) {
-            LibraryPickerView(session: session, space: space) { _ in
-                showPicker = false
-                Task { await store?.refresh() }
-            } onCancel: {
-                showPicker = false
+            if let albumID, let personal = session.personalSpace {
+                // An album's photos land in your own library first, then join
+                // the album, which shares them into its space — the way
+                // adding to an album has always worked. See `addToAlbum`.
+                LibraryPickerView(session: session, space: personal) { _ in
+                    showPicker = false
+                } onCancel: {
+                    showPicker = false
+                } onLanded: { placements in
+                    Task { await addToAlbum(albumID, placements) }
+                }
+            } else {
+                LibraryPickerView(session: session, space: space) { _ in
+                    showPicker = false
+                    Task { await store?.refresh() }
+                } onCancel: {
+                    showPicker = false
+                }
             }
         }
         .sheet(isPresented: $showBackup) {
@@ -522,6 +548,11 @@ struct TimelineView: View {
             session: session, space: space, selection: selection,
             showTags: $showTagEditor,
             result: $albumResult
+        ))
+        .modifier(SharedSettingsPresentation(
+            session: session, space: space, albumID: albumID,
+            isPresented: $showLibrarySettings, openReports: $openReports,
+            leave: leave, reload: { await store?.refresh() }
         ))
         #endif
         .sheet(isPresented: $showActivity) {
@@ -584,6 +615,14 @@ struct TimelineView: View {
         // itself should never wait to be discovered.
         .onChange(of: macUploads.completed) { _, _ in
             Task { await store?.refresh() }
+        }
+        // An album's photos turn up once they've joined it, a step after
+        // they've uploaded. See `MacUploads.joinedAlbum`.
+        .onChange(of: macUploads.joinedAlbum) { _, _ in
+            Task {
+                await store?.refresh()
+                await session.albumStore().refresh()
+            }
         }
         #endif
         .task(id: space.id) {
@@ -719,7 +758,9 @@ struct TimelineView: View {
             ContentUnavailableView(
                 "No photos yet",
                 systemImage: "square.on.square",
-                description: Text("Photos backed up to \(space.name) will appear here.")
+                description: Text(space.kind == .shared
+                    ? "Photos added to \(space.name) will appear here."
+                    : "Photos backed up to \(space.name) will appear here.")
             )
 
         case .loaded:
@@ -886,6 +927,7 @@ struct TimelineView: View {
             showFileImporter: $showFileImporter,
             isDropTargeted: $isDropTargeted,
             space: space,
+            albumID: albumID,
             session: session,
             uploads: macUploads,
             onReturn: { macReturn(to: $0) }
@@ -3252,41 +3294,22 @@ struct TimelineView: View {
         }
         .padding(.trailing, 2)
         .glassCapsule(fallback: .regularMaterial)
-        .sheet(isPresented: $showLibrarySettings, onDismiss: librarySettingsClosed) {
-            LibrarySettingsSheet(session: session, space: space) { showLibrarySettings = false }
-        }
-        .task(id: space.id) { await countReports() }
-        // A tapped "someone reported a photo" lands here, on the screen that
-        // reviews it. See `PushRegistrar.open`.
-        .onChange(of: session.pendingReportReview, initial: true) { _, spaceID in
-            guard spaceID == space.id else { return }
-            session.pendingReportReview = nil
-            showLibrarySettings = true
-        }
+        // Its sheet, its reports and the notification that opens it are
+        // `SharedSettingsPresentation`'s, which the Mac's Edit shares.
     }
 
-    /// How many reported photos wait on this library's owner. Nothing is
-    /// asked of a NAS without reports, or for anyone but the owner, who alone
-    /// may read them.
-    private func countReports() async {
-        guard space.role == .owner, let client = session.client else { return }
-        await session.loadCapabilities()
-        guard session.supports(ServerCapability.reportAndBlock),
-              let reports = try? await client.openReports(spaceID: space.id)
-        else { return }
-        openReports = reports.count
-    }
-
-    /// A new name reaches the title and the Albums page; leaving the library
-    /// takes you back out of it, rather than leaving you in a library that is
-    /// no longer yours to look at.
-    private func librarySettingsClosed() {
-        let spaceID = space.id
-        Task {
-            await session.refreshSpaces()
-            if !session.spaces.contains(where: { $0.id == spaceID }) { dismiss() }
-            await countReports()
+    /// Adds what the picker sent to the album this grid is, once it's on the
+    /// NAS: shared into the album's space, so it turns up here.
+    private func addToAlbum(_ albumID: UUID, _ placements: [UUID]) async {
+        guard !placements.isEmpty, let client = session.client else { return }
+        do {
+            _ = try await client.addToAlbum(
+                albumID, AlbumAssetsRequest(spaceAssetIDs: placements)
+            )
+            await store?.refresh()
             await session.albumStore().refresh()
+        } catch {
+            albumResult = "Couldn't add to \(space.name): \(error.localizedDescription)"
         }
     }
     #endif
@@ -3317,6 +3340,19 @@ struct TimelineView: View {
         }
         #endif
         #if os(macOS)
+        // Edit beside Add, for a shared library or a shared album, the way the
+        // phone pairs them in its bar and an album's grid pairs them here: its
+        // name, its people, leaving it. Up while a photo is picked too — it is
+        // about the library, not the selection, and a click picks a photo on a
+        // Mac, so hiding it then would make the bar jump with every click.
+        if space.kind == .shared {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Edit") { showLibrarySettings = true }
+                    .help(albumID == nil
+                          ? "Name, people, and leaving \(space.name)"
+                          : "Name, who it's shared with, and deleting or leaving it")
+            }
+        }
         // Adding from a Mac is choosing files, not backing up a library. The
         // drop target on the grid does the same job for people who drag; this
         // is the same action where a Mac keeps its actions.
@@ -3819,6 +3855,8 @@ private struct MacTimelineChrome: ViewModifier {
     @Binding var showFileImporter: Bool
     @Binding var isDropTargeted: Bool
     let space: SpaceDTO
+    /// The album shared with people this grid is. See `TimelineView.albumID`.
+    let albumID: UUID?
     @Bindable var session: AppSession
     let uploads: MacUploads
     /// The viewer closed on this photo. See `TimelineView.macReturn`.
@@ -3849,17 +3887,14 @@ private struct MacTimelineChrome: ViewModifier {
                 allowedContentTypes: MacUploads.acceptedTypes,
                 allowsMultipleSelection: true
             ) { result in
-                guard case .success(let urls) = result,
-                      let client = session.client else { return }
-                uploads.add(urls, to: space.id, client: client)
+                guard case .success(let urls) = result else { return }
+                upload(urls)
             }
             // Dropping onto the library is the gesture a Mac user reaches for
             // first, and it is the same action as the toolbar button — same
             // queue, same code path, so the two cannot behave differently.
             .dropDestination(for: URL.self) { urls, _ in
-                guard let client = session.client else { return false }
-                uploads.add(urls, to: space.id, client: client)
-                return true
+                upload(urls)
             } isTargeted: { isDropTargeted = $0 }
             .overlay {
                 if isDropTargeted {
@@ -3871,6 +3906,138 @@ private struct MacTimelineChrome: ViewModifier {
                 }
             }
             .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+    }
+
+    /// Sends files to this library — or, for an album shared with people, to
+    /// your own library and then into the album, the way adding to an album
+    /// always works. Sent straight to the album's space they'd show in its
+    /// grid and not be in the album.
+    @discardableResult
+    private func upload(_ urls: [URL]) -> Bool {
+        guard let client = session.client else { return false }
+        if let albumID {
+            guard let personal = session.personalSpace else { return false }
+            uploads.add(urls, to: personal.id, joining: albumID, client: client)
+        } else {
+            uploads.add(urls, to: space.id, client: client)
+        }
+        return true
+    }
+}
+#endif
+
+#if !os(tvOS)
+/// Edit for a shared library or an album shared with people: its settings
+/// sheet, the reported photos waiting on its owner, and the notification that
+/// opens it. Shared by the iPhone's floating bar and the Mac's toolbar, so the
+/// two can't drift — Family Shared had Edit on the phone and none on the Mac.
+private struct SharedSettingsPresentation: ViewModifier {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    /// The album the grid is, if it's one. See `TimelineView.albumID`.
+    let albumID: UUID?
+    @Binding var isPresented: Bool
+    @Binding var openReports: Int
+    let leave: DismissHandle
+    /// Asks for the grid's photos again.
+    let reload: () async -> Void
+    /// Set by an album's settings when they delete it or leave it.
+    @State private var albumGone = false
+
+    func body(content: Content) -> some View {
+        if space.kind == .shared {
+            content
+                .background { DismissCatcher(handle: leave) }
+                .sheet(isPresented: $isPresented, onDismiss: closed) { settings }
+                .task(id: space.id) { await countReports() }
+                // A tapped "someone reported a photo" lands here, on the
+                // screen that reviews it. See `PushRegistrar.open`.
+                .onChange(of: session.pendingReportReview, initial: true) { _, spaceID in
+                    guard spaceID == space.id else { return }
+                    session.pendingReportReview = nil
+                    isPresented = true
+                }
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var settings: some View {
+        if let albumID {
+            let store = session.albumStore()
+            if let album = store.albums.first(where: { $0.id == albumID }) {
+                AlbumSettingsSheet(
+                    session: session, album: album, store: store, library: nil,
+                    onDeleted: { albumGone = true }
+                ) { isPresented = false }
+            } else {
+                NavigationStack {
+                    ContentUnavailableView {
+                        Label("Album Unavailable", systemImage: "person.2.slash")
+                    } description: {
+                        Text("This isn't shared with you anymore.")
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { isPresented = false }
+                        }
+                    }
+                }
+            }
+        } else {
+            LibrarySettingsSheet(session: session, space: space) { isPresented = false }
+                #if os(macOS)
+                // A sheet on a Mac is as big as what's in it, and a list
+                // pushed inside a stack asks for very little.
+                .frame(minWidth: 440, idealWidth: 480, minHeight: 520, idealHeight: 600)
+                #endif
+        }
+    }
+
+    /// How many reported photos wait on this library's owner. Nothing is
+    /// asked of a NAS without reports, or for anyone but the owner, who alone
+    /// may read them.
+    private func countReports() async {
+        guard space.role == .owner, let client = session.client else { return }
+        await session.loadCapabilities()
+        guard session.supports(ServerCapability.reportAndBlock),
+              let reports = try? await client.openReports(spaceID: space.id)
+        else { return }
+        openReports = reports.count
+    }
+
+    /// A new name reaches the title and the Albums page; leaving takes you
+    /// back out, rather than leaving you in a library or album that is no
+    /// longer yours to look at.
+    ///
+    /// An album made personal again — shared with nobody — stays on screen:
+    /// the screen showing it opens it as an album from then on. See
+    /// `SharedAlbumRoute.target`.
+    private func closed() {
+        if albumID != nil {
+            if albumGone {
+                albumGone = false
+                leave.dismiss()
+                return
+            }
+            Task {
+                await session.albumStore().refresh()
+                await reload()
+                await countReports()
+            }
+            return
+        }
+        let spaceID = space.id
+        Task {
+            await session.refreshSpaces()
+            if !session.spaces.contains(where: { $0.id == spaceID }) {
+                leave.dismiss()
+                return
+            }
+            await countReports()
+            await session.albumStore().refresh()
+        }
     }
 }
 #endif

@@ -375,7 +375,7 @@ struct RootTabView: View {
         NavigationStack(path: $albumsPath) {
             AlbumsView(session: session)
                 .navigationDestination(for: SharedAlbumRoute.self) { route in
-                    sharedAlbum(route.spaceID)
+                    sharedAlbum(route)
                 }
         }
     }
@@ -397,15 +397,15 @@ struct RootTabView: View {
     #if os(iOS)
     /// The library on screen, which is the one the search button searches.
     ///
-    /// A shared album open in the Albums tab searches itself; everywhere else —
-    /// the Photos tab, the Albums page, More — is the personal library. Shared
-    /// albums used to carry a magnifier of their own in their top bar, because
-    /// this button only ever searched the personal library; one button in one
-    /// place, searching whatever you are looking at, is simpler, and it is where
-    /// Photos keeps it.
+    /// A shared library or shared album open in the Albums tab searches
+    /// itself; everywhere else — the Photos tab, the Albums page, More — is the
+    /// personal library. Shared albums used to carry a magnifier of their own
+    /// in their top bar, because this button only ever searched the personal
+    /// library; one button in one place, searching whatever you are looking
+    /// at, is simpler, and it is where Photos keeps it.
     private var spaceOnScreen: SpaceDTO? {
         if tab == .albums, let route = albumsPath.last,
-           let shared = session.spaces.first(where: { $0.id == route.spaceID }) {
+           let shared = route.target(in: session).searchSpace {
             return shared
         }
         return session.personalSpace
@@ -423,14 +423,16 @@ struct RootTabView: View {
         #endif
     }
 
-    /// One shared library, opened from the Albums page or a notification, or
-    /// an album shared with you, from a notification.
+    /// One shared library or one album shared with people, opened from the
+    /// Albums page or a notification: a library's timeline either way. See
+    /// `SharedAlbumTarget`.
     ///
     /// Resolved from the session rather than carried in the route, so renaming
     /// it from inside updates the title you are looking at.
     @ViewBuilder
-    private func sharedAlbum(_ spaceID: UUID) -> some View {
-        if let space = session.spaces.first(where: { $0.id == spaceID }) {
+    private func sharedAlbum(_ route: SharedAlbumRoute) -> some View {
+        switch route.target(in: session) {
+        case .library(let space):
             #if os(iOS)
             TimelineView(
                 session: session, space: space,
@@ -443,12 +445,23 @@ struct RootTabView: View {
             #else
             TimelineView(session: session, space: space, isPushed: true)
             #endif
-        } else if let album = session.albumStore().sharedWithPeople
-            .first(where: { $0.spaceID == spaceID }) {
-            // An album shared with you, from a notification: its space is the
-            // album's own, never a library.
+        case .peopleAlbum(let album, let space):
+            // Its own space is never a library, so nothing is shared *into*
+            // it from a selection: no review to follow, nothing to clear.
+            #if os(iOS)
+            TimelineView(
+                session: session, space: space,
+                engine: engine, backupSettings: $backupSettings,
+                isPushed: true, albumID: album.id,
+                onShared: followShare
+            )
+            #else
+            TimelineView(session: session, space: space, isPushed: true, albumID: album.id)
+            #endif
+        case .album(let album):
+            // Shared with nobody now: somebody's own album again.
             AlbumDetailView(session: session, album: album, store: session.albumStore())
-        } else {
+        case .unavailable:
             // Left rather than left behind: someone else can remove you from a
             // shared album while you are looking at the list it was on.
             ContentUnavailableView {

@@ -24,6 +24,7 @@ struct MacRootView: View {
     /// to Settings is the menu bar, which is where a Mac keeps preferences but
     /// is *not* where anyone looks for "sign me out".
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var selection: MacDestination? = .library
     /// The personal library's media types, for the pinned rows.
@@ -54,6 +55,10 @@ struct MacRootView: View {
     /// window rather than of whatever the detail pane happens to be showing.
     @State private var query = ""
 
+    /// The Albums page's list, for the shared albums down the side. The same
+    /// store the page draws from, so the two always list the same things.
+    private var albums: AlbumStore { session.albumStore() }
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -77,6 +82,48 @@ struct MacRootView: View {
             }
         }
         .task(id: session.personalSpace?.id) { await loadMediaTypes() }
+        // A shared album made on the phone — or on this Mac's Albums page —
+        // has to reach the sidebar without the Albums page being opened first.
+        .task { await albums.refreshIfStale() }
+        // And again on coming back to the window, the moment the grids look
+        // again too: one shared with you on the phone in the meantime turns
+        // up without a visit to Albums first.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await albums.refreshIfStale() }
+        }
+        // A notification or the activity list pointing at a shared library
+        // or album: select it, the way clicking its row would. The phone opens
+        // the same thing from its Albums tab.
+        .onChange(of: session.pendingLibrary, initial: true) { _, pending in
+            guard let pending else { return }
+            session.pendingLibrary = nil
+            if pending.reviewingReports { session.pendingReportReview = pending.spaceID }
+            if session.spaces.contains(where: { $0.id == pending.spaceID }) {
+                selection = .space(pending.spaceID)
+            } else if let album = albums.sharedWithPeople
+                .first(where: { $0.spaceID == pending.spaceID }) {
+                selection = .album(album.id)
+            }
+        }
+        // Gone from under you — left, deleted, or someone else took you out:
+        // back to Albums rather than an "unavailable" page for something
+        // that's no longer anywhere in the sidebar.
+        .onChange(of: selectionIsGone) { _, gone in
+            if gone { selection = .albums }
+        }
+    }
+
+    /// Whether the shared library or album the sidebar points at has gone.
+    private var selectionIsGone: Bool {
+        switch selection {
+        case .space(let id):
+            return !session.spaces.isEmpty && !session.spaces.contains { $0.id == id }
+        case .album(let id):
+            return albums.hasLoaded && !albums.albums.contains { $0.id == id }
+        default:
+            return false
+        }
     }
 
     // MARK: - Sidebar
@@ -90,13 +137,27 @@ struct MacRootView: View {
                     .tag(MacDestination.albums)
             }
 
-            // Each space by name, rather than a "Shared" row that asks again.
-            let shared = session.spaces.filter { $0.kind == .shared }
+            // Everything shared, by name — the Albums page's Shared Albums,
+            // row for row and in its order: albums shared with people, then
+            // each shared library and the albums made in it. It listed only
+            // the libraries, so an album shared with the family was on the
+            // Albums page and nowhere down here.
+            let shared = albums.sharedEntries(libraries: session.sharedSpaces)
             if !shared.isEmpty {
-                Section("Shared Libraries") {
-                    ForEach(shared) { space in
-                        Label(space.name, systemImage: "person.2")
-                            .tag(MacDestination.space(space.id))
+                Section("Shared Albums") {
+                    ForEach(shared) { entry in
+                        switch entry {
+                        case .library(let space):
+                            Label(space.name, systemImage: "person.2")
+                                .tag(MacDestination.space(space.id))
+                        case .album(let album):
+                            Label(
+                                album.name,
+                                systemImage: album.isSharedWithPeople
+                                    ? "rectangle.stack.badge.person.crop" : "rectangle.stack"
+                            )
+                            .tag(MacDestination.album(album.id))
+                        }
                     }
                 }
             }
@@ -182,11 +243,33 @@ struct MacRootView: View {
         // Typing shows results over whatever was selected, and clearing the
         // field puts you back exactly where you were — the sidebar selection is
         // never disturbed, so search is a lens rather than a detour.
-        if !query.isEmpty, let personal = session.personalSpace {
-            SearchView(session: session, space: personal, query: $query)
+        //
+        // It searches the library on screen: a shared library or shared album
+        // searches itself, everything else your own library — the phone's
+        // rule. It used to search your own library from inside Family Shared.
+        if !query.isEmpty, let space = searchSpace ?? session.personalSpace {
+            SearchView(session: session, space: space, query: $query)
+                // A different library is a different search, not the last
+                // one's results under a new name.
+                .id(space.id)
         } else {
             destination
         }
+    }
+
+    /// The shared library or album the sidebar is on, for search.
+    private var searchSpace: SpaceDTO? {
+        switch selection {
+        case .space(let id): SharedAlbumRoute(spaceID: id).target(in: session).searchSpace
+        case .album(let id): albumRoute(id)?.target(in: session).searchSpace
+        default: nil
+        }
+    }
+
+    /// An album's route, from what the device knows of it now.
+    private func albumRoute(_ id: UUID) -> SharedAlbumRoute? {
+        guard let album = albums.albums.first(where: { $0.id == id }) else { return nil }
+        return SharedAlbumRoute(spaceID: album.spaceID ?? album.id, albumID: id)
     }
 
     @ViewBuilder
@@ -201,30 +284,26 @@ struct MacRootView: View {
 
         case .albums:
             AlbumsView(session: session)
-                // A shared library's card opens the library here, with a way
-                // back to Albums, as it does on the phone.
+                // A shared library's or shared album's card opens it here,
+                // with a way back to Albums, as it does on the phone — the
+                // same screen its sidebar row shows, search field and all.
+                // The field is the pushed screen's own: the window's belongs
+                // to the page underneath, and leaving this screen should come
+                // back to the page as it was.
                 .navigationDestination(for: SharedAlbumRoute.self) { route in
-                    if let space = session.spaces.first(where: { $0.id == route.spaceID }) {
-                        TimelineView(session: session, space: space)
-                    } else {
-                        ContentUnavailableView {
-                            Label("Album Unavailable", systemImage: "person.2.slash")
-                        } description: {
-                            Text("This shared library is no longer available to you.")
-                        }
+                    MacSearchLens(session: session, space: route.target(in: session).searchSpace) {
+                        shared(route, isPushed: true)
                     }
                 }
 
         case .space(let id):
-            if let space = session.spaces.first(where: { $0.id == id }) {
-                TimelineView(session: session, space: space)
+            shared(SharedAlbumRoute(spaceID: id), isPushed: false)
+
+        case .album(let id):
+            if let route = albumRoute(id) {
+                shared(route, isPushed: false)
             } else {
-                // The space was removed while it was on screen.
-                ContentUnavailableView {
-                    Label("Album Unavailable", systemImage: "person.2.slash")
-                } description: {
-                    Text("This shared library is no longer available to you.")
-                }
+                unavailable
             }
 
         case .mediaType(let key):
@@ -244,6 +323,31 @@ struct MacRootView: View {
 
         case .spaces:
             SpacesView(session: session)
+        }
+    }
+
+    /// A shared library or album, the same screen from its sidebar row and
+    /// from its card on the Albums page. See `SharedAlbumTarget`.
+    @ViewBuilder
+    private func shared(_ route: SharedAlbumRoute, isPushed: Bool) -> some View {
+        switch route.target(in: session) {
+        case .library(let space):
+            TimelineView(session: session, space: space, isPushed: isPushed)
+        case .peopleAlbum(let album, let space):
+            TimelineView(session: session, space: space, isPushed: isPushed, albumID: album.id)
+        case .album(let album):
+            AlbumDetailView(session: session, album: album, store: albums)
+        case .unavailable:
+            unavailable
+        }
+    }
+
+    /// Removed while it was on screen.
+    private var unavailable: some View {
+        ContentUnavailableView {
+            Label("Album Unavailable", systemImage: "person.2.slash")
+        } description: {
+            Text("This isn't shared with you anymore.")
         }
     }
 
@@ -294,10 +398,42 @@ struct MacRootView: View {
 enum MacDestination: Hashable {
     case library
     case albums
+    /// A shared library.
     case space(UUID)
+    /// An album under Shared Albums, by its own id.
+    case album(UUID)
     case mediaType(String)
     case recentlyDeleted
     case spaces
+}
+
+/// A search field for a screen pushed inside the detail pane, searching the
+/// library that screen shows.
+///
+/// The window's own field is on the stack's root and leaves with it, so a
+/// shared library opened from its card on the Albums page had no field, while
+/// the same library from its sidebar row did. This gives the pushed screen
+/// the same field, with its own text: typing here and going back leaves the
+/// Albums page as it was.
+struct MacSearchLens<Content: View>: View {
+    @Bindable var session: AppSession
+    /// What to search. Nil: the personal library.
+    let space: SpaceDTO?
+    @ViewBuilder let content: () -> Content
+
+    @State private var query = ""
+
+    var body: some View {
+        Group {
+            if !query.isEmpty, let space = space ?? session.personalSpace {
+                SearchView(session: session, space: space, query: $query)
+                    .id(space.id)
+            } else {
+                content()
+            }
+        }
+        .searchable(text: $query, placement: .toolbar, prompt: "Search Places")
+    }
 }
 
 #endif

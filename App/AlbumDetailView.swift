@@ -369,7 +369,7 @@ final class DismissHandle {
 }
 
 /// Keeps a `DismissHandle` holding the current dismiss action.
-private struct DismissCatcher: View {
+struct DismissCatcher: View {
     let handle: DismissHandle
     @Environment(\.dismiss) private var dismiss
 

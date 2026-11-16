@@ -377,6 +377,10 @@ struct SearchView: View {
     /// The places and things matching what's typed.
     private func loadMatches(for query: String) async {
         guard let client = session.client else { return }
+        // Answered, so no longer loading. Only the landing used to say so,
+        // and a Mac never shows the landing: the window's field opens this
+        // screen with text already typed, so every search there spun forever.
+        defer { isLoadingPlaces = false }
         // More rows than a landing list would show: a match list that stops at
         // twelve looks like the answer isn't there.
         async let placesAnswer = client.places(spaceID: space.id, matching: query, limit: 60)

@@ -258,6 +258,111 @@ extension AlbumDTO {
 /// it hadn't taken.
 struct SharedAlbumRoute: Hashable {
     let spaceID: UUID
+    /// Set for an album shared with people, which is found by its own id
+    /// first: its space is a new one each time it is shared again after being
+    /// made personal, and the album is still the album.
+    var albumID: UUID? = nil
+
+    /// What this route opens, from what the device knows now.
+    @MainActor
+    func target(in session: AppSession) -> SharedAlbumTarget {
+        let albums = session.albumStore().albums
+        if let albumID, let album = albums.first(where: { $0.id == albumID }) {
+            if let space = album.ownSpace { return .peopleAlbum(album, space) }
+            return .album(album)
+        }
+        if let library = session.spaces.first(where: { $0.id == spaceID }) {
+            return .library(library)
+        }
+        // From a notification, which knows only the space.
+        if let album = albums.first(where: { $0.isSharedWithPeople && $0.spaceID == spaceID }),
+           let space = album.ownSpace {
+            return .peopleAlbum(album, space)
+        }
+        return .unavailable
+    }
+}
+
+/// Where a shared album's route leads.
+///
+/// A shared library and an album shared with people both open as a library's
+/// timeline — days, months, years, the scrubber — because both are a place a
+/// family puts its photos, and the one difference that matters, who's in it,
+/// is the Edit button's business. An album with no one else in it is
+/// somebody's own album again, and opens as one.
+enum SharedAlbumTarget {
+    case library(SpaceDTO)
+    /// The album, and its own space as a library the grid can show.
+    case peopleAlbum(AlbumDTO, SpaceDTO)
+    case album(AlbumDTO)
+    case unavailable
+
+    /// The library search looks in while this is on screen. Nil for none of
+    /// its own: the personal library's.
+    var searchSpace: SpaceDTO? {
+        switch self {
+        case .library(let space), .peopleAlbum(_, let space): space
+        case .album, .unavailable: nil
+        }
+    }
+}
+
+extension AlbumDTO {
+    /// The space an album shared with people keeps its photos in, as a library
+    /// its grid can show. Nil for any other album.
+    ///
+    /// Only its people are members, and a photo is in it exactly while it is
+    /// in the album — taking one out of the album takes it out of the space —
+    /// so the space's timeline is the album, by date.
+    ///
+    /// Shared, so what somebody else added is theirs to remove, and the
+    /// album's maker may remove anything (`SpacePermissions.mayRemove`), the
+    /// rule the NAS applies to the album's own photos.
+    var ownSpace: SpaceDTO? {
+        guard isSharedWithPeople, let spaceID else { return nil }
+        return SpaceDTO(
+            id: spaceID, kind: .shared, name: name,
+            role: mayManage ? .owner : mayAdd ? .contributor : .viewer,
+            memberCount: (people?.count ?? 0) + 1
+        )
+    }
+}
+
+extension AlbumStore {
+    /// One entry under Shared Albums: a whole shared library, or an album.
+    enum SharedEntry: Identifiable {
+        case library(SpaceDTO)
+        case album(AlbumDTO)
+
+        var id: UUID {
+            switch self {
+            case .library(let space): space.id
+            case .album(let album): album.id
+            }
+        }
+    }
+
+    /// Everything under Shared Albums, in the page's order: albums shared with
+    /// people first, then each shared library and its albums. Albums of a
+    /// library this device hasn't heard of yet come last: shown, never dropped.
+    ///
+    /// The ones shared with people lead because they're the ones somebody
+    /// made to share — the family album, the one with the cousins — where a
+    /// library is everyone's backup landing in one place.
+    ///
+    /// The Albums page and the Mac's sidebar both list these, from here, so
+    /// the two never disagree about what is shared.
+    func sharedEntries(libraries: [SpaceDTO]) -> [SharedEntry] {
+        let albums = family
+        var entries: [SharedEntry] = sharedWithPeople.map(SharedEntry.album)
+        for space in libraries {
+            entries.append(.library(space))
+            entries += albums.filter { $0.spaceID == space.id }.map(SharedEntry.album)
+        }
+        entries += albums.filter { album in !libraries.contains { $0.id == album.spaceID } }
+            .map(SharedEntry.album)
+        return entries
+    }
 }
 
 /// Albums — what the library noticed, what you filed by hand, and what the
@@ -909,10 +1014,23 @@ struct AlbumsView: View {
     private func browsableAlbumCell(
         _ album: AlbumDTO, card: some View, store: AlbumStore
     ) -> some View {
-        NavigationLink {
-            AlbumDetailView(session: session, album: album, store: store)
-        } label: {
-            card
+        Group {
+            // An album shared with people opens the way a shared library
+            // does, as a timeline of its own space: the same route, the same
+            // screen, whether it's reached from here, the Mac's sidebar or a
+            // notification. Yours alone and a library's albums keep the
+            // album grid.
+            if let spaceID = album.ownSpace?.id {
+                NavigationLink(value: SharedAlbumRoute(spaceID: spaceID, albumID: album.id)) {
+                    card
+                }
+            } else {
+                NavigationLink {
+                    AlbumDetailView(session: session, album: album, store: store)
+                } label: {
+                    card
+                }
+            }
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -1008,37 +1126,10 @@ struct AlbumsView: View {
         }
     }
 
-    /// One card under Shared Albums: a whole shared library, or an album.
-    private enum SharedCard: Identifiable {
-        case library(SpaceDTO)
-        case album(AlbumDTO)
-
-        var id: UUID {
-            switch self {
-            case .library(let space): space.id
-            case .album(let album): album.id
-            }
-        }
-    }
-
     /// Albums shared with people first, then each shared library and its
-    /// albums. Albums of a library this device hasn't heard of yet come last:
-    /// shown, never dropped.
-    ///
-    /// The ones shared with people lead because they're the ones somebody
-    /// made to share — the family album, the one with the cousins — where a
-    /// library is everyone's backup landing in one place.
-    private func sharedCards(_ store: AlbumStore) -> [SharedCard] {
-        let albums = store.family
-        let libraries = session.sharedSpaces
-        var cards: [SharedCard] = store.sharedWithPeople.map(SharedCard.album)
-        for space in libraries {
-            cards.append(.library(space))
-            cards += albums.filter { $0.spaceID == space.id }.map(SharedCard.album)
-        }
-        cards += albums.filter { album in !libraries.contains { $0.id == album.spaceID } }
-            .map(SharedCard.album)
-        return cards
+    /// albums. See `AlbumStore.sharedEntries`.
+    private func sharedCards(_ store: AlbumStore) -> [AlbumStore.SharedEntry] {
+        store.sharedEntries(libraries: session.sharedSpaces)
     }
 
     /// Set with a little more care than a list header usually gets: tighter
