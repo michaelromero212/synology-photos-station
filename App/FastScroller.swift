@@ -51,7 +51,13 @@ struct FastScroller: View {
                 if isDragging, let label {
                     ScrubberPill(text: label)
                         .offset(x: -trackWidth, y: pillOffset)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        // Pops out on touch, and is simply gone on release.
+                        // It used to fade and shrink away with the thumb (his
+                        // word, 2026-11-16: "no need to fade").
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.9)),
+                            removal: .identity
+                        ))
                         .allowsHitTesting(false)
                 }
 
