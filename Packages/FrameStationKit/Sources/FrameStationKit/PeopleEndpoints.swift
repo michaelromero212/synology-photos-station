@@ -124,15 +124,23 @@ extension FrameStationClient {
 
     /// The face that stands for someone. `face` is only there to change the
     /// URL when the face does; the NAS picks it.
-    public func personFaceURL(spaceID: UUID, person: PersonSummary) -> URL? {
+    ///
+    /// `size` asks for the NAS's large face (see `ServerCapability.largeFaces`);
+    /// nil is the small one, at the URL it always had.
+    public func personFaceURL(spaceID: UUID, person: PersonSummary, size: Int? = nil) -> URL? {
         URL(
-            string: "v1/spaces/\(spaceID)/people/\(person.id)/face?f=\(person.face)",
+            string: "v1/spaces/\(spaceID)/people/\(person.id)/face?f=\(person.face)"
+                + (size.map { "&size=\($0)" } ?? ""),
             relativeTo: baseURL
         )
     }
 
-    /// One face in one photo, for "Is this Emma?".
-    public func assetFaceURL(spaceID: UUID, assetID: UUID, ordinal: Int) -> URL? {
-        URL(string: "v1/spaces/\(spaceID)/assets/\(assetID)/faces/\(ordinal)", relativeTo: baseURL)
+    /// One face in one photo, for "Is this Emma?". `size` as above.
+    public func assetFaceURL(spaceID: UUID, assetID: UUID, ordinal: Int, size: Int? = nil) -> URL? {
+        URL(
+            string: "v1/spaces/\(spaceID)/assets/\(assetID)/faces/\(ordinal)"
+                + (size.map { "?size=\($0)" } ?? ""),
+            relativeTo: baseURL
+        )
     }
 }

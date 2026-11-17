@@ -16,6 +16,14 @@ import Vapor
 /// People lists them, one at a time, behind everything else for the CPU. A
 /// circle already made costs a file check, so a pass with nothing new costs
 /// the two queries that list them.
+///
+/// Then the faces "Is this Emma?" asks about, for everyone named, in the
+/// order it asks them. Those were cut only when asked for, and a quick yes
+/// or no outran them: each question's circle sat gray until its face came
+/// (his screenshot, 2026-11-16, at 28 of 50). They're cut large, as that
+/// screen draws them (see `FaceCrop.largeSize`). Last, everyone's large
+/// circle, for the top of their own page. A pass with nothing new costs one
+/// more query per named person with a question.
 actor FaceCropWarmer {
     private let app: Application
     /// Libraries waiting for a pass, in the order they asked.
@@ -73,28 +81,77 @@ actor FaceCropWarmer {
         let covers = try await PeopleController.covers(
             of: people.map(\.id), userID: userID, spaceID: space.id, on: app.sql
         )
-        var made = 0
-        var failed = 0
+        var circles = Tally()
         for person in people {
             try Task.checkCancellation()
             guard let cover = covers[person.id] else { continue }
-            do {
-                let crop = try await Shell.$isBackground.withValue(true) {
-                    try await FaceCrop.crop(app: app, userID: userID, sha256: cover.sha256, ordinal: cover.ordinal)
-                }
-                if crop.made { made += 1 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                // Tried again on the next pass, and by anyone who opens
-                // People meanwhile, which cuts it then as it always did.
-                failed += 1
+            try await cut(userID: userID, sha256: cover.sha256, ordinal: cover.ordinal, into: &circles)
+        }
+
+        // The questions, once everyone's circle is made: the People page
+        // shows those first. Large, as "Is this Emma?" draws them.
+        var questions = Tally()
+        var asked = 0
+        for person in people where person.name != nil && person.questions > 0 {
+            try Task.checkCancellation()
+            let faces = try await PeopleController.suggestedFaces(
+                userID: userID, spaceID: space.id, personID: person.id, on: app.sql
+            )
+            asked += faces.count
+            for face in faces {
+                try Task.checkCancellation()
+                try await cut(
+                    userID: userID, sha256: face.sha256, ordinal: face.ordinal,
+                    size: FaceCrop.largeSize, into: &questions
+                )
             }
         }
-        guard made + failed > 0 else { return }
+
+        // Then everyone's large circle, for the top of their own page. Until
+        // it's made the page shows the small one it has, so this goes last.
+        var large = Tally()
+        for person in people {
+            try Task.checkCancellation()
+            guard let cover = covers[person.id] else { continue }
+            try await cut(
+                userID: userID, sha256: cover.sha256, ordinal: cover.ordinal,
+                size: FaceCrop.largeSize, into: &large
+            )
+        }
+
+        let failed = circles.failed + questions.failed + large.failed
+        guard circles.made + questions.made + large.made + failed > 0 else { return }
         let elapsed = ContinuousClock.now - started
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         let missed = failed > 0 ? "; \(failed) couldn't be cut" : ""
-        app.logger.info("people: cut \(made) of \(people.count) face circles in \(String(format: "%.1f", seconds)) s\(missed)")
+        let took = String(format: "%.1f", seconds)
+        app.logger.info("""
+            people: cut \(circles.made) of \(people.count) face circles, \(large.made) large ones \
+            and \(questions.made) of \(asked) question faces in \(took) s\(missed)
+            """)
+    }
+
+    private struct Tally {
+        var made = 0
+        var failed = 0
+    }
+
+    /// One face, behind everything else for the CPU. One already made costs
+    /// a file check.
+    private func cut(
+        userID: UUID, sha256: String, ordinal: Int, size: Int = FaceCrop.size, into tally: inout Tally
+    ) async throws {
+        do {
+            let crop = try await Shell.$isBackground.withValue(true) {
+                try await FaceCrop.crop(app: app, userID: userID, sha256: sha256, ordinal: ordinal, size: size)
+            }
+            if crop.made { tally.made += 1 }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Tried again on the next pass, and by anyone who asks for it
+            // meanwhile, which cuts it then as it always did.
+            tally.failed += 1
+        }
     }
 }

@@ -368,6 +368,27 @@ faces are used for anything.
      didn't come, while it's on screen (1, 2, 4, 8 and 16 seconds apart).
      A circle scrolled away before its turn leaves the loader's line, so
      the circles on screen come first.
+   - **Question faces cut ahead too** (2026-11-16). "Is this Emma?" faces
+     were cut only when asked for, and a quick yes or no outran them: the
+     circle sat gray until its face came (his screenshot, at 28 of 50).
+     The same pass now cuts every named person's question faces after
+     everyone's circle, in the order the questions ask them
+     (`PeopleController.suggestedFaces`, shared with the endpoint). The log
+     line reads "cut N of M face circles, L large ones and Q of A question
+     faces". The app also waits for the first face before the first
+     question shows, and fetches the face on screen and the next four at
+     once.
+   - **Two sizes** (2026-11-16, "faces just need to show up clear and
+     quickly"). A face is cut at 256 pixels for the small circles and,
+     with `?size=768`, at up to 768 for the big ones (someone's page, "Is
+     this Emma?": 224 points, 672 pixels on a phone, which the 256 one
+     drew 2.6 times over). Only those two are made; any other size asked
+     for gets one of them. The large one is never enlarged past the
+     photo's own pixels. The question faces are cut large, and everyone's
+     large circle after them. A NAS lists `large-faces` in `/health`; the
+     apps ask for the large size only then, so an older NAS's small face
+     is never kept as the large one. A big circle shows the small face it
+     has while its large one comes.
    - **A photo's rotation tag, once.** The NAS's vips (8.12, in the server
      image) leaves a photo's rotation tag on the picture it has already
      stood up. So the crop's last step mustn't obey it (`--no-rotate`).

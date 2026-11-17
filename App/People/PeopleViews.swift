@@ -57,23 +57,63 @@ struct FaceCircle: View {
 
     @State private var image: PlatformImage?
 
+    /// The NAS's two sizes of a face (see `FaceCrop` there). The small one
+    /// fills a circle up to 256 pixels across. Past that it was enlarged:
+    /// the 224-point "Is this Emma?" circle drew it 2.6 times over on a
+    /// phone, and his rule is that faces show up clear (2026-11-16).
+    static let smallPixels = 256
+    static let largePixels = 768
+
+    /// Pixels to a point, as many as any screen of the kind has: an iPhone
+    /// has 3 and an iPad 2, so iOS counts 3.
+    private static var screenScale: CGFloat {
+        #if os(iOS)
+        return 3
+        #else
+        return 2
+        #endif
+    }
+
+    /// The face size a circle this big needs: the large one only where the
+    /// small one would be enlarged, and only from a NAS that makes it. One
+    /// that doesn't sends its small one to any request, and that would be
+    /// kept here as the large one for good.
+    static func pixels(for diameter: CGFloat, session: AppSession) -> Int {
+        guard diameter * screenScale > CGFloat(smallPixels),
+              session.supports(ServerCapability.largeFaces)
+        else { return smallPixels }
+        return largePixels
+    }
+
     init(session: AppSession, spaceID: UUID, source: Source, diameter: CGFloat) {
         self.session = session
         self.spaceID = spaceID
         self.source = source
         self.diameter = diameter
-        // Already decoded: drawn on the first frame, not one after.
-        _image = State(initialValue: session.loader?.cachedFace(key: Self.key(source)))
+        // Already decoded: drawn on the first frame, not one after. A big
+        // circle whose large face isn't here yet starts from the small one
+        // when that is.
+        let pixels = Self.pixels(for: diameter, session: session)
+        let loader = session.loader
+        _image = State(initialValue: loader?.cachedFace(key: Self.key(source, pixels: pixels))
+            ?? (pixels == Self.smallPixels ? nil : loader?.cachedFace(key: Self.key(source))))
     }
 
-    static func key(_ source: Source) -> String {
+    /// The small face keeps the key it always had, so faces already on a
+    /// device stay good.
+    static func key(_ source: Source, pixels: Int = smallPixels) -> String {
+        let base: String
         switch source {
-        case .person(let person): return "\(person.id)-\(person.face)"
-        case .suggestion(let face): return "\(face.assetID)-\(face.ordinal)"
+        case .person(let person): base = "\(person.id)-\(person.face)"
+        case .suggestion(let face): base = "\(face.assetID)-\(face.ordinal)"
         }
+        return pixels == smallPixels ? base : "\(base)-\(pixels)"
     }
 
     var body: some View {
+        // Read here, so the circle asks again in the large size once the NAS
+        // has said it makes one.
+        let pixels = Self.pixels(for: diameter, session: session)
         Circle()
             .fill(.quaternary)
             .overlay {
@@ -89,10 +129,25 @@ struct FaceCircle: View {
             }
             .frame(width: diameter, height: diameter)
             .clipShape(Circle())
-            .task(id: Self.key(source)) { await load() }
+            .task(id: Self.key(source, pixels: pixels)) { await load(pixels: pixels) }
     }
 
-    private func load() async {
+    private func load(pixels: Int) async {
+        // Until its large face comes, a big circle shows the small one, which
+        // is usually quicker to hand: on this device already, or made on the
+        // NAS for the People rows. Not a face being asked about: nobody made
+        // its small one, and making it would hold up the large one.
+        var stopgap: Task<Void, Never>?
+        if pixels != Self.smallPixels, image == nil, case .person = source {
+            stopgap = Task {
+                guard let small = await Self.fetch(session: session, spaceID: spaceID, source: source),
+                      image == nil
+                else { return }
+                show(small)
+            }
+        }
+        defer { stopgap?.cancel() }
+
         // A nil answer is a setback, not a verdict, as for the grid's tiles
         // (see PhotoCell): a face the NAS was still cutting when the request
         // gave up, or a connection dropped on the way, is asked for again
@@ -101,11 +156,9 @@ struct FaceCircle: View {
         // screen was left and opened again (his screenshot, 2026-11-10).
         var gap: Duration = .seconds(1)
         while true {
-            if let face = await Self.fetch(session: session, spaceID: spaceID, source: source) {
-                // No fade: the face is either there or it isn't.
-                var instant = Transaction()
-                instant.disablesAnimations = true
-                withTransaction(instant) { image = face }
+            if let face = await Self.fetch(session: session, spaceID: spaceID, source: source, pixels: pixels) {
+                stopgap?.cancel()
+                show(face)
                 return
             }
             guard !Task.isCancelled, gap <= .seconds(16) else { return }
@@ -114,22 +167,34 @@ struct FaceCircle: View {
         }
     }
 
+    /// No fade: the face is either there or it isn't.
+    private func show(_ face: PlatformImage) {
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { image = face }
+    }
+
     /// Fetches a face, or finds it already here. Also how "Is this Emma?"
-    /// gets the next face ready while the current one is being answered.
+    /// gets the next faces ready while the current one is being answered.
+    /// `pixels` is `smallPixels` or `largePixels`; see `pixels(for:session:)`.
     @discardableResult
-    static func fetch(session: AppSession, spaceID: UUID, source: Source) async -> PlatformImage? {
+    static func fetch(
+        session: AppSession, spaceID: UUID, source: Source, pixels: Int = smallPixels
+    ) async -> PlatformImage? {
         guard let loader = session.loader, let client = session.client else { return nil }
-        let key = key(source)
+        let key = key(source, pixels: pixels)
         if let held = loader.cachedFace(key: key) { return held }
+        let size = pixels == smallPixels ? nil : pixels
         switch source {
         case .person(let person):
-            guard let url = await client.personFaceURL(spaceID: spaceID, person: person) else { return nil }
-            return await loader.face(at: url, key: key)
+            guard let url = await client.personFaceURL(spaceID: spaceID, person: person, size: size)
+            else { return nil }
+            return await loader.face(at: url, key: key, pixels: pixels)
         case .suggestion(let face):
             guard let url = await client.assetFaceURL(
-                spaceID: spaceID, assetID: face.assetID, ordinal: face.ordinal
+                spaceID: spaceID, assetID: face.assetID, ordinal: face.ordinal, size: size
             ) else { return nil }
-            return await loader.face(at: url, key: key, persist: false)
+            return await loader.face(at: url, key: key, persist: false, pixels: pixels)
         }
     }
 }
@@ -1228,6 +1293,27 @@ struct PersonReviewView: View {
 
     private var called: String { person.name ?? "this person" }
 
+    /// How many faces past the one on screen are fetched with it.
+    ///
+    /// These faces are cut on the NAS the first time they're asked for, a
+    /// second or more each on its Celeron (see `FaceCropWarmer`, which cuts
+    /// only the People row's circles ahead). Two ahead, one by one, fell
+    /// behind anyone answering briskly, and the circle sat gray until its face
+    /// filled it (his screenshot, 2026-11-16, at 28 of 50). The face on screen
+    /// and the next four go at once: enough to keep the NAS's four cores
+    /// ahead of a quick thumb, and inside the loader's six at a time (see
+    /// `ThumbnailLoader.maxConcurrent`), so none of them waits in its line.
+    private static let ahead = 4
+
+    /// The face being asked about. Its picture is the NAS's large one where
+    /// the NAS makes it (see `FaceCircle.pixels(for:session:)`), and the
+    /// faces fetched ahead are fetched in that size.
+    private static let faceDiameter: CGFloat = 224
+
+    /// The longest the first question waits for its face before it shows
+    /// without one. The circle goes on asking (see `FaceCircle.load`).
+    private static let firstFaceWait: Duration = .seconds(6)
+
     /// Done, or a swipe down: either way out says what was answered, once.
     private func finish() {
         guard !finished else { return }
@@ -1247,7 +1333,7 @@ struct PersonReviewView: View {
                         .multilineTextAlignment(.center)
                     FaceCircle(
                         session: session, spaceID: spaceID,
-                        source: .suggestion(current), diameter: 224
+                        source: .suggestion(current), diameter: Self.faceDiameter
                     )
                     .id(current.id)
                     Text("\(answered + 1) of \(asked)")
@@ -1298,6 +1384,9 @@ struct PersonReviewView: View {
                 }
             }
             .task { await load() }
+            // Moves with each answer. Leaving cancels whatever is still
+            // waiting for a turn.
+            .task(id: queue.first?.id) { await fetchAhead() }
         }
         .onDisappear { finish() }
         #if os(macOS)
@@ -1310,20 +1399,64 @@ struct PersonReviewView: View {
         defer { isLoading = false }
         do {
             let found = try await client.personSuggestions(spaceID: spaceID, personID: person.id)
+            // Setting the queue starts the first faces coming (see
+            // `fetchAhead`); the spinner stays until the first is here, so
+            // the first question opens with its face rather than gray.
             queue = found.suggestions
             asked = found.suggestions.count
             latest = found.person
-            prefetch()
+            if let first = found.suggestions.first {
+                await waitForFace(first)
+            }
         } catch {
             failure = "Couldn't load: \(error.localizedDescription)"
         }
     }
 
-    /// The next two faces, so each answer shows the next face at once.
-    private func prefetch() {
-        for next in queue.dropFirst().prefix(2) {
-            Task { await FaceCircle.fetch(session: session, spaceID: spaceID, source: .suggestion(next)) }
+    /// The face on screen and the next few, all at once, so each answer finds
+    /// the next face already here. One already here or on its way costs
+    /// nothing: the loader hands back the one it holds or the request it has
+    /// out (see `ThumbnailLoader.image`).
+    private func fetchAhead() async {
+        let window = Array(queue.prefix(Self.ahead + 1))
+        guard !window.isEmpty else { return }
+        let session = session, spaceID = spaceID
+        let pixels = FaceCircle.pixels(for: Self.faceDiameter, session: session)
+        await withTaskGroup(of: Void.self) { group in
+            for face in window {
+                group.addTask {
+                    _ = await FaceCircle.fetch(
+                        session: session, spaceID: spaceID, source: .suggestion(face), pixels: pixels
+                    )
+                }
+            }
         }
+    }
+
+    /// Returns when the face is here, or after `firstFaceWait`, whichever
+    /// comes first.
+    ///
+    /// Not a task group: a group waits for every child before it returns,
+    /// and a request already out doesn't stop for a cancel, so a slow face
+    /// would have held the spinner past the limit. The fetch goes on after
+    /// this returns and lands in the loader's cache for the circle.
+    private func waitForFace(_ face: PersonSuggestion) async {
+        let session = session, spaceID = spaceID
+        let pixels = FaceCircle.pixels(for: Self.faceDiameter, session: session)
+        let (done, signal) = AsyncStream<Void>.makeStream()
+        Task {
+            _ = await FaceCircle.fetch(
+                session: session, spaceID: spaceID, source: .suggestion(face), pixels: pixels
+            )
+            signal.finish()
+        }
+        let timer = Task {
+            try? await Task.sleep(for: Self.firstFaceWait)
+            signal.finish()
+        }
+        // Ends at the first finish, and when the sheet closes first.
+        for await _ in done {}
+        timer.cancel()
     }
 
     private func answer(_ face: PersonSuggestion, isPerson: Bool) async {
@@ -1331,7 +1464,6 @@ struct PersonReviewView: View {
         // On to the next at once; the answer follows.
         queue.removeFirst()
         answered += 1
-        prefetch()
         do {
             latest = try await client.answerSuggestion(
                 spaceID: spaceID, personID: person.id, face, isPerson: isPerson

@@ -195,6 +195,12 @@ FACES=$(echo "$PEOPLE" | python3 -c 'import sys,json; print(" ".join(p["face"] f
 all_cut(){ for f in $FACES; do is_cut "$f" || return 1; done; }
 until_true 30 all_cut
 check "each person's circle is cut before anyone asks" "yes" "$(all_cut && echo yes || echo no)"
+# And large, for the top of their own page, after the small ones.
+is_cut_large(){ local sha=${1%%-*} rest=${1#*-}; local ordinal=${rest%%-*}
+  find "$ROOT/blobroot/derivatives" -type f -path "*/$sha*/face${rest##*-v}-$ordinal-*-768px.jpg" | grep -q .; }
+all_cut_large(){ for f in $FACES; do is_cut_large "$f" || return 1; done; }
+until_true 30 all_cut_large
+check "and each one's large circle" "yes" "$(all_cut_large && echo yes || echo no)"
 has "and the server says so" "of 2 face circles" "$(cat "$ROOT/server.log")"
 check "in 8 and 7 photos" "8,7" "$(echo "$PEOPLE" | python3 -c 'import sys,json; print(",".join(str(p["photoCount"]) for p in json.load(sys.stdin)["people"]))')"
 tiers(){ python3 -c 'import sys,json; print(",".join(str(p.get("tier")) for p in json.load(sys.stdin)["people"]))'; }
@@ -226,6 +232,13 @@ check "and the next page is the rest" "3 None ${EMMA[0]}" "$(curl -s "$API/v1/sp
 check "other collections still come whole, oldest first" "None" "$(curl -s "$API/v1/spaces/$P1/collections/items?kind=recentlyAdded&key=30" -H "$A1" | jq '.get("nextOffset")')"
 check "her face is a picture" "200 image/jpeg" "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$API/v1/spaces/$P1/people/$E/face" -H "$A1")"
 check "so is one face in a photo" "200" "$(code "$API/v1/spaces/$P1/assets/${BOTH[0]}/faces/0" -H "$A1")"
+# Two sizes: small for the rows, large for the big circles. See FaceCrop.
+face_width(){ curl -s "$1" -H "$A1" -o "$ROOT/face.jpg" && vipsheader -f width "$ROOT/face.jpg"; }
+check "a face is small unless asked" "256" "$(face_width "$API/v1/spaces/$P1/people/$E/face")"
+check "and large for a big circle" "768" "$(face_width "$API/v1/spaces/$P1/people/$E/face?size=768")"
+check "one face in a photo too" "768" "$(face_width "$API/v1/spaces/$P1/assets/${BOTH[0]}/faces/0?size=768")"
+check "any other size gets one of the two: large over the small one" "768 256" "$(face_width "$API/v1/spaces/$P1/people/$E/face?size=5000") $(face_width "$API/v1/spaces/$P1/people/$E/face?size=100")"
+has "and the NAS says it makes them" "large-faces" "$(curl -s "$API/health")"
 check "an unnamed person can't be asked about" "0" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; print([p["questions"] for p in json.load(sys.stdin)["people"] if p.get("name") is None][0])')"
 
 echo "Is this Emma?"
@@ -234,6 +247,13 @@ until_true 60 '[ "$(curl -s "$API/v1/spaces/$P1/people/$E/suggestions" -H "$A1" 
 S=$(curl -s "$API/v1/spaces/$P1/people/$E/suggestions" -H "$A1")
 check "a sibling-close face is a question, not a member" "2" "$(echo "$S" | jq '["suggestions"].__len__()')"
 check "the question count is on her card" "2" "$(curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; print([p["questions"] for p in json.load(sys.stdin)["people"] if p.get("name") == "Emma"][0])')"
+# Cut large by the pass that asked them, so the questions open with their
+# faces, sharp, rather than gray. See FaceCropWarmer.
+QFACES="$(q "SELECT left(sha256, 12) FROM assets WHERE id = '$NEAR1'")-0-v4 $(q "SELECT left(sha256, 12) FROM assets WHERE id = '$NEAR2'")-0-v4"
+questions_cut(){ for f in $QFACES; do is_cut_large "$f" || return 1; done; }
+until_true 30 questions_cut
+check "the faces she's asked about are cut before anyone asks" "yes" "$(questions_cut && echo yes || echo no)"
+has "and the server counts them" "of 2 question faces" "$(cat "$ROOT/server.log")"
 # Bodies made first: inside "$( … )", bash brace-expands a JSON object's
 # commas and sends three words instead of one body.
 YES=$(printf '{"assetID":"%s","ordinal":0,"isPerson":true}' "$NEAR1")

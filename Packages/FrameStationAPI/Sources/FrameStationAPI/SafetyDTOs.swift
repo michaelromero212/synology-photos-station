@@ -17,6 +17,10 @@ public enum ServerCapability {
     /// Search suggests a few searches before anything is typed. See
     /// `SearchSuggestionsResponse`.
     public static let searchSuggestions = "search-suggestions"
+    /// A face comes in a large size too, for the big circles, with
+    /// `?size=768`. A NAS without it sends its small one whatever is asked,
+    /// which a device would otherwise keep as the large one.
+    public static let largeFaces = "large-faces"
 }
 
 // MARK: - Reports

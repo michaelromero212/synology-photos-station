@@ -48,6 +48,7 @@ struct HealthController: RouteCollection {
                 ServerCapability.peopleAlbums,
                 ServerCapability.deletedPreview,
                 ServerCapability.searchSuggestions,
+                ServerCapability.largeFaces,
             ]
         )
     }

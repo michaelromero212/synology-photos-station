@@ -549,10 +549,27 @@ struct PeopleController: RouteCollection {
     func suggestions(req: Request) async throws -> PersonSuggestionsResponse {
         let (userID, spaceID) = try await Self.requireOwnLibrary(req)
         let personID = try await Self.requirePerson(req, userID: userID)
-        struct Row: Decodable { let assetID: UUID; let ordinal: Int }
-        // One photo per face, the closest first.
-        let rows = try await req.sql.raw("""
-            SELECT "assetID", ordinal FROM (
+        let rows = try await Self.suggestedFaces(userID: userID, spaceID: spaceID, personID: personID, on: req.sql)
+        return PersonSuggestionsResponse(
+            person: try await summary(req, userID: userID, spaceID: spaceID, personID: personID),
+            suggestions: rows.map { PersonSuggestion(assetID: $0.assetID, ordinal: $0.ordinal) }
+        )
+    }
+
+    struct SuggestedFace: Decodable {
+        let assetID: UUID
+        let ordinal: Int
+        let sha256: String
+    }
+
+    /// The faces "Is this Emma?" asks about, in the order it asks them: one
+    /// photo per face, the closest first. Also the order `FaceCropWarmer`
+    /// cuts them in, so the first questions are the first ready.
+    static func suggestedFaces(
+        userID: UUID, spaceID: UUID, personID: UUID, on sql: any SQLDatabase
+    ) async throws -> [SuggestedFace] {
+        try await sql.raw("""
+            SELECT "assetID", ordinal, sha256 FROM (
                 SELECT DISTINCT ON (pf.sha256, pf.ordinal) a.id AS "assetID", pf.ordinal::int AS ordinal,
                        pf.similarity, pf.sha256
                 FROM person_faces pf
@@ -564,11 +581,7 @@ struct PeopleController: RouteCollection {
                 ORDER BY pf.sha256, pf.ordinal, a.id
             ) faces
             ORDER BY similarity DESC NULLS LAST, sha256, ordinal
-            """).all(decoding: Row.self)
-        return PersonSuggestionsResponse(
-            person: try await summary(req, userID: userID, spaceID: spaceID, personID: personID),
-            suggestions: rows.map { PersonSuggestion(assetID: $0.assetID, ordinal: $0.ordinal) }
-        )
+            """).all(decoding: SuggestedFace.self)
     }
 
     @Sendable
@@ -819,7 +832,24 @@ struct PeopleController: RouteCollection {
 /// A square picture of one face, cropped from the owner's own photo or video
 /// frame, made once and kept beside the file's thumbnails.
 enum FaceCrop {
+    /// A face's two sizes. `size` fills the small circles: the People rows,
+    /// the grid of everyone, a photo's people (78 points at most, 234 pixels
+    /// on a phone). `largeSize` fills the big ones: someone's own page and
+    /// "Is this Emma?" (224 points there, 672 pixels on a phone), which
+    /// `size` left soft (2026-11-16: "faces just need to show up clear and
+    /// quickly"). Asked for with `?size=`; only these two are ever made, so a
+    /// request can't have the NAS render any size it likes.
     static let size = 256
+    static let largeSize = 768
+
+    /// The size a request gets: the large one for anything over the small,
+    /// the small one when it doesn't say, as apps from before the large one
+    /// don't.
+    static func size(requested: Int?) -> Int {
+        guard let requested, requested > size else { return size }
+        return largeSize
+    }
+
     /// How much of the head and shoulders around the face is kept.
     static let margin: Float = 1.8
     /// Part of every crop's file name and of `PersonSummary.face`: moved
@@ -833,7 +863,8 @@ enum FaceCrop {
     static let largestRender = 4096
 
     static func serve(_ req: Request, userID: UUID, sha256: String, ordinal: Int) async throws -> Response {
-        let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal).url
+        let size = size(requested: req.query[Int.self, at: "size"])
+        let path = try await crop(app: req.application, userID: userID, sha256: sha256, ordinal: ordinal, size: size).url
         let response = try await req.fileio.asyncStreamFile(at: path.path)
         response.headers.replaceOrAdd(name: .contentType, value: "image/jpeg")
         response.headers.replaceOrAdd(name: .cacheControl, value: "private, max-age=86400")
@@ -841,8 +872,13 @@ enum FaceCrop {
     }
 
     /// The face's picture, and whether it was made just now rather than
-    /// found already made. Usually made ahead by `FaceCropWarmer`.
-    static func crop(app: Application, userID: UUID, sha256: String, ordinal: Int) async throws -> (url: URL, made: Bool) {
+    /// found already made. Usually made ahead by `FaceCropWarmer`. `size` is
+    /// `size` or `largeSize`; the small one keeps the file name it always had.
+    static func crop(
+        app: Application, userID: UUID, sha256: String, ordinal: Int, size: Int = FaceCrop.size
+    ) async throws -> (url: URL, made: Bool) {
+        let isLarge = size != Self.size
+        let size = isLarge ? largeSize : Self.size
         struct Face: Decodable { let box: [Float]; let landmarks: [Float]; let frameMS: Int? }
         guard let face = try await app.sql.raw("""
             SELECT box, landmarks, frame_ms AS "frameMS" FROM nas_faces
@@ -851,7 +887,9 @@ enum FaceCrop {
         else { throw Abort(.notFound) }
         let directory = app.blobStore.derivativeDirectory(sha256: sha256)
         let boxKey = face.box.map { String(Int(($0 * 10_000).rounded())) }.joined(separator: "-")
-        let target = directory.appendingPathComponent("face\(version)-\(ordinal)-\(boxKey).jpg")
+        let target = directory.appendingPathComponent(
+            "face\(version)-\(ordinal)-\(boxKey)\(isLarge ? "-\(size)px" : "").jpg"
+        )
         if FileManager.default.fileExists(atPath: target.path) { return (target, false) }
 
         struct File: Decodable { let storagePath: String?; let blobExt: String; let mediaType: String }
@@ -922,9 +960,12 @@ enum FaceCrop {
         // made, and a second thumbnail turned every tagged photo's face a
         // second time. That was the sideways and upside-down circles.
         // `Scripts/smoke-image.sh` checks it in the image that ships.
+        // The large one is never enlarged: a face with fewer pixels in its
+        // photo than that comes as it is, and the device draws it to size.
         let partial = work.appendingPathComponent("face.jpg")
         try await Shell.runChecked(
-            "vips", ["thumbnail", square.path, partial.path + "[Q=85,strip]", "\(size)", "--no-rotate"],
+            "vips", ["thumbnail", square.path, partial.path + "[Q=85,strip]", "\(size)", "--no-rotate"]
+                + (isLarge ? ["--size", "down"] : []),
             timeout: 60
         )
         try? FileManager.default.removeItem(at: target)

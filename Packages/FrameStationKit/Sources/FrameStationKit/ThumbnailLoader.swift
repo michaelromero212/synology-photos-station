@@ -189,8 +189,12 @@ public actor ThumbnailLoader {
     /// A face whose circle is gone before its turn leaves the line (see
     /// `acquire`). Scrolling the grid of People used to queue every circle
     /// it passed, and the ones on screen waited behind all of them.
-    public func face(at url: URL, key: String, persist: Bool = true) async -> PlatformImage? {
-        await image(at: url, key: "face-\(key)", targetPixels: 256, persist: persist, abandonable: true)
+    ///
+    /// `pixels` is the face's size on the NAS: its small one, or its large
+    /// one for the big circles, decoded at that size rather than squeezed to
+    /// the small one's. `key` has to tell the two apart.
+    public func face(at url: URL, key: String, persist: Bool = true, pixels: Int = 256) async -> PlatformImage? {
+        await image(at: url, key: "face-\(key)", targetPixels: pixels, persist: persist, abandonable: true)
     }
 
     /// An already-decoded face, without suspending. See `cachedThumbnail`.
