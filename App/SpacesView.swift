@@ -295,6 +295,13 @@ struct SpaceMembersView: View {
             }
         }
         .navigationTitle(currentName)
+        // A name typed and not submitted is kept as this goes: from a
+        // library's Edit, Done only closed the sheet, and from More › Shared
+        // Libraries, so did going back. Only Return ever saved it, so a new
+        // name for Family Shared was dropped without a word.
+        .onDisappear {
+            if model.members?.callerIsOwner == true { commitRename() }
+        }
         .floatingTabBarClearance(when: underTabBar)
         .task {
             currentName = space.name

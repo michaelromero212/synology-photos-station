@@ -1897,6 +1897,19 @@ struct AlbumSettingsSheet: View {
             }
         }
         .macSheetSize()
+        .onDisappear(perform: keepTypedName)
+    }
+
+    /// A name typed and not yet saved, saved as the sheet goes, however it
+    /// goes. Done and Return saved it; swiping the sheet away threw it out
+    /// without a word, and the album kept its old name on every device.
+    /// Not for an album that's gone — deleted or left from here.
+    private func keepTypedName() {
+        guard current.mayManage, nameChanged,
+              store.albums.contains(where: { $0.id == album.id }) else { return }
+        let target = current
+        let newName = trimmed
+        Task { await store.rename(target, to: newName) }
     }
 
     // MARK: - Sections

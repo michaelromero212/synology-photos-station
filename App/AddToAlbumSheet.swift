@@ -184,7 +184,11 @@ struct AddToAlbumSheet: View {
     /// shown, never dropped.
     private var sharedRows: [SharedRow] {
         let albums = store.family.filter(\.mayAdd)
-        var rows: [SharedRow] = store.sharedWithPeople.filter(\.mayAdd).map(SharedRow.album)
+        // Not the album the photos are already in: from a shared album's own
+        // grid, it was offered as somewhere to put them.
+        var rows: [SharedRow] = store.sharedWithPeople
+            .filter { $0.mayAdd && ($0.spaceID == nil || $0.spaceID != source?.id) }
+            .map(SharedRow.album)
         for space in libraries {
             rows.append(.library(space))
             rows += albums.filter { $0.spaceID == space.id }.map(SharedRow.album)
