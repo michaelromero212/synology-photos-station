@@ -55,7 +55,7 @@ struct MacRootView: View {
     /// window rather than of whatever the detail pane happens to be showing.
     @State private var query = ""
 
-    /// The Albums page's list, for the shared albums down the side. The same
+    /// The Albums page's list, for the albums down the side. The same
     /// store the page draws from, so the two always list the same things.
     private var albums: AlbumStore { session.albumStore() }
 
@@ -135,6 +135,21 @@ struct MacRootView: View {
                     .tag(MacDestination.library)
                 Label("Albums", systemImage: "rectangle.stack")
                     .tag(MacDestination.albums)
+            }
+
+            // Your own albums, the Albums page's "Albums" row for row, above
+            // the shared ones as on the page. The sidebar listed every shared
+            // album by name and none of yours, so an album only you can see
+            // was the one thing here two clicks away. "My Albums", as Photos
+            // heads them, because the row above is already called Albums.
+            let mine = albums.personal
+            if !mine.isEmpty {
+                Section("My Albums") {
+                    ForEach(mine) { album in
+                        Label(album.name, systemImage: "rectangle.stack")
+                            .tag(MacDestination.album(album.id))
+                    }
+                }
             }
 
             // Everything shared, by name — the Albums page's Shared Albums,
@@ -400,7 +415,7 @@ enum MacDestination: Hashable {
     case albums
     /// A shared library.
     case space(UUID)
-    /// An album under Shared Albums, by its own id.
+    /// An album, yours or shared, by its own id.
     case album(UUID)
     case mediaType(String)
     case recentlyDeleted
