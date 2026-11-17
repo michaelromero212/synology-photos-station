@@ -61,6 +61,10 @@ TREE="$WORK/tree"
 cleanup() { git -C "$REPO" worktree remove --force "$TREE" >/dev/null 2>&1 || true; git -C "$REPO" worktree prune; }
 trap cleanup EXIT
 
+# Everything this run leaves behind lives in $WORK (DerivedData included) and
+# is removed on success; the distribution logs xcodebuild drops in $TMPDIR are
+# found by being newer than this marker.
+touch "$WORK/.started"
 git worktree add --detach --quiet "$TREE" HEAD
 [ -f "$REPO/Config/Local.xcconfig" ] || fail "Config/Local.xcconfig is missing; without it background uploads have no host."
 cp "$REPO/Config/Local.xcconfig" "$TREE/Config/Local.xcconfig"
@@ -91,6 +95,7 @@ archive() {  # platform scheme destination
     echo "→ Archiving $1…"
     (cd "$TREE" && xcodebuild archive -project FrameStation.xcodeproj -scheme "$2" \
         -configuration Release -destination "$3" -archivePath "$path" \
+        -derivedDataPath "$WORK/DerivedData" \
         -allowProvisioningUpdates > "$WORK/archive-$1.log" 2>&1) \
         || { grep -m 15 "error:" "$WORK/archive-$1.log" >&2; fail "$1 archive failed (log: $WORK/archive-$1.log)."; }
     echo "$path"
@@ -133,6 +138,10 @@ upload Mac "$MAC" || ok=1
 
 if [ $ok -ne 0 ]; then
     trap - EXIT; cleanup
-    fail "Build $BUILD is NOT on TestFlight for both apps. Logs: $WORK"
+    fail "Build $BUILD is NOT on TestFlight for both apps. Kept for debugging: $WORK (logs, DerivedData) and ${TMPDIR:-/tmp}/FrameStation-*.xcdistributionlogs"
 fi
+# Success: nothing left to debug, so leave no waste (~310 MB of DerivedData per upload).
+trap - EXIT; cleanup
+find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'FrameStation-*.xcdistributionlogs' -newer "$WORK/.started" -exec rm -rf {} + 2>/dev/null || true
+rm -rf "$WORK"
 echo "✓ Build $BUILD ($COMMIT) is uploaded for the iPhone and the Mac. Apple processes it next."

@@ -47,10 +47,15 @@ SRVPORT=8099
 # silently, while every local check appeared to pass.
 #
 # `--show-bin-path` is the toolchain's own answer to "where did you put it", so
-# this cannot drift again. The fallback keeps the script working if SwiftPM
-# can't answer.
-SRVBIN="$( (cd "$REPO/Server" && swift build --show-bin-path 2>/dev/null) )/FrameStationServer"
-[ -x "$SRVBIN" ] || SRVBIN="$REPO/Server/.build/arm64-apple-macosx/debug/FrameStationServer"
+# this cannot drift again. If SwiftPM can't answer, installing stops with an
+# error: a guessed path is exactly how a weeks-old build got served silently.
+SRVBIN="$( (cd "$REPO/Server" && swift build --show-bin-path 2>/dev/null) || true )"
+if [ -n "$SRVBIN" ]; then
+    SRVBIN="$SRVBIN/FrameStationServer"
+elif [ "${1:-}" = "install" ]; then
+    echo "error: 'swift build --show-bin-path' failed in $REPO/Server, so the server binary can't be located. Fix the Swift toolchain and retry; not guessing a path." >&2
+    exit 1
+fi
 # The version-stable symlink, not the Cellar path — a Homebrew upgrade must not
 # silently leave launchd pointing at a directory that no longer exists.
 PGBIN="/opt/homebrew/opt/postgresql@16/bin/postgres"
@@ -153,6 +158,20 @@ check_paths() {
     fi
 }
 
+# The dev server log is append-only and was never trimmed (88 MB once). Over
+# 50 MB, keep the last 20,000 lines in server.log.1 and empty the live file.
+# Truncating in place is safe: launchd holds the file open for appending.
+trim_server_log() {
+    local log="$LOGS/server.log" size
+    [ -f "$log" ] || return 0
+    size=$(stat -f %z "$log" 2>/dev/null || echo 0)
+    if [ "$size" -gt $((50 * 1024 * 1024)) ]; then
+        tail -n 20000 "$log" > "$log.1"
+        : > "$log"
+        echo "  trimmed server.log ($((size / 1024 / 1024)) MB); last 20,000 lines are in server.log.1"
+    fi
+}
+
 stop_strays() {
     # Anything started by hand before this script existed. Left running it would
     # hold the port and launchd's copy would crash-loop against it.
@@ -174,6 +193,7 @@ install)
 
     echo "stopping anything already running…"
     stop_strays
+    trim_server_log
     write_plists
     for label in "$LABEL_DB" "$LABEL_SRV"; do
         launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
@@ -196,6 +216,7 @@ restart)
     # After `swift build`: a running process keeps executing the image it
     # started with, so a rebuilt binary does nothing until the process is
     # replaced. This is that step.
+    trim_server_log
     launchctl kickstart -k "$DOMAIN/$LABEL_SRV"
     # Generous: the server loads ~170k geonames places before it listens,
     # and a short wait reported a false failure on a server that was fine.

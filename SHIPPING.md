@@ -41,6 +41,11 @@ will take it. The server has its own document — see DEPLOY.md.
    both archives carry the claimed number and the iPhone its upload
    extension, and uploads both. It refuses a number nobody claimed, or one
    already uploaded from this Mac, and says plainly if either upload failed.
+   On success it also deletes its own DerivedData and the `.xcdistributionlogs`
+   it wrote (about 310 MB per upload); on failure it keeps them for debugging.
+   Afterwards, `Scripts/cleanup.sh` lists the old archives, and
+   `Scripts/cleanup.sh --apply` moves those older than the newest 6 build
+   numbers to the Trash.
 
    By hand, only if the script can't be used: `xcodegen generate`, then in
    Xcode **Product → Archive** for `FrameStation-iOS` on **Any iOS Device** and
