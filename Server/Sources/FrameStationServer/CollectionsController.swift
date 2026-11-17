@@ -2939,11 +2939,6 @@ struct CollectionsController: RouteCollection {
 
     // MARK: - Recently deleted
 
-    private struct DeletedRow: Decodable {
-        let count: Int
-        let coverAssetID: UUID?
-    }
-
     /// Removals inside their retention window, in any library.
     ///
     /// Shared libraries used to be left out, on the grounds that their removals
@@ -3730,13 +3725,6 @@ struct CollectionsController: RouteCollection {
             return "\(year)"
         }
         return stampFormatter("MMMM d, yyyy").string(from: date)
-    }
-
-    /// "A busy Saturday" — the weekday is the part people actually recall about
-    /// a day that mattered, more than its date.
-    private static func weekdayTitle(_ key: String) -> String {
-        guard let date = parseDate(key) else { return "A busy day" }
-        return "A busy \(stampFormatter("EEEE").string(from: date))"
     }
 
     private static func longDay(_ key: String) -> String? {

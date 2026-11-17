@@ -168,8 +168,6 @@ actor APNsClient {
         self.logger = logger
     }
 
-    var isConfigured: Bool { configuration != nil }
-
     func send(
         _ notification: Notification,
         to deviceToken: String,

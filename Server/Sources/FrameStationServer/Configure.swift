@@ -71,8 +71,6 @@ func configure(_ app: Application) async throws {
     app.asyncCommands.use(GeocodeCommand(), as: "geocode")
     app.asyncCommands.use(CreditUploadersCommand(), as: "credit-uploaders")
     app.asyncCommands.use(RebuildCommand(), as: "rebuild")
-    app.asyncCommands.use(RepairDimensionsCommand(), as: "repair-dimensions")
-    app.asyncCommands.use(RetireLegacyBrowseCommand(), as: "retire-legacy-browse")
     app.asyncCommands.use(AnalysisCommand(), as: "analysis")
 
     try app.register(collection: HealthController())
@@ -280,10 +278,6 @@ func startBackgroundWork(_ app: Application) async {
     Task { await MetadataBackfill.requeueVanishedLadders(on: app) }
     // And give HDR clips their 10-bit ladder, where there's an encoder for it.
     Task { await MetadataBackfill.requeueHDRLadders(on: app) }
-    // Take apart the old hardlink tree under the blob root, which kept the
-    // bytes of permanently deleted photos on disk. Once it is gone this is
-    // a single failed `stat` per boot.
-    Task { await LegacyBrowseTree.retireInBackground(app: app) }
 }
 
 enum ConfigurationError: Error, CustomStringConvertible {

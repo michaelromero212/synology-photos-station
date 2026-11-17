@@ -16,13 +16,11 @@ import Darwin
 /// /data/incoming/<uploadID>/upload.data    an upload in progress
 /// ```
 ///
-/// An upload that was already partway through when the server updated may
-/// still be staged the old way, as `incoming/<uploadID>/<n>.part`, one file per
-/// chunk. It finishes that way. See `writeChunk`.
+/// An upload that is never finished is cleared away by the retention pass,
+/// its staging folder with it. See `RetentionWorker.sweepAbandonedUploads`.
 ///
 /// The copies people browse in File Station live in their DSM homes and are
-/// kept there by `BrowseTreeWorker`. The `browse/` tree that used to sit here
-/// is retired by `LegacyBrowseTree`.
+/// kept there by `BrowseTreeWorker`.
 ///
 /// Originals are stored byte-for-byte. Nothing here ever rewrites an original —
 /// re-encoding destroys HDR gain maps, ProRAW, depth data, and Live Photo
@@ -77,13 +75,6 @@ struct BlobStore: Sendable {
         stagingDirectory(uploadID: uploadID).appendingPathComponent("upload.data")
     }
 
-    /// One chunk as a file of its own: how uploads were staged before
-    /// `uploadDataPath`. Only an upload that was partway through when the
-    /// server updated still has these.
-    func chunkPath(uploadID: UUID, index: Int) -> URL {
-        stagingDirectory(uploadID: uploadID).appendingPathComponent("\(index).part")
-    }
-
     // MARK: - Chunks
 
     /// Writes one chunk where it belongs in the finished file.
@@ -107,13 +98,6 @@ struct BlobStore: Sendable {
     func writeChunk(uploadID: UUID, index: Int, chunkSize: Int, bytes: Data) throws {
         let directory = stagingDirectory(uploadID: uploadID)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        // An upload that started before this server finishes the way it
-        // started, one file per chunk.
-        if hasChunkFiles(uploadID: uploadID) {
-            try bytes.write(to: chunkPath(uploadID: uploadID, index: index), options: .atomic)
-            return
-        }
 
         // Created if missing and never truncated: two chunks can arrive at
         // once, and either may be the first. 0o666 is what Foundation's
@@ -142,14 +126,6 @@ struct BlobStore: Sendable {
         }
     }
 
-    /// Whether this upload was staged the old way, one file per chunk.
-    private func hasChunkFiles(uploadID: UUID) -> Bool {
-        let names = (try? fm.contentsOfDirectory(
-            atPath: stagingDirectory(uploadID: uploadID).path
-        )) ?? []
-        return names.contains { $0.hasSuffix(".part") }
-    }
-
     func discardStaging(uploadID: UUID) {
         try? fm.removeItem(at: stagingDirectory(uploadID: uploadID))
     }
@@ -168,7 +144,6 @@ struct BlobStore: Sendable {
     @discardableResult
     func assemble(
         uploadID: UUID,
-        chunkCount: Int,
         expectedSHA256: String,
         fileExtension: String
     ) throws -> URL {
@@ -180,13 +155,13 @@ struct BlobStore: Sendable {
             return destination
         }
 
+        // Every chunk noted as received and still no file: the staging folder
+        // went missing under the session. A `BlobStoreError`, so the commit
+        // clears the session and the phone starts the file over.
         let staged = uploadDataPath(uploadID: uploadID)
         guard fm.fileExists(atPath: staged.path) else {
-            // Staged the old way, one file per chunk.
-            return try assembleChunkFiles(
-                uploadID: uploadID, chunkCount: chunkCount,
-                expectedSHA256: expectedSHA256, destination: destination
-            )
+            discardStaging(uploadID: uploadID)
+            throw BlobStoreError.nothingStaged
         }
 
         let digest: String
@@ -239,59 +214,6 @@ struct BlobStore: Sendable {
         #endif
     }
 
-    /// Commits an upload staged before `upload.data`: reads every chunk file,
-    /// hashes it, and writes the whole upload out again as one file.
-    private func assembleChunkFiles(
-        uploadID: UUID,
-        chunkCount: Int,
-        expectedSHA256: String,
-        destination: URL
-    ) throws -> URL {
-        let assembled = stagingDirectory(uploadID: uploadID)
-            .appendingPathComponent("assembled.tmp")
-        try? fm.removeItem(at: assembled)
-        guard fm.createFile(atPath: assembled.path, contents: nil) else {
-            throw BlobStoreError.cannotCreate(assembled.path)
-        }
-
-        let handle = try FileHandle(forWritingTo: assembled)
-        var hasher = SHA256()
-
-        do {
-            for index in 0..<chunkCount {
-                let chunk = chunkPath(uploadID: uploadID, index: index)
-                guard fm.fileExists(atPath: chunk.path) else {
-                    throw BlobStoreError.missingChunk(index)
-                }
-                // Chunks are bounded (16 MB) so a whole-chunk read is fine and
-                // avoids a second streaming layer.
-                let data = try Data(contentsOf: chunk, options: .mappedIfSafe)
-                hasher.update(data: data)
-                try handle.write(contentsOf: data)
-            }
-            try handle.close()
-        } catch {
-            try? handle.close()
-            discardStaging(uploadID: uploadID)
-            throw error
-        }
-
-        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        guard digest == expectedSHA256.lowercased() else {
-            discardStaging(uploadID: uploadID)
-            throw BlobStoreError.hashMismatch(expected: expectedSHA256, actual: digest)
-        }
-
-        try fm.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try fm.moveItem(at: assembled, to: destination)
-        discardStaging(uploadID: uploadID)
-
-        return destination
-    }
-
     /// Keeps a file that arrived whole, already hashed as it came in: a
     /// background upload, which has no chunks to check. Moved into `blobs/`,
     /// the same volume, so nothing is copied. If the same bytes are already
@@ -311,10 +233,6 @@ struct BlobStore: Sendable {
         return destination
     }
 
-    func blobExists(sha256: String, fileExtension: String) -> Bool {
-        fm.fileExists(atPath: blobPath(sha256: sha256, fileExtension: fileExtension).path)
-    }
-
     static func fileExtension(for filename: String) -> String {
         let ext = (filename as NSString).pathExtension.lowercased()
         // Guard against a hostile or malformed filename becoming a path segment.
@@ -326,7 +244,7 @@ struct BlobStore: Sendable {
 enum BlobStoreError: Error, CustomStringConvertible {
     case cannotCreate(String)
     case cannotWrite(String, Int32)
-    case missingChunk(Int)
+    case nothingStaged
     case hashMismatch(expected: String, actual: String)
 
     var description: String {
@@ -335,8 +253,8 @@ enum BlobStoreError: Error, CustomStringConvertible {
             return "Could not create \(path)."
         case .cannotWrite(let path, let code):
             return "Could not write \(path): \(String(cString: strerror(code)))."
-        case .missingChunk(let index):
-            return "Chunk \(index) was never received."
+        case .nothingStaged:
+            return "None of this upload's bytes are on the server any more."
         case .hashMismatch(let expected, let actual):
             return "Hash mismatch: client claimed \(expected), assembled bytes are \(actual)."
         }

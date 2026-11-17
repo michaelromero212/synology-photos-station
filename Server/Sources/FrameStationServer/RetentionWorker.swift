@@ -27,7 +27,9 @@ extension Retention {
 ///
 /// Each pass then forgets what was seen in files people no longer hold
 /// (`forget`), by their devices and by the NAS's analyzer, faces included, so
-/// a photo deleted for good leaves nothing about itself behind.
+/// a photo deleted for good leaves nothing about itself behind. And it clears
+/// away uploads that were started and never finished
+/// (`sweepAbandonedUploads`), which nothing else ever did.
 actor RetentionWorker {
     private let app: Application
     private let interval: Duration
@@ -117,6 +119,112 @@ actor RetentionWorker {
         if nas + devices > 0 {
             app.logger.info("retention: removed \(devices) device observations and \(nas) NAS analyses of files no longer in their libraries")
         }
+
+        do {
+            let swept = try await Self.sweepAbandonedUploads(on: sql, store: app.blobStore)
+            if swept.sessions + swept.folders > 0 {
+                app.logger.notice("uploads: removed \(swept.sessions) unfinished upload(s) idle over \(Self.abandonedUploadDays) days and \(swept.folders) staging folder(s) no upload was using")
+            }
+        } catch is CancellationError {
+        } catch {
+            app.logger.error("uploads: clearing abandoned uploads failed: \(String(reflecting: error))")
+        }
+    }
+
+    // MARK: - Abandoned uploads
+
+    /// How long an unfinished upload is kept with nothing added to it.
+    ///
+    /// Generous, because backup pauses: under Only While Charging, or with the
+    /// phone off or away, a video can sit half-sent for days. Two weeks keeps
+    /// what was sent of it for any pause that ordinary, and losing it costs
+    /// only a fresh start (see `sweepAbandonedUploads`).
+    static let abandonedUploadDays = 14
+
+    /// How long a staging folder no unfinished upload owns is left alone.
+    ///
+    /// A background upload (`BackgroundUploadController`) stages under an id
+    /// of its own, with no session row, and writes its file the whole time
+    /// the request is arriving, so one in flight has always been written to
+    /// within seconds. Two days is far past any request.
+    static let strayStagingAge: TimeInterval = 2 * 24 * 3600
+
+    /// Deletes unfinished uploads nothing has been added to in
+    /// `abandonedUploadDays`, with their staging folders, and any staging
+    /// folder in `incoming/` that no unfinished upload owns and nothing has
+    /// written to in `strayStagingAge`. Returns how many of each went.
+    ///
+    /// Nothing removed these before. An upload the phone never came back to
+    /// left its session row and its half-sent file for good, and so did a
+    /// background upload cut off partway, or the folder of an upload whose
+    /// session went some other way (Delete Account, say).
+    ///
+    /// Safe for the phone. It probes before every file it sends, a resumed
+    /// one included, rather than reusing an upload id it kept: with no session
+    /// to resume, the probe opens a new one and the file goes from its first
+    /// chunk. If one did arrive with an id this removed, its chunk or commit
+    /// is a 404, a failure of that one file, which the queue tries again from
+    /// a fresh probe.
+    ///
+    /// Cheap: the delete uses the index 0002 made on `created_at` for open
+    /// sessions, which every row this wants is older than too, and
+    /// `incoming/` holds only what is in flight.
+    static func sweepAbandonedUploads(
+        on sql: any SQLDatabase, store: BlobStore, now: Date = Date()
+    ) async throws -> (sessions: Int, folders: Int) {
+        struct IDRow: Decodable { let id: UUID }
+        let abandoned = try await sql.raw("""
+            DELETE FROM upload_sessions
+            WHERE committed_at IS NULL
+              AND created_at < now() - (\(bind: abandonedUploadDays) * interval '1 day')
+              AND updated_at < now() - (\(bind: abandonedUploadDays) * interval '1 day')
+            RETURNING id
+            """).all(decoding: IDRow.self)
+        for row in abandoned {
+            store.discardStaging(uploadID: row.id)
+        }
+
+        // Folders named for an upload, and only those: anything else in here
+        // (DSM's `@eaDir`, a file someone put there) is left as it is.
+        let fm = FileManager.default
+        let incoming = store.root.appendingPathComponent("incoming", isDirectory: true)
+        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey]
+        let entries = (try? fm.contentsOfDirectory(
+            at: incoming, includingPropertiesForKeys: keys
+        )) ?? []
+        let cutoff = now.addingTimeInterval(-strayStagingAge)
+        var stale: [UUID: URL] = [:]
+        for entry in entries {
+            guard let id = UUID(uuidString: entry.lastPathComponent),
+                  (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            else { continue }
+            // Its newest write, the folder's or a file's in it: the folder's
+            // own time only moves when a file is added or removed, and a
+            // background upload's file is written to all the while it arrives.
+            let files = (try? fm.contentsOfDirectory(
+                at: entry, includingPropertiesForKeys: [.contentModificationDateKey]
+            )) ?? []
+            let written = ([entry] + files).compactMap {
+                try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            }.max()
+            guard let written, written < cutoff else { continue }
+            stale[id] = entry
+        }
+        guard !stale.isEmpty else { return (abandoned.count, 0) }
+
+        // An unfinished upload still owns its folder however long it has been
+        // quiet: that one is for the session window above to judge.
+        let owned = try await sql.raw("""
+            SELECT id FROM upload_sessions
+            WHERE id = ANY(\(bind: Array(stale.keys))::uuid[]) AND committed_at IS NULL
+            """).all(decoding: IDRow.self)
+        for row in owned { stale[row.id] = nil }
+        var removed = 0
+        for folder in stale.values {
+            // One that won't go is tried again on the next pass.
+            if (try? fm.removeItem(at: folder)) != nil { removed += 1 }
+        }
+        return (abandoned.count, removed)
     }
 
     /// `forget`, with a failure logged rather than thrown, so one kind failing

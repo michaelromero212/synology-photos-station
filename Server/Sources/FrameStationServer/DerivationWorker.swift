@@ -18,8 +18,7 @@ actor DerivationWorker {
     /// Set once the lanes are running. See `deriveNow(assetID:)`.
     private var lanesStarted = false
 
-    /// Whether a lane is transcoding: building a stream ladder, or a playback
-    /// rendition left in the queue from before ladders.
+    /// Whether a lane is transcoding: building a stream ladder.
     ///
     /// One at a time. A 4K transcode holds its lane for minutes, and when two
     /// ran at once after a restart they had half the lanes and the processor
@@ -192,7 +191,7 @@ actor DerivationWorker {
     private func finishedTranscoding() { transcoding = false }
 
     /// The jobs that hold a lane for minutes at a time.
-    static let transcodeKinds: Set<String> = [StreamLadder.jobKind, Derivatives.playbackJobKind]
+    static let transcodeKinds: Set<String> = [StreamLadder.jobKind]
 
     /// Atomically takes the oldest claimable job.
     ///
@@ -222,8 +221,7 @@ actor DerivationWorker {
                            AND j.attempts < 3))
                       -- One transcode at a time; see `transcoding`.
                       AND (\(bind: includingTranscodes)
-                           OR (j.kind <> \(bind: StreamLadder.jobKind)
-                               AND j.kind <> \(bind: Derivatives.playbackJobKind)))
+                           OR j.kind <> \(bind: StreamLadder.jobKind))
                     -- Thumbnails first: they are what someone watching the grid
                     -- is waiting on, so a burst of uploads (and the exif-dump
                     -- backfill sharing this queue) fills tiles before it spends
@@ -381,25 +379,14 @@ actor DerivationWorker {
                     logger: app.logger
                 )
 
-            case Derivatives.playbackJobKind:
-                // Only video has one, and only video above the bitrate
-                // threshold — see `makePlaybackRendition`. No longer queued:
-                // the ladder above replaced it. Kept for a row from before.
-                guard mediaType == .video,
-                      let shape = try await VideoShape.read(asset.id, on: app.sql)
-                else { break }
-                _ = try await Derivatives.makePlaybackRendition(
-                    blob: blob,
-                    sha256: asset.sha256,
-                    sourceBitrate: shape.bitrate,
-                    sourceLongEdge: shape.longEdge,
-                    sourceDurationMS: shape.durationMS,
-                    store: app.blobStore,
-                    logger: app.logger
-                )
-
             default:
-                try await finish(job: job, app: app, error: "unknown job kind \(job.kind)")
+                // A kind this server no longer builds, such as the single
+                // cellular rendition the ladder replaced ('playback', closed
+                // out by 0035), or one it never knew. Done rather than failed,
+                // the way 0035 closed them: a failed row would only be claimed
+                // twice more to fail the same way.
+                app.logger.warning("derivation: no longer builds \(job.kind); closing job \(job.id)")
+                try await finish(job: job, app: app, error: nil, note: "no longer built: \(job.kind)")
                 return
             }
 
@@ -447,11 +434,15 @@ actor DerivationWorker {
         }
     }
 
-    private static func finish(job: Job, app: Application, error: String?) async throws {
+    /// `note` is kept in `last_error` beside a job that is done, as for one
+    /// closed without being built.
+    private static func finish(
+        job: Job, app: Application, error: String?, note: String? = nil
+    ) async throws {
         try await app.sql.raw("""
             UPDATE derivation_jobs
             SET state = \(bind: error == nil ? "done" : "failed"),
-                last_error = \(bind: error),
+                last_error = \(bind: error ?? note),
                 finished_at = now()
             WHERE id = \(bind: job.id)
             """).run()

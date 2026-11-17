@@ -163,7 +163,7 @@ curl -s http://127.0.0.1:8099/v1/me -H "Authorization: Bearer <token>"
 | POST | `/v1/auth/redeem` | — | Invite code → user + personal space + device token, and the shared library the code was made for |
 | GET | `/v1/me` | Bearer | Current user, device, and space memberships |
 | DELETE | `/v1/me` | Bearer | Delete this account: its devices, personal library and albums. What it added to shared libraries stays |
-| PUT/DELETE | `/v1/devices/push-token` | Bearer | Register or drop the APNs token (`POST` still accepted) |
+| PUT/DELETE | `/v1/devices/push-token` | Bearer | Register or drop the APNs token |
 | PUT | `/v1/devices/backup-state` | Bearer | Items still to back up, so the NAS can wake a stalled phone |
 | POST | `/v1/uploads/probe` | Bearer | Hash-first: `have` (skip transfer) / `need` / `partial` (resume) |
 | PUT | `/v1/uploads/:id/chunk/:n` | Bearer | Upload one 16 MB chunk |
@@ -316,18 +316,6 @@ Backfill assets that predate geocoding, or re-run after a dataset update:
 
 ```bash
 docker compose exec server ./FrameStationServer geocode
-```
-
-Correct photos whose size was recorded a quarter turn out — portrait iPhone
-photos backed up before uploads reconciled PhotoKit's upright size with the
-file's orientation, which reported them landscape (the Information panel said
-4032 × 3024; the justified grid on the Mac and the television laid them out
-wide). Reads each file, writes only the two numbers, and announces every
-change so apps redraw. Try it dry first; a second run finds nothing to do:
-
-```bash
-docker compose exec server ./FrameStationServer repair-dimensions --dry-run
-docker compose exec server ./FrameStationServer repair-dimensions
 ```
 
 ### Smoke test

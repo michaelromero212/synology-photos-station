@@ -308,12 +308,10 @@ struct UploadController: RouteCollection {
             // used to hold one of the four threads every other request was
             // waiting on.
             let store = req.blobStore
-            let chunkCount = session.chunkCount
             let sha256 = session.sha256
             blob = try await req.application.threadPool.runIfActive {
                 try store.assemble(
                     uploadID: uploadID,
-                    chunkCount: chunkCount,
                     expectedSHA256: sha256,
                     fileExtension: fileExtension
                 )

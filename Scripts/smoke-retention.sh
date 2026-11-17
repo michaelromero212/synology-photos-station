@@ -11,6 +11,9 @@
 # no library they're in holds it, and what the NAS's analyzer saw, faces and
 # the names given them included, once their own library doesn't: by the pass
 # the server makes as it starts and hourly after, with no analyzer set up.
+# And that the same pass clears away an upload nobody has added to in two
+# weeks, and a staging folder no upload owns, while one paused for days keeps
+# what it sent, and the phone's next probe starts the cleared one over.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-retention.sh
 #
@@ -288,6 +291,70 @@ check "restored, it shows what was seen without a new analysis" "200" \
   "$(status "$A" "/v1/spaces/$SP/assets/$HELD/observation")"
 check "and what the NAS saw" "200" "$(status "$A" "/v1/spaces/$SP/assets/$HELD/nas-observation")"
 lacks "and the pass's log names no file" "$(sha "$F_GONE" | cut -c1-8)" "$(grep 'retention' "$ROOT/server.log")"
+
+echo "== uploads nobody finished =="
+# begin <file> → its upload id, with its one chunk sent and no commit
+begin(){ local up
+  up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$SP\",\"sha256\":\"$(sha "$1")\",\"byteSize\":$(stat -f%z "$1"),\"filename\":\"$(basename "$1")\",\"isAutomaticBackup\":true}" | jq '["uploadID"]')
+  curl -s -o /dev/null -X PUT "$API/v1/uploads/$up/chunk/0" -H "$A" --data-binary "@$1"
+  echo "$up"; }
+# staged <folder> → whether incoming/ still has it
+staged(){ [ -e "$ROOT/blobroot/incoming/$1" ] && echo yes || echo no; }
+# session <upload id> → 1 while its row is kept
+session(){ q "select count(*) from upload_sessions where id = '$1';"; }
+F_STALE=$(photo IMG_9300); STALE=$(begin "$F_STALE")
+F_PAUSED=$(photo IMG_9301); PAUSED=$(begin "$F_PAUSED")
+check "two uploads started and never finished" "yes yes" "$(staged "$STALE") $(staged "$PAUSED")"
+DAYS_AGO=$(date -v-3d +%Y%m%d%H%M)
+# One the phone never came back to in fifteen days, and one paused for three,
+# under Only While Charging, say.
+q "update upload_sessions set created_at = now() - interval '15 days', updated_at = now() - interval '15 days'
+   where id = '$STALE';
+   update upload_sessions set created_at = now() - interval '3 days', updated_at = now() - interval '3 days'
+   where id = '$PAUSED';" >/dev/null
+touch -t "$DAYS_AGO" "$ROOT/blobroot/incoming/$PAUSED"/* "$ROOT/blobroot/incoming/$PAUSED"
+# Folders no upload owns, as a background upload stages one: left by one cut
+# off three days ago, one whose file is still being written, and one that
+# isn't an upload's at all.
+LEFT=$(uuidgen); WRITING=$(uuidgen)
+for d in "$LEFT" "$WRITING" "@eaDir"; do
+  mkdir -p "$ROOT/blobroot/incoming/$d"; head -c 1000 /dev/urandom > "$ROOT/blobroot/incoming/$d/upload.data"
+done
+touch -t "$DAYS_AGO" "$ROOT/blobroot/incoming/$LEFT/upload.data" "$ROOT/blobroot/incoming/$LEFT" \
+  "$ROOT/blobroot/incoming/$WRITING" "$ROOT/blobroot/incoming/@eaDir/upload.data" "$ROOT/blobroot/incoming/@eaDir"
+
+stop_server; start_server
+for _ in $(seq 1 60); do grep -q 'uploads: removed' "$ROOT/server.log" && break; sleep 0.5; done
+check "the one left fifteen days goes" "0" "$(session "$STALE")"
+check "and its half-sent file with it" "no" "$(staged "$STALE")"
+check "the one paused three days stays" "1" "$(session "$PAUSED")"
+check "with what it had sent" "yes" "$(staged "$PAUSED")"
+check "a folder no upload owns, quiet three days, goes" "no" "$(staged "$LEFT")"
+check "one still being written stays" "yes" "$(staged "$WRITING")"
+check "and a folder that isn't an upload's is left alone" "yes" "$(staged "@eaDir")"
+has "the log says what went" "uploads: removed 1 unfinished upload(s) idle over 14 days and 1 staging folder(s)" \
+  "$(grep 'uploads:' "$ROOT/server.log")"
+
+# What the phone does next: it probes before every file, so the one cleared
+# away starts over under a new upload, and the paused one picks up.
+P=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
+  -d "{\"spaceID\":\"$SP\",\"sha256\":\"$(sha "$F_STALE")\",\"byteSize\":$(stat -f%z "$F_STALE"),\"filename\":\"IMG_9300.jpg\",\"isAutomaticBackup\":true}")
+NEW=$(echo "$P" | jq '["uploadID"]')
+check "the cleared one starts over, every chunk to send" "need [0]" \
+  "$(echo "$P" | jq '["status"]') $(echo "$P" | jq '["missingChunks"]')"
+check "under a new upload" "yes" "$([ -n "$NEW" ] && [ "$NEW" != "$STALE" ] && echo yes || echo no)"
+curl -s -o /dev/null -X PUT "$API/v1/uploads/$NEW/chunk/0" -H "$A" --data-binary "@$F_STALE"
+COMMITTED=$(curl -s -X POST "$API/v1/uploads/$NEW/commit" -H "$A" -H 'Content-Type: application/json' \
+  -d "{\"spaceID\":\"$SP\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":400,\"height\":300,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]')
+check "and goes up" "yes" "$([ -n "$COMMITTED" ] && echo yes || echo no)"
+P=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A" -H 'Content-Type: application/json' \
+  -d "{\"spaceID\":\"$SP\",\"sha256\":\"$(sha "$F_PAUSED")\",\"byteSize\":$(stat -f%z "$F_PAUSED"),\"filename\":\"IMG_9301.jpg\",\"isAutomaticBackup\":true}")
+check "the paused one resumes where it was, nothing left to send" "$PAUSED []" \
+  "$(echo "$P" | jq '["uploadID"]') $(echo "$P" | jq '["missingChunks"]')"
+COMMITTED=$(curl -s -X POST "$API/v1/uploads/$PAUSED/commit" -H "$A" -H 'Content-Type: application/json' \
+  -d "{\"spaceID\":\"$SP\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":400,\"height\":300,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]')
+check "and goes up" "yes" "$([ -n "$COMMITTED" ] && echo yes || echo no)"
 
 echo
 echo "  $PASS passed, $FAIL failed"

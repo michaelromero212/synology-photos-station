@@ -238,7 +238,12 @@ enum StreamLadder {
         }
         let name = hdr == nil ? directoryName : hdrDirectoryName
         let destination = directory(sha256: sha256, store: store, named: name)
-        if isBuilt(destination) { return destination }
+        if isBuilt(destination) {
+            // Built already, perhaps by a server that left the rendition
+            // beside it.
+            retireRendition(sha256: sha256, store: store, logger: logger)
+            return destination
+        }
 
         // Written beside, then moved into place whole, so a transcode that is
         // killed part-way — the container restarting, the NAS rebooting —
@@ -272,8 +277,9 @@ enum StreamLadder {
         }
 
         // Every size read back before the playlist naming them is written: a
-        // file that exists is not the same as one that plays (see
-        // `Derivatives.makePlaybackRendition`).
+        // file that exists is not the same as one that plays. A rendition from
+        // before ladders once came out 112 MB with a duration and no track in
+        // it that a player could read.
         var built: [Built] = []
         for rung in planned {
             let playlist = partial.appendingPathComponent(rung.name + ".m3u8")
@@ -307,7 +313,32 @@ enum StreamLadder {
                 at: directory(sha256: sha256, store: store, named: directoryName)
             )
         }
+        retireRendition(sha256: sha256, store: store, logger: logger)
         return destination
+    }
+
+    /// Removes the single 1080p rendition (`Derivatives.playbackName`) from
+    /// beside a clip's ladder, once the ladder is in place.
+    ///
+    /// Nothing asks for it after that. Every app since build 4 asks for a
+    /// ladder (`adaptive=1`), and `AssetController.playbackURL` hands one out
+    /// wherever a ladder exists, so the rendition was only taking space: 947 of
+    /// them, 68.6 GB, when they were first cleared by hand.
+    ///
+    /// A link to one signed just before still plays, from the original
+    /// (`AssetController.stream`). A player partway through one when it goes
+    /// fails the way it does when its five-minute link runs out, and the app
+    /// asks for a new link, which is now the ladder, and carries on from the
+    /// same moment.
+    static func retireRendition(sha256: String, store: BlobStore, logger: Logger) {
+        let rendition = store.derivativePath(sha256: sha256, name: Derivatives.playbackName)
+        guard FileManager.default.fileExists(atPath: rendition.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: rendition)
+            logger.info("derive \(sha256.prefix(8)): removed the 1080p rendition the ladder replaces")
+        } catch {
+            logger.warning("derive \(sha256.prefix(8)): could not remove the old rendition: \(error)")
+        }
     }
 
     /// The ffmpeg command for a ladder: one input, decoded once, one HLS output
@@ -345,7 +376,7 @@ enum StreamLadder {
             command += ["-map", "[o\(index)]"]
             // The first audio track only: an iPhone clip also carries spatial
             // audio and metadata tracks this ffmpeg can't decode or doesn't
-            // need. See `Derivatives.makePlaybackRendition`.
+            // need.
             if audio != .none { command += ["-map", "0:a:0"] }
             if let hdr {
                 command += HDRVideo.encodeArguments(

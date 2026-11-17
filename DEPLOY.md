@@ -182,6 +182,33 @@ The pull output in step 3 is corroborating evidence. A server layer reporting
 Seven `Already exists` and one `Pull complete` is the normal shape of a code-only
 deploy: same base, new binary.
 
+Two failures arrive without changing anything yourself, because they are about
+the NAS rather than the commit: the **address moving** (DHCP — see Gotchas) and
+the **registry token expiring** (see below). Neither announces itself until a
+deploy is already half done.
+
+### Cleaning up after a deploy
+
+Once the new image is confirmed working, clear out what the deploy left behind.
+Keep the newest of each, so a rollback still has something to go back to.
+
+- Delete the rollback compose copies, `docker-compose.yml.before-*`, in
+  `/volume1/docker/framestation`.
+- In `~/framestation-deploy`, delete the staged scripts except the newest
+  `redeploy-*.sh`.
+- In `backups/`, keep only the newest `pgdump-before-*.sql.gz`.
+- Prune old images:
+
+```bash
+ssh -t nas 'sudo /usr/local/bin/docker image prune -f'
+```
+
+That is safe because GHCR keeps every image's `sha-<commit>` tag, so a rollback
+pulls the one it needs again.
+
+`Scripts/cleanup.sh --nas` reports all of this with sizes. It removes nothing
+on its own, and prints the sudo commands for you to run.
+
 ---
 
 ## What else the change needs
@@ -276,30 +303,6 @@ To take a library out again and delete what was stored, faces included, use
 `analysis remove "<name>"`. `docker compose stop analyzer` pauses everything;
 the server logs once and waits. After restoring a database, `analysis verify
 "<name>"` says whether the faces still open with the key in `secrets/`.
-
-### The old `browse/` tree
-
-Every upload used to hardlink its blob into `/volume1/docker/framestation/browse/`,
-and nothing removed those links, so purged photos kept their bytes on disk. The
-server now takes that tree apart by itself on its first start, logging a
-`legacy browse tree:` summary: extra names removed, space freed, any missing
-blob restored from it, and anything it doesn't recognize left in place. To see
-what it will do first, ask the new image before it serves: pull, a one-off
-run, then step 3 as usual.
-
-```bash
-ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose pull && sudo /usr/local/bin/docker compose run --rm server retire-legacy-browse --dry-run'
-```
-
-Not `exec`: the old container doesn't have the command, and the new one has
-already done the work by the time you can exec into it. The one-off run applies
-the image's migrations, as every start does, so take the `pgdata` snapshot
-before it rather than after.
-
-Two failures arrive without changing anything yourself, because they are about
-the NAS rather than the commit: the **address moving** (DHCP — see Gotchas) and
-the **registry token expiring** (see below). Neither announces itself until a
-deploy is already half done.
 
 ### When the compose file changed
 
@@ -418,7 +421,9 @@ ssh nas 'curl -s http://127.0.0.1:8080/health'                      # migrations
 ```
 
 Snapshot `pgdata` if those differ. Btrfs snapshots are why the shared folder is
-on Btrfs.
+on Btrfs. A hand-taken `pgdump-before-*.sql.gz` in `backups/` is superseded once
+the deploy is confirmed, so remove the older ones (see "Cleaning up after a
+deploy").
 
 ---
 

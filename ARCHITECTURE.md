@@ -256,7 +256,6 @@ One DSM shared folder, one service account. No per-user folders.
       stream-v1/                      ← video: the stream ladder (StreamLadder) — master.m3u8,
                                         and for each size a playlist and one .m4s it reads by range
   incoming/<uploadSessionId>/         ← upload.data, each chunk written in place
-  browse/<user>/2026/07/IMG_4821.heic ← hardlinks, zero extra space
   pgdata/
 ```
 
@@ -787,7 +786,7 @@ All under `/v1`, bearer token auth, JSON except blob transfer.
 
 ```
 POST   /v1/auth/redeem            { inviteCode, deviceName, platform } → token
-POST   /v1/devices/push-token     { apnsToken, env }
+PUT    /v1/devices/push-token     { apnsToken, env }
 
 GET    /v1/spaces                                    → spaces + membership
 GET    /v1/spaces/:id/timeline?zoom=year|month|day   → bucket list + counts + places
@@ -1804,6 +1803,10 @@ That last clause is load-bearing. `assets.sha256` is **not unique** — sharing 
 photograph makes a second asset row over the same blob — so a purge that
 unlinked on expiry alone would blank the photograph everywhere else it still
 legitimately lives.
+
+The same hourly pass sweeps abandoned uploads: an unfinished upload untouched
+for 14 days goes with its staging folder, and so does any folder in `incoming/`
+that no unfinished upload owns and nothing has written to for 2 days.
 
 **What this replaced, and why.** Deleting used to call
 `AssetController.moveToRecycleBin`, moving the file into `#recycle` beside

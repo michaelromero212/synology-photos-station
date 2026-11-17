@@ -185,7 +185,6 @@ struct SessionController: RouteCollection {
             .grouped(AuthenticatedDevice.guardMiddleware())
 
         protected.get("me", use: me)
-        protected.post("devices", "push-token", use: registerPushToken)
     }
 
     private struct SpaceRow: Decodable {
@@ -227,20 +226,5 @@ struct SessionController: RouteCollection {
         }
 
         return MeResponse(user: device.user, deviceID: device.deviceID, spaces: spaces)
-    }
-
-    @Sendable
-    func registerPushToken(req: Request) async throws -> HTTPStatus {
-        let device = try req.auth.require(AuthenticatedDevice.self)
-        let input = try req.content.decode(RegisterPushTokenRequest.self)
-
-        try await req.sql.raw("""
-            UPDATE devices
-            SET apns_token = \(bind: input.apnsToken),
-                apns_env   = \(bind: input.environment.rawValue)
-            WHERE id = \(bind: device.deviceID)
-            """).run()
-
-        return .noContent
     }
 }

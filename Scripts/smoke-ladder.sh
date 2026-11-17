@@ -3,7 +3,9 @@
 # to need one gets a few sizes, cut into one-second pieces that start at the
 # same instants in every size, with playlists a player can choose between. An
 # app that asks for one gets a link to it; an app from before ladders goes on
-# getting what it always did. And the link is checked on every piece.
+# getting what it always did. And the link is checked on every piece. And the
+# one-file rendition from before ladders goes from beside every ladder, while a
+# clip without one keeps it.
 #
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-ladder.sh
 #
@@ -166,6 +168,48 @@ check "and it plays" "206" "$(code -H 'Range: bytes=0-99' "$(link "$FOURK" mobil
 check "at home, the original" "direct" "$(link "$FOURK" original yes | jq '["kind"]')"
 check "a lean clip, as it is" "direct" "$(link "$LEAN" mobile yes | jq '["kind"]')"
 check "no one else can ask for one" "404" "$(code "$API/v1/assets/$FOURK/playback?quality=mobile&adaptive=1" -H "$A2")"
+
+echo
+echo "The 1080p rendition from before ladders goes once a clip has one"
+# The NAS still holds these for clips its ladders haven't reached. Put one
+# beside three clips here, a copy of the clip itself: one whose ladder is
+# built again, one that already has its ladder, and one too lean for any.
+rendition(){ echo "$(dirname "$(dir "$1")")/playback-1080.mp4"; }
+cp "$ROOT/files/flip-test.mp4" "$(rendition "$HD")"
+cp "$ROOT/files/prefetch-a.mov" "$(rendition "$SILENT")"
+mkdir -p "$(dirname "$(dir "$LEAN")")"; cp "$ROOT/files/held-video.mp4" "$(rendition "$LEAN")"
+rm -rf "$(dir "$HD")"
+R=$(link "$HD" mobile yes)
+check "with no ladder yet, an app is handed the rendition" "rendition" "$(echo "$R" | jq '["kind"]')"
+BEFORE=$(echo "$R" | jq '["url"]')
+SMASTER=$(shasum -a 256 < "$(dir "$SILENT")/master.m3u8")
+q "UPDATE derivation_jobs SET state = 'pending', attempts = 0, last_error = NULL
+   WHERE kind = 'ladder' AND asset_id IN ('$HD', '$SILENT', '$LEAN')" >/dev/null
+for _ in $(seq 1 240); do
+  [ "$(q "SELECT count(*) FROM derivation_jobs WHERE kind = 'ladder' AND state = 'done'
+          AND asset_id IN ('$HD', '$SILENT', '$LEAN')")" = "3" ] && break
+  sleep 0.5
+done
+check "the ladder is built again" "yes" "$([ -s "$(dir "$HD")/master.m3u8" ] && echo yes || echo no)"
+check "and the rendition beside it is gone" "no" "$([ -e "$(rendition "$HD")" ] && echo yes || echo no)"
+check "from beside a ladder already built too" "no" "$([ -e "$(rendition "$SILENT")" ] && echo yes || echo no)"
+check "which is left as it was" "$SMASTER" "$(shasum -a 256 < "$(dir "$SILENT")/master.m3u8")"
+check "a clip with no ladder keeps its rendition" "yes" "$([ -e "$(rendition "$LEAN")" ] && echo yes || echo no)"
+check "and goes on being handed it" "rendition" "$(link "$LEAN" mobile yes | jq '["kind"]')"
+check "a rendition link signed before it went still plays, from the original" "206" \
+  "$(code -H 'Range: bytes=0-99' "$BEFORE")"
+check "an app asking now gets the ladder" "adaptive" "$(link "$HD" mobile yes | jq '["kind"]')"
+check "an app from before ladders gets the original" "direct" "$(link "$HD" mobile | jq '["kind"]')"
+check "the log says each that went" "2" "$(grep -c 'removed the 1080p rendition the ladder replaces' "$ROOT/server.log")"
+# The queue's 'playback' kind is still allowed, and nothing builds it any more:
+# a row of it that turns up is closed, not failed and claimed again.
+q "INSERT INTO derivation_jobs (asset_id, kind) VALUES ('$LEAN', 'playback')" >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(q "SELECT state FROM derivation_jobs WHERE kind = 'playback'")" = "done" ] && break
+  sleep 0.5
+done
+check "a rendition job left in the queue is closed, once" "done|1|no longer built: playback" \
+  "$(q "SELECT state || '|' || attempts || '|' || last_error FROM derivation_jobs WHERE kind = 'playback'")"
 
 echo
 echo "What a player fetches through it"
