@@ -418,25 +418,6 @@ public struct AssetDetail: Codable, Sendable, Hashable {
         return "Photo"
     }
 
-    /// The SF Symbol that goes with `kind`.
-    public var kindSymbol: String {
-        if live { return "livephoto" }
-        let subtypes = self.subtypes
-        if mediaType == .video {
-            if subtypes.contains(.screenRecording) { return "record.circle" }
-            if subtypes.contains(.slomo) { return "slowmo" }
-            if subtypes.contains(.timelapse) { return "timelapse" }
-            if subtypes.contains(.cinematic) { return "film" }
-            return "video"
-        }
-        if subtypes.contains(.screenshot) { return "camera.viewfinder" }
-        if subtypes.contains(.panorama) { return "pano" }
-        if subtypes.contains(.portrait) { return "person.crop.square" }
-        if burst { return "square.stack.3d.down.right" }
-        if isRaw { return "camera.aperture" }
-        return "photo"
-    }
-
     public init(
         id: UUID, assetID: UUID, spaceID: UUID, mediaType: MediaType, mime: String,
         byteSize: Int64, width: Int?, height: Int?, durationMs: Int?,

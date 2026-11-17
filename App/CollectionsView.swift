@@ -1313,7 +1313,6 @@ struct RecentlyDeletedView: View {
     }
 
     private var isWorking: Bool { working != nil }
-    private var allPicked: Bool { !items.isEmpty && picked.count == items.count }
     /// A viewer can see what was removed but, like everywhere else in a
     /// library they only view, can't change it.
     private var canEdit: Bool { space.role != .viewer }

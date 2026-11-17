@@ -207,18 +207,6 @@ public struct HealthResponse: Codable, Sendable, Hashable {
     }
 }
 
-// MARK: - Errors
-
-public struct APIErrorResponse: Codable, Sendable, Error {
-    public let error: String
-    public let reason: String
-
-    public init(error: String, reason: String) {
-        self.error = error
-        self.reason = reason
-    }
-}
-
 /// A ready-to-play URL for a video, signed and short-lived.
 ///
 /// Returned rather than constructed client-side so the signing scheme stays a

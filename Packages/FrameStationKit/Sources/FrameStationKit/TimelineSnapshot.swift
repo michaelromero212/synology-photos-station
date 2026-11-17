@@ -98,13 +98,4 @@ public enum TimelineSnapshotStore {
         guard let root else { return }
         try? FileManager.default.removeItem(at: root)
     }
-
-    public static func diskSize() -> Int64 {
-        guard let root, let files = try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return 0 }
-        return files.reduce(0) { total, url in
-            total + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        }
-    }
 }

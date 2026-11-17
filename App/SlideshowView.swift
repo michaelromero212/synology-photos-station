@@ -19,7 +19,6 @@ final class SlideshowModel {
     private(set) var index = 0
     private(set) var player: AVPlayer?
     private(set) var isFinished = false
-    var isPaused = false
 
     /// How long a still photo holds before moving on. Videos run to their end
     /// instead — cutting a clip off at five seconds would be worse than useless.

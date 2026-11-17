@@ -481,10 +481,6 @@ public actor ThumbnailLoader {
         #endif
     }
 
-    public func clearMemoryCache() {
-        memory.removeAllObjects()
-    }
-
     /// Drops every cached image, on both tiers.
     ///
     /// Leaves the timeline snapshot alone deliberately — that is metadata, it
