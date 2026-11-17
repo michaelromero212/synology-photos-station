@@ -755,6 +755,9 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         /// same stretch can be found again in the next layout. See `drawnRows`.
         var windowRevision = 0
         var windowDays: (first: String, last: String, fromTop: Bool)?
+        /// The layout whose days near the window were last asked for. See
+        /// `updateWindow`.
+        var requestedRevision = 0
         /// The pointer, in the scroll view's own coordinates.
         var pointer: CGPoint?
     }
@@ -1057,9 +1060,15 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
         guard visible.height > 0 else { return }
         let margin = visible.height
         let next = layout.rows(from: visible.minY - margin, to: visible.maxY + margin)
-        if next != window {
+        // Asked again for a new layout too, not only a new stretch of rows.
+        // Photos added to a day the library didn't have bring that day in
+        // under a window that hasn't moved: the same row numbers, so it was
+        // never asked for, and it sat as gray squares until you scrolled a
+        // stride or left and came back.
+        if next != window || tracker.requestedRevision != layout.revision {
             window = next
             requestDays(in: next)
+            tracker.requestedRevision = layout.revision
         }
         tracker.windowRevision = layout.revision
         tracker.windowDays = dayKeys(of: next)
@@ -1135,6 +1144,10 @@ private struct MacGridScroller<Cell: View, DayHeader: View, AreaHeader: View, Li
                 window = carried
                 tracker.windowRevision = layout.revision
                 tracker.windowDays = dayKeys(of: carried)
+                // Whatever arrived inside the carried stretch, now rather than
+                // at the next scroll. Not marked as asked: once the scroll
+                // settles, `updateWindow` asks for the stretch really on screen.
+                requestDays(in: carried)
             } else {
                 updateWindow()
             }
