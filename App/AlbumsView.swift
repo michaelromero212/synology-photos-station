@@ -1504,7 +1504,11 @@ struct NewAlbumSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Iceland 2012", text: $name)
+                    // The example as the field's placeholder, not its label:
+                    // a Mac's form draws a label beside the field, and it sat
+                    // out past the sheet's edge.
+                    TextField("Name", text: $name, prompt: Text("Iceland 2012"))
+                        .labelsHidden()
                 } header: {
                     Text("Name")
                 }
@@ -1521,6 +1525,11 @@ struct NewAlbumSheet: View {
                     librarySection
                 }
             }
+            // The look of Edit and Add to Album beside it, rather than a
+            // Mac's settings-pane form of push buttons.
+            #if os(macOS)
+            .formStyle(.grouped)
+            #endif
             .navigationTitle("New Album")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -1554,6 +1563,7 @@ struct NewAlbumSheet: View {
                 }
             }
         }
+        .macSheetSize()
     }
 
     /// Personal or a shared library, for a NAS without albums shared with
@@ -1632,6 +1642,11 @@ struct SharePeopleSection: View {
                         }
                         .contentShape(Rectangle())
                     }
+                    // A row with a checkmark, as on the phone, not a push
+                    // button per person.
+                    #if os(macOS)
+                    .buttonStyle(.plain)
+                    #endif
                     .accessibilityAddTraits(picked.contains(person.id) ? .isSelected : [])
                 }
             } else if failed {
@@ -1881,7 +1896,7 @@ struct AlbumSettingsSheet: View {
                 Text(BlockWording.consequences)
             }
         }
-        .settingsSheetSize()
+        .macSheetSize()
     }
 
     // MARK: - Sections
@@ -2229,7 +2244,7 @@ struct LibrarySettingsSheet: View {
                 }
             }
         }
-        .settingsSheetSize()
+        .macSheetSize()
         .task {
             if model == nil, let client = session.client {
                 model = SpacesModel(client: client)
@@ -2239,10 +2254,12 @@ struct LibrarySettingsSheet: View {
 }
 
 extension View {
-    /// The size of a library's or an album's Edit on a Mac, the same for both.
-    /// A sheet there is as big as what's in it, and a list inside a stack asks
-    /// for very little. Nothing elsewhere: a phone's sheet is the screen's.
-    func settingsSheetSize() -> some View {
+    /// The size of a list sheet on a Mac: a library's or an album's Edit, and
+    /// Add to Album. A sheet there is as big as what's in it, and a list
+    /// inside a stack asks for none at all — Add to Album opened as its title
+    /// and Cancel with every album and New Album squeezed out between them.
+    /// Nothing elsewhere: a phone's sheet is the screen's.
+    func macSheetSize() -> some View {
         #if os(macOS)
         frame(minWidth: 440, idealWidth: 480, minHeight: 520, idealHeight: 600)
         #else

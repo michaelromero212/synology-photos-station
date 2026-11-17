@@ -139,6 +139,7 @@ struct AddToAlbumSheet: View {
                 await load()
             }
         }
+        .macSheetSize()
     }
 
     private var title: String {
@@ -326,19 +327,28 @@ struct AddToAlbumPresentation: ViewModifier {
     @Binding var isPresented: Bool
     @Binding var result: String?
 
+    /// The library picked in the sheet, shared once the sheet has gone.
+    @State private var sharingTo: SpaceDTO?
+
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $isPresented) {
+            // The sheet goes first, then the share, which reads and clears the
+            // selection the sheet was showing. Once it has *finished* going:
+            // started as it began to close, the share's answer came back
+            // mid-animation on a Mac, and its "Done" opened as an empty box.
+            .sheet(isPresented: $isPresented, onDismiss: {
+                guard let library = sharingTo else { return }
+                sharingTo = nil
+                shareToLibrary?(library)
+            }) {
                 AddToAlbumSheet(
                     session: session,
                     spaceAssetIDs: selection.picked.map(\.id),
                     source: source,
-                    // The sheet goes first, then the share, which reads and
-                    // clears the selection the sheet was showing.
-                    onShareToLibrary: shareToLibrary.map { share in
+                    onShareToLibrary: shareToLibrary.map { _ in
                         { library in
+                            sharingTo = library
                             isPresented = false
-                            share(library)
                         }
                     }
                 ) { done in
@@ -362,4 +372,24 @@ struct AddToAlbumPresentation: ViewModifier {
             }
     }
 }
+
+#if os(macOS)
+/// The phone's "Couldn't share these", for a share into a shared library from
+/// Add to Album on a Mac. A modifier of its own for the reason above: one more
+/// alert inline and the timeline's chain no longer type-checks.
+struct ShareFailureAlert: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Couldn't share these",
+            isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })
+        ) {
+            Button("OK") { message = nil }
+        } message: {
+            Text(message ?? "")
+        }
+    }
+}
+#endif
 #endif

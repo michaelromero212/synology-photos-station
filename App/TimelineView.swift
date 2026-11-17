@@ -178,6 +178,8 @@ struct TimelineView: View {
     /// can be read as a double-click without a gesture that delays the first.
     @State private var lastClickAt = Date.distantPast
     @State private var lastClickedID: UUID?
+    /// Why a share into a library from Add to Album didn't go through.
+    @State private var shareError: String?
     #endif
     #if os(iOS)
     @State private var showBackup = false
@@ -553,6 +555,9 @@ struct TimelineView: View {
             source: space, shareToLibrary: shareToLibrary,
             isPresented: $showAddToAlbum, result: $albumResult
         ))
+        #if os(macOS)
+        .modifier(ShareFailureAlert(message: $shareError))
+        #endif
         .modifier(MetadataPresentation(
             session: session, space: space, selection: selection,
             showTags: $showTagEditor,
@@ -1659,9 +1664,14 @@ struct TimelineView: View {
     /// How the Add to Album sheet puts the selection into a shared library:
     /// the same share as Add to Shared Library, so it lands and is followed
     /// the same way. Nil where the grid has no way to share.
+    ///
+    /// The Mac had none, so its Add to Album left every shared library out —
+    /// for a library's own photos, a sheet with New Album and nothing else.
     private var shareToLibrary: ((SpaceDTO) -> Void)? {
         #if os(iOS)
         return { share(to: $0) }
+        #elseif os(macOS)
+        return { shareFromSheet(to: $0) }
         #else
         return nil
         #endif
@@ -1888,6 +1898,37 @@ struct TimelineView: View {
                 // people wondering whether it half-happened, and half-happened
                 // is exactly what they will assume.
                 moveError = error.localizedDescription
+            }
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    /// The phone's `share(to:)` for the Mac, from Add to Album: the same share
+    /// as the right-click menu's Add to Shared Library, said when it's done.
+    /// The phone follows its share with a review bar; a window has none, so it
+    /// says so the way an album add does.
+    private func shareFromSheet(to destination: SpaceDTO) {
+        let assetIDs = selection.picked.map(\.assetID)
+        guard let client = session.client, !assetIDs.isEmpty else { return }
+        Task {
+            do {
+                let result = try await client.share(
+                    spaceID: space.id, assetIDs: assetIDs, to: destination.id
+                )
+                selection.clear()
+                await store?.refresh()
+                let already = result.alreadySharedAssetIDs?.count
+                    ?? max(assetIDs.count - result.shared, 0)
+                guard result.shared + already > 0 else {
+                    shareError = assetIDs.count == 1
+                        ? "That item is no longer in \(space.name)."
+                        : "Those items are no longer in \(space.name)."
+                    return
+                }
+                albumResult = "Added to \(destination.name)"
+            } catch {
+                shareError = error.localizedDescription
             }
         }
     }
