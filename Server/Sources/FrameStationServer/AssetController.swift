@@ -534,6 +534,10 @@ struct AssetController: RouteCollection {
                     RETURNING id
                     """).all(decoding: Touched.self)
                 let changedSomething = fileChanged || !updated.isEmpty
+                // Copies shared before this arrived — an upload added to a
+                // shared album at once — are as ready as it now is. See
+                // `DerivationWorker.readyCopies`.
+                let copies = try await DerivationWorker.readyCopies(of: assetID, on: sql)
 
                 // Announced only when there is something to announce.
                 //
@@ -543,10 +547,11 @@ struct AssetController: RouteCollection {
                 // photo through `/changes` every time somebody re-ran a backup
                 // over a library that was already safe — waking every device in
                 // the house to tell it nothing happened.
-                if changedSomething {
+                let announced = (changedSomething ? [assetID] : []) + copies
+                if !announced.isEmpty {
                     let placements = try await sql.raw("""
                         SELECT id, space_id AS "spaceID" FROM space_assets
-                        WHERE asset_id = \(bind: assetID) AND deleted_at IS NULL
+                        WHERE asset_id = ANY(\(bind: announced)) AND deleted_at IS NULL
                         """).all(decoding: DerivationWorker.SpacePlacement.self)
 
                     for placement in placements {

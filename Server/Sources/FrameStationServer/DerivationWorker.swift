@@ -61,6 +61,39 @@ actor DerivationWorker {
         let spaceID: UUID
     }
 
+    /// Marks the copies of a photo ready once the photo itself is, and
+    /// returns their ids so their places can be announced too.
+    ///
+    /// A copy is made when a photo goes into a shared library or an album
+    /// shared with people (see `UploadController.copyIntoSpace`), and it takes
+    /// the photo's `derived_at` and ThumbHash as they were at that moment. Made
+    /// before the queue reached the photo — added to an album straight after
+    /// its upload — that was nothing, and the queue only ever marked the photo
+    /// it was working on. The copy stayed "not ready" for good: a flat gray
+    /// tile in the album, on every device but the one that took the picture,
+    /// until somebody opened it full screen. Same file, same content hash, so
+    /// the same thumbnails: it is as ready as the photo the moment the photo is.
+    ///
+    /// Only copies still waiting. One already marked has its own say.
+    static func readyCopies(of assetID: UUID, on sql: any SQLDatabase) async throws -> [UUID] {
+        struct Copy: Decodable { let id: UUID }
+        return try await sql.raw("""
+            UPDATE assets c
+            SET thumbhash     = COALESCE(c.thumbhash, o.thumbhash),
+                width         = COALESCE(c.width, o.width),
+                height        = COALESCE(c.height, o.height),
+                derived_at    = o.derived_at,
+                thumb_version = o.thumb_version
+            FROM assets o
+            WHERE o.id = \(bind: assetID)
+              AND o.derived_at IS NOT NULL
+              AND c.sha256 = o.sha256
+              AND c.id <> o.id
+              AND c.derived_at IS NULL
+            RETURNING c.id
+            """).all(decoding: Copy.self).map(\.id)
+    }
+
     /// The size on record, before a probe's is reconciled with it.
     private struct RecordedSize: Decodable {
         let width: Int?
@@ -331,9 +364,11 @@ actor DerivationWorker {
                             WHERE id = \(bind: assetID)
                             """).run()
 
+                        // And its copies, shared before this got to it.
+                        let ready = try await Self.readyCopies(of: assetID, on: sql) + [assetID]
                         let placements = try await sql.raw("""
                             SELECT id, space_id AS "spaceID" FROM space_assets
-                            WHERE asset_id = \(bind: assetID) AND deleted_at IS NULL
+                            WHERE asset_id = ANY(\(bind: ready)) AND deleted_at IS NULL
                             """).all(decoding: SpacePlacement.self)
 
                         for placement in placements {

@@ -203,6 +203,11 @@ struct MediaEditController: RouteCollection {
                     """).first(decoding: IDRow.self) else {
                     throw Abort(.internalServerError, reason: "Could not place asset in space.")
                 }
+                // The photo may have finished its thumbnail while it was being
+                // copied, too late for the copy to take it along and too early
+                // for the queue to see the copy. See
+                // `DerivationWorker.readyCopies`.
+                _ = try await DerivationWorker.readyCopies(of: assetID, on: sql)
 
                 _ = try await ChangeLog.append(
                     spaceID: destinationID, entity: "space_asset",
