@@ -352,6 +352,12 @@ struct MacRootView: View {
             TimelineView(session: session, space: space, isPushed: isPushed, albumID: album.id)
         case .album(let album):
             AlbumDetailView(session: session, album: album, store: albums)
+                // A screen per album. Without it, clicking from one of My
+                // Albums to the next kept the same screen — same place in this
+                // switch — and it went on showing the first album, which it
+                // holds in its own state and loads once. A pushed album is a
+                // new screen each time, so only the sidebar met this.
+                .id(album.id)
         case .unavailable:
             unavailable
         }
