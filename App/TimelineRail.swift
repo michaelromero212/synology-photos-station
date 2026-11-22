@@ -46,19 +46,21 @@ struct TimelineRail: View {
     @State private var pointerNear = false
     @State private var putAway: Task<Void, Never>?
 
-    /// The years and bars, inside the panel.
+    /// The years and bars.
     private let railWidth: CGFloat = 60
     private let barMaxWidth: CGFloat = 22
-    /// The panel around them: its padding and its gap from the window's edge.
-    private static let panelPadding = EdgeInsets(top: 12, leading: 9, bottom: 12, trailing: 9)
+    /// Room around them that still counts as the rail — so a pointer a hair
+    /// off a bar keeps it out — and their gap from the window's edge.
+    private static let margins = EdgeInsets(top: 12, leading: 9, bottom: 12, trailing: 0)
     private static let edgeGap: CGFloat = 8
     /// How near the window's right edge the pointer must come to call the
-    /// rail out. Narrower than the rail, so pointing at the right of a photo
-    /// in the last column doesn't send a panel over it.
-    private static let edgeReach: CGFloat = 32
+    /// rail out: the last few points, about where a Mac's own overlay scroll
+    /// bar sits. It was 32, and a photo in the grid's last column couldn't be
+    /// pointed at near its right side without the rail sliding out over it.
+    private static let edgeReach: CGFloat = 10
     /// Everything the rail takes from the window's right edge when it's out.
     private var footprint: CGFloat {
-        railWidth + Self.panelPadding.leading + Self.panelPadding.trailing + Self.edgeGap
+        railWidth + Self.margins.leading + Self.margins.trailing + Self.edgeGap
     }
     #else
     private let railWidth: CGFloat = 62
@@ -79,15 +81,19 @@ struct TimelineRail: View {
             // Out past the window's edge while away, so it slides in from it.
             .offset(x: isOut ? 0 : footprint + 4)
             .frame(width: footprint, alignment: .trailing)
-            // While away, only a band along the edge answers the pointer, so
-            // the photos beside it stay clickable; while out, all of it does.
+            // While away, only a band along the edge takes clicks, so the
+            // photos beside it stay clickable; while out, all of it does.
             .contentShape(EdgeBand(width: isOut ? footprint : Self.edgeReach))
             .onContinuousHover { phase in
                 switch phase {
-                case .active:
+                case .active(let point):
                     pointerNear = true
                     putAway?.cancel()
-                    if !isOut { isOut = true }
+                    // Out only from the band at the edge, measured here: the
+                    // hover answers over the whole width whatever the shape
+                    // above says, and the rail came out for a pointer
+                    // anywhere within 77 points of the edge.
+                    if !isOut, point.x >= footprint - Self.edgeReach { isOut = true }
                 case .ended:
                     pointerNear = false
                     // A drag may wander off the rail; it goes once you let go.
@@ -104,7 +110,7 @@ struct TimelineRail: View {
 
     #if os(macOS)
     /// Away after a beat, not the instant the pointer slips off: brushing past
-    /// the panel's edge shouldn't make it flicker.
+    /// the rail's edge shouldn't make it flicker.
     private func putAwaySoon() {
         putAway?.cancel()
         putAway = Task { @MainActor in
@@ -185,18 +191,18 @@ struct TimelineRail: View {
                         isDragging = false
                         onScrubEnd()
                         #if os(macOS)
-                        // Let go off the panel: away it goes. The pointer's
+                        // Let go off the rail: away it goes. The pointer's
                         // comings and goings aren't reported while the button
                         // is down, so where the drag ended is the only word
                         // on where the pointer is — measured without it, the
                         // rail stayed out, its month pill stuck, until the
                         // pointer next moved.
-                        let padding = Self.panelPadding
-                        let onPanel = value.location.x >= -padding.leading
-                            && value.location.x <= railWidth + padding.trailing + Self.edgeGap
-                            && value.location.y >= -padding.top
-                            && value.location.y <= height + padding.bottom
-                        if onPanel {
+                        let margins = Self.margins
+                        let onRail = value.location.x >= -margins.leading
+                            && value.location.x <= railWidth + margins.trailing + Self.edgeGap
+                            && value.location.y >= -margins.top
+                            && value.location.y <= height + margins.bottom
+                        if onRail {
                             // The pill names where you let go, not where the
                             // pointer last hovered before the drag began.
                             pointerNear = true
@@ -214,24 +220,20 @@ struct TimelineRail: View {
         }
         .frame(width: railWidth)
         #if os(macOS)
-        // A panel of its own to slide out on, dark whatever the photos under
-        // it: the years were small gray labels straight over the grid, and
-        // over a bright photo they all but vanished.
-        .padding(Self.panelPadding)
-        .glassBackground(
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous),
-            tint: .viewerGlassTint, interactive: false
-        )
-        .shadow(color: .black.opacity(0.25), radius: 10, y: 2)
+        // Straight over the photos, with no panel of its own — it had a dark
+        // glass one, which was a second thing sliding over the grid for no
+        // gain. White, with a shadow under the years and bars (see
+        // `Backdrop`), reads over bright photos and dark ones alike.
+        .padding(Self.margins)
         .environment(\.colorScheme, .dark)
         .padding(.trailing, Self.edgeGap)
         #endif
     }
 
-    /// Where the hover pill sits: beside the rail, clear of the Mac's panel.
+    /// Where the hover pill sits: beside the rail, clear of its years.
     private var pillOffset: CGFloat {
         #if os(macOS)
-        -(railWidth + Self.panelPadding.leading + 8)
+        -(railWidth + Self.margins.leading)
         #else
         -railWidth + 6
         #endif
@@ -337,11 +339,24 @@ private struct Backdrop: View, Equatable {
                 )
                 context.fill(
                     Path(rect),
-                    with: .color(.primary.opacity(0.16 + 0.24 * scaled))
+                    with: .color(.primary.opacity(Self.barOpacity(scaled)))
                 )
             }
         }
+        #if os(macOS)
+        .shadow(color: .black.opacity(0.45), radius: 1.5)
+        #endif
         .allowsHitTesting(false)
+    }
+
+    /// How strongly a bar is drawn, by how full it is. Stronger on a Mac,
+    /// where the bars sit straight on the photos rather than beside them.
+    private static func barOpacity(_ scaled: Double) -> Double {
+        #if os(macOS)
+        0.3 + 0.4 * scaled
+        #else
+        0.16 + 0.24 * scaled
+        #endif
     }
 
     /// How much of the library sits in each slot of the rail.
@@ -369,8 +384,8 @@ private struct Backdrop: View, Equatable {
     /// rather than shrunk — an unreadable stack of years is worse than fewer.
     private func years(height: CGFloat) -> some View {
         #if os(macOS)
-        // Larger and white, on the rail's dark panel: the thing you read the
-        // rail for, and it was the faintest thing on it.
+        // Larger and white, with a shadow to stand on over a bright photo:
+        // the thing you read the rail for, and it was the faintest thing on it.
         let font = Font.system(size: 12, weight: .semibold)
         let style = HierarchicalShapeStyle.primary
         let minimumGap: CGFloat = 20
@@ -391,6 +406,9 @@ private struct Backdrop: View, Equatable {
                     .font(font)
                     .monospacedDigit()
                     .foregroundStyle(style)
+                    #if os(macOS)
+                    .shadow(color: .black.opacity(0.7), radius: 2, y: 0.5)
+                    #endif
                     .offset(x: -barMaxWidth - 6, y: mark.y - lift)
             }
         }
