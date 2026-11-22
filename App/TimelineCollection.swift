@@ -838,6 +838,11 @@ struct TimelineCollection: UIViewRepresentable {
     let libraryHeader: () -> AnyView
     /// Fetches a day and warms its thumbnails.
     let load: (String) async -> Void
+    /// Whether the library has caught up with the NAS since the grid opened
+    /// (`TimelineStore.isCaughtUp`). Only a change that arrives after that
+    /// slides in; the catch-up itself is drawn in place, as if it had always
+    /// been there — it is what happened while nobody was looking.
+    var animatesChanges = true
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -875,6 +880,8 @@ struct TimelineCollection: UIViewRepresentable {
         private var lastInsets = UIEdgeInsets.zero
         /// Opened on the newest photograph yet. Once, on first layout.
         private var hasLanded = false
+        /// `animatesChanges` as the last update had it. See `update`.
+        private var wasCaughtUp = false
         /// What was at the top of the screen as the width began to change.
         /// See `widthWillChange`.
         private var placeBeforeWidthChange: Anchor?
@@ -976,7 +983,9 @@ struct TimelineCollection: UIViewRepresentable {
         /// Photographs arriving or leaving — a backup, a delete, another
         /// phone's upload — animate: the tiles slide to their new places and
         /// close the gap, as Photos does, holding whatever was on screen where
-        /// it was. See `animate`.
+        /// it was. See `animate`. Only while you're looking, though: what
+        /// arrives as the grid catches up after opening is drawn as though it
+        /// had always been there (`animatesChanges`).
         ///
         /// A shape drawn another way — a density change — or a change too big
         /// to be worth watching reloads, holding the screen's place the same
@@ -1005,9 +1014,14 @@ struct TimelineCollection: UIViewRepresentable {
             let nextKeys = next.sections.map(\.bucket.key)
             let nextShape = shape(for: next)
             let reshaped = nextShape != layout.shape || nextKeys != keys
+            // Caught up as of the update *before* this one. The catch-up's last
+            // change and the word that it's over can come in the same update,
+            // and that change is as old as the rest of it.
+            let live = wasCaughtUp && next.animatesChanges
+            wasCaughtUp = next.animatesChanges
 
             if reshaped {
-                if !insetsChanged,
+                if !insetsChanged, live,
                    let diff = animatableChange(to: nextShape, keys: nextKeys, from: next) {
                     animate(diff, keys: nextKeys, shape: nextShape, wasAtBottom: wasAtBottom, anchor: anchor)
                 } else {

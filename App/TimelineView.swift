@@ -662,11 +662,14 @@ struct TimelineView: View {
             // photo landed in the middle of the zoom out. What changed while it
             // was out of view is all a return needs, and that is usually
             // nothing: an unchanged library answers with an empty list.
-            if newStore?.state == .loaded {
-                await newStore?.refresh()
-            } else {
-                await newStore?.load()
-            }
+            // (`refresh` loads a library that isn't yet, and then replays what
+            // changed since a snapshot it put on screen.)
+            //
+            // And what it brings is old news, drawn in place rather than slid
+            // in: a photo someone added to a shared space yesterday is simply
+            // there when you open it. See `TimelineStore.isCaughtUp`.
+            newStore?.beginCatchUp()
+            await newStore?.refresh()
         }
         // Coming back to the app should not mean coming back to a stale
         // library. Photos this device didn't upload — from a phone, from
@@ -675,6 +678,8 @@ struct TimelineView: View {
         // catches them: every return to the foreground, and a cold reopen.
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            // What arrived while the app was away is old news too.
+            store?.beginCatchUp()
             Task { await store?.refresh() }
             #if os(iOS)
             // Returning to the app is the acknowledgment pull-to-refresh used
@@ -2418,7 +2423,8 @@ struct TimelineView: View {
                 load: { key in
                     await store.loadBucket(key)
                     await prefetchThumbnails(for: key, in: store)
-                }
+                },
+                animatesChanges: store.isCaughtUp
             )
             // Edge to edge, under the clock and the tab bar, the way the
             // SwiftUI grid's content ran — every inset is applied inside.
@@ -2538,6 +2544,7 @@ struct TimelineView: View {
                 await store.loadBucket(key)
                 await prefetchThumbnails(for: key, in: store)
             },
+            animatesChanges: store.isCaughtUp,
             onClick: { item, dayItems in macClick(item, dayItems: dayItems) },
             onClickEmpty: {
                 guard !NSEvent.modifierFlags.contains(.command) else { return }

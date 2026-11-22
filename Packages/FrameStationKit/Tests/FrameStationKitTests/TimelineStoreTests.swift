@@ -354,6 +354,79 @@ struct TimelineSyncTests {
         #expect(StubServer.requests(matching: changesPath(since: 5)).count == 1)
     }
 
+    @Test("A grid's catch-up ends once the NAS has answered, not before")
+    func catchUpEndsWhenTheNASAnswers() async {
+        let a = UUID(), b = UUID()
+        StubServer.answer(timelinePath, with: manifest(cursor: 4, count: 1))
+        StubServer.answer(dayPath, with: TimelineBucketPage(
+            key: day, zoom: .day, items: [photo(a, "2025-06-15T09:00:00Z", space: space)]
+        ))
+
+        let store = TimelineStore(client: client, spaceID: space)
+        store.beginCatchUp()
+        #expect(!store.isCaughtUp)
+        await store.refresh()
+        #expect(store.isCaughtUp)
+        await store.loadBucket(day)
+
+        // Opened again: what changed meanwhile is the next catch-up, and it
+        // ends when that answer is in — the new photo, and the new count.
+        store.beginCatchUp()
+        #expect(!store.isCaughtUp)
+        StubServer.answer(changesPath(since: 4), with: SpaceChanges(
+            cursor: 5, hasMore: false,
+            changes: [change(5, .insert, photo(b, "2025-06-15T10:00:00Z", space: space))]
+        ))
+        StubServer.answer(timelinePath, with: manifest(cursor: 5, count: 2))
+        await store.refresh()
+        #expect(store.isCaughtUp)
+        #expect(store.items[day]?.map(\.id) == [a, b])
+    }
+
+    @Test("A catch-up the NAS didn't answer isn't over")
+    func unansweredCatchUpStaysOpen() async {
+        StubServer.answer(timelinePath, with: manifest(cursor: 8, count: 0))
+        let store = TimelineStore(client: client, spaceID: space)
+        await store.refresh()
+        #expect(store.isCaughtUp)
+
+        // Nothing queued for `since=8`: the request fails, as a NAS out of
+        // reach does. What it would have said is still to come, so it is
+        // still a catch-up when it does.
+        store.beginCatchUp()
+        await store.refresh()
+        #expect(!store.isCaughtUp)
+
+        StubServer.answer(changesPath(since: 8), with: SpaceChanges(cursor: 8, hasMore: false, changes: []))
+        await store.refresh()
+        #expect(store.isCaughtUp)
+    }
+
+    @Test("A day the new counts disagreed with is fetched again before the catch-up ends")
+    func catchUpWaitsForStaleDays() async {
+        let a = UUID(), b = UUID()
+        TimelineSnapshotStore.save(
+            manifest: manifest(cursor: 20, count: 1),
+            items: [day: [photo(a, "2025-06-15T09:00:00Z", space: space)]],
+            cursor: 20, spaceID: space, zoom: .day
+        )
+        // The day gained a photo while the app was closed. The change log
+        // says so too, but the count check is what refetches the day.
+        StubServer.answer(timelinePath, with: manifest(cursor: 20, count: 2))
+        StubServer.answer(dayPath, with: TimelineBucketPage(
+            key: day, zoom: .day,
+            items: [photo(b, "2025-06-15T10:00:00Z", space: space),
+                    photo(a, "2025-06-15T09:00:00Z", space: space)]
+        ))
+
+        let store = TimelineStore(client: client, spaceID: space)
+        store.beginCatchUp()
+        await store.refresh()
+
+        #expect(store.isCaughtUp)
+        #expect(store.items[day]?.map(\.id) == [a, b])
+    }
+
     @Test("A server whose change log started over resets the days it can no longer update")
     func rebuiltServerResets() async {
         TimelineSnapshotStore.save(

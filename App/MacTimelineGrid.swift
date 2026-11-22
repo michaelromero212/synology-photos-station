@@ -222,12 +222,21 @@ final class MacGridLayoutCache {
     /// in place — switching between shared libraries reuses the view — and
     /// that is a different library, not a change to animate.
     private var library: UUID?
+    /// `animatesChanges` as the last call had it.
+    private var wasCaughtUp = false
     private(set) var layout = MacGridLayout()
 
+    /// `animatesChanges` is whether the library has caught up with the NAS
+    /// since the grid opened. A change slides in only if it had already, as
+    /// of the call before this one: the catch-up's last change and the word
+    /// that it's over can arrive together, and that change is as old as the
+    /// rest. Photos added while nobody was looking are simply there.
     func layout(
         library: UUID, buckets: [TimelineBucket], items: [String: [TimelineItem]],
-        metrics: MacGridMetrics
+        animatesChanges: Bool = true, metrics: MacGridMetrics
     ) -> MacGridLayout {
+        let live = wasCaughtUp && animatesChanges
+        wasCaughtUp = animatesChanges
         guard metrics.width > 0 else { return layout }
         let sameLibrary = library == self.library
         self.library = library
@@ -272,7 +281,7 @@ final class MacGridLayoutCache {
 
         var next = MacGridLayout()
         next.revision = layout.revision + 1
-        next.animatesChange = sameMetrics && layout.revision > 0
+        next.animatesChange = live && sameMetrics && layout.revision > 0
             && Self.isMembershipChange(
                 keys: keys, signatures: signatures,
                 lastKeys: lastKeys, lastSignatures: lastSignatureByKey
@@ -497,6 +506,10 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
     let progress: ScrollProgress
     let controller: MacGridController
     let loadDay: (String) async -> Void
+    /// Whether the library has caught up with the NAS since the grid opened
+    /// (`TimelineStore.isCaughtUp`). Only a change after that slides in; the
+    /// catch-up itself is drawn in place. See `MacGridLayoutCache.layout`.
+    var animatesChanges = true
     /// A click on a photograph, with the rest of its day.
     let onClick: (TimelineItem, [TimelineItem]) -> Void
     /// A click between photographs.
@@ -519,6 +532,7 @@ struct MacTimelineGrid<Cell: View, DayHeader: View, AreaHeader: View, LibraryHea
             let width = layoutWidth > 0 ? layoutWidth : proxy.size.width
             let layout = cache.layout(
                 library: space, buckets: buckets, items: items,
+                animatesChanges: animatesChanges,
                 metrics: MacGridMetrics(
                     width: width, targetHeight: targetHeight, spacing: spacing,
                     headerHeight: headerHeight, areaHeaderHeight: areaHeaderHeight,

@@ -32,6 +32,30 @@ public final class TimelineStore {
     /// grid uses this to stop asking for buckets that cannot arrive.
     public private(set) var isFromSnapshot = false
 
+    /// Whether everything the NAS had for this timeline when its grid last
+    /// opened has arrived: the days, their counts, what changed in the days
+    /// already in hand, and any day whose count disagreed fetched again.
+    ///
+    /// It decides what a change on screen looks like. The grid opens on what
+    /// it already has — last night's snapshot, or the days kept from the last
+    /// visit — so the pictures are there at once, and the NAS's answer lands a
+    /// beat later. Until this is true, that answer is old news: photos added
+    /// yesterday, or an hour ago in a shared space, which should simply be
+    /// there like the rest. Only what arrives after it — a photo uploaded while
+    /// you're looking — slides in. They used to slide in on every visit, so a
+    /// shared space or an album seemed to be filling up as you opened it, with
+    /// photos that had been there for days.
+    public private(set) var isCaughtUp = false
+    /// Moved by `beginCatchUp`, so a sync that started before the grid opened
+    /// isn't taken for the catch-up.
+    @ObservationIgnored private var catchUpGeneration = 0
+    /// A sync started since `beginCatchUp` reached the NAS and applied all of
+    /// what it was told.
+    @ObservationIgnored private var heardSinceCatchUp = false
+    /// `load` and `refresh` calls running. The catch-up ends only once none
+    /// is, since any of them can still be bringing old news.
+    @ObservationIgnored private var syncsInFlight = 0
+
     public init(client: FrameStationClient, spaceID: UUID, zoom: TimelineZoom = .day) {
         self.client = client
         self.spaceID = spaceID
@@ -80,7 +104,18 @@ public final class TimelineStore {
     /// The failure path is guarded for the same reason the one in `refresh()`
     /// is: a blip on a background poll must not throw away a library the user is
     /// looking at and put an error in its place.
-    public func load() async {
+    ///
+    /// Returns whether the NAS answered.
+    @discardableResult
+    public func load() async -> Bool {
+        let generation = beginSync()
+        let reached = await fetchManifest()
+        await endSync(generation, reached: reached)
+        return reached
+    }
+
+    /// `load`, untracked: what `refresh` calls, since it tracks itself.
+    private func fetchManifest() async -> Bool {
         let isFirstLoad = manifest == nil
         if isFirstLoad {
             // Paint the last library this device saw *before* asking the
@@ -109,15 +144,52 @@ public final class TimelineStore {
             self.isFromSnapshot = false
             scheduleSnapshot()
             revalidateStaleBuckets()
+            return true
         } catch {
-            guard isFirstLoad else { return }
+            guard isFirstLoad else { return false }
             // Nothing on the wire. If the snapshot above is on screen it stays
             // there — showing that beats showing an error page over a library
             // the user knows perfectly well exists, and the connection banner
             // already says why the pictures are missing.
-            if isFromSnapshot { return }
+            if isFromSnapshot { return false }
             state = .failed(error.localizedDescription)
+            return false
         }
+    }
+
+    // MARK: - Catching up
+
+    /// The grid has come into view — opened, come back to from a photo or
+    /// another tab, or the app back in the foreground. What the NAS sends
+    /// until the next sync started from here finishes is what happened while
+    /// nobody was looking. See `isCaughtUp`.
+    public func beginCatchUp() {
+        catchUpGeneration &+= 1
+        heardSinceCatchUp = false
+        if isCaughtUp { isCaughtUp = false }
+    }
+
+    private func beginSync() -> Int {
+        syncsInFlight += 1
+        return catchUpGeneration
+    }
+
+    /// Ends the catch-up once nothing is still syncing and one that started
+    /// after it began got through.
+    ///
+    /// It waits for the days the new counts disagreed with to be fetched
+    /// again as well. On the iPhone those fill in where they already stood,
+    /// but on a Mac a day is laid out from its photographs, so one arriving
+    /// that way slides in like any other — and it is as old as the rest.
+    private func endSync(_ generation: Int, reached: Bool) async {
+        syncsInFlight -= 1
+        if reached, generation == catchUpGeneration { heardSinceCatchUp = true }
+        guard !isCaughtUp, heardSinceCatchUp, syncsInFlight == 0 else { return }
+        let current = catchUpGeneration
+        await revalidation?.value
+        guard current == catchUpGeneration, !isCaughtUp, heardSinceCatchUp, syncsInFlight == 0
+        else { return }
+        isCaughtUp = true
     }
 
     /// Returns false when there is nothing stored to fall back to.
@@ -306,12 +378,20 @@ public final class TimelineStore {
     /// on screen, and tiles that stayed gray because the "thumbnail finished"
     /// update was in a page nobody fetched.
     public func refresh() async {
+        let generation = beginSync()
+        let reached = await replay()
+        await endSync(generation, reached: reached)
+    }
+
+    /// `refresh`, untracked. Returns whether it heard everything the NAS had
+    /// to say: every page of changes, and the manifest when it asked for one.
+    private func replay() async -> Bool {
         if manifest == nil {
-            await load()
+            let fetched = await fetchManifest()
             // A first load that put last night's days back on screen resumes
             // from last night's cursor — see `adoptCursor`. Replay what changed
             // since now, rather than waiting for the next thing to ask.
-            guard let manifest, cursor < manifest.cursor else { return }
+            guard let manifest, cursor < manifest.cursor else { return fetched }
         }
 
         let zoom = self.zoom
@@ -321,12 +401,13 @@ public final class TimelineStore {
         var membershipMoved = false
         var appliedAny = false
         var pages = 0
+        var reachedEnd = false
         do {
             while true {
                 let delta = try await client.changes(spaceID: spaceID, since: cursor)
                 // A density change while this was in flight replaced every day
                 // these would be filed under, and reloaded them from scratch.
-                guard zoom == self.zoom else { return }
+                guard zoom == self.zoom else { return false }
                 if !delta.changes.isEmpty {
                     let applied = Self.applying(delta.changes, to: items, zoom: zoom)
                     items = applied.items
@@ -335,15 +416,17 @@ public final class TimelineStore {
                 }
                 cursor = delta.cursor
                 pages += 1
-                guard delta.hasMore else { break }
+                guard delta.hasMore else {
+                    reachedEnd = true
+                    break
+                }
                 guard pages < Self.maximumReplayPages else {
                     // Too far behind to be worth replaying change by change —
                     // weeks away, or a whole library imported meanwhile. Start
                     // over from the server's position instead: the days on
                     // screen go, and the ones scrolled back into view load fresh.
                     items.removeAll()
-                    await load()
-                    return
+                    return await fetchManifest()
                 }
             }
         } catch {
@@ -351,7 +434,7 @@ public final class TimelineStore {
             // network blip should not blank the grid. Whatever pages did arrive
             // are applied, and the cursor stays where they got to.
         }
-        guard appliedAny else { return }
+        guard appliedAny else { return reachedEnd }
 
         // Only when membership actually moved.
         //
@@ -367,7 +450,8 @@ public final class TimelineStore {
         // update in place changes neither bucket membership nor any count, so
         // there is nothing in the manifest for it to refresh.
         if membershipMoved {
-            await load()
+            let fetched = await fetchManifest()
+            return reachedEnd && fetched
         } else {
             // Write the delta down, or the next cold start undoes it.
             //
@@ -385,6 +469,7 @@ public final class TimelineStore {
             // and fills it, and the cycle repeats forever because that
             // correction is never the thing being saved.
             scheduleSnapshot()
+            return reachedEnd
         }
     }
 
