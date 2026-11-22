@@ -34,8 +34,36 @@ struct TimelineRail: View {
     /// there", and the rail should answer the first without doing the second.
     @State private var hoverFraction: Double?
 
+    #if os(macOS)
+    /// On a Mac the rail is out of sight until the pointer comes to the
+    /// window's right edge, then slides out, and goes again once the pointer
+    /// has left. It used to stand over the grid's right edge the whole time —
+    /// a strip of bars and labels on top of every photograph in that column,
+    /// for a control used now and then. A Mac has a pointer to ask with, the
+    /// way it has overlay scroll bars that come when wanted.
+    @State private var isOut = false
+    /// The pointer is over the rail, or over the edge that calls it.
+    @State private var pointerNear = false
+    @State private var putAway: Task<Void, Never>?
+
+    /// The years and bars, inside the panel.
+    private let railWidth: CGFloat = 60
+    private let barMaxWidth: CGFloat = 22
+    /// The panel around them: its padding and its gap from the window's edge.
+    private static let panelPadding = EdgeInsets(top: 12, leading: 9, bottom: 12, trailing: 9)
+    private static let edgeGap: CGFloat = 8
+    /// How near the window's right edge the pointer must come to call the
+    /// rail out. Narrower than the rail, so pointing at the right of a photo
+    /// in the last column doesn't send a panel over it.
+    private static let edgeReach: CGFloat = 32
+    /// Everything the rail takes from the window's right edge when it's out.
+    private var footprint: CGFloat {
+        railWidth + Self.panelPadding.leading + Self.panelPadding.trailing + Self.edgeGap
+    }
+    #else
     private let railWidth: CGFloat = 62
     private let barMaxWidth: CGFloat = 26
+    #endif
     /// How many bars the density strip is drawn with.
     ///
     /// Fixed rather than one per bucket: a day-zoomed library has thousands of
@@ -46,6 +74,49 @@ struct TimelineRail: View {
     private let slots = 90
 
     var body: some View {
+        #if os(macOS)
+        rail
+            // Out past the window's edge while away, so it slides in from it.
+            .offset(x: isOut ? 0 : footprint + 4)
+            .frame(width: footprint, alignment: .trailing)
+            // While away, only a band along the edge answers the pointer, so
+            // the photos beside it stay clickable; while out, all of it does.
+            .contentShape(EdgeBand(width: isOut ? footprint : Self.edgeReach))
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    pointerNear = true
+                    putAway?.cancel()
+                    if !isOut { isOut = true }
+                case .ended:
+                    pointerNear = false
+                    // A drag may wander off the rail; it goes once you let go.
+                    if !isDragging { putAwaySoon() }
+                }
+            }
+            // Quick out, quicker back.
+            .animation(isOut ? .snappy(duration: 0.2) : .easeIn(duration: 0.16), value: isOut)
+            .onDisappear { putAway?.cancel() }
+        #else
+        rail
+        #endif
+    }
+
+    #if os(macOS)
+    /// Away after a beat, not the instant the pointer slips off: brushing past
+    /// the panel's edge shouldn't make it flicker.
+    private func putAwaySoon() {
+        putAway?.cancel()
+        putAway = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, !isDragging, !pointerNear else { return }
+            hoverFraction = nil
+            isOut = false
+        }
+    }
+    #endif
+
+    private var rail: some View {
         GeometryReader { proxy in
             let height = proxy.size.height
             let fraction = isDragging ? dragFraction : progress.fraction
@@ -71,7 +142,7 @@ struct TimelineRail: View {
                         title: Self.pillTitle(for: bucket),
                         count: bucket.count
                     )
-                    .offset(x: -railWidth + 6, y: height * asking - 18)
+                    .offset(x: pillOffset, y: height * asking - 18)
                     .allowsHitTesting(false)
                     .transition(.opacity)
                 }
@@ -110,15 +181,60 @@ struct TimelineRail: View {
                             onScrub(named, target)
                         }
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
                         isDragging = false
                         onScrubEnd()
+                        #if os(macOS)
+                        // Let go off the panel: away it goes. The pointer's
+                        // comings and goings aren't reported while the button
+                        // is down, so where the drag ended is the only word
+                        // on where the pointer is — measured without it, the
+                        // rail stayed out, its month pill stuck, until the
+                        // pointer next moved.
+                        let padding = Self.panelPadding
+                        let onPanel = value.location.x >= -padding.leading
+                            && value.location.x <= railWidth + padding.trailing + Self.edgeGap
+                            && value.location.y >= -padding.top
+                            && value.location.y <= height + padding.bottom
+                        if onPanel {
+                            // The pill names where you let go, not where the
+                            // pointer last hovered before the drag began.
+                            pointerNear = true
+                            hoverFraction = (value.location.y / max(height, 1)).clamped(to: 0...1)
+                        } else {
+                            pointerNear = false
+                            hoverFraction = nil
+                        }
+                        if !pointerNear { putAwaySoon() }
+                        #endif
                     }
             )
             .animation(.easeOut(duration: 0.12), value: hoverFraction == nil)
             .animation(.easeOut(duration: 0.15), value: isDragging)
         }
         .frame(width: railWidth)
+        #if os(macOS)
+        // A panel of its own to slide out on, dark whatever the photos under
+        // it: the years were small gray labels straight over the grid, and
+        // over a bright photo they all but vanished.
+        .padding(Self.panelPadding)
+        .glassBackground(
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous),
+            tint: .viewerGlassTint, interactive: false
+        )
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 2)
+        .environment(\.colorScheme, .dark)
+        .padding(.trailing, Self.edgeGap)
+        #endif
+    }
+
+    /// Where the hover pill sits: beside the rail, clear of the Mac's panel.
+    private var pillOffset: CGFloat {
+        #if os(macOS)
+        -(railWidth + Self.panelPadding.leading + 8)
+        #else
+        -railWidth + 6
+        #endif
     }
 
     // MARK: - Where you are
@@ -252,24 +368,57 @@ private struct Backdrop: View, Equatable {
     /// pretending to be a library. Labels are dropped when they would collide
     /// rather than shrunk — an unreadable stack of years is worse than fewer.
     private func years(height: CGFloat) -> some View {
-        let marks = Self.yearMarks(buckets: buckets)
+        #if os(macOS)
+        // Larger and white, on the rail's dark panel: the thing you read the
+        // rail for, and it was the faintest thing on it.
+        let font = Font.system(size: 12, weight: .semibold)
+        let style = HierarchicalShapeStyle.primary
+        let minimumGap: CGFloat = 20
+        let lift: CGFloat = 8
+        #else
+        let font = Font.caption2.weight(.semibold)
+        let style = HierarchicalShapeStyle.secondary
         let minimumGap: CGFloat = 22
-        var lastY: CGFloat = -.greatestFiniteMagnitude
+        let lift: CGFloat = 7
+        #endif
+        let marks = Self.visibleYearMarks(
+            buckets: buckets, height: height, minimumGap: minimumGap
+        )
 
         return ZStack(alignment: .topTrailing) {
             ForEach(marks, id: \.year) { mark in
-                let y = height * mark.fraction
-                let fits = y - lastY >= minimumGap
-                if fits { let _ = { lastY = y }() }
                 Text(mark.year)
-                    .font(.caption2.weight(.semibold))
+                    .font(font)
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .opacity(fits ? 1 : 0)
-                    .offset(x: -barMaxWidth - 6, y: y - 7)
+                    .foregroundStyle(style)
+                    .offset(x: -barMaxWidth - 6, y: mark.y - lift)
             }
         }
         .allowsHitTesting(false)
+    }
+
+    /// The year labels that fit, each where its year begins, and how far down.
+    ///
+    /// One that would crowd the label above it is left out rather than drawn
+    /// over it — except the newest year, where the library opens, which is
+    /// always labeled, at the expense of whichever came just before it. This
+    /// used to be decided while the labels were being drawn, by a running
+    /// total the drawing kept; SwiftUI may draw a list's rows in any order and
+    /// more than once, so it wasn't a total anything could rely on.
+    static func visibleYearMarks(
+        buckets: [TimelineBucket], height: CGFloat, minimumGap: CGFloat
+    ) -> [(year: String, y: CGFloat)] {
+        let marks = yearMarks(buckets: buckets).map { (year: $0.year, y: height * CGFloat($0.fraction)) }
+        var kept: [(year: String, y: CGFloat)] = []
+        for mark in marks {
+            if let last = kept.last, mark.y - last.y < minimumGap { continue }
+            kept.append(mark)
+        }
+        if let newest = marks.last, kept.last?.year != newest.year {
+            while let last = kept.last, newest.y - last.y < minimumGap { kept.removeLast() }
+            kept.append(newest)
+        }
+        return kept
     }
 
     static func yearMarks(buckets: [TimelineBucket]) -> [(year: String, fraction: Double)] {
@@ -286,5 +435,18 @@ private struct Backdrop: View, Equatable {
     }
 
 }
+
+#if os(macOS)
+/// A strip of `width` along the trailing edge: where the hidden rail listens
+/// for the pointer.
+private struct EdgeBand: Shape {
+    var width: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let width = min(width, rect.width)
+        return Path(CGRect(x: rect.maxX - width, y: rect.minY, width: width, height: rect.height))
+    }
+}
+#endif
 
 #endif
