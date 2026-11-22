@@ -3,7 +3,9 @@ name: framestation
 services:
   db:
     image: postgres:16-alpine
-    restart: unless-stopped
+    # Always, like the server and the analyzer: Docker brings it back after a
+    # DSM update, not Synology. See the server's restart: for why.
+    restart: always
     environment:
       POSTGRES_USER: framestation
       POSTGRES_DB: framestation
@@ -31,7 +33,18 @@ services:
       # because the server depends on ../Packages/FrameStationAPI by path.
       context: .
       dockerfile: Server/Dockerfile
-    restart: unless-stopped
+    # Always, never unless-stopped. When DSM installs an update or restarts
+    # Container Manager, Synology stops every container through its own API,
+    # which Docker records as someone pressing Stop, so unless-stopped won't
+    # bring it back. Synology then starts them again through that API, and it
+    # refuses this one (error 117, "Fail to parse share name from [/volume1]")
+    # because the whole-volume mount below isn't a shared folder. That kept
+    # the server down after the 10-21 reboot, the 11-05 Container Manager
+    # update and the 11-22 DSM update while everything else came back. With
+    # always, Docker starts it itself as soon as the daemon is up. If Postgres
+    # isn't ready yet, the server exits and Docker tries again until it is.
+    # DEPLOY.md, "After a DSM update or reboot", has the rest.
+    restart: always
     depends_on:
       db:
         condition: service_healthy
@@ -139,7 +152,8 @@ services:
     build:
       context: .
       dockerfile: Analyzer/Dockerfile
-    restart: unless-stopped
+    # Always, like the server: see its restart: for why.
+    restart: always
     # No network at all: not the internet, not the LAN, not the database, not
     # the server's port. The socket in analyzer-run is the one way in, and
     # nothing this container reads can leave it except as numbers the server

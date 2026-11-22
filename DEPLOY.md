@@ -657,6 +657,58 @@ build.
 
 ---
 
+### After a DSM update or reboot, Docker restarts the containers, not Synology
+
+The server stayed down after the reboot on 10-21-2026, the Container Manager
+update on 11-05 and the DSM 7.4.1 Update 2 on 11-22, each time with the
+database, the analyzer and ReelStation back up. The app showed "Can't Reach
+Your NAS" and the public `/health` returned 502. The cause, from the NAS's own
+logs on 11-22:
+
+1. Before DSM shuts Container Manager down, its stop script
+   (`/var/packages/ContainerManager/scripts/start-stop-status`) writes down
+   which containers are running and stops each one through Synology's API.
+   Docker counts that as a manual stop, so `restart: unless-stopped` no longer
+   applies.
+2. After the boot, the same script starts that list through the same API. The
+   API maps every bind mount to a DSM shared folder first, and the server's
+   whole-volume mount (`/volume1:/volume1`, which makes File Station copies
+   real clones) isn't one. So it refuses with error 117:
+
+   ```
+   synowebapi_SYNO.Docker.Container_1_start: share_name_path_get.c:316 Fail to parse share name from [/volume1]
+   synowebapi_SYNO.Docker.Container_1_start: container.cpp:2421 Failed to cRunWithDep()
+   ```
+
+   Docker itself starts the container without complaint, which is why
+   `docker compose up -d` always fixed it.
+
+The fix is `restart: always` on all three services. Docker restarts an
+`always` container whenever its daemon starts, manual stop or not, so the
+server comes back without Synology's API. If the server starts before Postgres
+is ready, it exits with code 1 and Docker retries until it isn't. Synology's
+script still tries the server after that and still logs error 117; ignore it.
+The whole-volume mount can't go, because clones between the blob store, the
+homes and the media share only work inside one mount.
+
+`restart:` changes apply to the running containers with no restart:
+
+```bash
+ssh -t nas 'sudo /usr/local/bin/docker update --restart always framestation-db-1 framestation-server-1 framestation-analyzer-1'
+```
+
+The next `docker compose up -d` recreates the db and the analyzer once, since
+their config changed.
+
+If the app ever can't connect after a night with an update, check
+`curl -s https://<nas-host>:8443/health` first: a 502 means the container is
+down, not the app. Bring it back with
+`ssh -t nas 'cd /volume1/docker/framestation && sudo /usr/local/bin/docker compose up -d --no-recreate'`.
+Container Manager's script output, error 117 included, is in
+`/var/log/packages/ContainerManager.log` (root only).
+
+---
+
 ## Checking what's deployed without touching the NAS
 
 ```bash
