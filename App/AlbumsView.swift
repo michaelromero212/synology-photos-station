@@ -1450,6 +1450,22 @@ extension AlbumCard {
     }
 }
 
+/// An album named in New Album from Add to Album, made once Add is pressed.
+struct AlbumDraft: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    /// The shared library it goes in, on a NAS without albums shared with
+    /// people.
+    let spaceID: UUID?
+    let libraryName: String?
+    /// Who it's shared with. Empty, and it's yours alone.
+    let memberIDs: [UUID]
+    /// "Just you", "3 people", or the library's name, for its row.
+    let audience: String
+
+    var isShared: Bool { spaceID != nil || !memberIDs.isEmpty }
+}
+
 /// Making an album: a name, and who to share it with.
 ///
 /// Nobody, and it's yours alone, under Albums. Anyone, and it's shared with
@@ -1465,6 +1481,10 @@ struct NewAlbumSheet: View {
     /// Photos to start it with, when it's made from a selection.
     var spaceAssetIDs: [UUID] = []
     let onDone: (AlbumDTO?) -> Void
+    /// From Add to Album: told the name and who it's shared with, and nothing
+    /// is made yet. Add to Album makes it, with everything else picked, once
+    /// Add is pressed. The button says "Done" then, not "Create".
+    var onDraft: ((AlbumDraft) -> Void)?
 
     enum Kind: Hashable { case personal, shared }
 
@@ -1547,12 +1567,22 @@ struct NewAlbumSheet: View {
                     Button("Cancel") { onDone(nil) }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
+                    Button(onDraft == nil ? "Create" : "Done") {
+                        let members = sharesWithPeople ? Array(picked) : []
+                        if let onDraft {
+                            onDraft(AlbumDraft(
+                                name: trimmed, spaceID: chosen?.id,
+                                libraryName: chosen?.name, memberIDs: members,
+                                audience: chosen.map { "In \($0.name)" }
+                                    ?? ShareWording.people(count: members.count + 1)
+                            ))
+                            return
+                        }
                         isCreating = true
                         Task {
                             let album = await store.create(
                                 name: trimmed, spaceID: chosen?.id,
-                                memberIDs: sharesWithPeople ? Array(picked) : [],
+                                memberIDs: members,
                                 spaceAssetIDs: spaceAssetIDs
                             )
                             isCreating = false

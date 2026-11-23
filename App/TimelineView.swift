@@ -178,8 +178,6 @@ struct TimelineView: View {
     /// can be read as a double-click without a gesture that delays the first.
     @State private var lastClickAt = Date.distantPast
     @State private var lastClickedID: UUID?
-    /// Why a share into a library from Add to Album didn't go through.
-    @State private var shareError: String?
     #endif
     #if os(iOS)
     @State private var showBackup = false
@@ -195,8 +193,6 @@ struct TimelineView: View {
     /// The pending pull-the-grid, so a stream of landings coalesces into one.
     @State private var landingRefresh: Task<Void, Never>?
     #endif
-    @State private var showMoveTo = false
-    @State private var moveError: String?
     /// Owned by RootTabView, read here because this is where a broken
     /// connection has to be visible.
     @Environment(\.connectionMonitor) private var connection
@@ -215,7 +211,8 @@ struct TimelineView: View {
     /// look at. See `DismissHandle` for why the Mac can't read `\.dismiss`
     /// here.
     @State private var leave = DismissHandle()
-    @State private var showAddToAlbum = false
+    /// Add to Album, or Add to Shared Library, while it's open.
+    @State private var addRequest: AddToAlbumRequest?
     @State private var showTagEditor = false
     @State private var albumResult: String?
     @State private var selection = GridSelection()
@@ -527,22 +524,6 @@ struct TimelineView: View {
         }
         // "Set Up Now" is a promise to set backup up, so it opens the settings
         // rather than a hub the settings are one more tap inside.
-        .sheet(isPresented: $showMoveTo) {
-            MoveToSheet(session: session, source: space, count: selection.count) {
-                showMoveTo = false
-            } onConfirm: { destination in
-                showMoveTo = false
-                share(to: destination)
-            }
-        }
-        .alert(
-            "Couldn't share these",
-            isPresented: Binding(get: { moveError != nil }, set: { if !$0 { moveError = nil } })
-        ) {
-            Button("OK") { moveError = nil }
-        } message: {
-            Text(moveError ?? "")
-        }
         .fullScreenCover(isPresented: $showFocusedBackup) {
             if let engine {
                 FocusedBackupView(engine: engine) { showFocusedBackup = false }
@@ -552,12 +533,10 @@ struct TimelineView: View {
         #if !os(tvOS)
         .modifier(AddToAlbumPresentation(
             session: session, selection: selection,
-            source: space, shareToLibrary: shareToLibrary,
-            isPresented: $showAddToAlbum, result: $albumResult
+            source: space, offersLibraries: true,
+            request: $addRequest, result: $albumResult,
+            onDone: albumAddFinished
         ))
-        #if os(macOS)
-        .modifier(ShareFailureAlert(message: $shareError))
-        #endif
         .modifier(MetadataPresentation(
             session: session, space: space, selection: selection,
             showTags: $showTagEditor,
@@ -1079,28 +1058,20 @@ struct TimelineView: View {
 
         Button {
             focus(item)
-            showAddToAlbum = true
+            addRequest = AddToAlbumRequest()
         } label: {
             Label("Add to Album…", systemImage: "rectangle.stack.badge.plus")
         }
 
-        if !session.sharedSpaces.isEmpty {
-            Menu {
-                ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
-                    Button(target.name) {
-                        focus(item)
-                        Task {
-                            _ = try? await session.client?.share(
-                                spaceID: space.id,
-                                assetIDs: targets.map(\.assetID),
-                                to: target.id
-                            )
-                            await store?.refresh()
-                        }
-                    }
-                }
+        // The sheet, with only the libraries in it, rather than a submenu that
+        // shared on the click with nothing on screen to say it had: the same
+        // pick, Add, and watch it go as Add to Album.
+        if session.sharedSpaces.contains(where: { $0.id != space.id && $0.role != .viewer }) {
+            Button {
+                focus(item)
+                addRequest = AddToAlbumRequest(librariesOnly: true)
             } label: {
-                Label("Add to Shared Library", systemImage: "person.2")
+                Label("Add to Shared Library…", systemImage: "person.2")
             }
         }
 
@@ -1658,22 +1629,6 @@ struct TimelineView: View {
         .padding(.bottom, 6)
     }
 
-    /// How the Add to Album sheet puts the selection into a shared library:
-    /// the same share as Add to Shared Library, so it lands and is followed
-    /// the same way. Nil where the grid has no way to share.
-    ///
-    /// The Mac had none, so its Add to Album left every shared library out —
-    /// for a library's own photos, a sheet with New Album and nothing else.
-    private var shareToLibrary: ((SpaceDTO) -> Void)? {
-        #if os(iOS)
-        return { share(to: $0) }
-        #elseif os(macOS)
-        return { shareFromSheet(to: $0) }
-        #else
-        return nil
-        #endif
-    }
-
     #if os(iOS)
     /// Opens a photo over the grid, growing it out of its tile.
     ///
@@ -1854,80 +1809,30 @@ struct TimelineView: View {
         return nil
     }
 
-    /// Shares the selection into another space, then hands the result upward.
-    ///
-    /// This space is refreshed even though nothing left it: the copies are new
-    /// rows the server has just announced, and re-reading is honest where
-    /// guessing which rows changed is not.
-    private func share(to destination: SpaceDTO) {
-        let assetIDs = selection.picked.map(\.assetID)
-        guard let client = session.client, !assetIDs.isEmpty else { return }
-        Task {
-            do {
-                let result = try await client.share(
-                    spaceID: space.id, assetIDs: assetIDs, to: destination.id
-                )
-                selection.clear()
-                await store?.refresh()
-                // A server that predates `alreadySharedAssetIDs` says only how
-                // many arrived. Anything sent that didn't arrive was skipped for
-                // being there already. The one other reason, a photo removed
-                // from this library between selecting and sharing, is rare
-                // enough to be read the same way.
-                let already = result.alreadySharedAssetIDs
-                let alreadyCount = already?.count ?? max(assetIDs.count - result.shared, 0)
-                guard result.shared + alreadyCount > 0 else {
-                    moveError = assetIDs.count == 1
-                        ? "That item is no longer in \(space.name)."
-                        : "Those items are no longer in \(space.name)."
-                    return
-                }
-                onShared?(MoveReview(
-                    assetIDs: result.assetIDs + (already ?? []),
-                    destinationID: destination.id,
-                    destinationName: destination.name,
-                    newCount: result.shared,
-                    alreadyCount: alreadyCount,
-                    source: MoveReview.Source(space: space, assetIDs: result.sourceAssetIDs)
-                ))
-            } catch {
-                // Said out loud. An action that silently does nothing leaves
-                // people wondering whether it half-happened, and half-happened
-                // is exactly what they will assume.
-                moveError = error.localizedDescription
-            }
-        }
-    }
     #endif
 
-    #if os(macOS)
-    /// The phone's `share(to:)` for the Mac, from Add to Album: the same share
-    /// as the right-click menu's Add to Shared Library, said when it's done.
-    /// The phone follows its share with a review bar; a window has none, so it
-    /// says so the way an album add does.
-    private func shareFromSheet(to destination: SpaceDTO) {
-        let assetIDs = selection.picked.map(\.assetID)
-        guard let client = session.client, !assetIDs.isEmpty else { return }
-        Task {
-            do {
-                let result = try await client.share(
-                    spaceID: space.id, assetIDs: assetIDs, to: destination.id
-                )
-                selection.clear()
-                await store?.refresh()
-                let already = result.alreadySharedAssetIDs?.count
-                    ?? max(assetIDs.count - result.shared, 0)
-                guard result.shared + already > 0 else {
-                    shareError = assetIDs.count == 1
-                        ? "That item is no longer in \(space.name)."
-                        : "Those items are no longer in \(space.name)."
-                    return
-                }
-                albumResult = "Added to \(destination.name)"
-            } catch {
-                shareError = error.localizedDescription
-            }
-        }
+    #if !os(tvOS)
+    /// After Add to Album, once its sheet has gone.
+    ///
+    /// A share into a shared library refreshes this space even though nothing
+    /// left it: the copies are new rows the server has just announced, and
+    /// re-reading is honest where guessing which rows changed is not. On the
+    /// phone the share is then walked through where it landed (`MoveReview`):
+    /// the first library, when more than one was picked.
+    private func albumAddFinished(_ outcome: AlbumAddOutcome) {
+        guard let first = outcome.shares.first else { return }
+        Task { await store?.refresh() }
+        #if os(iOS)
+        let result = first.result
+        onShared?(MoveReview(
+            assetIDs: result.assetIDs + (result.alreadySharedAssetIDs ?? []),
+            destinationID: first.destination.id,
+            destinationName: first.destination.name,
+            newCount: result.shared,
+            alreadyCount: first.alreadyCount,
+            source: MoveReview.Source(space: space, assetIDs: result.sourceAssetIDs)
+        ))
+        #endif
     }
     #endif
 
@@ -2252,7 +2157,7 @@ struct TimelineView: View {
                     if !shareFiles.isEmpty { showShare = true }
                 }
             } onAddToAlbum: {
-                showAddToAlbum = true
+                addRequest = AddToAlbumRequest()
             } onDelete: {
                 confirmDelete = true
             } moreMenu: {
@@ -2261,7 +2166,7 @@ struct TimelineView: View {
                 // than annotating them where they sit.
                 #if os(iOS)
                 Button {
-                    showMoveTo = true
+                    addRequest = AddToAlbumRequest(librariesOnly: true)
                 } label: {
                     Label("Add to Shared Library", systemImage: "person.2.badge.plus")
                 }
