@@ -806,13 +806,11 @@ struct TimelineView: View {
     /// cells, but the branch lives inside the builder rather than across a
     /// `#if` — braces have to balance within each conditional block.
     ///
-    /// `sweeps` is off for the collection grid on iPhone and iPad, whose
-    /// drag-to-select is done by the collection view itself, so its tiles have
-    /// no frames to report.
+    /// Drag to select is the collection view's own on iPhone and iPad — see
+    /// `TimelineCollection.Coordinator.handleSweep`.
     @ViewBuilder
     private func gridCell(
-        _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = [],
-        sweeps: Bool = true
+        _ item: TimelineItem, size: CGSize, dayItems: [TimelineItem] = []
     ) -> some View {
         #if os(macOS)
         // One branch, always. There used to be two — a selecting cell and a
@@ -868,11 +866,6 @@ struct TimelineView: View {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { selection.toggle(item) }
-                // Lets a drag across the grid find this tile. Reports only
-                // while selecting, so browsing pays nothing for it.
-                #if os(iOS)
-                .sweepTarget(item, in: Self.gridSpace, active: sweeps && selection.isActive)
-                #endif
         } else {
             #if os(iOS)
             // Not a NavigationLink: the link consumes the press and pushes the
@@ -1641,12 +1634,11 @@ struct TimelineView: View {
     /// Draws one entry at the size the layout worked out for it.
     @ViewBuilder
     private func cell(
-        _ entry: GridEntry, size: CGSize, dayItems: [TimelineItem],
-        sweeps: Bool = true
+        _ entry: GridEntry, size: CGSize, dayItems: [TimelineItem]
     ) -> some View {
         switch entry {
         case .item(let item):
-            gridCell(item, size: size, dayItems: dayItems, sweeps: sweeps)
+            gridCell(item, size: size, dayItems: dayItems)
         case .placeholder:
             Rectangle().fill(.quaternary)
                 .frame(width: size.width, height: size.height)
@@ -2415,7 +2407,7 @@ struct TimelineView: View {
                 },
                 dayItems: { store.items[$0.key] ?? [] },
                 cell: { entry, size, items in
-                    AnyView(cell(entry, size: size, dayItems: items, sweeps: false))
+                    AnyView(cell(entry, size: size, dayItems: items))
                 },
                 header: { AnyView(header($0, height: headingHeight)) },
                 areaHeader: { AnyView(areaHeader($0, height: areaHeight)) },
@@ -2777,11 +2769,6 @@ struct TimelineView: View {
                     }
                 }
             }
-            #endif
-            #if os(iOS)
-            // Drag across tiles to select a run of them. Inert until a selection
-            // is already open, so an ordinary drag still means scroll.
-            .selectionSweep(selection, space: Self.gridSpace)
             #endif
             // Not on iOS. The grid's content is *meant* to run up into the
             // status bar and under the Dynamic Island there, the way Photos
@@ -3522,11 +3509,6 @@ struct TimelineView: View {
             #endif
         }
     }
-
-    /// Names the coordinate space the sweep measures tiles in. Shared by the
-    /// cells that report their frames and the gesture that reads them, so the
-    /// two cannot drift onto different spaces and silently never match.
-    static let gridSpace = "photo-grid"
 
     /// Whether a selection is open.
     ///

@@ -42,6 +42,21 @@ final class GridSelection {
         }
     }
 
+    /// Adds a run at once, as one change however long it is. What drag to
+    /// select uses: a run that grows by a row adds the whole row together.
+    func pick(_ items: [TimelineItem]) {
+        var seen = pickedIDs
+        let new = items.filter { seen.insert($0.id).inserted }
+        guard !new.isEmpty else { return }
+        picked.append(contentsOf: new)
+    }
+
+    /// Takes several out at once — a run pulled back.
+    func unpick(_ ids: Set<UUID>) {
+        guard !ids.isEmpty, !pickedIDs.isDisjoint(with: ids) else { return }
+        picked.removeAll { ids.contains($0.id) }
+    }
+
     func begin(with item: TimelineItem) {
         isActive = true
         if !contains(item) { picked.append(item) }

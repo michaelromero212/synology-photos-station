@@ -902,8 +902,22 @@ struct TimelineCollection: UIViewRepresentable {
         private var dayRevisions: [String: Int] = [:]
 
         private var sweep: UIPanGestureRecognizer?
-        private var sweeping = false
-        private var visited: Set<UUID> = []
+        /// What the drag now under way means. See `SweepIntent`.
+        private var intent: SweepIntent = .undecided
+        /// Where the finger came down, in content: the first tile of a run.
+        private var touchDown: CGPoint?
+        private var sweepAnchor: SweepAnchor?
+        /// What was picked before this drag began. A run never takes it away.
+        private var sweepBaseline: Set<UUID> = []
+        /// What this drag picked, which it puts back as the run shrinks.
+        private var sweepPicked: Set<UUID> = []
+        /// The tile the run was last drawn to, and whether the grid has
+        /// changed under it since — a day in it loading, most often.
+        private var sweepEnd: IndexPath?
+        private var sweepStale = false
+        /// Whether the scroll is held still for the run, to be let go after.
+        private var sweepHoldsScroll = false
+        private var autoscroll: CADisplayLink?
 
         private static let cellID = "tile"
         private static let headerID = "day"
@@ -960,6 +974,7 @@ struct TimelineCollection: UIViewRepresentable {
 
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleSweep(_:)))
             pan.delegate = self
+            pan.maximumNumberOfTouches = 1
             pan.isEnabled = false
             view.addGestureRecognizer(pan)
             sweep = pan
@@ -971,6 +986,7 @@ struct TimelineCollection: UIViewRepresentable {
         }
 
         func tearDown() {
+            stopAutoscroll()
             for task in loads.values { task.cancel() }
             loads.removeAll()
         }
@@ -1050,7 +1066,15 @@ struct TimelineCollection: UIViewRepresentable {
             lastContext = next.cellContext
 
             sweep?.isEnabled = next.selection.isActive
-            if !next.selection.isActive { endSweep() }
+            if !next.selection.isActive {
+                endSweep()
+            } else if intent == .select {
+                // The grid may have changed under a run — a day in it loading,
+                // a photograph arriving. Drawn again on the next turn rather
+                // than from inside this update, which SwiftUI is watching.
+                sweepStale = true
+                DispatchQueue.main.async { [weak self] in self?.extendSweep() }
+            }
 
             if reshaped || next.progress.span == nil {
                 next.progress.span = layout.span(keys: keys)
@@ -1588,6 +1612,14 @@ struct TimelineCollection: UIViewRepresentable {
             for section in first...max(first, last) where keys.indices.contains(section) {
                 wanted.insert(keys[section])
             }
+            // A run keeps its days coming however far the grid has carried it
+            // past them: a day that never loads is a hole in the run, out of
+            // sight, that the person believes they picked.
+            if let run = sweepRunSections() {
+                for section in run where hasPlaceholders(section) {
+                    wanted.insert(keys[section])
+                }
+            }
             for (key, task) in loads where !wanted.contains(key) {
                 task.cancel()
                 loads[key] = nil
@@ -1775,44 +1807,303 @@ struct TimelineCollection: UIViewRepresentable {
 
         // MARK: Drag to select
 
-        /// Dragging across tiles adds them to the selection, the way it did in
-        /// the SwiftUI grid — only while selecting, only ever adding, each tile
-        /// once per drag, and alongside the scroll rather than instead of it.
-        /// See `SelectionSweep` for why each of those is so.
+        /// What a drag across the grid means while a selection is open.
+        ///
+        /// One finger does two jobs there: scroll to find more, and run across
+        /// photographs to pick them. Reading every drag as both was the bug —
+        /// each swipe up to find the next photo picked everything it passed
+        /// over. So the drag's first fourteen points decide, the way Photos
+        /// does: mostly sideways picks, anything steeper scrolls, and the
+        /// answer holds until the finger lifts. A pick that then turns up or
+        /// down keeps picking, and the grid stays still under it.
+        ///
+        /// Only ever armed while a selection is already open. The rest of the
+        /// time a drag means scroll and nothing else.
+        private enum SweepIntent { case undecided, select, scroll }
+
+        /// The tile a run started on. Held by identity rather than position, so
+        /// a photograph arriving mid-drag doesn't move the start of the run; a
+        /// tile whose day hasn't loaded yet has no identity and is held by its
+        /// place in the day instead.
+        private struct SweepAnchor {
+            let key: String
+            let id: UUID?
+            let index: Int
+        }
+
+        /// How far a drag runs before it is read. Less, and a tap that slips a
+        /// little starts a run from the photo it meant to toggle.
+        private static let sweepDecision: CGFloat = 14
+        /// How much more sideways than up or down a drag must be to pick:
+        /// within about 40 degrees of level. It leans toward scroll, because a
+        /// scroll misread as a pick is the worse mistake — it changes the
+        /// selection, where the other only scrolls.
+        private static let sweepSlope: CGFloat = 1.2
+        /// How close to the top or bottom of the grid a run's finger must be
+        /// for the grid to scroll on by itself, and how fast it goes, from the
+        /// zone's inner edge to its outer one, in points per second.
+        private static let autoscrollZone: CGFloat = 72
+        private static let autoscrollSpeeds: ClosedRange<CGFloat> = 120...1500
+
+        /// Drag to select, the way Photos does it.
+        ///
+        /// A run picks every photograph between the tile it started on and the
+        /// one under the finger, in reading order — across a row and then down
+        /// picks whole rows. Pulled back, it puts back what it picked past the
+        /// finger. It never takes away anything picked before it began: taking
+        /// a photo out is a tap, which is cheap, and losing forty to a misread
+        /// drag is not. Held near the top or bottom of the grid, it carries the
+        /// grid on so a run can cross more than a screen. See `SweepIntent` for
+        /// how a run is told from a scroll.
         ///
         /// A recognizer on the collection view rather than frames reported by
-        /// each tile: the tiles are hosted separately now, and the layout
-        /// already knows what is under any point.
+        /// each tile: the tiles are hosted separately, and the layout already
+        /// knows what is under any point.
         @objc private func handleSweep(_ gesture: UIPanGestureRecognizer) {
             guard let view else { return }
             switch gesture.state {
             case .began, .changed:
                 guard parent.selection.isActive else { return }
-                if !sweeping {
+                if intent == .undecided {
                     let travel = gesture.translation(in: view)
-                    // The same fourteen points as before: less, and the press
-                    // that toggles one photo also sweeps it straight back.
-                    guard hypot(travel.x, travel.y) >= 14 else { return }
-                    sweeping = true
+                    guard hypot(travel.x, travel.y) >= Self.sweepDecision else { return }
+                    guard abs(travel.x) > abs(travel.y) * Self.sweepSlope else {
+                        intent = .scroll
+                        return
+                    }
+                    beginSweep()
                 }
-                let point = gesture.location(in: view)
-                guard let path = view.indexPathForItem(at: point) else { return }
-                let all = entries(path.section)
-                guard path.item < all.count, case .item(let item) = all[path.item] else { return }
-                guard visited.insert(item.id).inserted else { return }
-                guard !parent.selection.contains(item) else { return }
-                parent.selection.toggle(item)
-                UISelectionFeedbackGenerator().selectionChanged()
+                guard intent == .select else { return }
+                extendSweep()
+                updateAutoscroll()
             default:
                 endSweep()
             }
         }
 
-        private func endSweep() {
-            sweeping = false
-            visited.removeAll()
+        private func beginSweep() {
+            guard let view else { return }
+            intent = .select
+            // The grid holds still from here: a finger picking a run can't
+            // also be moving the grid under it. It moves again only by itself,
+            // at the edges — see `autoscrollTick`.
+            view.isScrollEnabled = false
+            sweepHoldsScroll = true
+            sweepBaseline = Set(parent.selection.picked.map(\.id))
+            sweepPicked = []
+            sweepEnd = nil
+            // The tile the finger came down on, which can sit up to a few
+            // points from the one under it now: the grid may have scrolled a
+            // little before the drag was read.
+            if let touchDown, let path = itemPath(nearestTo: touchDown) {
+                sweepAnchor = anchor(at: path)
+            }
         }
 
+        /// Draws the run out to the tile under the finger.
+        private func extendSweep() {
+            guard intent == .select, let view, let sweep else { return }
+            // Read inside the part of the grid that can be seen. Under a bar,
+            // the run stops at the last row showing rather than picking tiles
+            // nobody can see, and the grid scrolling on brings the rest out.
+            let visibleTop = view.contentOffset.y + view.contentInset.top
+            let visibleBottom = max(
+                view.contentOffset.y + view.bounds.height - view.contentInset.bottom,
+                visibleTop + 2
+            )
+            var point = sweep.location(in: view)
+            point.x = min(max(point.x, 1), view.bounds.width - 1)
+            point.y = min(max(point.y, visibleTop + 1), visibleBottom - 1)
+            // Over a heading or between rows: the run stays where it was.
+            guard let end = itemPath(nearestTo: point) else { return }
+            if sweepAnchor == nil { sweepAnchor = anchor(at: end) }
+            guard end != sweepEnd || sweepStale,
+                  let anchor = sweepAnchor, let start = resolve(anchor)
+            else { return }
+            sweepEnd = end
+            sweepStale = false
+            pickRun(from: start, to: end)
+        }
+
+        /// Makes the selection what it was before the drag plus everything
+        /// from `start` to `end`, in one change.
+        private func pickRun(from start: IndexPath, to end: IndexPath) {
+            let (first, last) = start <= end ? (start, end) : (end, start)
+            var run: [TimelineItem] = []
+            for section in first.section...last.section {
+                let all = entries(section)
+                let from = section == first.section ? first.item : 0
+                let to = min(section == last.section ? last.item : all.count - 1, all.count - 1)
+                guard from <= to else { continue }
+                for case .item(let item) in all[from...to] { run.append(item) }
+            }
+            let inRun = Set(run.map(\.id))
+            let selection = parent.selection
+            let adding = run.filter { !sweepBaseline.contains($0.id) && !selection.contains($0) }
+            let dropping = sweepPicked.subtracting(inRun)
+            guard !adding.isEmpty || !dropping.isEmpty else { return }
+            selection.unpick(dropping)
+            selection.pick(adding)
+            sweepPicked.subtract(dropping)
+            sweepPicked.formUnion(adding.map(\.id))
+            UISelectionFeedbackGenerator().selectionChanged()
+        }
+
+        private func endSweep() {
+            stopAutoscroll()
+            if sweepHoldsScroll {
+                view?.isScrollEnabled = true
+                sweepHoldsScroll = false
+            }
+            intent = .undecided
+            touchDown = nil
+            sweepAnchor = nil
+            sweepBaseline = []
+            sweepPicked = []
+            sweepEnd = nil
+            sweepStale = false
+        }
+
+        /// The tile at a point in content, any kind — a run can start or end
+        /// on a day still loading, and its photographs join once they land.
+        private func itemPath(at point: CGPoint) -> IndexPath? {
+            guard let view, let path = view.indexPathForItem(at: point),
+                  path.item < entries(path.section).count
+            else { return nil }
+            return path
+        }
+
+        /// The same, or — out past the end of a short row — the row's last tile.
+        /// A finger in the empty end of a day's last row is pointing at that
+        /// day's last photograph, the way Photos reads it; without this, a day
+        /// that ends short of the far column could never end a run.
+        private func itemPath(nearestTo point: CGPoint) -> IndexPath? {
+            if let path = itemPath(at: point) { return path }
+            guard let view, parent.columns > 0 else { return nil }
+            let step = view.bounds.width / CGFloat(parent.columns)
+            var x = point.x - step
+            while x > 0 {
+                if let path = itemPath(at: CGPoint(x: x, y: point.y)) { return path }
+                x -= step
+            }
+            return nil
+        }
+
+        private func anchor(at path: IndexPath) -> SweepAnchor? {
+            guard keys.indices.contains(path.section) else { return nil }
+            let all = entries(path.section)
+            guard path.item < all.count else { return nil }
+            var id: UUID?
+            if case .item(let item) = all[path.item] { id = item.id }
+            return SweepAnchor(key: keys[path.section], id: id, index: path.item)
+        }
+
+        private func resolve(_ anchor: SweepAnchor) -> IndexPath? {
+            guard let section = sectionIndex[anchor.key] else { return nil }
+            let all = entries(section)
+            if let id = anchor.id {
+                let index = all.firstIndex { entry in
+                    if case .item(let item) = entry { return item.id == id }
+                    return false
+                }
+                return index.map { IndexPath(item: $0, section: section) }
+            }
+            guard !all.isEmpty else { return nil }
+            return IndexPath(item: min(anchor.index, all.count - 1), section: section)
+        }
+
+        /// The days a run covers, while one is being drawn.
+        private func sweepRunSections() -> ClosedRange<Int>? {
+            guard intent == .select, let end = sweepEnd,
+                  let anchor = sweepAnchor, let start = resolve(anchor)
+            else { return nil }
+            let run = min(start.section, end.section)...max(start.section, end.section)
+            return run.clamped(to: 0...max(keys.count - 1, 0))
+        }
+
+        private func hasPlaceholders(_ section: Int) -> Bool {
+            entries(section).contains { entry in
+                if case .placeholder = entry { return true }
+                return false
+            }
+        }
+
+        // MARK: Scrolling on at the edges
+
+        /// How fast a run's finger is asking the grid to scroll, in points per
+        /// second — negative is up, toward older photographs. Faster the
+        /// deeper into the edge it is, and fastest over the bars themselves.
+        private func autoscrollSpeed() -> CGFloat {
+            guard intent == .select, let view, let sweep else { return 0 }
+            let y = sweep.location(in: view).y - view.contentOffset.y
+            let top = view.contentInset.top
+            let bottom = view.bounds.height - view.contentInset.bottom
+            let zone = Self.autoscrollZone
+            let depth: CGFloat
+            if y < top + zone {
+                depth = -min((top + zone - y) / zone, 1)
+            } else if y > bottom - zone {
+                depth = min((y - (bottom - zone)) / zone, 1)
+            } else {
+                return 0
+            }
+            let speeds = Self.autoscrollSpeeds
+            let speed = speeds.lowerBound + (speeds.upperBound - speeds.lowerBound) * depth * depth
+            return depth < 0 ? -speed : speed
+        }
+
+        private func updateAutoscroll() {
+            guard autoscrollSpeed() != 0 else {
+                stopAutoscroll()
+                return
+            }
+            guard autoscroll == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(autoscrollTick(_:)))
+            link.add(to: .main, forMode: .common)
+            autoscroll = link
+        }
+
+        private func stopAutoscroll() {
+            autoscroll?.invalidate()
+            autoscroll = nil
+        }
+
+        /// One frame of the grid scrolling under a still finger, and the run
+        /// drawn on to whatever is under it now. Stops at either end of the
+        /// library; the next move of the finger starts it again if there is
+        /// further to go.
+        @objc private func autoscrollTick(_ link: CADisplayLink) {
+            guard let view else {
+                stopAutoscroll()
+                return
+            }
+            let speed = autoscrollSpeed()
+            // A frame's worth at whatever rate the display runs, and never more
+            // than a thirtieth of a second's worth after a hitch.
+            let step = speed * CGFloat(min(link.targetTimestamp - link.timestamp, 1.0 / 30))
+            let y = min(max(view.contentOffset.y + step, -view.contentInset.top), maxContentOffsetY)
+            guard speed != 0, y != view.contentOffset.y else {
+                stopAutoscroll()
+                return
+            }
+            view.contentOffset.y = y
+            extendSweep()
+        }
+
+        // MARK: Gesture delegate
+
+        /// Remembers where each drag came down, which is where a run starts.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch
+        ) -> Bool {
+            if gestureRecognizer === sweep, gestureRecognizer.state == .possible, let view {
+                touchDown = touch.location(in: view)
+            }
+            return true
+        }
+
+        /// Alongside the grid's own scroll, which is what lets a drag read as a
+        /// scroll go on scrolling. A run stops the scroll itself.
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
