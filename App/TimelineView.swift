@@ -211,7 +211,7 @@ struct TimelineView: View {
     /// look at. See `DismissHandle` for why the Mac can't read `\.dismiss`
     /// here.
     @State private var leave = DismissHandle()
-    /// Add to Album, or Add to Shared Library, while it's open.
+    /// Add to Album, or Add to Shared Album, while it's open.
     @State private var addRequest: AddToAlbumRequest?
     @State private var showTagEditor = false
     @State private var albumResult: String?
@@ -1063,15 +1063,16 @@ struct TimelineView: View {
             Label("Add to Album…", systemImage: "rectangle.stack.badge.plus")
         }
 
-        // The sheet, with only the libraries in it, rather than a submenu that
-        // shared on the click with nothing on screen to say it had: the same
-        // pick, Add, and watch it go as Add to Album.
-        if session.sharedSpaces.contains(where: { $0.id != space.id && $0.role != .viewer }) {
+        // The sheet with only its Shared Albums in it, the same list the
+        // sidebar has under that heading, rather than a submenu that shared on
+        // the click with nothing on screen to say it had: the same pick, Add,
+        // and watch it go as Add to Album.
+        if session.hasSharedAlbums {
             Button {
                 focus(item)
-                addRequest = AddToAlbumRequest(librariesOnly: true)
+                addRequest = AddToAlbumRequest(sharedOnly: true)
             } label: {
-                Label("Add to Shared Library…", systemImage: "person.2")
+                Label("Add to Shared Album…", systemImage: "person.2")
             }
         }
 
@@ -2166,9 +2167,9 @@ struct TimelineView: View {
                 // than annotating them where they sit.
                 #if os(iOS)
                 Button {
-                    addRequest = AddToAlbumRequest(librariesOnly: true)
+                    addRequest = AddToAlbumRequest(sharedOnly: true)
                 } label: {
-                    Label("Add to Shared Library", systemImage: "person.2.badge.plus")
+                    Label("Add to Shared Album", systemImage: "person.2.badge.plus")
                 }
                 Divider()
                 #endif

@@ -3,7 +3,7 @@ import FrameStationAPI
 import FrameStationKit
 import SwiftUI
 
-/// Where selected photos go: Add to Album, and Add to Shared Library.
+/// Where selected photos go: Add to Album, and Add to Shared Album.
 ///
 /// Three steps in one sheet, so nothing happens out of sight. **Pick**: a tap
 /// checks a place and tints its row, as many as you like, and nothing is sent.
@@ -36,8 +36,8 @@ struct AddToAlbumSheet: View {
     /// Whether shared libraries are offered. Only a library's own grid can
     /// share out of it.
     var offersLibraries = false
-    /// Shared libraries and nothing else, for Add to Shared Library.
-    var librariesOnly = false
+    /// The Shared Albums section and nothing else, for Add to Shared Album.
+    var sharedOnly = false
     /// Told once the sheet should go: what was done, or nil when nothing was
     /// sent.
     let onFinished: (AlbumAddOutcome?) -> Void
@@ -64,7 +64,7 @@ struct AddToAlbumSheet: View {
 
     init(
         session: AppSession, items: [TimelineItem], source: SpaceDTO?,
-        offersLibraries: Bool = false, librariesOnly: Bool = false,
+        offersLibraries: Bool = false, sharedOnly: Bool = false,
         preselected: Set<UUID> = [],
         onFinished: @escaping (AlbumAddOutcome?) -> Void
     ) {
@@ -72,7 +72,7 @@ struct AddToAlbumSheet: View {
         self.items = items
         self.source = source
         self.offersLibraries = offersLibraries
-        self.librariesOnly = librariesOnly
+        self.sharedOnly = sharedOnly
         self.onFinished = onFinished
         _picked = State(initialValue: preselected)
     }
@@ -84,10 +84,10 @@ struct AddToAlbumSheet: View {
             Group {
                 switch phase {
                 case .picking:
-                    if isLoading && store.albums.isEmpty && libraries.isEmpty && !librariesOnly {
+                    if isLoading && store.albums.isEmpty && libraries.isEmpty {
                         ProgressView()
-                    } else if librariesOnly && libraries.isEmpty {
-                        noLibraries
+                    } else if sharedOnly && sharedRows.isEmpty {
+                        noSharedAlbums
                     } else {
                         picker
                     }
@@ -125,8 +125,14 @@ struct AddToAlbumSheet: View {
         .macSheetSize()
     }
 
+    /// "it" for one photo, "them" for more, wherever a sentence points back
+    /// at what's being added.
+    private var them: String {
+        (phase == .picking ? items.count : sent.count) == 1 ? "it" : "them"
+    }
+
     private var title: String {
-        librariesOnly ? "Add to Shared Library" : "Add to Album"
+        sharedOnly ? "Add to Shared Album" : "Add to Album"
     }
 
     private static func counted(_ count: Int) -> String {
@@ -244,8 +250,7 @@ struct AddToAlbumSheet: View {
         case 0: return "Add"
         case 1: return "Add to \(chosen[0].name)"
         default:
-            let noun = librariesOnly ? "Libraries" : "Albums"
-            return "Add to \(chosen.count) \(noun)"
+            return "Add to \(chosen.count) Albums"
         }
     }
 
@@ -277,13 +282,13 @@ struct AddToAlbumSheet: View {
         var seen = Set<String>()
         libraryNames = libraryNames.filter { seen.insert($0).inserted }
         if !libraryNames.isEmpty && albumAudiences.isEmpty {
-            return "Everyone in \(Self.joined(libraryNames)) will see them and be notified."
+            return "Everyone in \(Self.joined(libraryNames)) will see \(them) and be notified."
         }
         if libraryNames.isEmpty && !albumAudiences.isEmpty {
-            return "Everyone in \(Self.joined(albumAudiences)) will see them."
+            return "Everyone in \(Self.joined(albumAudiences)) will see \(them)."
         }
         if !libraryNames.isEmpty {
-            return "Everyone in \(Self.joined(libraryNames + albumAudiences)) will see them."
+            return "Everyone in \(Self.joined(libraryNames + albumAudiences)) will see \(them)."
         }
         return nil
     }
@@ -313,8 +318,8 @@ struct AddToAlbumSheet: View {
                         Text(Self.countedTitle(items.count))
                             .font(.headline)
                             .foregroundStyle(Color.primary)
-                        Text(librariesOnly
-                             ? "Choose where to share them."
+                        Text(sharedOnly
+                             ? "Choose who to share \(them) with."
                              : "Choose one or more albums.")
                             .font(.subheadline)
                             .foregroundStyle(Color.secondary)
@@ -324,13 +329,11 @@ struct AddToAlbumSheet: View {
                 .padding(.vertical, 4)
             }
 
-            if librariesOnly {
-                Section {
-                    ForEach(libraries) { space in
-                        destinationRow(.library(space))
+            if sharedOnly {
+                Section("Shared Albums") {
+                    ForEach(sharedRows) { destination in
+                        destinationRow(destination)
                     }
-                } header: {
-                    Text("Shared Libraries")
                 }
             } else {
                 Section {
@@ -365,21 +368,23 @@ struct AddToAlbumSheet: View {
         }
     }
 
-    private var noLibraries: some View {
+    private var noSharedAlbums: some View {
         ContentUnavailableView {
-            Label("Nowhere to add these", systemImage: "person.2")
+            Label("No Shared Albums", systemImage: "person.2")
         } description: {
             Text(
-                "Photos can only be shared into a shared library. "
-                + "Create one and everyone in it sees the same photos."
+                "Make a shared album on the Albums page, and everyone in it "
+                + "sees the same photos."
             )
         }
     }
 
     /// A place, checked or not. The check is the selection mark the grid's
-    /// photos wear, so a picked album looks like a picked photo.
+    /// photos wear, so a picked album looks like a picked photo. One you may
+    /// only look at is dimmed, says so, and can't be picked.
     private func destinationRow(_ destination: Destination) -> some View {
         let isPicked = picked.contains(destination.id)
+        let mayAdd = destination.mayAdd
         return Button {
             withAnimation(.snappy(duration: 0.2)) {
                 if isPicked { picked.remove(destination.id) } else { picked.insert(destination.id) }
@@ -399,14 +404,22 @@ struct AddToAlbumSheet: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                CheckCircle(isOn: isPicked)
+                if mayAdd {
+                    CheckCircle(isOn: isPicked)
+                } else {
+                    Image(systemName: "eye")
+                        .foregroundStyle(Color.secondary)
+                        .frame(width: 24, height: 24)
+                }
             }
+            .opacity(mayAdd ? 1 : 0.5)
             .contentShape(Rectangle())
         }
         #if os(macOS)
         // A row with a checkmark, not a push button.
         .buttonStyle(.plain)
         #endif
+        .disabled(!mayAdd)
         .listRowBackground(isPicked ? Color.accentColor.opacity(0.13) : nil)
         .accessibilityAddTraits(isPicked ? .isSelected : [])
     }
@@ -434,6 +447,11 @@ struct AddToAlbumSheet: View {
     }
 
     private func detail(for destination: Destination) -> String {
+        let detail = plainDetail(for: destination)
+        return destination.mayAdd ? detail : "View only · \(detail)"
+    }
+
+    private func plainDetail(for destination: Destination) -> String {
         switch destination {
         case .album(let album):
             let count = Self.counted(album.itemCount)
@@ -451,36 +469,39 @@ struct AddToAlbumSheet: View {
 
     // MARK: - Shared
 
-    /// The shared libraries these photos can be added to: not the one they're
-    /// in, and not one this person may only look at.
+    /// The shared libraries photos can go into from here. Only a grid that can
+    /// share out of its library offers them.
     private var libraries: [SpaceDTO] {
-        guard offersLibraries || librariesOnly, source != nil else { return [] }
-        return session.sharedSpaces.filter { $0.id != source?.id && $0.role != .viewer }
+        guard offersLibraries || sharedOnly, source != nil else { return [] }
+        return session.sharedSpaces
     }
 
-    /// Albums shared with people, then each library and the albums made in
-    /// it, as far as you may add to them: the order the Albums page draws
-    /// them in. Albums of a library this device hasn't heard of come last,
-    /// shown, never dropped.
+    /// The Albums page's Shared Albums, row for row and in its order: the
+    /// same `AlbumStore.sharedEntries` that page and the Mac's sidebar list.
+    /// Built separately, this list had its own rules, and on a Mac the sidebar
+    /// showed two shared albums where Add to Shared Library offered one.
+    ///
+    /// What the photos are already in is left out: the library they're in,
+    /// and from an album's own grid, that album. Ones you may only look at
+    /// stay, dimmed and saying "View only" (`destinationRow`): a shared album
+    /// missing from the list looked like a bug, where one that says why it
+    /// can't be picked doesn't.
     private var sharedRows: [Destination] {
-        let albums = store.family.filter(\.mayAdd)
-        // Not the album the photos are already in: from a shared album's own
-        // grid, it was offered as somewhere to put them.
-        var rows: [Destination] = store.sharedWithPeople
-            .filter { $0.mayAdd && ($0.spaceID == nil || $0.spaceID != source?.id) }
-            .map(Destination.album)
-        for space in libraries {
-            rows.append(.library(space))
-            rows += albums.filter { $0.spaceID == space.id }.map(Destination.album)
+        store.sharedEntries(libraries: libraries).compactMap { entry in
+            switch entry {
+            case .library(let space):
+                return space.id == source?.id ? nil : .library(space)
+            case .album(let album):
+                if album.isSharedWithPeople, let spaceID = album.spaceID,
+                   spaceID == source?.id { return nil }
+                return .album(album)
+            }
         }
-        rows += albums.filter { album in !libraries.contains { $0.id == album.spaceID } }
-            .map(Destination.album)
-        return rows
     }
 
     /// Every place, in the order the list draws them.
     private var destinations: [Destination] {
-        if librariesOnly { return libraries.map(Destination.library) }
+        if sharedOnly { return sharedRows }
         return drafts.map(Destination.new) + store.personal.map(Destination.album) + sharedRows
     }
 
@@ -586,13 +607,14 @@ struct AddToAlbumSheet: View {
             return "Adding \(count)…"
         case .finished:
             if failures == 0 { return "Added \(count)" }
-            return finishedCount == 0 ? "Couldn't Add These" : "Some Didn't Go"
+            if finishedCount > 0 { return "Some Didn't Go" }
+            return sent.count == 1 ? "Couldn't Add This" : "Couldn't Add These"
         }
     }
 
     private var subline: String {
         let places = run.count == 1 ? run[0].name
-            : "\(run.count) \(librariesOnly ? "libraries" : "albums")"
+            : "\(run.count) albums"
         switch phase {
         case .picking, .working:
             if run.count > 1, finishedCount > 0 {
@@ -600,7 +622,7 @@ struct AddToAlbumSheet: View {
             }
             return "To \(places)"
         case .finished:
-            if failures == 0 { return "They're in \(places)." }
+            if failures == 0 { return "\(sent.count == 1 ? "It's" : "They're") in \(places)." }
             if finishedCount == 0 { return "Nothing was added. Try again, or come back later." }
             return "Added to \(finishedCount) of \(run.count). The rest can be tried again."
         }
@@ -752,7 +774,9 @@ struct AddToAlbumSheet: View {
             onFinished(nil)
             return
         }
-        onFinished(AlbumAddOutcome(everything: failures == 0, shares: shares))
+        onFinished(AlbumAddOutcome(
+            everything: failures == 0, shares: shares, places: done.map(\.name)
+        ))
     }
 
     /// The Albums page keeps its list between visits, and an album isn't part
@@ -813,6 +837,16 @@ extension AddToAlbumSheet {
         var isAlbum: Bool {
             if case .library = self { false } else { true }
         }
+
+        /// Whether this person may put photos in it. False in a library or an
+        /// album they may only look at.
+        var mayAdd: Bool {
+            switch self {
+            case .album(let album): album.mayAdd
+            case .library(let space): space.role != .viewer
+            case .new: true
+            }
+        }
     }
 }
 
@@ -823,6 +857,17 @@ struct AlbumAddOutcome {
     let everything: Bool
     /// Shares into shared libraries that went through.
     let shares: [LibraryShare]
+    /// Every place that got them, by name, in the order they were added.
+    let places: [String]
+}
+
+extension AppSession {
+    /// Whether there's anywhere for Add to Shared Album to offer: a shared
+    /// library, or an album shared with people. What decides whether the
+    /// grid's right-click menu and the viewer show it at all.
+    var hasSharedAlbums: Bool {
+        !sharedSpaces.isEmpty || !albumStore().sharedWithPeople.isEmpty
+    }
 }
 
 struct LibraryShare {
@@ -970,10 +1015,10 @@ private struct AlbumRowCover: View {
     }
 }
 
-/// Which Add to Album to open: everywhere, or only the shared libraries.
+/// Which Add to Album to open: every album, or only the shared ones.
 struct AddToAlbumRequest: Identifiable {
     let id = UUID()
-    var librariesOnly = false
+    var sharedOnly = false
 }
 
 /// Presenting the sheet and the selection-wide "Done" alert as one modifier.
@@ -1013,7 +1058,7 @@ struct AddToAlbumPresentation: ViewModifier {
                     items: selection.picked,
                     source: source,
                     offersLibraries: offersLibraries,
-                    librariesOnly: request.librariesOnly
+                    sharedOnly: request.sharedOnly
                 ) { done in
                     outcome = done
                     self.request = nil

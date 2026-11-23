@@ -293,6 +293,12 @@ struct AssetDetailView: View {
     @State private var handoff = VideoHandoff()
     #endif
     @State private var showInfo = false
+    #if !os(tvOS)
+    /// Add to Shared Album, while it's open, for the photo on screen. The
+    /// grid's sheet: pick, Add, watch it go. These menus shared on the tap
+    /// with nothing on screen, and offered only whole libraries.
+    @State private var addRequest: AddToAlbumRequest?
+    #endif
     #if os(iOS)
     /// Which page is on screen, keyed by placement id.
     ///
@@ -556,6 +562,9 @@ struct AssetDetailView: View {
         .sheet(isPresented: $showInfo) {
             InformationSheet(model: currentModel, session: session) { showInfo = false }
         }
+        .sheet(item: $addRequest) { _ in
+            addToSharedAlbum(currentItem, model: currentModel)
+        }
         .sheet(isPresented: $showDateEditor) {
             DateTimeEditorSheet(items: [currentItem]) { plan in
                 try? await session.client?.setCaptureTimes(spaceID: space.id, items: plan)
@@ -687,6 +696,11 @@ struct AssetDetailView: View {
             .inspectorColumnWidth(min: 280, ideal: 320, max: 440)
         }
         .onAppear { if showsInfoInitially { showInfo = true } }
+        .sheet(item: $addRequest) { _ in
+            addToSharedAlbum(
+                displayedItem, model: cache.model(for: displayedItem, spaceID: space.id)
+            )
+        }
         #else
         // tvOS keeps the bar across the bottom. There is no toolbar to move
         // these into and no pointer to open an inspector with — a remote walks
@@ -856,23 +870,18 @@ struct AssetDetailView: View {
         }
 
         // The action neither reference app has: put this photo in a shared
-        // space. A row, not a copy — the bytes are already on the NAS.
-        if !session.sharedSpaces.isEmpty {
+        // album. The grid's Add to Shared Album sheet, so it lists everything
+        // the sidebar does under Shared Albums and shows the add happening.
+        if session.hasSharedAlbums {
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
-                        Button {
-                            Task { await model.addTo(target, client: session.client) }
-                        } label: {
-                            Label(target.name, systemImage: "person.2")
-                        }
-                    }
+                Button {
+                    addRequest = AddToAlbumRequest(sharedOnly: true)
                 } label: {
-                    Label("Add to Shared Library", systemImage: model.addedTo.isEmpty
+                    Label("Add to Shared Album", systemImage: model.addedTo.isEmpty
                           ? "rectangle.stack.badge.plus"
                           : "rectangle.stack.badge.person.crop.fill")
                 }
-                .help("Add to a shared library")
+                .help("Add to a shared album")
             }
         }
 
@@ -1345,6 +1354,25 @@ struct AssetDetailView: View {
     }
     #endif
 
+    #if !os(tvOS)
+    /// The grid's Add to Shared Album, for one photo. Where it went is kept on
+    /// the photo's model, as the old menus kept it: the toolbar's mark on a
+    /// Mac, "Added to …" along the bottom on the phone.
+    private func addToSharedAlbum(_ item: TimelineItem, model: AssetDetailModel) -> some View {
+        AddToAlbumSheet(
+            session: session, items: [item], source: space(of: item),
+            offersLibraries: true, sharedOnly: true
+        ) { outcome in
+            addRequest = nil
+            guard let outcome else { return }
+            for place in outcome.places where !model.addedTo.contains(place) {
+                model.addedTo.append(place)
+            }
+            model.addError = nil
+        }
+    }
+    #endif
+
     private var subject: String {
         #if os(iOS)
         return currentItem.mediaType == .video ? "This Video" : "This Photo"
@@ -1591,16 +1619,12 @@ struct AssetDetailView: View {
             }
         }
 
-        if !session.sharedSpaces.filter({ $0.id != space.id }).isEmpty {
+        if session.hasSharedAlbums {
             Divider()
-            Menu("Add to Shared Library") {
-                ForEach(session.sharedSpaces.filter { $0.id != space.id }) { target in
-                    Button(target.name) {
-                        Task { [model = currentModel] in
-                            await model.addTo(target, client: session.client)
-                        }
-                    }
-                }
+            Button {
+                addRequest = AddToAlbumRequest(sharedOnly: true)
+            } label: {
+                Label("Add to Shared Album", systemImage: "person.2.badge.plus")
             }
         }
 
