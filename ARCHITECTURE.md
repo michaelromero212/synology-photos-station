@@ -527,10 +527,11 @@ still in it.
 A shared *library* is everything its members share; a shared *album* is a set
 of those photos with a name. On the Albums page both are the same card under
 Shared Albums, each library followed by its own albums. A library's card has
-its most recently added photo for a cover and "3 people · 2,791 items" beneath
-it, sent with the album list (`?shared=true` adds `libraries`) rather than on
-`/me`, so it's as fresh as the albums beside it. Menus that put photos into a
-library say "Shared Library".
+its most recently added photo for a cover and "3 people · 2,791 items" on the
+picture under its name, as every card on the page has, sent with the album
+list (`?shared=true` adds `libraries`) rather than on `/me`, so it's as fresh
+as the albums beside it. Menus that put photos into a library say "Shared
+Library".
 
 The app learns that the NAS has shared albums from the list itself, and keeps
 that across launches: a NAS that sends library cards has them. If New Album
@@ -1615,12 +1616,41 @@ photos arrive, and nothing here can take a kept album's place. Optional on the
 wire: an older app ignores it, and a newer app talking to an older NAS draws no
 section. `Scripts/smoke-traditions.sh` covers it.
 
+### One Albums page on every device
+
+*Added 2026-11-24.* The Albums page is Photos' Collections on iPhone, iPad,
+Mac and Apple TV alike: one implementation (`AlbumsView.page`) built from one
+set of pieces (`CollectionsPieces.swift`), where the phone used to draw a
+column of list rows and the Mac a page of its own in a different order.
+
+- **The order** is the same everywhere: Memories, Pinned, People, Albums,
+  Shared Albums, Trips, Holidays & Occasions, Over the Years, Media Types,
+  Utilities.
+- **Each section's title** has a › where it opens the rest, and a round button
+  that folds the section away, kept per device in `albums.collapsedSections`.
+  A TV's sections don't fold.
+- **Cards** carry their names on the picture (`CollectionTile`). People are
+  rounded-square face cards (`PersonTile`): the NAS's crops are square, and a
+  taller card cut from one showed a face from ear to ear. Media Types and
+  Utilities are compact rows with counts (`CollectionsPill`). A section with
+  nothing in it says what will be there (`CollectionsEmptyCard`).
+- **Sizes come from the width** (`CollectionsLayout`). A phone fits three small
+  or two medium cards between its margins. Its rows scroll sideways and come
+  to rest on a card, with the next one peeking in at the edge, and its compact
+  rows sit in sideways columns wider than half the screen. Anything wider fits
+  as many cards as there's room for at about one size. A Mac shows one row of
+  each section, with the rest behind its title.
+- **Left out on purpose:** Photos' Groups, reordering, layout sizes and
+  sorting. Each is a setting somebody would have to look after.
+
 ### The row the Albums page opens on
 
 Photos opens on a row of featured memories and photos to swipe through, a
-fresh set each day, and this page does the same. It used to be one card a day,
-and in a young library that was the same handful in turn. The NAS sends
-`featured`, up to six cards, in this order:
+fresh set each day, and this page does the same under Memories: cards along
+the top that scroll sideways, square on a phone with the next one peeking in,
+wider than tall on an iPad, a Mac and a TV, each saying why it's there. It used
+to be one card a day, and in a young library that was the same handful in
+turn. The NAS sends `featured`, up to six cards, in this order:
 
 1. **Tied to today:** On This Day, the trip you were on this week in an earlier
    year, a holiday coming up ("CHRISTMAS IS COMING UP"). These come first.

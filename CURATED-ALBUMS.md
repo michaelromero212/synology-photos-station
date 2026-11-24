@@ -87,9 +87,12 @@ SDKs, not recalled.
 and 3,000 videos. About 67,000 files are still waiting in Synology Photos; that
 migration is deferred.
 
-**The Albums page today.** It shows a hero card (On This Day, a recent trip or
-last season, for example), Recently Added, Favorites, Trips, Holidays &
-Occasions, the person's own albums, Shared Albums, Places and Media Types.
+**The Albums page today.** One page on iPhone, iPad, Mac and Apple TV, in
+Photos' Collections order: Memories (the row the page opens on), Pinned
+(Favorites, Recently Added, Videos, Screenshots, Places, Recently Deleted),
+People, the person's own Albums, Shared Albums, Trips, Holidays & Occasions,
+Over the Years, Media Types and Utilities. Each section folds away (except on
+Apple TV), and its title opens the rest where there's more.
 
 ---
 

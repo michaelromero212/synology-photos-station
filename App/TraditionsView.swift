@@ -8,8 +8,8 @@ import SwiftUI
 // Albums page does, so a year here is the same photos Holidays & Occasions
 // opens.
 
-/// Every tradition, the soonest to come round first: what the section's See
-/// All opens.
+/// Every tradition, the soonest to come around first: what the section's
+/// title opens. The Albums page's cards, in its columns.
 ///
 /// Read live from the page's store, like `CollectionListView`, so a date named
 /// inside one of them has its name here too when you come back.
@@ -21,50 +21,30 @@ struct TraditionListView: View {
     private var traditions: [Tradition] { store.page?.traditions ?? [] }
 
     var body: some View {
-        #if os(macOS)
-        // Photos' cards, as on the Albums page this opened from.
         GeometryReader { proxy in
-            let layout = MacCardLayout(width: proxy.size.width)
+            let layout = CollectionsLayout(width: proxy.size.width)
+            let side = layout.side(.medium)
             ScrollView {
-                LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                LazyVGrid(columns: layout.columns(.medium), alignment: .leading, spacing: layout.gap) {
                     ForEach(traditions) { tradition in
                         NavigationLink {
                             TraditionView(session: session, space: space, store: store, tradition: tradition)
                         } label: {
-                            TraditionTile(tradition: tradition, side: layout.side, loader: session.loader)
+                            TraditionTile(tradition: tradition, side: side, loader: session.loader)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, MacCardLayout.margin)
-                .padding(.vertical, 22)
+                .padding(.horizontal, layout.margin)
+                .padding(.vertical, CollectionsLayout.pagePadding)
             }
-        }
-        .navigationTitle("Over the Years")
-        // Its covers are the page's, and hold still with them. See
-        // `CollectionsStore.take`.
-        .holdsCovers(store)
-        #else
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(traditions) { tradition in
-                    NavigationLink {
-                        TraditionView(session: session, space: space, store: store, tradition: tradition)
-                    } label: {
-                        TraditionRow(tradition: tradition, loader: session.loader)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.vertical, 8)
         }
         .navigationTitle("Over the Years")
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
+        // Its covers are the page's, and hold still with them. See
+        // `CollectionsStore.take`.
         .holdsCovers(store)
-        #endif
     }
 }
 
@@ -128,27 +108,28 @@ struct TraditionView: View {
             #endif
     }
 
-    @ViewBuilder
+    /// Its years as the Albums page's cards, in its columns, under the line
+    /// that says how many and when.
     private func content(_ tradition: Tradition) -> some View {
-        #if os(macOS)
         GeometryReader { proxy in
-            let layout = MacCardLayout(width: proxy.size.width)
+            let layout = CollectionsLayout(width: proxy.size.width)
+            let side = layout.side(.medium)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if let subtitle = tradition.subtitle {
                         Text(subtitle)
-                            .font(.callout)
+                            .font(Self.subtitleFont)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
-                    LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                    LazyVGrid(columns: layout.columns(.medium), alignment: .leading, spacing: layout.gap) {
                         ForEach(tradition.years) { year in
                             NavigationLink {
                                 CollectionDetailView(session: session, space: space, collection: year)
                             } label: {
-                                MacCollectionTile(
-                                    title: year.title, detail: year.subtitle ?? macItems(year.count),
-                                    side: layout.side
+                                CollectionTile(
+                                    title: year.title, detail: year.subtitle ?? itemsLine(year.count),
+                                    width: side
                                 ) {
                                     CollectionCover(
                                         assetIDs: year.coverAssetIDs, loader: session.loader, size: 512
@@ -159,65 +140,34 @@ struct TraditionView: View {
                         }
                     }
                 }
-                .padding(.horizontal, MacCardLayout.margin)
-                .padding(.vertical, 22)
+                .padding(.horizontal, layout.margin)
+                .padding(.vertical, CollectionsLayout.pagePadding)
             }
         }
+    }
+
+    private static var subtitleFont: Font {
+        #if os(macOS)
+        return .callout
         #else
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if let subtitle = tradition.subtitle {
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                }
-                ForEach(tradition.years) { year in
-                    NavigationLink {
-                        CollectionDetailView(session: session, space: space, collection: year)
-                    } label: {
-                        CollectionRowCard(collection: year, loader: session.loader)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.vertical, 8)
-        }
+        return .subheadline
         #endif
     }
 }
 
-/// A tradition as a row on the phone's page: its cover, its name, how many
-/// years, and how many photos across them.
-struct TraditionRow: View {
-    let tradition: Tradition
-    let loader: ThumbnailLoader?
-
-    var body: some View {
-        CollectionRowCard(
-            title: tradition.title, subtitle: tradition.subtitle, count: tradition.count,
-            coverAssetIDs: tradition.coverAssetIDs, loader: loader
-        )
-    }
-}
-
-#if os(macOS)
-/// A tradition as one of the Mac page's square cards.
+/// A tradition as a card: its name, and how many years and when, on a photo
+/// from one of them.
 struct TraditionTile: View {
     let tradition: Tradition
     let side: CGFloat
     let loader: ThumbnailLoader?
 
     var body: some View {
-        MacCollectionTile(
-            title: tradition.title, detail: tradition.subtitle ?? macItems(tradition.count), side: side
+        CollectionTile(
+            title: tradition.title, detail: tradition.subtitle ?? itemsLine(tradition.count),
+            width: side
         ) {
             CollectionCover(assetIDs: tradition.coverAssetIDs, loader: loader, size: 512)
         }
     }
 }
-#endif

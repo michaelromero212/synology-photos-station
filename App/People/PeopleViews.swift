@@ -22,15 +22,6 @@ enum PeopleMetrics {
         return 78
         #endif
     }
-
-    /// The face at the top of someone's page.
-    static var headerFace: CGFloat {
-        #if os(tvOS)
-        return 180
-        #else
-        return 104
-        #endif
-    }
 }
 
 // MARK: - A face
@@ -294,6 +285,11 @@ struct PeopleListView: View {
     var onlyMore = false
 
     @State private var people: [PersonSummary]
+    /// A "Yes" or "No" to the page's question is on its way.
+    @State private var answering = false
+    /// The NAS has no such question (404): left off for this visit.
+    @State private var questionHidden = false
+    @State private var failure: String?
 
     init(session: AppSession, space: SpaceDTO, initial: [PersonSummary], onlyMore: Bool = false) {
         self.session = session
@@ -310,31 +306,67 @@ struct PeopleListView: View {
         onlyMore ? [] : people.filter { $0.place == .more }
     }
 
-    var body: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: PeopleMetrics.rowFace + 14), spacing: 14)],
-                spacing: 22
-            ) {
-                ForEach(shown) { person in
-                    NavigationLink {
-                        PersonView(session: session, space: space, person: person)
-                    } label: {
-                        PersonBubble(session: session, spaceID: space.id, person: person)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(16)
+    #if !os(tvOS)
+    /// The first unnamed person the NAS has a guess about, asked at the top
+    /// of the page as Photos asks "Is this photo of you?".
+    private var questioned: PersonSummary? {
+        guard !questionHidden else { return nil }
+        return shown.first { $0.name == nil && $0.maybe != nil }
+    }
+    #endif
 
-            if !more.isEmpty {
-                NavigationLink {
-                    PeopleListView(session: session, space: space, initial: more, onlyMore: true)
-                } label: {
-                    MorePeopleRow(session: session, spaceID: space.id, people: more)
+    var body: some View {
+        GeometryReader { proxy in
+            let layout = CollectionsLayout(width: proxy.size.width)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    #if !os(tvOS)
+                    if let person = questioned, let maybe = person.maybe {
+                        VStack(alignment: .leading, spacing: 6) {
+                            PeopleQuestionBanner(
+                                session: session, spaceID: space.id,
+                                face: person, name: maybe.name,
+                                answering: answering
+                            ) { isPerson in
+                                Task { await answer(person, maybe, isPerson: isPerson) }
+                            }
+                            if let failure {
+                                Text(failure)
+                                    .font(.footnote)
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 6)
+                            }
+                        }
+                        .padding(.horizontal, layout.margin)
+                    }
+                    #endif
+
+                    LazyVGrid(columns: layout.columns(.small), spacing: layout.gap) {
+                        ForEach(shown) { person in
+                            NavigationLink {
+                                PersonView(session: session, space: space, person: person)
+                            } label: {
+                                PersonTile(
+                                    session: session, spaceID: space.id, person: person,
+                                    side: layout.side(.small)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, layout.margin)
+
+                    if !more.isEmpty {
+                        NavigationLink {
+                            PeopleListView(session: session, space: space, initial: more, onlyMore: true)
+                        } label: {
+                            MorePeopleRow(session: session, spaceID: space.id, people: more)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, layout.margin)
+                    }
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 16)
+                .padding(.top, 8)
                 .padding(.bottom, 24)
             }
         }
@@ -348,6 +380,34 @@ struct PeopleListView: View {
         .modifier(FollowsOwnChanges(session: session) { await load() })
     }
 
+    #if !os(tvOS)
+    /// Answers the question for `person`'s whole group, the same call the
+    /// person's own page makes, then reloads so the next question shows.
+    private func answer(_ person: PersonSummary, _ maybe: PersonMaybe, isPerson: Bool) async {
+        guard let client = session.client, !answering else { return }
+        answering = true
+        defer { answering = false }
+        do {
+            _ = try await client.answerMaybe(
+                spaceID: space.id, groupID: person.id, maybe, isPerson: isPerson
+            )
+            failure = nil
+            // The answer doesn't count as a library change (see
+            // `AppSession.noteWrite`), so the Albums page is told.
+            session.collectionsStore(for: space.id).expire()
+            await load()
+        } catch FrameStationClientError.http(status: 404, reason: _) {
+            // A NAS from before these questions.
+            questionHidden = true
+        } catch FrameStationClientError.http(status: 409, reason: _) {
+            // Named in the meantime: the list is whoever they are now.
+            await load()
+        } catch {
+            failure = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
+    #endif
+
     private func load() async {
         guard let client = session.client,
               let everyone = try? await client.people(spaceID: space.id)
@@ -355,6 +415,106 @@ struct PeopleListView: View {
         people = onlyMore ? everyone.filter { $0.place == .more } : everyone
     }
 }
+
+#if !os(tvOS)
+// MARK: - Questions
+
+/// A question about someone, as a pill across the top of a page: a face, the
+/// question, and a Yes and a No, drawn after Photos' "Is this photo of you?".
+///
+/// It only draws; the page that shows it makes the call, so the list and a
+/// person's own page answer the same way.
+struct PeopleQuestionBanner: View {
+    let session: AppSession
+    let spaceID: UUID
+    /// Whose face to show.
+    let face: PersonSummary
+    /// Who the NAS thinks it may be.
+    let name: String
+    let answering: Bool
+    /// Called with true for Yes and false for No.
+    let onAnswer: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            FaceCircle(session: session, spaceID: spaceID, source: .person(face), diameter: 40)
+                .accessibilityHidden(true)
+            Text("Is this \(name)?")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Yes") { onAnswer(true) }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .accessibilityLabel("Yes, this is \(name)")
+            Button {
+                onAnswer(false)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, height: 30)
+                    .background(Color.primary.opacity(0.1), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("No, not \(name)")
+        }
+        .disabled(answering)
+        .peopleBannerStyle()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Is this \(name)?")
+    }
+}
+
+/// "Found 12 more photos. Is this Morgan?" with a way into going through
+/// them. Not a question to answer on the spot, so there is no No.
+struct PeopleReviewBanner: View {
+    let name: String
+    let count: Int
+    let session: AppSession
+    let spaceID: UUID
+    let person: PersonSummary
+    let onReview: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            FaceCircle(session: session, spaceID: spaceID, source: .person(person), diameter: 40)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(count == 1 ? "Found 1 more photo" : "Found \(count.formatted()) more photos")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Is this \(name)?")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Review", action: onReview)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+        }
+        .peopleBannerStyle()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            count == 1
+                ? "Found 1 more photo. Is this \(name)?"
+                : "Found \(count) more photos. Is this \(name)?"
+        )
+    }
+}
+
+private extension View {
+    /// The pill both banners sit in. No wider than a phone's on a big
+    /// screen, and placed by the page: from the margin on the list, centered
+    /// under the face on someone's page.
+    func peopleBannerStyle() -> some View {
+        padding(10)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .frame(maxWidth: 560)
+    }
+}
+#endif
 
 /// The one row that stands for everyone behind More People: a few of their
 /// faces, overlapping, and how many there are.
@@ -387,7 +547,10 @@ struct MorePeopleRow: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(
+            Color.primary.opacity(0.06),
+            in: RoundedRectangle(cornerRadius: CollectionsLayout.cornerRadius, style: .continuous)
+        )
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("More People, \(people.count)")
@@ -446,6 +609,9 @@ struct PersonView: View {
     /// Moves when "Is this Emma?" closes with answers, so the grid loads
     /// once rather than once an answer.
     @State private var reviewed = 0
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     init(session: AppSession, space: SpaceDTO, person: PersonSummary) {
         self.session = session
@@ -524,6 +690,38 @@ struct PersonView: View {
         #endif
     }
 
+    /// The big face at the top of the page, by screen.
+    private var headerFace: CGFloat {
+        #if os(tvOS)
+        return 240
+        #elseif os(macOS)
+        return 160
+        #else
+        return horizontalSizeClass == .compact ? 150 : 180
+        #endif
+    }
+
+    private var nameFont: Font {
+        #if os(macOS)
+        return .system(size: 26, weight: .bold)
+        #elseif os(tvOS)
+        return .title2.weight(.bold)
+        #else
+        return .title.weight(.bold)
+        #endif
+    }
+
+    /// The banners' distance from the edges: the Albums page's margins.
+    private var bannerMargin: CGFloat {
+        #if os(macOS)
+        return 40
+        #elseif os(tvOS)
+        return 0
+        #else
+        return horizontalSizeClass == .compact ? 20 : 32
+        #endif
+    }
+
     private var header: some View {
         VStack(spacing: 10) {
             #if !os(tvOS)
@@ -531,10 +729,16 @@ struct PersonView: View {
                 maybeCard(maybe)
             }
             #endif
-            FaceCircle(
-                session: session, spaceID: space.id, source: .person(person),
-                diameter: PeopleMetrics.headerFace
+            PersonTile(
+                session: session, spaceID: space.id, person: person,
+                side: headerFace, showsName: false
             )
+            .padding(.top, 4)
+            if let name = person.name {
+                Text(name)
+                    .font(nameFont)
+                    .multilineTextAlignment(.center)
+            }
             Text(headerLine)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -542,20 +746,15 @@ struct PersonView: View {
             if person.name == nil {
                 Button("Add Name") { naming = true }
                     .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
                     .padding(.top, 4)
             } else if person.questions > 0 {
-                Button {
-                    reviewing = true
-                } label: {
-                    Label(
-                        person.questions == 1
-                            ? "Is This \(called)? 1 Photo"
-                            : "Is This \(called)? \(person.questions) Photos",
-                        systemImage: "person.crop.circle.badge.questionmark"
-                    )
-                }
-                .buttonStyle(.bordered)
-                .padding(.top, 4)
+                PeopleReviewBanner(
+                    name: called, count: person.questions,
+                    session: session, spaceID: space.id, person: person
+                ) { reviewing = true }
+                .padding(.horizontal, bannerMargin)
+                .padding(.top, 8)
             }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.triangle.fill")
@@ -573,25 +772,13 @@ struct PersonView: View {
     /// "Is this Kathy Deem?" for the whole group, answered with one tap.
     private func maybeCard(_ maybe: PersonMaybe) -> some View {
         let stand = PersonSummary(id: maybe.id, name: maybe.name, photoCount: 0, face: maybe.face)
-        return HStack(spacing: 12) {
-            FaceCircle(session: session, spaceID: space.id, source: .person(stand), diameter: 40)
-            Text("Is this \(maybe.name)?")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button("No") { Task { await answer(maybe, isPerson: false) } }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("No, not \(maybe.name)")
-            Button("Yes") { Task { await answer(maybe, isPerson: true) } }
-                .buttonStyle(.borderedProminent)
-                .accessibilityLabel("Yes, this is \(maybe.name)")
+        return PeopleQuestionBanner(
+            session: session, spaceID: space.id, face: stand,
+            name: maybe.name, answering: answering
+        ) { isPerson in
+            Task { await answer(maybe, isPerson: isPerson) }
         }
-        .controlSize(.small)
-        .disabled(answering)
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .padding(.horizontal, 16)
-        .frame(maxWidth: 520)
+        .padding(.horizontal, bannerMargin)
         .padding(.bottom, 6)
     }
 

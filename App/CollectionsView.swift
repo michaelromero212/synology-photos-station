@@ -196,7 +196,9 @@ final class CollectionsStore {
                 await CoverWarmer.warm(pictures, loader: loader)
             }
             guard let session else { return }
-            let pixels = FaceCircle.pixels(for: PeopleMetrics.rowFace, session: session)
+            // The size the row's face cards draw, the NAS's large crop
+            // wherever it makes one. See `PersonTile.smallestSide`.
+            let pixels = FaceCircle.pixels(for: PersonTile.smallestSide, session: session)
             for person in faces where !Task.isCancelled {
                 await FaceCircle.fetch(
                     session: session, spaceID: spaceID, source: .person(person), pixels: pixels
@@ -478,33 +480,27 @@ enum CoverWarmer {
 
 extension CollectionsResponse {
     /// The covers the Albums page draws from this answer, the top of the page
-    /// first, at the sizes this platform's page draws them. See `AlbumsView`.
+    /// first. See `AlbumsView`.
+    ///
+    /// The same on every device: every card on the page draws its cover at
+    /// 512 through `CollectionCover`, which trims letterboxing. A row holds
+    /// up to twelve, as many as the NAS sends for one; a Mac shows fewer and
+    /// has the rest ready for a wider window.
     var pagePictures: [CoverPicture] {
         var pictures: [CoverPicture] = []
-        func add(_ covers: [UUID]?, size: Int) {
+        func add(_ covers: [UUID]?) {
             guard let first = covers?.first else { return }
-            pictures.append(CoverPicture(assetID: first, size: size, trimmed: true))
+            pictures.append(CoverPicture(assetID: first, size: 512, trimmed: true))
         }
-        for card in featured ?? hero.map({ [$0] }) ?? [] { add(card.coverAssetIDs, size: 512) }
-        #if os(macOS)
-        // Everything a card, at 512: `macPage`. A row across a wide window
-        // holds as many as the NAS sends for one, twelve.
-        add(favorites?.coverAssetIDs, size: 512)
-        add(recentlyAdded?.coverAssetIDs, size: 512)
+        for card in featured ?? hero.map({ [$0] }) ?? [] { add(card.coverAssetIDs) }
+        add(favorites?.coverAssetIDs)
+        add(recentlyAdded?.coverAssetIDs)
         for type in mediaTypes where type.key == "video" || type.key == "screenshot" {
-            add(type.coverAssetIDs, size: 512)
+            add(type.coverAssetIDs)
         }
-        for trip in (wideTrips ?? trips).prefix(12) { add(trip.coverAssetIDs, size: 512) }
-        for day in onceDays(limit: 12) { add(day.coverAssetIDs, size: 512) }
-        for tradition in (traditions ?? []).prefix(12) { add(tradition.coverAssetIDs, size: 512) }
-        #else
-        // The phone's and the television's rows, at 256: `CollectionRowCard`.
-        add(recentlyAdded?.coverAssetIDs, size: 256)
-        add(favorites?.coverAssetIDs, size: 256)
-        for trip in trips { add(trip.coverAssetIDs, size: 256) }
-        for day in onceDays(limit: 3) { add(day.coverAssetIDs, size: 256) }
-        for tradition in (traditions ?? []).prefix(3) { add(tradition.coverAssetIDs, size: 256) }
-        #endif
+        for trip in (wideTrips ?? trips).prefix(12) { add(trip.coverAssetIDs) }
+        for day in onceDays(limit: 12) { add(day.coverAssetIDs) }
+        for tradition in (traditions ?? []).prefix(12) { add(tradition.coverAssetIDs) }
         return pictures
     }
 
@@ -830,18 +826,22 @@ enum Letterbox {
     }
 }
 
-/// The single card at the top of the page.
+/// One of the cards along the top of the Albums page, under Memories: why it's
+/// there, what it is and how much is in it, over its cover.
 ///
-/// One hero rather than a carousel of nine competing for the same glance. The
-/// server has already decided what it should be, so this draws what it is given
-/// instead of re-litigating the choice on the device.
+/// The server has already decided what each card should be, so this draws
+/// what it is given instead of re-litigating the choice on the device. Sized
+/// by the page (`CollectionsLayout.memorySize`): square on a phone, wider than
+/// tall anywhere with room for it.
 struct CollectionHeroCard: View {
     let collection: CollectionSummary
     let loader: ThumbnailLoader?
+    let width: CGFloat
+    let height: CGFloat
 
     var body: some View {
         Color.clear
-            .aspectRatio(5 / 4, contentMode: .fit)
+            .frame(width: width, height: height)
             .overlay {
                 ZStack(alignment: .bottomLeading) {
                     CollectionCover(assetIDs: collection.coverAssetIDs, loader: loader)
@@ -865,17 +865,15 @@ struct CollectionHeroCard: View {
                             .tracking(1.4)
                             .foregroundStyle(.tint)
                         Text(collection.title)
-                            .font(.system(.title, design: .default, weight: .bold))
+                            .font(titleFont)
                             .tracking(-0.4)
                             .foregroundStyle(.white)
                             .lineLimit(2)
                             .minimumScaleFactor(0.8)
-                        // The hero is the one card with no count badge beside
-                        // it, so it carries the count in its own line. The rows
-                        // show it on the right, which is why the server stopped
-                        // putting it in the subtitle — a trip that said its
-                        // count twice was also the trip whose dates got
-                        // truncated to make room.
+                        // The count in its own line, after the dates. The
+                        // server stopped putting it in the subtitle: a trip
+                        // that said its count twice was also the trip whose
+                        // dates got truncated to make room.
                         Text(detail)
                             .font(.subheadline)
                             .monospacedDigit()
@@ -883,6 +881,11 @@ struct CollectionHeroCard: View {
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    #if os(iOS)
+                    // The card doesn't grow with the type, so the type stops
+                    // growing before it no longer fits on the card.
+                    .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+                    #endif
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -894,6 +897,14 @@ struct CollectionHeroCard: View {
             }
             .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    /// Smaller on a narrow card, as a phone's are, so a name still fits on
+    /// two lines.
+    private var titleFont: Font {
+        width < 300
+            ? .title3.weight(.bold)
+            : .system(.title, design: .default, weight: .bold)
     }
 
     private var detail: String {
@@ -926,8 +937,8 @@ struct CollectionHeroCard: View {
     }
 }
 
-/// Everything one section of the Albums page chose its few rows from — every
-/// trip, or every holiday and occasion.
+/// Everything one section of the Albums page chose its few cards from: every
+/// trip, or every holiday and occasion. The page's cards, in its columns.
 ///
 /// Read live from the page's store rather than handed a copy, so naming a day
 /// from here renames it here as well as on the page underneath.
@@ -943,19 +954,18 @@ struct CollectionListView: View {
     private var rows: [CollectionSummary] { store.page?[keyPath: list] ?? [] }
 
     var body: some View {
-        #if os(macOS)
-        // Photos' cards, as on the Albums page this opened from.
         GeometryReader { proxy in
-            let layout = MacCardLayout(width: proxy.size.width)
+            let layout = CollectionsLayout(width: proxy.size.width)
+            let side = layout.side(.medium)
             ScrollView {
-                LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                LazyVGrid(columns: layout.columns(.medium), alignment: .leading, spacing: layout.gap) {
                     ForEach(rows) { row in
                         NavigationLink {
                             CollectionDetailView(session: session, space: space, collection: row)
                         } label: {
-                            MacCollectionTile(
-                                title: row.title, detail: row.subtitle ?? macItems(row.count),
-                                side: layout.side
+                            CollectionTile(
+                                title: row.title, detail: row.subtitle ?? itemsLine(row.count),
+                                width: side
                             ) {
                                 CollectionCover(
                                     assetIDs: row.coverAssetIDs, loader: session.loader, size: 512
@@ -966,37 +976,9 @@ struct CollectionListView: View {
                         .nameable(row) { naming = $0 }
                     }
                 }
-                .padding(.horizontal, MacCardLayout.margin)
-                .padding(.vertical, 22)
+                .padding(.horizontal, layout.margin)
+                .padding(.vertical, CollectionsLayout.pagePadding)
             }
-        }
-        .navigationTitle(title)
-        .sheet(item: $naming) { collection in
-            NameOccasionSheet(
-                session: session, spaceID: space.id, collection: collection
-            ) { changed in
-                naming = nil
-                if changed { Task { await store.refresh() } }
-            }
-        }
-        // Its covers are the page's, and hold still with them.
-        .holdsCovers(store)
-        #else
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(rows) { row in
-                    NavigationLink {
-                        CollectionDetailView(session: session, space: space, collection: row)
-                    } label: {
-                        CollectionRowCard(collection: row, loader: session.loader)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                    }
-                    .buttonStyle(.plain)
-                    .nameable(row) { naming = $0 }
-                }
-            }
-            .padding(.vertical, 8)
         }
         .navigationTitle(title)
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
@@ -1013,78 +995,6 @@ struct CollectionListView: View {
         #endif
         // Its covers are the page's, and hold still with them.
         .holdsCovers(store)
-        #endif
-    }
-}
-
-/// A day or a trip, as a row rather than a tile.
-///
-/// Rows rather than a second shelf: two horizontal scrollers stacked is a lot
-/// of sideways in one screen, and a day has a date and a place worth reading
-/// rather than cropping.
-struct CollectionRowCard: View {
-    let title: String
-    let subtitle: String?
-    let count: Int
-    let coverAssetIDs: [UUID]
-    let loader: ThumbnailLoader?
-
-    init(collection: CollectionSummary, loader: ThumbnailLoader?) {
-        self.init(
-            title: collection.title, subtitle: collection.subtitle, count: collection.count,
-            coverAssetIDs: collection.coverAssetIDs, loader: loader
-        )
-    }
-
-    /// Anything drawn as a row: a tradition, say, which isn't one collection
-    /// but all the years of one.
-    init(title: String, subtitle: String?, count: Int, coverAssetIDs: [UUID], loader: ThumbnailLoader?) {
-        self.title = title
-        self.subtitle = subtitle
-        self.count = count
-        self.coverAssetIDs = coverAssetIDs
-        self.loader = loader
-    }
-
-    var body: some View {
-        HStack(spacing: 14) {
-            // Large enough to be a photograph rather than an icon. At the 54pt
-            // it started out, every cover read as a colored square and the row
-            // looked like a settings screen.
-            CollectionCover(
-                assetIDs: coverAssetIDs, loader: loader, size: 256
-            )
-            .frame(width: 76, height: 76)
-            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
-            }
-            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(.body, design: .default, weight: .semibold))
-                    .tracking(-0.2)
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.footnote)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 10)
-
-            Text("\(count)")
-                .font(.footnote)
-                .monospacedDigit()
-                .foregroundStyle(.tertiary)
-        }
-        .contentShape(Rectangle())
     }
 }
 
@@ -2364,7 +2274,8 @@ struct RecentlyDeletedView: View {
     }
 }
 
-/// Everything of one shape. Behind one door, not twelve.
+/// Everything of one shape. Behind one door, not twelve: the Albums page's
+/// cards, in its columns.
 struct MediaTypesView: View {
     @Bindable var session: AppSession
     let space: SpaceDTO
@@ -2376,19 +2287,16 @@ struct MediaTypesView: View {
     private var store: CollectionsStore { session.collectionsStore(for: space.id) }
 
     var body: some View {
-        #if os(macOS)
-        // Photos' cards, as on the Albums page this opened from.
         GeometryReader { proxy in
-            let layout = MacCardLayout(width: proxy.size.width)
+            let layout = CollectionsLayout(width: proxy.size.width)
+            let side = layout.side(.medium)
             ScrollView {
-                LazyVGrid(columns: layout.columns, alignment: .leading, spacing: MacCardLayout.gap) {
+                LazyVGrid(columns: layout.columns(.medium), alignment: .leading, spacing: layout.gap) {
                     ForEach(store.page?.mediaTypes ?? types) { type in
                         NavigationLink {
                             CollectionDetailView(session: session, space: space, collection: type)
                         } label: {
-                            MacCollectionTile(
-                                title: type.title, detail: macItems(type.count), side: layout.side
-                            ) {
+                            CollectionTile(title: type.title, detail: itemsLine(type.count), width: side) {
                                 CollectionCover(
                                     assetIDs: type.coverAssetIDs, loader: session.loader, size: 512
                                 )
@@ -2397,22 +2305,8 @@ struct MediaTypesView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, MacCardLayout.margin)
-                .padding(.vertical, 22)
-            }
-        }
-        .navigationTitle("Media Types")
-        .onAppear { Task { await store.refreshIfStale() } }
-        .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
-        // Its covers are the page's, and hold still with them.
-        .holdsCovers(store)
-        #else
-        List(store.page?.mediaTypes ?? types) { type in
-            NavigationLink {
-                CollectionDetailView(session: session, space: space, collection: type)
-            } label: {
-                CollectionRowCard(collection: type, loader: session.loader)
-                    .padding(.vertical, 4)
+                .padding(.horizontal, layout.margin)
+                .padding(.vertical, CollectionsLayout.pagePadding)
             }
         }
         .navigationTitle("Media Types")
@@ -2423,7 +2317,7 @@ struct MediaTypesView: View {
         #endif
         .onAppear { Task { await store.refreshIfStale() } }
         .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+        // Its covers are the page's, and hold still with them.
         .holdsCovers(store)
-        #endif
     }
 }

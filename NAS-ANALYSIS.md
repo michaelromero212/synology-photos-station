@@ -536,20 +536,23 @@ faces are used for anything.
 
      A person's photos are the collection kind `person`, newest first, 300 to
      a page.
-   - **Apps.** The People row sits on the Albums page under Recently Added
-     and Favorites (on the Mac, under Pinned). It comes from
-     `CollectionsResponse.people`, which older apps ignore.
-     - A person's page is the collection grid, with their face and count,
-       and "Add Name" or "Is This Emma?".
+   - **Apps.** People sits on the Albums page under Pinned on every device,
+     as a row of rounded-square face cards with names on them (`PersonTile`).
+     It comes from `CollectionsResponse.people`, which older apps ignore.
+     - The People page is a grid of the same cards, three across a phone.
+     - A person's page is the collection grid under a big face card, their
+       name and count, and "Add Name". For someone named with photos to
+       check, it shows "Found 12 more photos · Is this Emma?" with Review.
      - On iPhone, iPad and Mac it also has Rename, Merge With…, and
        "Not Emma" on a long press.
      - Typing a name someone already has asks whether they're the same
        person.
      - The Apple TV shows the people and their names, without editing.
-     - An unnamed circle with a question shows the first name and a question
-       mark ("Emma?"). Its page has "Is this Emma?" with Yes and No above the
-       photos; Add Name stays for when it's someone else. The Apple TV doesn't
-       show questions.
+     - An unnamed card with a question shows the first name and a question
+       mark ("Emma?"). The People page asks the first such question in a
+       banner at the top, "Is this Emma?" with Yes and ✕ (No). The person's
+       own page asks it the same way above the photos, and Add Name stays for
+       when it's someone else. The Apple TV doesn't show questions.
    - **Shadow mode included.** People shows for anyone the NAS analyzes,
      shadow or on. It replaces nothing the phones do, so there's nothing to
      preview it against.
