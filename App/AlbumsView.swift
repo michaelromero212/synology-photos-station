@@ -39,9 +39,15 @@ final class AlbumStore {
     /// And how many of this device's own changes it had seen. See
     /// `AppSession.libraryRevision`.
     private var fetchedRevision: Int?
-    /// Set while a request is out, so a second caller doesn't send another.
-    /// See `CollectionsStore.isRefreshing`.
-    private var isRefreshing = false
+    /// The request out now, so a second caller waits for its answer rather
+    /// than sending another. See `CollectionsStore.inFlight`.
+    @ObservationIgnored private var inFlight: Task<Void, Never>?
+    /// So a slow answer never replaces a newer one.
+    @ObservationIgnored private var asked = 0
+    @ObservationIgnored private var answered = 0
+    /// Holds the covers still while the page is on screen. See
+    /// `CollectionsStore.take`.
+    @ObservationIgnored private var hold: CoverHold<AlbumListResponse>!
 
     /// Starts from the list this device saw last, so the page has something to
     /// draw before the NAS answers. See `AlbumsSnapshotStore`. Counted as an
@@ -63,6 +69,9 @@ final class AlbumStore {
         supportsFamily = savedLibraries != nil || albums.contains(where: \.isFamily)
         // Only a NAS that shares albums with people sends one.
         supportsPeople = albums.contains(where: \.isSharedWithPeople)
+        hold = CoverHold(edits: session.editRevision) { [weak self] answer in
+            self?.draw(answer)
+        }
     }
 
     /// Whether it is worth asking again.
@@ -93,15 +102,21 @@ final class AlbumStore {
         return session.changeCursor(for: personal.id)
     }
 
+    /// With a request already out, waits for its answer instead. See
+    /// `CollectionsStore.refreshIfStale`.
     func refreshIfStale() async {
-        guard isStale, !isRefreshing else { return }
+        if let inFlight {
+            await inFlight.value
+            return
+        }
+        guard isStale else { return }
         await refresh()
     }
 
     /// Asks again only if the library has moved since the last answer, however
     /// recent that was. For a page that's watching. See `LiveCounts`.
     func refreshIfChanged() async {
-        guard !isRefreshing else { return }
+        guard inFlight == nil else { return }
         guard fetchedAt == nil || libraryCursor != fetchedCursor
                 || session?.libraryRevision != fetchedRevision else { return }
         await refresh()
@@ -110,31 +125,40 @@ final class AlbumStore {
     /// Asks again on the next visit. See `AppSession.hiddenContentChanged`.
     func expire() { fetchedAt = nil }
 
-    func refresh() async {
+    /// Asks the NAS now, whatever else is out. `explicit` for a pull to
+    /// refresh. See `CollectionsStore.refresh`.
+    func refresh(explicit: Bool = false) async {
+        let request = Task { await ask(explicit: explicit) }
+        inFlight = request
+        await request.value
+        if inFlight == request { inFlight = nil }
+    }
+
+    private func ask(explicit: Bool) async {
         guard let client = session?.client else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
         // Only the first time. A refresh behind a list that is already on
         // screen must not announce itself — this drives the empty state, and
         // flipping it on every poll would make the page flicker between having
         // albums and deciding whether it has any.
         if !hasLoaded { isLoading = true }
         defer { isLoading = false }
-        // Before asking, as `CollectionsStore.refresh` does.
+        asked += 1
+        let number = asked
+        // Before asking, as `CollectionsStore.ask` does.
         let cursor = libraryCursor
         let revision = session?.libraryRevision
+        let edits = session?.editRevision ?? 0
         do {
             // Assigned only on success. A blip should cost you the update,
             // never the list you were looking at.
             // Always asked for: a NAS that predates albums shared with people
             // ignores the question.
             let response = try await client.albums(includeFamily: true, includePeople: true)
+            guard number > answered else { return }
+            answered = number
             let fresh = response.albums
             let shelves = response.libraries
-            albums = fresh
-            libraries = shelves ?? []
-            supportsFamily = response.includesFamilyAlbums == true
-            supportsPeople = response.includesPeopleAlbums == true
+            let hadList = hasLoaded
             hasLoaded = true
             Task.detached(priority: .utility) {
                 AlbumsSnapshotStore.saveAlbums(fresh)
@@ -145,10 +169,69 @@ final class AlbumStore {
             fetchedCursor = cursor
             fetchedRevision = revision
             lastError = nil
+            take(response, edits: edits, explicit: explicit, hadList: hadList)
         } catch {
             lastError = error.localizedDescription
         }
     }
+
+    /// Puts an answer on the page, or holds its covers back until the page is
+    /// left: each album's and each shared library's, by id. A shared library's
+    /// cover is its newest photo, and it moves whenever somebody adds one;
+    /// never while you're looking. See `CollectionsStore.take`, which this
+    /// follows rule for rule.
+    private func take(_ fresh: AlbumListResponse, edits: Int, explicit: Bool, hadList: Bool) {
+        guard hadList, !explicit, !hold.editedSince(edits) else {
+            hold.drawn(edits: edits)
+            draw(fresh)
+            return
+        }
+        let drawing = Set(Self.pictures(albums: albums, libraries: libraries))
+        draw(fresh.keepingCovers(albums: albums, libraries: libraries))
+        let pictures = Array(
+            Self.pictures(albums: fresh.albums, libraries: fresh.libraries ?? [])
+                .filter { !drawing.contains($0) }.prefix(40)
+        )
+        let loader = session?.loader
+        hold.wait(for: fresh, edits: edits, isWarm: pictures.isEmpty) {
+            if let loader { await CoverWarmer.warm(pictures, loader: loader) }
+        }
+    }
+
+    /// Each only when it's different: assigning an equal value still redraws
+    /// whatever reads it.
+    private func draw(_ answer: AlbumListResponse) {
+        if albums != answer.albums { albums = answer.albums }
+        let shelves = answer.libraries ?? []
+        if libraries != shelves { libraries = shelves }
+        let family = answer.includesFamilyAlbums == true
+        if supportsFamily != family { supportsFamily = family }
+        let people = answer.includesPeopleAlbums == true
+        if supportsPeople != people { supportsPeople = people }
+    }
+
+    /// The album and library covers the Albums page draws, yours first, at
+    /// the size its cards draw them. See `AlbumCard`.
+    private static func pictures(
+        albums: [AlbumDTO], libraries: [SharedLibrarySummary]
+    ) -> [CoverPicture] {
+        #if os(macOS)
+        // Through `CollectionCover`, which trims letterboxing.
+        let trimmed = true
+        #else
+        let trimmed = false
+        #endif
+        let covers = albums.filter { !$0.isFamily }.compactMap(\.coverAssetID)
+            + albums.filter(\.isFamily).compactMap(\.coverAssetID)
+            + libraries.compactMap(\.coverAssetID)
+        return covers.map { CoverPicture(assetID: $0, size: 512, trimmed: trimmed) }
+    }
+
+    // MARK: On screen
+
+    /// See `CollectionsStore.enterScreen`.
+    func enterScreen() { hold.enter() }
+    func leaveScreen(now: Bool) { hold.leave(now: now) }
 
     /// A new album: yours alone, shared with `memberIDs`, or with `spaceID` a
     /// family album in that shared library, starting with `spaceAssetIDs` if
@@ -230,6 +313,54 @@ final class AlbumStore {
             lastError = error.localizedDescription
             return false
         }
+    }
+}
+
+extension AlbumStore: CoverHolder {}
+
+extension AlbumListResponse {
+    /// This list as the page draws it while it's held: its albums and
+    /// libraries, counts and names, with every one still here under the cover
+    /// it has now. See `AlbumStore.take`.
+    func keepingCovers(
+        albums shownAlbums: [AlbumDTO], libraries shownLibraries: [SharedLibrarySummary]
+    ) -> AlbumListResponse {
+        let albumCovers = Dictionary(
+            shownAlbums.map { ($0.id, $0.coverAssetID) }, uniquingKeysWith: { first, _ in first }
+        )
+        let libraryCovers = Dictionary(
+            shownLibraries.map { ($0.id, $0.coverAssetID) }, uniquingKeysWith: { first, _ in first }
+        )
+        return AlbumListResponse(
+            albums: albums.map { album in albumCovers[album.id].map(album.withCover) ?? album },
+            includesFamilyAlbums: includesFamilyAlbums,
+            libraries: libraries?.map { library in
+                libraryCovers[library.id].map(library.withCover) ?? library
+            },
+            includesPeopleAlbums: includesPeopleAlbums
+        )
+    }
+}
+
+extension AlbumDTO {
+    /// The same album under another cover.
+    func withCover(_ cover: UUID?) -> AlbumDTO {
+        guard cover != coverAssetID else { return self }
+        return AlbumDTO(
+            id: id, name: name, itemCount: itemCount, coverAssetID: cover,
+            createdAt: createdAt, updatedAt: updatedAt, spaceID: spaceID,
+            canManage: canManage, canAdd: canAdd, people: people, owner: owner
+        )
+    }
+}
+
+extension SharedLibrarySummary {
+    /// The same library under another cover.
+    func withCover(_ cover: UUID?) -> SharedLibrarySummary {
+        guard cover != coverAssetID else { return self }
+        return SharedLibrarySummary(
+            id: id, name: name, memberCount: memberCount, itemCount: itemCount, coverAssetID: cover
+        )
     }
 }
 
@@ -655,6 +786,25 @@ struct AlbumsView: View {
             await collections?.refreshIfChanged()
             await store?.refreshIfChanged()
         })
+        // The covers and the top row stay as they are while you're here; what
+        // the NAS sends meanwhile goes up once you've gone. See
+        // `CollectionsStore.take`.
+        .holdsCovers(store, collections)
+        #if !os(macOS)
+        // A new top row, put up while the page was out of sight, may not have
+        // the card the row was on. Back to its first rather than a position
+        // past the end, or between two cards.
+        .onChange(of: featuredIDs) { _, ids in
+            guard let current = featuredCard, !ids.contains(current) else { return }
+            featuredCard = ids.first
+        }
+        #endif
+    }
+
+    /// The top row's cards, by `featuredID`. See `hero`.
+    private var featuredIDs: [String] {
+        guard let found = collections?.page else { return [] }
+        return (found.featured ?? found.hero.map { [$0] } ?? []).map(\.featuredID)
     }
 
     /// The page: what the library noticed, then what you filed.
@@ -696,9 +846,10 @@ struct AlbumsView: View {
                 }
                 .padding(.vertical, spacing)
             }
+            // Asking to see what's new: it goes straight up, covers and all.
             .refreshable {
-                await store.refresh()
-                await collections?.refresh()
+                await store.refresh(explicit: true)
+                await collections?.refresh(explicit: true)
             }
         }
         #endif
@@ -1370,7 +1521,44 @@ private struct AlbumCard: View {
     /// Marked in the corner of the Mac's card: two people on anything shared.
     var badge: String?
 
-    @State private var cover: PlatformImage?
+    /// The cover this card fetched, and which photo it is. The Mac's card
+    /// draws through `CollectionCover`, which keeps its own.
+    @State private var loaded: Loaded?
+
+    private struct Loaded {
+        let assetID: UUID
+        let image: PlatformImage
+    }
+
+    init(
+        title: String, details: String, coverAssetID: UUID?, side: CGFloat,
+        loader: ThumbnailLoader?, placeholder: String = "rectangle.stack", badge: String? = nil
+    ) {
+        self.title = title
+        self.details = details
+        self.coverAssetID = coverAssetID
+        self.side = side
+        self.loader = loader
+        self.placeholder = placeholder
+        self.badge = badge
+        #if !os(macOS)
+        // Already decoded in memory: drawn on the first frame, as
+        // `CollectionCover` does, rather than the placeholder for one.
+        _loaded = State(initialValue: coverAssetID.flatMap { assetID in
+            loader?.cachedThumbnail(assetID: assetID, size: 512)
+                .map { Loaded(assetID: assetID, image: $0) }
+        })
+        #endif
+    }
+
+    /// What to draw: what this card fetched, unless its album has another
+    /// cover since, which is usually in memory already. See
+    /// `CollectionCover.image`.
+    private var cover: PlatformImage? {
+        guard let coverAssetID else { return nil }
+        if let loaded, loaded.assetID == coverAssetID { return loaded.image }
+        return loader?.cachedThumbnail(assetID: coverAssetID, size: 512) ?? loaded?.image
+    }
 
     var body: some View {
         #if os(macOS)
@@ -1408,8 +1596,11 @@ private struct AlbumCard: View {
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         .task(id: coverAssetID) {
-            guard let assetID = coverAssetID, let loader else { return }
-            cover = await loader.thumbnail(assetID: assetID, size: 512)
+            guard let assetID = coverAssetID, let loader, loaded?.assetID != assetID else { return }
+            let image = await loader.thumbnail(assetID: assetID, size: 512)
+            // A cover that didn't come leaves the placeholder, as it always
+            // has, not the album's old cover.
+            loaded = image.map { Loaded(assetID: assetID, image: $0) }
         }
         #endif
     }

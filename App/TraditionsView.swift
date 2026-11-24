@@ -41,6 +41,9 @@ struct TraditionListView: View {
             }
         }
         .navigationTitle("Over the Years")
+        // Its covers are the page's, and hold still with them. See
+        // `CollectionsStore.take`.
+        .holdsCovers(store)
         #else
         ScrollView {
             LazyVStack(spacing: 0) {
@@ -60,6 +63,7 @@ struct TraditionListView: View {
         .navigationTitle("Over the Years")
         // The floating tab bar is drawn over this — see `FloatingTabBar`.
         .floatingTabBarClearance()
+        .holdsCovers(store)
         #endif
     }
 }
@@ -88,6 +92,9 @@ struct TraditionView: View {
     var body: some View {
         let tradition = shown
         content(tradition)
+            // Its years' covers are the page's, and hold still with them. See
+            // `CollectionsStore.take`.
+            .holdsCovers(store)
             .navigationTitle(tradition.title)
             // The floating tab bar is drawn over this — see `FloatingTabBar`.
             .floatingTabBarClearance()

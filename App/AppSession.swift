@@ -620,6 +620,21 @@ final class AppSession {
     /// business.
     private(set) var libraryRevision = 0
 
+    /// Moves with `libraryRevision` for every change but an upload landing:
+    /// the ones somebody makes by hand. An album made, renamed or added to, a
+    /// photo trashed or marked a favorite.
+    ///
+    /// The Albums page holds its covers still while it's on screen and takes
+    /// what the NAS sends next once it isn't (`CollectionsStore.take`). A
+    /// change made here is the exception, because whoever made it is waiting
+    /// to see it. A backup isn't: its photos land one after another whether
+    /// or not anyone is looking, and the page used to change in front of you
+    /// with each one.
+    ///
+    /// Not observed. Only the stores read it, as they ask the NAS, and nothing
+    /// should redraw because it moved.
+    @ObservationIgnored private(set) var editRevision = 0
+
     /// Which writes count. Everything under a library or an album, and an
     /// upload once committed, but not what a curation pass reports about the
     /// photos it looked at: that arrives in batches all the time it runs, and
@@ -629,12 +644,14 @@ final class AppSession {
     /// and each one reloaded the page underneath; that page asks again once,
     /// when the questions close (`PersonView`).
     private func noteWrite(_ path: String) {
+        let landed = path.contains("/v1/uploads/") && path.hasSuffix("/commit")
         let changesLibrary = (path.contains("/v1/spaces") && !path.contains("/curation/")
                 && !(path.contains("/people/") && path.hasSuffix("/suggestions")))
             || path.contains("/v1/albums")
-            || (path.contains("/v1/uploads/") && path.hasSuffix("/commit"))
+            || landed
         guard changesLibrary else { return }
         libraryRevision &+= 1
+        if !landed { editRevision &+= 1 }
     }
 
     /// How far into a library's changes the grid has followed it. Nil until

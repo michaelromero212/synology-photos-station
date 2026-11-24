@@ -45,10 +45,12 @@ struct RootTabView: View {
     /// copy of this view a navigation destination was built from — see
     /// `ShareReviews`.
     @State private var reviews = ShareReviews()
-    @Environment(\.scenePhase) private var scenePhase
     /// The viewer albums, collections and Recently Deleted open photos in.
     /// See `OverlayViewer`.
     @State private var overlayViewer = OverlayViewer()
+    #endif
+    #if !os(macOS)
+    @Environment(\.scenePhase) private var scenePhase
     #endif
 
     /// Which tab is on screen. Bound so following a share can move you.
@@ -99,8 +101,17 @@ struct RootTabView: View {
         // assembling itself in front of you. Two seconds in, so it doesn't
         // compete with the grid's own first load on the NAS. See
         // `AppSession.albumStore`.
-        .task {
+        //
+        // And each time the app comes back, from here rather than from the
+        // Albums page: opened in the morning on Photos, today's page comes in
+        // while you're there. The page holds what it has while you're on it
+        // (`CollectionsStore.take`), so whatever isn't in before you get
+        // there waits until you leave. The stores' own staleness rules keep
+        // this to one request each, and none within a minute of the last.
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { return }
             try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
             if let personal = session.personalSpace {
                 await session.collectionsStore(for: personal.id).refreshIfStale()
             }

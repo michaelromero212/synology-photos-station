@@ -56,6 +56,8 @@ struct FaceCircle: View {
     let diameter: CGFloat
 
     @State private var image: PlatformImage?
+    /// Whose face `image` is, by `key(_:)`.
+    @State private var imageKey: String?
 
     /// The NAS's two sizes of a face (see `FaceCrop` there). The small one
     /// fills a circle up to 256 pixels across. Past that it was enlarged:
@@ -94,9 +96,25 @@ struct FaceCircle: View {
         // circle whose large face isn't here yet starts from the small one
         // when that is.
         let pixels = Self.pixels(for: diameter, session: session)
+        let held = Self.held(source, pixels: pixels, session: session)
+        _image = State(initialValue: held)
+        _imageKey = State(initialValue: held == nil ? nil : Self.key(source))
+    }
+
+    /// A face already decoded, large or small, without asking for it.
+    private static func held(_ source: Source, pixels: Int, session: AppSession) -> PlatformImage? {
         let loader = session.loader
-        _image = State(initialValue: loader?.cachedFace(key: Self.key(source, pixels: pixels))
-            ?? (pixels == Self.smallPixels ? nil : loader?.cachedFace(key: Self.key(source))))
+        return loader?.cachedFace(key: key(source, pixels: pixels))
+            ?? (pixels == smallPixels ? nil : loader?.cachedFace(key: key(source)))
+    }
+
+    /// What to draw: the face this circle fetched, unless it has been handed
+    /// another since. The Albums page's row is, when the page takes the NAS's
+    /// new answer while it's out of sight; that face is usually in memory by
+    /// the time you're back. See `CollectionCover.image`.
+    private func shown(pixels: Int) -> PlatformImage? {
+        if imageKey == Self.key(source) { return image }
+        return Self.held(source, pixels: pixels, session: session) ?? image
     }
 
     /// The small face keeps the key it always had, so faces already on a
@@ -114,11 +132,12 @@ struct FaceCircle: View {
         // Read here, so the circle asks again in the large size once the NAS
         // has said it makes one.
         let pixels = Self.pixels(for: diameter, session: session)
+        let face = shown(pixels: pixels)
         Circle()
             .fill(.quaternary)
             .overlay {
-                if let image {
-                    Image(platformImage: image)
+                if let face {
+                    Image(platformImage: face)
                         .resizable()
                         .scaledToFill()
                 } else {
@@ -171,7 +190,11 @@ struct FaceCircle: View {
     private func show(_ face: PlatformImage) {
         var instant = Transaction()
         instant.disablesAnimations = true
-        withTransaction(instant) { image = face }
+        let key = Self.key(source)
+        withTransaction(instant) {
+            image = face
+            imageKey = key
+        }
     }
 
     /// Fetches a face, or finds it already here. Also how "Is this Emma?"

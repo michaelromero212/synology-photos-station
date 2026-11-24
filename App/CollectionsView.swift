@@ -31,22 +31,32 @@ final class CollectionsStore {
     /// And how many of this device's own changes it had seen. See
     /// `AppSession.libraryRevision`.
     private var fetchedRevision: Int?
-    /// Set while a request is out, so a second caller doesn't send another.
-    /// The Albums page asks from two places as it appears, and both used to go
-    /// to the NAS: two identical requests per visit.
-    private var isRefreshing = false
+    /// The request out now, so a second caller waits for its answer rather
+    /// than sending another. The Albums page asks from two places as it
+    /// appears, and both used to go to the NAS: two identical requests per
+    /// visit.
+    @ObservationIgnored private var inFlight: Task<Void, Never>?
+    /// How many requests have gone out, and the latest of them answered, so a
+    /// slow answer never replaces a newer one. See `refresh`.
+    @ObservationIgnored private var asked = 0
+    @ObservationIgnored private var answered = 0
+    /// Holds the covers still while the page is on screen. See `take`.
+    @ObservationIgnored private var hold: CoverHold<CollectionsResponse>!
 
     /// Starts from the page this device saw last, so the trips and occasions
     /// are there the moment the tab is, even with the NAS busy or out of reach.
     /// See `AlbumsSnapshotStore`. `isStale` still says yes, because nothing has
-    /// been fetched, so the first visit asks for the current page and swaps it
-    /// in when it arrives.
+    /// been fetched, so the page is asked for again, usually before anyone
+    /// opens it (`RootTabView`, `MacRootView`).
     init(session: AppSession, spaceID: UUID) {
         self.session = session
         self.spaceID = spaceID
         if let saved = AlbumsSnapshotStore.loadCollections(spaceID: spaceID) {
             page = saved
             hasLoaded = true
+        }
+        hold = CoverHold(edits: session.editRevision) { [weak self] answer in
+            self?.draw(answer)
         }
     }
 
@@ -80,16 +90,21 @@ final class CollectionsStore {
     }
 
     /// Asks again only when it is worth it, so switching tabs back and forth
-    /// doesn't put a run of identical queries on a J4125.
+    /// doesn't put a run of identical queries on a J4125. With a request
+    /// already out, waits for its answer instead.
     func refreshIfStale() async {
-        guard isStale, !isRefreshing else { return }
+        if let inFlight {
+            await inFlight.value
+            return
+        }
+        guard isStale else { return }
         await refresh()
     }
 
     /// Asks again only if the library has moved since the last answer, however
     /// recent that was. For a page that's watching. See `LiveCounts`.
     func refreshIfChanged() async {
-        guard !isRefreshing else { return }
+        guard inFlight == nil else { return }
         guard fetchedAt == nil || session?.changeCursor(for: spaceID) != fetchedCursor
                 || session?.libraryRevision != fetchedRevision else { return }
         await refresh()
@@ -98,33 +113,503 @@ final class CollectionsStore {
     /// Asks again on the next visit. See `AppSession.hiddenContentChanged`.
     func expire() { fetchedAt = nil }
 
-    func refresh() async {
+    /// Whether the NAS has answered since launch, rather than the page being
+    /// the one saved last time.
+    var hasAnswered: Bool { fetchedAt != nil }
+
+    /// Asks the NAS now, whatever else is out. `explicit` for somebody pulling
+    /// the page down to refresh it, who is asking to see what's new: the
+    /// answer goes straight up, covers and all. See `take`.
+    ///
+    /// The request isn't called off when its caller is. A tab left while the
+    /// page was being asked for used to throw the answer away, and the next
+    /// visit asked again.
+    func refresh(explicit: Bool = false) async {
+        let request = Task { await ask(explicit: explicit) }
+        inFlight = request
+        await request.value
+        if inFlight == request { inFlight = nil }
+    }
+
+    private func ask(explicit: Bool) async {
         guard let client = session?.client else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
         if page == nil { isLoading = true }
         defer { isLoading = false }
+        asked += 1
+        let number = asked
         // Read before asking, not after: a change that lands while the request
         // is out may not be in the answer, and must still count as unseen.
         let cursor = session?.changeCursor(for: spaceID)
         let revision = session?.libraryRevision
+        let edits = session?.editRevision ?? 0
         // Failure is quiet, but it must not be destructive. Assigning the
         // result straight through meant one failed pull-to-refresh replaced a
         // good page with nil — and the page above, seeing nothing, replaced
         // itself with the "no albums yet" empty state. A blip should cost you
         // the update, never the screen.
-        if let fresh = try? await client.collections(spaceID: spaceID) {
-            page = fresh
-            hasLoaded = true
-            let spaceID = spaceID
-            Task.detached(priority: .utility) {
-                AlbumsSnapshotStore.saveCollections(fresh, spaceID: spaceID)
-            }
-            fetchedAt = Date()
-            fetchedFor = Self.dayStamp()
-            fetchedCursor = cursor
-            fetchedRevision = revision
+        guard let fresh = try? await client.collections(spaceID: spaceID),
+              number > answered else { return }
+        answered = number
+        hasLoaded = true
+        let spaceID = spaceID
+        Task.detached(priority: .utility) {
+            AlbumsSnapshotStore.saveCollections(fresh, spaceID: spaceID)
         }
+        fetchedAt = Date()
+        fetchedFor = Self.dayStamp()
+        fetchedCursor = cursor
+        fetchedRevision = revision
+        take(fresh, edits: edits, explicit: explicit)
+    }
+
+    /// Puts an answer on the page, or holds it until the page is left.
+    ///
+    /// The page used to draw its saved copy, ask the NAS as you arrived, and
+    /// swap the answer in while you were looking: covers changing under you,
+    /// the top row turning into a different one. Now, while any screen is
+    /// showing these covers (`HoldsCovers`), what's drawn takes the answer's
+    /// counts, titles and whatever came or went, and keeps the top row and
+    /// every cover still on it as they are. The answer itself waits, and goes
+    /// up once nothing is showing it. Its new covers are fetched while it
+    /// waits, so they're drawn on the first frame when you come back.
+    ///
+    /// Straight up instead, when there was nothing to draw yet, when this
+    /// device changed something since what's drawn was asked for
+    /// (`AppSession.editRevision`: whoever did it is waiting to see it), or
+    /// when the page was pulled down to refresh.
+    private func take(_ fresh: CollectionsResponse, edits: Int, explicit: Bool) {
+        guard let shown = page, !explicit, !hold.editedSince(edits) else {
+            hold.drawn(edits: edits)
+            draw(fresh)
+            return
+        }
+        draw(fresh.keepingCovers(of: shown))
+        // Only what changed, and only the page's own covers: the lists
+        // behind See All fetch theirs as they open, as they always have.
+        let drawing = Set(shown.pagePictures)
+        let pictures = Array(fresh.pagePictures.filter { !drawing.contains($0) }.prefix(40))
+        let faces = Self.newFaces(in: fresh, shown: shown)
+        let session = session
+        let spaceID = spaceID
+        hold.wait(for: fresh, edits: edits, isWarm: pictures.isEmpty && faces.isEmpty) {
+            if let loader = session?.loader {
+                await CoverWarmer.warm(pictures, loader: loader)
+            }
+            guard let session else { return }
+            let pixels = FaceCircle.pixels(for: PeopleMetrics.rowFace, session: session)
+            for person in faces where !Task.isCancelled {
+                await FaceCircle.fetch(
+                    session: session, spaceID: spaceID, source: .person(person), pixels: pixels
+                )
+            }
+        }
+    }
+
+    /// The people on the row whose face is new since what's drawn.
+    private static func newFaces(
+        in fresh: CollectionsResponse, shown: CollectionsResponse
+    ) -> [PersonSummary] {
+        let drawn = Dictionary(
+            (shown.people ?? []).map { ($0.id, $0.face) }, uniquingKeysWith: { first, _ in first }
+        )
+        return (fresh.people ?? []).filter { drawn[$0.id] != $0.face }
+    }
+
+    /// Only when it's different: assigning an equal page still redraws it.
+    private func draw(_ answer: CollectionsResponse) {
+        if page != answer { page = answer }
+    }
+
+    // MARK: On screen
+
+    /// A screen showing these covers came up. See `HoldsCovers`.
+    func enterScreen() { hold.enter() }
+
+    /// A screen showing them went. `now` for the window going to the
+    /// background, rather than a screen pushed over the page: see `CoverHold`.
+    func leaveScreen(now: Bool) { hold.leave(now: now) }
+}
+
+extension CollectionsStore: CoverHolder {}
+
+// MARK: - Holding covers still
+
+/// One of the Albums page's two stores, which the page holds still while it's
+/// showing them. See `HoldsCovers`.
+@MainActor
+protocol CoverHolder: AnyObject {
+    func enterScreen()
+    func leaveScreen(now: Bool)
+}
+
+/// Keeps a store's covers where they are while somebody's looking at them,
+/// and puts the NAS's latest answer up once nobody is. See
+/// `CollectionsStore.take`.
+///
+/// A count rather than a flag: more than one screen can show the same store
+/// at once. An iPad's two windows, a Mac's, the Albums page and a list pushed
+/// from it. The answer waits for the last of them to go.
+@MainActor
+final class CoverHold<Answer> {
+    private var holders = 0
+    /// The latest answer, untouched, while what's drawn is that answer with
+    /// the covers that were already up; and `AppSession.editRevision` as it
+    /// was asked for.
+    private var pending: (answer: Answer, edits: Int)?
+    /// `AppSession.editRevision` as of what's drawn.
+    private var drawnEdits: Int
+    /// Whether the waiting answer's new covers are in memory, or the wait for
+    /// them is over.
+    private var isWarm = true
+    /// Moves with each answer, so a warm-up still running for an older one
+    /// can't put up a newer one early.
+    private var generation = 0
+    private var warming: Task<Void, Never>?
+    private var settling: Task<Void, Never>?
+    private let draw: (Answer) -> Void
+
+    /// How long an answer waits for its covers before it goes up anyway.
+    private var warmLimit: Duration { .seconds(4) }
+
+    /// How long after the last screen goes before the answer goes up.
+    ///
+    /// Not for a list pushed over the page: it comes up as the slide starts,
+    /// and the page only goes once the slide ends, half a second later
+    /// (measured on iOS 27), so the count never drops between them. This is
+    /// for coming straight back, from a swipe back let go of halfway or a
+    /// glance at another tab, and for a system that reports the two the other
+    /// way round.
+    private var settleDelay: Duration { .milliseconds(600) }
+
+    init(edits: Int, draw: @escaping (Answer) -> Void) {
+        drawnEdits = edits
+        self.draw = draw
+    }
+
+    /// Whether this device has changed something since what's drawn was
+    /// asked for.
+    func editedSince(_ edits: Int) -> Bool { edits != drawnEdits }
+
+    /// An answer went up in full, as of `edits`.
+    func drawn(edits: Int) {
+        drawnEdits = edits
+        pending = nil
+        generation += 1
+        isWarm = true
+        warming?.cancel()
+        warming = nil
+    }
+
+    /// Holds `answer` until nothing is showing the store, running `warm` to
+    /// fetch its new covers first. Not on screen, it goes up as soon as they're
+    /// in, or after `warmLimit`: somebody may be on the way to the page.
+    func wait(
+        for answer: Answer, edits: Int, isWarm warmAlready: Bool,
+        warm: @escaping @MainActor () async -> Void
+    ) {
+        pending = (answer, edits)
+        generation += 1
+        let generation = generation
+        warming?.cancel()
+        warming = nil
+        isWarm = warmAlready
+        guard !warmAlready else {
+            settle()
+            return
+        }
+        warming = Task { [weak self] in
+            await warm()
+            self?.warmed(generation)
+        }
+        let limit = warmLimit
+        Task { [weak self] in
+            try? await Task.sleep(for: limit)
+            self?.warmed(generation)
+        }
+    }
+
+    private func warmed(_ generation: Int) {
+        guard generation == self.generation, !isWarm else { return }
+        isWarm = true
+        // No new fetches once the wait is over. Those already out finish and
+        // land in the cache.
+        warming?.cancel()
+        warming = nil
+        settle()
+    }
+
+    func enter() {
+        holders += 1
+        settling?.cancel()
+        settling = nil
+    }
+
+    /// `now` when the window is going to the background or out of sight:
+    /// up at once, warm or not, so it's never done as the app comes back.
+    /// Otherwise a screen was pushed over the page or the tab was left, and
+    /// the answer goes up after `settleDelay`, once its covers are in.
+    func leave(now: Bool) {
+        holders = max(0, holders - 1)
+        guard holders == 0 else { return }
+        settling?.cancel()
+        settling = nil
+        if now {
+            putUp()
+            return
+        }
+        let delay = settleDelay
+        settling = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.settling = nil
+            self.settle()
+        }
+    }
+
+    /// Puts the waiting answer up if nothing's showing it, its covers are in,
+    /// and no screen has only just been left.
+    private func settle() {
+        guard holders == 0, isWarm, settling == nil else { return }
+        putUp()
+    }
+
+    private func putUp() {
+        guard let pending else { return }
+        self.pending = nil
+        drawnEdits = pending.edits
+        draw(pending.answer)
+    }
+}
+
+/// Holds an Albums store's covers still for as long as this screen is up, in
+/// a window that's in front. See `CoverHold`.
+///
+/// For screens that draw covers from the stores: the Albums page, and the
+/// lists pushed from it. Not the Mac's sidebar, which is always there and
+/// draws names.
+struct HoldsCovers: ViewModifier {
+    let stores: [any CoverHolder]
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isUp = false
+    /// The stores this screen is holding now.
+    @State private var holding: [any CoverHolder] = []
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                isUp = true
+                update(isUp: true, phase: scenePhase, now: false)
+            }
+            .onDisappear {
+                isUp = false
+                update(isUp: false, phase: scenePhase, now: false)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                update(isUp: isUp, phase: phase, now: true)
+            }
+            .onChange(of: stores.map { ObjectIdentifier($0) }) {
+                update(isUp: isUp, phase: scenePhase, now: false)
+            }
+    }
+
+    private func update(isUp: Bool, phase: ScenePhase, now: Bool) {
+        let wanted = isUp && phase == .active ? stores : []
+        for store in holding where !wanted.contains(where: { $0 === store }) {
+            store.leaveScreen(now: now)
+        }
+        for store in wanted where !holding.contains(where: { $0 === store }) {
+            store.enterScreen()
+        }
+        holding = wanted
+    }
+}
+
+extension View {
+    /// See `HoldsCovers`. Nil stores are left out.
+    func holdsCovers(_ stores: (any CoverHolder)?...) -> some View {
+        modifier(HoldsCovers(stores: stores.compactMap { $0 }))
+    }
+}
+
+/// A cover the Albums page draws, at the size it's drawn.
+struct CoverPicture: Hashable, Sendable {
+    let assetID: UUID
+    let size: Int
+    /// Drawn by `CollectionCover`, which takes letterbox bars off and keeps
+    /// the result; so the warm-up does that too, off the main thread.
+    let trimmed: Bool
+}
+
+/// Fetches covers before the page needs them, so they're drawn on its first
+/// frame. See `CollectionsStore.take`.
+///
+/// Four at a time, behind anything on screen: through the loader's prefetch
+/// lane, which never takes a slot a visible tile is waiting for.
+enum CoverWarmer {
+    static func warm(_ pictures: [CoverPicture], loader: ThumbnailLoader) async {
+        var queue = pictures[...]
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<4 {
+                guard let picture = queue.popFirst() else { break }
+                group.addTask { await fetch(picture, loader: loader) }
+            }
+            while await group.next() != nil {
+                guard !Task.isCancelled, let picture = queue.popFirst() else { continue }
+                group.addTask { await fetch(picture, loader: loader) }
+            }
+        }
+    }
+
+    private static func fetch(_ picture: CoverPicture, loader: ThumbnailLoader) async {
+        guard !Task.isCancelled else { return }
+        let held = loader.cachedThumbnail(assetID: picture.assetID, size: picture.size)
+        let image: PlatformImage?
+        if let held {
+            image = held
+        } else {
+            image = await loader.thumbnail(
+                assetID: picture.assetID, size: picture.size, isPrefetch: true
+            )
+        }
+        guard let image, picture.trimmed else { return }
+        _ = Letterbox.trimmed(image, key: "\(picture.assetID)-\(picture.size)")
+    }
+}
+
+extension CollectionsResponse {
+    /// The covers the Albums page draws from this answer, the top of the page
+    /// first, at the sizes this platform's page draws them. See `AlbumsView`.
+    var pagePictures: [CoverPicture] {
+        var pictures: [CoverPicture] = []
+        func add(_ covers: [UUID]?, size: Int) {
+            guard let first = covers?.first else { return }
+            pictures.append(CoverPicture(assetID: first, size: size, trimmed: true))
+        }
+        for card in featured ?? hero.map({ [$0] }) ?? [] { add(card.coverAssetIDs, size: 512) }
+        #if os(macOS)
+        // Everything a card, at 512: `macPage`. A row across a wide window
+        // holds as many as the NAS sends for one, twelve.
+        add(favorites?.coverAssetIDs, size: 512)
+        add(recentlyAdded?.coverAssetIDs, size: 512)
+        for type in mediaTypes where type.key == "video" || type.key == "screenshot" {
+            add(type.coverAssetIDs, size: 512)
+        }
+        for trip in (wideTrips ?? trips).prefix(12) { add(trip.coverAssetIDs, size: 512) }
+        for day in onceDays(limit: 12) { add(day.coverAssetIDs, size: 512) }
+        for tradition in (traditions ?? []).prefix(12) { add(tradition.coverAssetIDs, size: 512) }
+        #else
+        // The phone's and the television's rows, at 256: `CollectionRowCard`.
+        add(recentlyAdded?.coverAssetIDs, size: 256)
+        add(favorites?.coverAssetIDs, size: 256)
+        for trip in trips { add(trip.coverAssetIDs, size: 256) }
+        for day in onceDays(limit: 3) { add(day.coverAssetIDs, size: 256) }
+        for tradition in (traditions ?? []).prefix(3) { add(tradition.coverAssetIDs, size: 256) }
+        #endif
+        return pictures
+    }
+
+    /// This answer as the page draws it while it's held (`CollectionsStore.take`):
+    /// its counts, titles and whatever came or went, with `shown`'s top row
+    /// exactly as it is and every card still here under the cover it has.
+    func keepingCovers(of shown: CollectionsResponse) -> CollectionsResponse {
+        // Matched on the card, kind and key. The top row isn't in here: it's
+        // kept whole.
+        var covers: [String: [UUID]] = [:]
+        let drawnCards = [shown.recentlyAdded, shown.favorites, shown.recentlyDeleted].compactMap { $0 }
+            + shown.trips + (shown.wideTrips ?? []) + shown.days + (shown.wideDays ?? [])
+            + (shown.allTrips ?? []) + (shown.allOccasions ?? []) + shown.mediaTypes + shown.revisits
+        for card in drawnCards where covers[card.id] == nil { covers[card.id] = card.coverAssetIDs }
+        func keep(_ card: CollectionSummary) -> CollectionSummary {
+            covers[card.id].map(card.withCovers) ?? card
+        }
+
+        // The server leaves each card in the top row out of the sections
+        // under it. The new sections are built around the new row, so under
+        // the old one they'd show a trip from it twice and drop the one moving
+        // up into the new row. While the row that's showing isn't the one
+        // coming, the sections stay as they're drawn instead, brought up to
+        // date and less any card that's gone. While it is, which is most of
+        // every day, the sections are the new ones.
+        let showing = (shown.featured ?? shown.hero.map { [$0] } ?? []).map(\.id)
+        let coming = (featured ?? hero.map { [$0] } ?? []).map(\.id)
+        var latest: [String: CollectionSummary] = [:]
+        let freshCards = (featured ?? []) + [hero].compactMap { $0 } + trips + (wideTrips ?? [])
+            + days + (wideDays ?? []) + (allTrips ?? []) + (allOccasions ?? [])
+        for card in freshCards where latest[card.id] == nil { latest[card.id] = card }
+        func section(_ fresh: [CollectionSummary], shown before: [CollectionSummary]) -> [CollectionSummary] {
+            guard showing != coming else { return fresh.map(keep) }
+            // As they're drawn, brought up to date, less any that are gone.
+            return before.compactMap { latest[$0.id].map(keep) }
+        }
+
+        let drawnTraditions = Dictionary(
+            (shown.traditions ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let faces = Dictionary(
+            (shown.people ?? []).map { ($0.id, $0.face) }, uniquingKeysWith: { first, _ in first }
+        )
+
+        return CollectionsResponse(
+            hero: shown.hero,
+            trips: section(trips, shown: shown.trips),
+            days: section(days, shown: shown.days),
+            revisits: revisits.map(keep),
+            mediaTypes: mediaTypes.map(keep),
+            recentlyDeleted: recentlyDeleted.map(keep),
+            recentlyAdded: recentlyAdded.map(keep),
+            favorites: favorites.map(keep),
+            allTrips: allTrips?.map(keep),
+            allOccasions: allOccasions?.map(keep),
+            featured: shown.featured,
+            traditions: traditions?.map { tradition in
+                drawnTraditions[tradition.id].map(tradition.withCovers(of:)) ?? tradition
+            },
+            wideTrips: wideTrips.map { section($0, shown: shown.wideTrips ?? []) },
+            wideDays: wideDays.map { section($0, shown: shown.wideDays ?? []) },
+            people: people?.map { person in
+                faces[person.id].map(person.withFace) ?? person
+            },
+            together: together
+        )
+    }
+}
+
+extension CollectionSummary {
+    /// The same card under other covers.
+    func withCovers(_ covers: [UUID]) -> CollectionSummary {
+        guard covers != coverAssetIDs else { return self }
+        return CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: covers, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
+        )
+    }
+}
+
+extension Tradition {
+    /// The same tradition under the covers `drawn` has, its own and each
+    /// year's still in it.
+    func withCovers(of drawn: Tradition) -> Tradition {
+        let before = Dictionary(
+            drawn.years.map { ($0.id, $0.coverAssetIDs) }, uniquingKeysWith: { first, _ in first }
+        )
+        let kept = years.map { year in before[year.id].map(year.withCovers) ?? year }
+        guard drawn.coverAssetIDs != coverAssetIDs || kept != years else { return self }
+        return Tradition(
+            id: id, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: drawn.coverAssetIDs, years: kept, next: next, naming: naming
+        )
+    }
+}
+
+extension PersonSummary {
+    /// The same person, with another face standing for them.
+    func withFace(_ face: String) -> PersonSummary {
+        guard face != self.face else { return self }
+        return PersonSummary(
+            id: id, name: name, photoCount: photoCount, face: face, questions: questions,
+            relation: relation, isMe: isMe, tier: tier, maybe: maybe
+        )
     }
 }
 
@@ -149,7 +634,13 @@ struct CollectionCover: View {
     let loader: ThumbnailLoader?
     let size: Int
 
-    @State private var image: PlatformImage?
+    /// The picture this card fetched, and the covers it fetched it for.
+    @State private var loaded: Loaded?
+
+    private struct Loaded {
+        let assetIDs: [UUID]
+        let image: PlatformImage
+    }
 
     init(assetIDs: [UUID], loader: ThumbnailLoader?, size: Int = 512) {
         self.assetIDs = assetIDs
@@ -157,10 +648,31 @@ struct CollectionCover: View {
         self.size = size
         // Already decoded in memory: drawn on the first frame rather than one
         // after it, so coming back to the page doesn't blink the hero gray.
-        _image = State(initialValue: assetIDs.first.flatMap { first in
+        _loaded = State(initialValue: Self.held(assetIDs, loader: loader, size: size)
+            .map { Loaded(assetIDs: assetIDs, image: $0) })
+    }
+
+    /// What to draw: what this card fetched, unless it has been handed other
+    /// covers since.
+    ///
+    /// A card keeps its state while its page is out of sight, and that is
+    /// when the page takes the NAS's new answer (`CollectionsStore.take`). Its
+    /// task only runs again once it's back, so it came back showing the old
+    /// cover for a frame and then the new one. The new one is usually in
+    /// memory by then, fetched before the page took it, and is drawn from
+    /// there. Failing that, the old one stays until the new one comes, as it
+    /// always has.
+    private var image: PlatformImage? {
+        if let loaded, loaded.assetIDs == assetIDs { return loaded.image }
+        guard !assetIDs.isEmpty else { return nil }
+        return Self.held(assetIDs, loader: loader, size: size) ?? loaded?.image
+    }
+
+    private static func held(_ assetIDs: [UUID], loader: ThumbnailLoader?, size: Int) -> PlatformImage? {
+        assetIDs.first.flatMap { first in
             loader?.cachedThumbnail(assetID: first, size: size)
                 .map { Letterbox.trimmed($0, key: "\(first)-\(size)") }
-        })
+        }
     }
 
     var body: some View {
@@ -187,7 +699,8 @@ struct CollectionCover: View {
     }
 
     private func load() async {
-        guard let loader else { return }
+        guard let loader, loaded?.assetIDs != assetIDs else { return }
+        let assetIDs = assetIDs
         for assetID in assetIDs.prefix(3) {
             guard !Task.isCancelled else { return }
             if let cover = await loader.thumbnail(assetID: assetID, size: size) {
@@ -196,7 +709,7 @@ struct CollectionCover: View {
                 // page: the picture is either there or it isn't.
                 var instant = Transaction()
                 instant.disablesAnimations = true
-                withTransaction(instant) { image = trimmed }
+                withTransaction(instant) { loaded = Loaded(assetIDs: assetIDs, image: trimmed) }
                 return
             }
         }
@@ -466,6 +979,8 @@ struct CollectionListView: View {
                 if changed { Task { await store.refresh() } }
             }
         }
+        // Its covers are the page's, and hold still with them.
+        .holdsCovers(store)
         #else
         ScrollView {
             LazyVStack(spacing: 0) {
@@ -496,6 +1011,8 @@ struct CollectionListView: View {
             }
         }
         #endif
+        // Its covers are the page's, and hold still with them.
+        .holdsCovers(store)
         #endif
     }
 }
@@ -1887,6 +2404,8 @@ struct MediaTypesView: View {
         .navigationTitle("Media Types")
         .onAppear { Task { await store.refreshIfStale() } }
         .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+        // Its covers are the page's, and hold still with them.
+        .holdsCovers(store)
         #else
         List(store.page?.mediaTypes ?? types) { type in
             NavigationLink {
@@ -1904,6 +2423,7 @@ struct MediaTypesView: View {
         #endif
         .onAppear { Task { await store.refreshIfStale() } }
         .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+        .holdsCovers(store)
         #endif
     }
 }

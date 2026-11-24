@@ -81,16 +81,23 @@ struct MacRootView: View {
                     )
             }
         }
+        // The Albums page, fetched as the window opens rather than when the
+        // page is, which also brings the media types in. See `loadMediaTypes`.
         .task(id: session.personalSpace?.id) { await loadMediaTypes() }
         // A shared album made on the phone — or on this Mac's Albums page —
         // has to reach the sidebar without the Albums page being opened first.
         .task { await albums.refreshIfStale() }
         // And again on coming back to the window, the moment the grids look
         // again too: one shared with you on the phone in the meantime turns
-        // up without a visit to Albums first.
+        // up without a visit to Albums first, and today's page comes in
+        // before you open it. The page holds what it has while it's showing
+        // (`CollectionsStore.take`).
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await albums.refreshIfStale() }
+            if let personal = session.personalSpace {
+                Task { await session.collectionsStore(for: personal.id).refreshIfStale() }
+            }
         }
         // A notification or the activity list pointing at a shared library
         // or album: select it, the way clicking its row would. The phone opens
@@ -374,21 +381,26 @@ struct MacRootView: View {
 
     // MARK: - Loading
 
+    /// From the Albums page's own request, which carries them. This asked the
+    /// NAS for the whole page itself, and now that the page is fetched as the
+    /// window opens too, that was the same heavy request twice.
     private func loadMediaTypes() async {
-        guard let personal = session.personalSpace, let client = session.client else { return }
-        // Only on success. A failed refresh that assigned nil would empty the
-        // sidebar over a library that is perfectly fine — the same mistake the
-        // Albums page made once already.
+        guard let personal = session.personalSpace else { return }
         // Signed in, or the spaces arrived, after the window opened.
         if mediaTypes.isEmpty { mediaTypes = Self.savedMediaTypes(for: personal) }
-        if let page = try? await client.collections(spaceID: personal.id) {
-            // Assigned only when different, so an unchanged answer doesn't
-            // rebuild the sidebar under someone's pointer.
-            if page.mediaTypes != mediaTypes { mediaTypes = page.mediaTypes }
-            let spaceID = personal.id
-            Task.detached(priority: .utility) {
-                AlbumsSnapshotStore.saveMediaTypes(page.mediaTypes, spaceID: spaceID)
-            }
+        let store = session.collectionsStore(for: personal.id)
+        await store.refreshIfStale()
+        // Only an answer. A failed refresh that assigned nil would empty the
+        // sidebar over a library that is perfectly fine — the same mistake the
+        // Albums page made once already — and the store's page before one is
+        // the saved copy, no newer than what's here.
+        guard store.hasAnswered, let types = store.page?.mediaTypes else { return }
+        // Assigned only when different, so an unchanged answer doesn't
+        // rebuild the sidebar under someone's pointer.
+        if types != mediaTypes { mediaTypes = types }
+        let spaceID = personal.id
+        Task.detached(priority: .utility) {
+            AlbumsSnapshotStore.saveMediaTypes(types, spaceID: spaceID)
         }
     }
 
