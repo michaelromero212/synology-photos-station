@@ -979,6 +979,13 @@ struct TimelineCollection: UIViewRepresentable {
             view.addGestureRecognizer(pan)
             sweep = pan
 
+            // A trackpad's or a mouse's pointer at the right edge calls the
+            // iPad's rail out. Watched here, by the grid, because the rail
+            // takes no pointer there while it's away — see `TimelineRail`.
+            view.addGestureRecognizer(
+                UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+            )
+
             keys = parent.sections.map(\.bucket.key)
             rebuildIndex()
             parent.controller.coordinator = self
@@ -1539,6 +1546,29 @@ struct TimelineCollection: UIViewRepresentable {
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             report()
             updateLoads()
+            // Somebody's scroll, and its fling — not a scrub, a jump or the
+            // grid keeping its place, which move it with neither. One that
+            // stops without saying so, cut short by a jump, ends here.
+            parent.progress.noteUserScrolling(scrollView.isDragging || scrollView.isDecelerating)
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { parent.progress.noteUserScrolling(false) }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            parent.progress.noteUserScrolling(false)
+        }
+
+        @objc private func handleHover(_ hover: UIHoverGestureRecognizer) {
+            guard let view else { return }
+            switch hover.state {
+            case .began, .changed:
+                let x = hover.location(in: view).x
+                parent.progress.notePointerAtEdge(x >= view.bounds.maxX - TimelineRail.edgeReach)
+            default:
+                parent.progress.notePointerAtEdge(false)
+            }
         }
 
         // MARK: Reporting

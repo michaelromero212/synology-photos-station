@@ -6,10 +6,17 @@ import SwiftUI
 
 /// The library's shape, down the trailing edge, on screens with room for it.
 ///
-/// `FastScroller` is the phone answer: invisible until you touch it, because a
-/// phone has no width to spare. On a Mac or an iPad that reticence is a waste —
-/// there is room for a rail that says something while you are not touching it,
-/// and a pointer that can ask questions of it without committing to a drag.
+/// `FastScroller` is the phone answer: a slim thumb until you touch it,
+/// because a phone has no width to spare. A Mac or an iPad has room for a rail
+/// that says more once it's asked for — years, and how much is in each.
+///
+/// Asked for, not standing there. It used to stay out on both, a strip of bars
+/// and labels over every photograph in the grid's last column, for a control
+/// used now and then; on an iPad it took every touch in that strip, so a tap
+/// on one of those photos scrubbed instead of opening it. Now it's away until
+/// wanted. On a Mac, the pointer at the window's edge calls it. On an iPad,
+/// scrolling does — the way a scroll indicator comes — or a finger on the
+/// thumb that stands in for it at rest, or a trackpad's pointer at the edge.
 ///
 /// What it says is the part worth having. Synology's equivalent is a ruler:
 /// evenly spaced years, dots between. It tells you *when* and nothing about
@@ -34,13 +41,7 @@ struct TimelineRail: View {
     /// there", and the rail should answer the first without doing the second.
     @State private var hoverFraction: Double?
 
-    #if os(macOS)
-    /// On a Mac the rail is out of sight until the pointer comes to the
-    /// window's right edge, then slides out, and goes again once the pointer
-    /// has left. It used to stand over the grid's right edge the whole time —
-    /// a strip of bars and labels on top of every photograph in that column,
-    /// for a control used now and then. A Mac has a pointer to ask with, the
-    /// way it has overlay scroll bars that come when wanted.
+    /// Out over the grid, or away past the trailing edge.
     @State private var isOut = false
     /// The pointer is over the rail, or over the edge that calls it.
     @State private var pointerNear = false
@@ -49,23 +50,35 @@ struct TimelineRail: View {
     /// The years and bars.
     private let railWidth: CGFloat = 60
     private let barMaxWidth: CGFloat = 22
+    #if os(macOS)
     /// Room around them that still counts as the rail — so a pointer a hair
     /// off a bar keeps it out — and their gap from the window's edge.
     private static let margins = EdgeInsets(top: 12, leading: 9, bottom: 12, trailing: 0)
+    #else
+    /// None. Above and below, a finger's place on the rail is read straight
+    /// off it; beside, every point of the rail is a point of photograph a tap
+    /// can't reach while it's out.
+    private static let margins = EdgeInsets()
+    /// The thumb that stands in for the rail while it's away: the phone's —
+    /// see `FastScroller` — and, as there, only a band around it starts a
+    /// scrub, so a swipe or a tap anywhere else down the edge reaches the grid.
+    private static let thumbHeight: CGFloat = 36
+    private static let thumbReach: CGFloat = 22
+    private static let thumbGrabWidth: CGFloat = 44
+    /// How long the rail stays out after a scroll or a scrub ends: long enough
+    /// to reach for it, as a scroll indicator waits.
+    private static let lingerAfterTouch: Duration = .milliseconds(1500)
+    #endif
     private static let edgeGap: CGFloat = 8
-    /// How near the window's right edge the pointer must come to call the
-    /// rail out: the last few points, about where a Mac's own overlay scroll
-    /// bar sits. It was 32, and a photo in the grid's last column couldn't be
-    /// pointed at near its right side without the rail sliding out over it.
-    private static let edgeReach: CGFloat = 10
-    /// Everything the rail takes from the window's right edge when it's out.
+    /// How near the right edge the pointer must come to call the rail out:
+    /// the last few points, about where a Mac's own overlay scroll bar sits.
+    /// It was 32, and a photo in the grid's last column couldn't be pointed at
+    /// near its right side without the rail sliding out over it.
+    static let edgeReach: CGFloat = 10
+    /// Everything the rail takes from the right edge when it's out.
     private var footprint: CGFloat {
         railWidth + Self.margins.leading + Self.margins.trailing + Self.edgeGap
     }
-    #else
-    private let railWidth: CGFloat = 62
-    private let barMaxWidth: CGFloat = 26
-    #endif
     /// How many bars the density strip is drawn with.
     ///
     /// Fixed rather than one per bucket: a day-zoomed library has thousands of
@@ -104,23 +117,141 @@ struct TimelineRail: View {
             .animation(isOut ? .snappy(duration: 0.2) : .easeIn(duration: 0.16), value: isOut)
             .onDisappear { putAway?.cancel() }
         #else
-        rail
+        GeometryReader { proxy in
+            let height = proxy.size.height
+            let thumbY = Self.thumbCenter(fraction: progress.fraction, height: height)
+
+            ZStack(alignment: .topTrailing) {
+                Color.clear
+                rail
+                    // Out past the screen's edge while away, so it slides in
+                    // from it.
+                    .offset(x: isOut ? 0 : footprint + 4)
+                if !isOut {
+                    // The phone's thumb, where the rail's line would be.
+                    Capsule()
+                        .fill(.secondary)
+                        .frame(width: 4, height: Self.thumbHeight)
+                        .padding(.trailing, 8)
+                        .offset(y: thumbY - Self.thumbHeight / 2)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            // Quick out, quicker back. Inside the reader, which would
+            // otherwise keep the change to itself.
+            .animation(isOut ? .snappy(duration: 0.2) : .easeIn(duration: 0.16), value: isOut)
+            // While away, only a band around the thumb takes touches, so the
+            // photos down the edge open and scroll; while out, the rail does.
+            .contentShape(RailReach(
+                isOut: isOut, thumbY: thumbY,
+                reach: Self.thumbHeight / 2 + Self.thumbReach, width: Self.thumbGrabWidth
+            ))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        // A finger on the thumb brings the rail out under it.
+                        if !isDragging {
+                            putAway?.cancel()
+                            isOut = true
+                        }
+                        scrub(toFraction: value.location.y / max(height, 1))
+                    }
+                    .onEnded { _ in
+                        endScrub()
+                        // A finger says nothing of where it went, so the rail
+                        // waits as it does after a scroll, for a second go. A
+                        // pointer still on it says so the next time it moves.
+                        pointerNear = false
+                        putAwaySoon(after: Self.lingerAfterTouch)
+                    }
+            )
+            // A trackpad's or a mouse's pointer, as on a Mac. The grid watches
+            // the edge beyond the thumb — see `ScrollProgress.pointerAtEdge`.
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let point):
+                    pointerNear = true
+                    putAway?.cancel()
+                    if !isOut, point.x >= footprint - Self.edgeReach { isOut = true }
+                case .ended:
+                    pointerNear = false
+                    if !isDragging { putAwaySoon() }
+                }
+            }
+        }
+        .frame(width: footprint)
+        // Out while you scroll, as a scroll indicator comes, and a moment
+        // after — long enough to put a finger on it.
+        .onChange(of: progress.isUserScrolling) { _, scrolling in
+            if scrolling {
+                putAway?.cancel()
+                isOut = true
+            } else {
+                putAwaySoon(after: Self.lingerAfterTouch)
+            }
+        }
+        .onChange(of: progress.pointerAtEdge) { _, near in
+            if near {
+                putAway?.cancel()
+                isOut = true
+            } else {
+                putAwaySoon()
+            }
+        }
+        .onDisappear { putAway?.cancel() }
         #endif
     }
 
-    #if os(macOS)
     /// Away after a beat, not the instant the pointer slips off: brushing past
-    /// the rail's edge shouldn't make it flicker.
-    private func putAwaySoon() {
+    /// the rail's edge shouldn't make it flicker. Not while it's in use — held,
+    /// pointed at, or, on an iPad, scrolled by or called from the edge.
+    private func putAwaySoon(after delay: Duration = .milliseconds(300)) {
         putAway?.cancel()
         putAway = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled, !isDragging, !pointerNear else { return }
+            #if os(iOS)
+            guard !progress.isUserScrolling, !progress.pointerAtEdge else { return }
+            #endif
             hoverFraction = nil
             isOut = false
         }
     }
+
+    #if os(iOS)
+    /// Where the resting thumb's middle sits: where the rail's line would be,
+    /// so a finger that takes hold of it lands the grid where it already is,
+    /// kept a half-thumb inside each end.
+    private static func thumbCenter(fraction: Double, height: CGFloat) -> CGFloat {
+        let half = thumbHeight / 2
+        guard height > thumbHeight else { return height / 2 }
+        return (height * CGFloat(fraction.clamped(to: 0...1))).clamped(to: half...(height - half))
+    }
     #endif
+
+    /// Sends the grid to a point on the rail, 0 at the top to 1 at the bottom.
+    private func scrub(toFraction raw: Double) {
+        isDragging = true
+        dragFraction = raw.clamped(to: 0...1)
+        guard let bucket = buckets.bucket(atFraction: dragFraction) else { return }
+        // The day under the pointer, measured the way the grid is measured —
+        // by height, not by photograph count. The pill was naming one month
+        // while the scroll went to another; see `LibrarySpan.target`. Falls
+        // back to the item count only before the library has been measured.
+        let target = progress.span?.target(
+            atFraction: dragFraction, viewport: progress.viewport
+        )
+        let named = target.flatMap { spot in
+            buckets.first { $0.key == spot.day }
+        } ?? bucket
+        onScrub(named, target)
+    }
+
+    private func endScrub() {
+        isDragging = false
+        onScrubEnd()
+    }
 
     private var rail: some View {
         GeometryReader { proxy in
@@ -155,7 +286,6 @@ struct TimelineRail: View {
             }
             .frame(width: railWidth, alignment: .trailing)
             .contentShape(Rectangle())
-            #if os(macOS) || os(iOS)
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let point):
@@ -164,33 +294,16 @@ struct TimelineRail: View {
                     hoverFraction = nil
                 }
             }
-            #endif
+            #if os(macOS)
+            // On an iPad the drag is the whole rail's, thumb and all — see
+            // `body`.
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        isDragging = true
-                        dragFraction = (value.location.y / max(height, 1))
-                            .clamped(to: 0...1)
-                        if let bucket = buckets.bucket(atFraction: dragFraction) {
-                            // The day under the pointer, measured the way the
-                            // grid is measured — by height, not by photograph
-                            // count. The pill was naming one month while the
-                            // scroll went to another; see `LibrarySpan.target`.
-                            // Falls back to the item count only before the
-                            // library has been measured.
-                            let target = progress.span?.target(
-                                atFraction: dragFraction, viewport: progress.viewport
-                            )
-                            let named = target.flatMap { spot in
-                                buckets.first { $0.key == spot.day }
-                            } ?? bucket
-                            onScrub(named, target)
-                        }
+                        scrub(toFraction: value.location.y / max(height, 1))
                     }
                     .onEnded { value in
-                        isDragging = false
-                        onScrubEnd()
-                        #if os(macOS)
+                        endScrub()
                         // Let go off the rail: away it goes. The pointer's
                         // comings and goings aren't reported while the button
                         // is down, so where the drag ended is the only word
@@ -212,31 +325,25 @@ struct TimelineRail: View {
                             hoverFraction = nil
                         }
                         if !pointerNear { putAwaySoon() }
-                        #endif
                     }
             )
+            #endif
             .animation(.easeOut(duration: 0.12), value: hoverFraction == nil)
             .animation(.easeOut(duration: 0.15), value: isDragging)
         }
         .frame(width: railWidth)
-        #if os(macOS)
         // Straight over the photos, with no panel of its own — it had a dark
-        // glass one, which was a second thing sliding over the grid for no
-        // gain. White, with a shadow under the years and bars (see
+        // glass one on a Mac, which was a second thing sliding over the grid
+        // for no gain. White, with a shadow under the years and bars (see
         // `Backdrop`), reads over bright photos and dark ones alike.
         .padding(Self.margins)
         .environment(\.colorScheme, .dark)
         .padding(.trailing, Self.edgeGap)
-        #endif
     }
 
     /// Where the hover pill sits: beside the rail, clear of its years.
     private var pillOffset: CGFloat {
-        #if os(macOS)
         -(railWidth + Self.margins.leading)
-        #else
-        -railWidth + 6
-        #endif
     }
 
     // MARK: - Where you are
@@ -343,20 +450,14 @@ private struct Backdrop: View, Equatable {
                 )
             }
         }
-        #if os(macOS)
         .shadow(color: .black.opacity(0.45), radius: 1.5)
-        #endif
         .allowsHitTesting(false)
     }
 
-    /// How strongly a bar is drawn, by how full it is. Stronger on a Mac,
-    /// where the bars sit straight on the photos rather than beside them.
+    /// How strongly a bar is drawn, by how full it is: strongly enough to
+    /// read straight on the photos, with nothing behind it.
     private static func barOpacity(_ scaled: Double) -> Double {
-        #if os(macOS)
         0.3 + 0.4 * scaled
-        #else
-        0.16 + 0.24 * scaled
-        #endif
     }
 
     /// How much of the library sits in each slot of the rail.
@@ -383,19 +484,12 @@ private struct Backdrop: View, Equatable {
     /// pretending to be a library. Labels are dropped when they would collide
     /// rather than shrunk — an unreadable stack of years is worse than fewer.
     private func years(height: CGFloat) -> some View {
-        #if os(macOS)
         // Larger and white, with a shadow to stand on over a bright photo:
         // the thing you read the rail for, and it was the faintest thing on it.
         let font = Font.system(size: 12, weight: .semibold)
         let style = HierarchicalShapeStyle.primary
         let minimumGap: CGFloat = 20
         let lift: CGFloat = 8
-        #else
-        let font = Font.caption2.weight(.semibold)
-        let style = HierarchicalShapeStyle.secondary
-        let minimumGap: CGFloat = 22
-        let lift: CGFloat = 7
-        #endif
         let marks = Self.visibleYearMarks(
             buckets: buckets, height: height, minimumGap: minimumGap
         )
@@ -406,9 +500,7 @@ private struct Backdrop: View, Equatable {
                     .font(font)
                     .monospacedDigit()
                     .foregroundStyle(style)
-                    #if os(macOS)
                     .shadow(color: .black.opacity(0.7), radius: 2, y: 0.5)
-                    #endif
                     .offset(x: -barMaxWidth - 6, y: mark.y - lift)
             }
         }
@@ -453,6 +545,25 @@ private struct Backdrop: View, Equatable {
     }
 
 }
+
+#if os(iOS)
+/// What of the rail takes touches: all of it while it's out, and while it's
+/// away only a band around the thumb that stands in for it.
+private struct RailReach: Shape {
+    var isOut: Bool
+    var thumbY: CGFloat
+    var reach: CGFloat
+    var width: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        if isOut { return Path(rect) }
+        let width = min(width, rect.width)
+        let top = max(thumbY - reach, rect.minY)
+        let bottom = min(thumbY + reach, rect.maxY)
+        return Path(CGRect(x: rect.maxX - width, y: top, width: width, height: max(bottom - top, 0)))
+    }
+}
+#endif
 
 #if os(macOS)
 /// A strip of `width` along the trailing edge: where the hidden rail listens

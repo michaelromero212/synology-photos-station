@@ -2791,10 +2791,10 @@ struct TimelineView: View {
             .overlay(alignment: .trailing) {
                 if store.buckets.count > 1 {
                     // A phone gets the scrubber that stays out of the way; a
-                    // Mac or an iPad gets the rail that says something while
-                    // nobody is touching it. The difference is available width,
-                    // not preference — a labeled rail costs horizontal space a
-                    // phone has already given to photographs.
+                    // Mac or an iPad gets the rail, which comes out with years
+                    // and bars when asked for. The difference is available
+                    // width, not preference — a labeled rail costs horizontal
+                    // space a phone has already given to photographs.
                     //
                     // No animation on the scroll in either: an animated scroll
                     // per drag update queues up and the grid slides on after

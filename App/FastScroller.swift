@@ -348,8 +348,29 @@ final class ScrollProgress {
     /// pill names the last day.
     @ObservationIgnored var isScrubbing = false
 
+    /// True while somebody is moving the grid — a finger or a trackpad, and
+    /// the fling after it — and not the app moving it for them. The iPad's
+    /// rail comes out for it. Observed, and read only by the rail; it flips
+    /// twice a scroll, not once a frame.
+    var isUserScrolling = false
+
+    /// The pointer is in the last few points of the grid's right edge, which
+    /// on an iPad with a trackpad or a mouse calls the rail out — see
+    /// `TimelineRail.edgeReach`. The grid reports it: while the rail is away
+    /// it takes no pointer of its own there, so the photos beside it stay
+    /// clickable.
+    var pointerAtEdge = false
+
     func noteTopDay(_ key: String?) {
         if topDay != key { topDay = key }
+    }
+
+    func noteUserScrolling(_ scrolling: Bool) {
+        if isUserScrolling != scrolling { isUserScrolling = scrolling }
+    }
+
+    func notePointerAtEdge(_ near: Bool) {
+        if pointerAtEdge != near { pointerAtEdge = near }
     }
 
     /// Where the grid is in the *library*, rather than in the scroll view's idea
