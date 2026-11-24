@@ -91,9 +91,9 @@ struct CollectionsController: RouteCollection {
         // person is having, and a NAS in another timezone — or simply awake at
         // 1am — would otherwise answer for the wrong one.
         let today = req.query[String.self, at: "date"].flatMap(Self.parseDate) ?? Date()
-        // Rotates the covers daily and holds them still in between, so a card
-        // stays recognizable for as long as anyone is looking at it.
-        let seed = Self.dayStamp(today)
+        // What the top row deals from: the same all day, and new tomorrow. The
+        // covers don't turn with it; see `coverSeed`.
+        let todayStamp = Self.dayStamp(today)
 
         // What the person's own devices saw, for their own library. Empty
         // anywhere else, or with curation turned off, and then the page is
@@ -119,7 +119,7 @@ struct CollectionsController: RouteCollection {
         let events = Self.events(in: evidence, excluding: holidays)
 
         let onThisDay = try await onThisDayCollections(
-            spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
+            spaceID: spaceID, today: today, userID: device.userID, on: req.sql
         )
         // Kept as they were shown, so improving the rules below never makes
         // an album someone knows disappear. See `CuratedAlbums`.
@@ -139,14 +139,14 @@ struct CollectionsController: RouteCollection {
             uniquingKeysWith: { evidenced, _ in evidenced }
         )
         let tripsFound = try await trips(
-            spaceID: spaceID, seed: seed, userID: device.userID,
+            spaceID: spaceID, userID: device.userID,
             holidays: tripHolidays, evidence: evidence, geocoder: req.application.geocoder,
             on: req.sql
         )
         let everyTrip = tripsFound.cards
         let trips = await keeper.keep(
             trips: Array(everyTrip.prefix(Self.allTripsLimit)),
-            saved: saved, limit: Self.allTripsLimit, seed: seed,
+            saved: saved, limit: Self.allTripsLimit,
             rejudge: { key in
                 Self.judgeKept(
                     trip: key, in: tripsFound, holidays: tripHolidays, evidence: evidence,
@@ -183,7 +183,7 @@ struct CollectionsController: RouteCollection {
             events: events, evidence: evidence, claimed: claimed
         )
         let found = try await occasions(
-            spaceID: spaceID, seed: seed, userID: device.userID, named: named,
+            spaceID: spaceID, userID: device.userID, named: named,
             holidays: holidays, events: events, excluding: claimed,
             recurring: library.recurring, yearly: yearly, scope: scope, on: req.sql
         )
@@ -201,7 +201,7 @@ struct CollectionsController: RouteCollection {
                     seen.isAnalyzed && events[day] == nil && holidays[day] == nil
                 }.keys)
             ),
-            limit: Self.allOccasionsLimit, seed: seed
+            limit: Self.allOccasionsLimit
         )
         let deleted = try await recentlyDeleted(
             spaceID: spaceID, userID: device.userID, on: req.sql
@@ -211,14 +211,14 @@ struct CollectionsController: RouteCollection {
             spaceID: spaceID, userID: device.userID, on: req.sql
         )
         let away = try await revisits(
-            spaceID: spaceID, seed: seed, userID: device.userID, on: req.sql
+            spaceID: spaceID, userID: device.userID, on: req.sql
         )
         let season = try await lastSeason(
-            spaceID: spaceID, today: today, seed: seed, userID: device.userID, on: req.sql
+            spaceID: spaceID, today: today, userID: device.userID, on: req.sql
         )
         let anniversaries = Self.anniversaries(of: trips, today: today)
         let types = try await mediaTypes(
-            spaceID: spaceID, seed: seed, userID: device.userID, on: req.sql
+            spaceID: spaceID, userID: device.userID, on: req.sql
         )
         let comingUp = Self.comingUp(occasions, today: today)
 
@@ -230,17 +230,18 @@ struct CollectionsController: RouteCollection {
 
         // The rest is a pool, and the pool is the point. A page that always
         // opens on the same card stops being looked at — so on a day with
-        // nothing anchored to it, the hero moves: the latest trip, somewhere
-        // you haven't been in years, last season, the latest occasion. Turned
-        // by the date, so it holds still while you are looking and has changed
-        // by tomorrow.
-        let latestOccasion = occasions.first { $0.occasion != nil }?.summary
-        let pool = ([trips.first, away.first, season, latestOccasion]).compactMap { $0 }
-
-        let turn = Self.utc.ordinality(of: .day, in: .year, for: today) ?? 0
+        // nothing anchored to it, the hero moves. Dealt by the date and the
+        // library, so it holds still all day, on every device, and has changed
+        // by tomorrow. See `highlights` and `DailyDeal`.
+        var deal = DailyDeal(day: todayStamp, spaceID: spaceID)
+        let pool = Self.highlights(
+            trips: trips, revisits: away, season: season,
+            occasions: occasions.filter { $0.occasion != nil }.map(\.summary),
+            deal: &deal
+        )
 
         let traditions = yearly.traditions(
-            rows: found.rows, today: today, turn: turn,
+            rows: found.rows, today: today,
             holidays: holidays, named: named, annual: annual, events: events
         )
         // Which tradition each day is a year of, so Holidays & Occasions can
@@ -261,13 +262,13 @@ struct CollectionsController: RouteCollection {
         // The row the page opens on, the way Photos opens on its featured
         // memories and photos: a handful of cards to swipe, each with its own
         // reason to be looked at today. What's tied to today comes first, then
-        // the day's highlights with a featured photo or two between them. All
-        // turned by the date, so each day starts somewhere new and the row
+        // the day's highlights with a featured photo or two among them. All
+        // dealt by the date, so each day starts somewhere new and the row
         // holds still while you're looking at it. The first card is `hero`,
         // all an older app draws.
         let photos = curation.enabled && curation.isPersonal
             ? try await featuredPhotos(
-                spaceID: spaceID, userID: device.userID, today: today, seed: seed,
+                spaceID: spaceID, userID: device.userID, today: today, seed: todayStamp,
                 // Every trip, not only the forty the page lists: a photo
                 // from Christmas 2012 is from a trip far older than those.
                 naming: FeaturedDays(
@@ -278,9 +279,7 @@ struct CollectionsController: RouteCollection {
             )
             : []
         var featured = Self.featuredRow(
-            today: Self.rotated(anchored, by: turn),
-            highlights: Self.rotated(pool, by: turn),
-            photos: photos
+            today: anchored, highlights: pool, photos: photos, deal: &deal
         )
 
         // Last Christmas on top of the page in December needs saying why, or
@@ -350,7 +349,7 @@ struct CollectionsController: RouteCollection {
             allTrips: trips.map(mark),
             allOccasions: occasions.map { mark(yearMarked($0.summary)) },
             featured: featured.map(mark),
-            traditions: Self.withTrips(traditions, trips: everyTrip, today: today, turn: turn)
+            traditions: Self.withTrips(traditions, trips: everyTrip, today: today)
                 .map { Self.withPeople($0, people: whoIsWho) },
             wideTrips: Self.featuredTrips(
                 unfeaturedTrips, today: today, heroPlace: hero.flatMap(Self.place(of:)),
@@ -871,28 +870,110 @@ struct CollectionsController: RouteCollection {
 
     /// At most this many cards to swipe through at the top of the page.
     static let featuredLimit = 6
+    /// Of which at most this many are featured photos.
+    static let featuredPhotoLimit = 2
+    /// And how many photos are offered for those places, from different days,
+    /// so one from a day the row already has can give way. See
+    /// `featuredPhotos`.
+    static let featuredPhotoChoices = 6
 
-    /// The top row's cards in order: today's, then the highlights with a
-    /// featured photo after the first and the third, so photos and places
-    /// alternate rather than bunching. Each set of photos once: an
-    /// anniversary is a trip wearing a different sentence, and the same trip
-    /// twice in one row is one card too many.
+    /// The top row's cards in order: today's, in the day's order, then the
+    /// highlights with the featured photos dealt in among them.
+    ///
+    /// Where a photo lands is the day's deal too. It used to be after the
+    /// first highlight and the third, every day, and that sameness was part of
+    /// why the row read as predictable. A photo still never opens the row while
+    /// there's an album to, two photos never sit side by side while there's an
+    /// album to put between them, and each lands where it survives the row
+    /// being cut to length. Each set of photos once: an anniversary is a trip
+    /// wearing a different sentence, and the same trip twice in one row is one
+    /// card too many.
     static func featuredRow(
-        today: [CollectionSummary], highlights: [CollectionSummary], photos: [CollectionSummary]
+        today: [CollectionSummary], highlights: [CollectionSummary], photos: [CollectionSummary],
+        deal: inout DailyDeal
     ) -> [CollectionSummary] {
-        var rest: [CollectionSummary] = []
-        var waiting = photos[...]
-        for (index, card) in highlights.enumerated() {
-            rest.append(card)
-            if index % 2 == 0, let photo = waiting.popFirst() { rest.append(photo) }
-        }
-        rest += waiting
-
         var seen = Set<String>()
-        return (today + rest)
-            .filter { seen.insert($0.key).inserted }
-            .prefix(featuredLimit)
-            .map { $0 }
+        let lead = today.filter { seen.insert($0.key).inserted }.shuffled(using: &deal)
+        let places = highlights.filter { seen.insert($0.key).inserted }
+        // Not a photo from a day an album in the row already covers: that's
+        // the trip's own photos again, under the trip's own name. The next
+        // one waits behind it. See `featuredPhotos`.
+        let covered = Set((lead + places).flatMap { days(inKey: $0.key) })
+        let pictures = Array(
+            photos.filter { !covered.contains($0.key) && seen.insert($0.key).inserted }
+                .prefix(featuredPhotoLimit)
+        )
+
+        // The photos' places are chosen in the finished row, not inserted
+        // into a list that's cut afterward. Inserting one photo ahead of
+        // another pushed the other past the end, and it was dropped.
+        let length = min(featuredLimit, lead.count + places.count + pictures.count)
+        let firstSlot = lead.isEmpty ? min(1, places.count) : lead.count
+        var open = firstSlot < length ? Array(firstSlot..<length) : []
+        var chosen = Set<Int>()
+        for _ in 0..<min(pictures.count, open.count) {
+            let apart = open.filter { !chosen.contains($0 - 1) && !chosen.contains($0 + 1) }
+            guard let slot = (apart.isEmpty ? open : apart).randomElement(using: &deal) else { break }
+            chosen.insert(slot)
+            open.removeAll { $0 == slot }
+        }
+
+        var albums = (lead + places)[...]
+        var shots = pictures[...]
+        return (0..<length).compactMap { index in
+            chosen.contains(index) ? shots.popFirst() : albums.popFirst()
+        }
+    }
+
+    /// What the top row deals from on a day with nothing tied to it, in the
+    /// day's order.
+    ///
+    /// The latest trip, last season and the latest occasion, as always. The
+    /// one place you haven't been in years is one of the first few rather
+    /// than always the first. Then one trip and one occasion from further
+    /// back. Without those, the row was the same four cards turned round by
+    /// one each day, and he asked for it to be more random (2026-11-24). Each
+    /// of them has already passed the rules every album on the page passes.
+    /// They're the kept trips and occasions themselves.
+    static func highlights(
+        trips: [CollectionSummary], revisits: [CollectionSummary], season: CollectionSummary?,
+        occasions: [CollectionSummary], deal: inout DailyDeal
+    ) -> [CollectionSummary] {
+        let away = revisits.prefix(3).randomElement(using: &deal)
+        let olderTrip = trips.dropFirst().randomElement(using: &deal)
+        let olderOccasion = occasions.dropFirst().randomElement(using: &deal)
+        return [trips.first, season, occasions.first, away, olderTrip, olderOccasion]
+            .compactMap { $0 }
+            .shuffled(using: &deal)
+    }
+
+    /// The top row's dice. The same all day, on every device and for
+    /// everyone in the library, and different tomorrow.
+    ///
+    /// Seeded from the date and the library, never from the system. The
+    /// system's generator would deal a new row on every request: the page
+    /// would change between one visit and the next a minute later, and the
+    /// iPad would disagree with the phone. Swift's own hashing is seeded per
+    /// process, so it can't make the seed either. FNV-1a turns the text into
+    /// one, and SplitMix64 makes the numbers.
+    struct DailyDeal: RandomNumberGenerator {
+        private var state: UInt64
+
+        init(day: String, spaceID: UUID) {
+            var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+            for byte in "\(day) \(spaceID.uuidString.lowercased())".utf8 {
+                hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+            }
+            state = hash
+        }
+
+        mutating func next() -> UInt64 {
+            state &+= 0x9e37_79b9_7f4a_7c15
+            var mixed = state
+            mixed = (mixed ^ (mixed >> 30)) &* 0xbf58_476d_1ce4_e5b9
+            mixed = (mixed ^ (mixed >> 27)) &* 0x94d0_49bb_1331_11eb
+            return mixed ^ (mixed >> 31)
+        }
     }
 
     /// `items` begun at `turn`, wrapping round, so each day starts with a
@@ -903,11 +984,17 @@ struct CollectionsController: RouteCollection {
         return Array(items[start...] + items[..<start])
     }
 
-    /// Two of the library's best-looking photos, as Photos features its own:
+    /// A few of the library's best-looking photos, as Photos features its own:
     /// rated well by the person's own phone, never a screenshot or a receipt,
     /// at least a month old so they're a rediscovery rather than a rerun of
-    /// the camera roll, from two different days, and a different pair each
+    /// the camera roll, each from a different day, and a different set each
     /// day. Each opens the day it was taken.
+    ///
+    /// More than the row shows. A photo from a day already in the row is that
+    /// album's photos twice, under the album's own name twice, so the row
+    /// skips it for the next (`featuredRow`). With two picks and a row dealing
+    /// from more albums, both could land on days it already held, and the row
+    /// went out with no photo at all.
     ///
     /// Only where the person's devices have analyzed the library; without
     /// their ratings, "featured" would only mean "random".
@@ -940,11 +1027,11 @@ struct CollectionsController: RouteCollection {
               AND COALESCE(o.aesthetic, 0) > \(bind: Self.goodLooking)
               AND to_char(\(unsafeRaw: local), 'YYYY-MM-DD') < \(bind: Self.dayStamp(cutoff))
             ORDER BY md5(a.id::text || \(bind: seed))
-            LIMIT 12
+            LIMIT 24
             """).all(decoding: PhotoRow.self)
 
         var days = Set<String>()
-        let picked = candidates.filter { days.insert($0.day).inserted }.prefix(2)
+        let picked = candidates.filter { days.insert($0.day).inserted }.prefix(Self.featuredPhotoChoices)
         guard !picked.isEmpty else { return [] }
 
         let counts = try await sql.raw("""
@@ -1201,7 +1288,7 @@ struct CollectionsController: RouteCollection {
     /// morning UTC. Getting this wrong shows the wrong day once a year to
     /// anyone who has traveled, which is the whole audience.
     private func onThisDayCollections(
-        spaceID: UUID, today: Date, seed: String, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, today: Date, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let parts = Self.utc.dateComponents([.year, .month, .day], from: today)
         guard let month = parts.month, let day = parts.day, let year = parts.year else {
@@ -1211,7 +1298,7 @@ struct CollectionsController: RouteCollection {
         let rows = try await sql.raw("""
             SELECT EXTRACT(YEAR FROM \(unsafeRaw: TimelineController.localTime))::int AS year,
                    count(*)::int AS count,
-                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder)))
                        [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
@@ -1285,7 +1372,7 @@ struct CollectionsController: RouteCollection {
     /// A single day that far away is a day out, not a trip, so a run has to
     /// span at least two.
     private func trips(
-        spaceID: UUID, seed: String, userID: UUID, holidays: [String: String],
+        spaceID: UUID, userID: UUID, holidays: [String: String],
         evidence: [String: DayEvidence] = [:], geocoder: Geocoder? = nil,
         on sql: any SQLDatabase
     ) async throws -> TripsFound {
@@ -1376,7 +1463,7 @@ struct CollectionsController: RouteCollection {
                             (camera_make IS NOT NULL) DESC,
                             (burst_id IS NULL OR burst_pick) DESC,
                             (media_type = 'photo') DESC,
-                            md5(id::text || '\(unsafeRaw: seed)')
+                            md5(id::text || '\(unsafeRaw: Self.coverSeed)')
                         )) [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
                 FROM marked GROUP BY day
             )
@@ -1900,7 +1987,7 @@ struct CollectionsController: RouteCollection {
     /// round is asked about only where `yearly` found it a pattern, by the
     /// name it found for it.
     private func occasions(
-        spaceID: UUID, seed: String, userID: UUID, named: [String: String],
+        spaceID: UUID, userID: UUID, named: [String: String],
         holidays: [String: String], events: [String: CurationVocabulary.Event] = [:],
         excluding claimed: Set<String>, recurring: Set<String>, yearly: YearlyPatterns,
         scope: EventScope = EventScope(), on sql: any SQLDatabase
@@ -1930,7 +2017,7 @@ struct CollectionsController: RouteCollection {
                        count(DISTINCT COALESCE(sa.credited_to_user_id, sa.uploaded_by_user_id))::int
                            AS "peopleCount",
                        count(DISTINCT date_trunc('minute', \(unsafeRaw: local)))::int AS moments,
-                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder)))
                            [1:\(unsafeRaw: String(Self.coverDepth))] AS cover
                 FROM space_assets sa
                 JOIN assets a ON a.id = sa.asset_id
@@ -2679,7 +2766,7 @@ struct CollectionsController: RouteCollection {
     /// year's trip, which opens as it does under Trips. A trip over a holiday
     /// is a year of that holiday instead, and has no year at the end of its
     /// name.
-    static func tripTraditions(_ trips: [CollectionSummary], today: Date, turn: Int) -> [Tradition] {
+    static func tripTraditions(_ trips: [CollectionSummary], today: Date) -> [Tradition] {
         var byName: [String: [(trip: CollectionSummary, year: Int)]] = [:]
         for trip in trips where trip.kind == .trip && !isHolidayTrip(trip.title) {
             guard let (name, year) = yearless(trip.title), tripPlace(inTitle: trip.title) != nil else { continue }
@@ -2703,7 +2790,8 @@ struct CollectionsController: RouteCollection {
                     .map { CivilDay.number(year: $0, month: start.month, day: start.day) }
                     .first { $0 > todayNumber }
             }
-            let turned = rotated(newest, by: turn)
+            // Which year leads the card, held as Over the Years holds it.
+            let turned = rotated(newest, by: coverTurn)
             return Tradition(
                 id: "trip:\(name.lowercased())", title: name,
                 subtitle: [every, "\(years.count) years · \(first)–\(last)"].compactMap { $0 }.joined(separator: " · "),
@@ -2718,9 +2806,9 @@ struct CollectionsController: RouteCollection {
     /// Over the Years with the trips taken every year in it, the soonest to
     /// come round first, as the rest are.
     static func withTrips(
-        _ traditions: [Tradition], trips: [CollectionSummary], today: Date, turn: Int
+        _ traditions: [Tradition], trips: [CollectionSummary], today: Date
     ) -> [Tradition] {
-        let found = tripTraditions(trips, today: today, turn: turn)
+        let found = tripTraditions(trips, today: today)
         guard !found.isEmpty else { return traditions }
         return (traditions + found)
             .sorted { a, b in
@@ -2819,7 +2907,7 @@ struct CollectionsController: RouteCollection {
     /// timeline buries, because the only way to reach 2021 by scrolling is to
     /// scroll through everything since.
     private func revisits(
-        spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         let local = TimelineController.localTime
         let place = TimelineController.placeName
@@ -2827,7 +2915,7 @@ struct CollectionsController: RouteCollection {
             SELECT \(unsafeRaw: place) AS place,
                    count(*)::int AS count,
                    to_char(max(\(unsafeRaw: local)), 'YYYY-MM-DD') AS "lastSeen",
-                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                   (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder)))
                        [1:\(unsafeRaw: String(Self.coverDepth))] AS "coverAssetIDs"
             FROM space_assets sa
             JOIN assets a ON a.id = sa.asset_id
@@ -2870,7 +2958,7 @@ struct CollectionsController: RouteCollection {
     /// season you are standing in, and a page offering to reminisce about this
     /// morning is a page that has run out of things to say.
     private func lastSeason(
-        spaceID: UUID, today: Date, seed: String, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, today: Date, userID: UUID, on sql: any SQLDatabase
     ) async throws -> CollectionSummary? {
         guard let season = Self.completedSeason(before: today) else { return nil }
         let local = TimelineController.localTime
@@ -2883,7 +2971,7 @@ struct CollectionsController: RouteCollection {
         let row = try await sql.raw("""
             SELECT count(*)::int AS count,
                    COALESCE(
-                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                       (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder)))
                            [1:\(unsafeRaw: String(Self.coverDepth))],
                        ARRAY[]::uuid[]
                    ) AS "coverAssetIDs"
@@ -3079,7 +3167,7 @@ struct CollectionsController: RouteCollection {
     /// A type with nothing in it is absent rather than shown as zero, which is
     /// the same rule the rest of the page follows.
     private func mediaTypes(
-        spaceID: UUID, seed: String, userID: UUID, on sql: any SQLDatabase
+        spaceID: UUID, userID: UUID, on sql: any SQLDatabase
     ) async throws -> [CollectionSummary] {
         // (key, title, predicate)
         var kinds: [(String, String, SQLQueryString)] = [
@@ -3108,7 +3196,7 @@ struct CollectionsController: RouteCollection {
                        -- check could skip the row, so one absent type failed the
                        -- whole page with a 500.
                        COALESCE(
-                           (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder(seed: seed))))
+                           (ARRAY_AGG(a.id ORDER BY \(unsafeRaw: Self.coverOrder)))
                                [1:\(unsafeRaw: String(Self.coverDepth))],
                            ARRAY[]::uuid[]
                        ) AS "coverAssetIDs"
@@ -3631,25 +3719,14 @@ struct CollectionsController: RouteCollection {
     /// cannot be drawn produces a gray rectangle where a photograph should be —
     /// while a perfectly good alternative sits in the same collection.
     ///
-    /// The seed is the current date, so covers hold still all day and differ
-    /// tomorrow. Rotating them *while someone is looking* would defeat the one
-    /// job a cover has, which is to make a card recognizable.
-    /// How many photographs to send for a card.
-    ///
-    /// Five is what the hero cycles through. Sending them costs nothing — they
-    /// are ids in a response that was being built anyway — and only the hero
-    /// actually fetches beyond the first.
-    static let coverDepth = 5
-
-    ///
     /// Where the person's own devices have looked at the photos, what they saw
     /// comes next. A screenshot or a document never fronts a card, and a photo
-    /// Vision rated good-looking goes ahead of one it didn't. That bias is
-    /// still rotated by the seed, among the good ones, rather than crowning
-    /// one photo for good. Expects the caller's observations joined as `o`;
-    /// see `observed(by:)`. Where there are none, the order is what it always
-    /// was.
-    static func coverOrder(seed: String) -> String {
+    /// Vision rated good-looking goes ahead of one it didn't. Among photos
+    /// equally good by all of that, `coverSeed` decides, and it never changes,
+    /// so an album keeps its cover. Expects the caller's observations joined as
+    /// `o`; see `observed(by:)`. Where there are none, the order is what it
+    /// always was.
+    static var coverOrder: String {
         """
         (a.derived_at IS NOT NULL) DESC,
         COALESCE(o.is_utility OR 'utility' = ANY(o.tags), false) ASC,
@@ -3657,9 +3734,38 @@ struct CollectionsController: RouteCollection {
         (a.camera_make IS NOT NULL) DESC,
         (a.burst_id IS NULL OR a.burst_pick) DESC,
         (a.media_type = 'photo') DESC,
-        md5(a.id::text || '\(seed)')
+        md5(a.id::text || '\(coverSeed)')
         """
     }
+
+    /// What settles which of a collection's best photos is its cover. A fixed
+    /// string, not the date.
+    ///
+    /// It was the date: covers held still all day and were different the next.
+    /// He didn't like it (2026-11-24). A cover is how you recognize an album,
+    /// and one that changed every morning, and changed only as you arrived,
+    /// because that's when the app asked, made the whole page look unsettled.
+    /// So it stopped on the day it last turned, and the covers stay the ones
+    /// that day showed: anyone who looked that day saw them last, so there's
+    /// no switch to notice. From then on an album's cover moves only when
+    /// what's in the album does: its photo deleted, or a better one added.
+    ///
+    /// The top row still changes daily. It deals from the date. See
+    /// `DailyDeal`.
+    static let coverSeed = "2026-11-24"
+
+    /// The same day as a position, for the covers that are picked by position
+    /// rather than by `coverOrder`: which year leads an Over the Years card.
+    /// Turned by the date, those changed daily too.
+    static let coverTurn = stampFormatter("yyyy-MM-dd").date(from: coverSeed)
+        .flatMap { utc.ordinality(of: .day, in: .year, for: $0) } ?? 0
+
+    /// How many photographs to send for a card.
+    ///
+    /// Five is what the hero cycles through. Sending them costs nothing — they
+    /// are ids in a response that was being built anyway — and only the hero
+    /// actually fetches beyond the first.
+    static let coverDepth = 5
 
     /// Vision's aesthetic score, from -1 to 1, above which a photo counts as
     /// good-looking enough to prefer for a cover. A starting point, to tune

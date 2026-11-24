@@ -1623,20 +1623,55 @@ and in a young library that was the same handful in turn. The NAS sends
 `featured`, up to six cards, in this order:
 
 1. **Tied to today:** On This Day, the trip you were on this week in an earlier
-   year, a holiday coming up ("CHRISTMAS IS COMING UP").
-2. **The day's highlights:** the latest trip, a place you haven't been in a
-   while, last season, the latest holiday or occasion.
-3. **Featured photos:** two between the highlights. These are photos the
-   person's own phone rated well, never a screenshot or a receipt, at least a
-   month old, from two different days. Each opens the day it was taken. They
-   appear only where the person's devices have analyzed the library, since
-   without their ratings "featured" would mean "random".
+   year, a holiday coming up ("CHRISTMAS IS COMING UP"). These come first.
+2. **The day's highlights:** the latest trip, last season, the latest holiday
+   or occasion, a place you haven't been in a while (one of the first three
+   such places), and one older trip and one older occasion. They're drawn from
+   that wider pool and shuffled.
+3. **Featured photos:** at most two, dealt into random places after the cards
+   tied to today. These are photos the person's own phone rated well, never a
+   screenshot or a receipt, at least a month old, from two different days. Each
+   opens the day it was taken. They appear only where the person's devices have
+   analyzed the library, since without their ratings "featured" would mean
+   "random".
 
-All of it is turned by the date, so each day starts somewhere new and the row
-holds still while you look. No set of photos appears twice in the row, and
-none of them repeats in the sections below. `hero` is the row's first card,
-which is all an older app draws. `Scripts/smoke-kept-albums.sh` checks the
-row.
+A photo never opens the row while there's an album to, and two photos never sit
+side by side while an album can go between them. A photo never comes from a day
+an album in the row already holds, so the NAS offers six from different days and
+one can give way. No set of photos appears twice in the row, and none of them
+repeats in the sections below. `hero` is the row's first card, which is all an
+older app draws. `Scripts/smoke-kept-albums.sh` checks the row.
+
+**Dealt, not turned.** The whole row is shuffled by a generator seeded from the
+date and the library (`DailyDeal` in `CollectionsController`). It's the same all
+day, on every device and for everyone in the library, and new tomorrow. Before,
+the row turned the same four cards round by one each day, and he asked for it to
+be more random (2026-11-24).
+
+**Covers hold still.** Covers no longer change with the date. Ties between
+equally good photos are broken by a fixed `coverSeed`, frozen on the covers
+shown on November 24, 2026, the last day they turned. A cover now
+changes only when its album's photos do: its photo deleted, or a better one
+added. The year that leads an Over the Years card is fixed the same way
+(`coverTurn`). Shared libraries and Recently Added keep showing their newest
+photo, as before.
+
+**The app holds still too.** The page used to draw its saved copy, ask the NAS
+as you arrived, and swap the answer in while you were looking. Now every screen
+that draws these covers (the page, its See All lists, Media Types, Over the
+Years) registers with the two stores (`HoldsCovers`). While any of them is up,
+a new answer brings its counts, titles and added or removed cards, but the top
+row and every cover already drawn stay as they are. The full answer waits while
+its new covers are fetched into memory (`CoverWarmer`). It goes up once nothing
+shows the page, about 0.6 s after the last screen goes, or at once when the
+window leaves the foreground. It goes straight up when nothing is drawn yet,
+after a change made on this device (`AppSession.editRevision`, which leaves out
+backup uploads), or on a pull to refresh. The page is also asked for from the
+root at launch and each time the app comes back (`RootTabView`, the Mac's
+sidebar), so it's usually current before anyone opens it.
+
+`Scripts/smoke-albums-steady.sh` checks that covers hold across days and that
+the row is dealt as described.
 
 ---
 

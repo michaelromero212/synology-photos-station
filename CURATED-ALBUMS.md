@@ -299,7 +299,8 @@ A worker in the style of `DerivationWorker` and `RetentionWorker`.
 - **When it runs:** it wakes on new observations or edits, debounced, and runs
   per library.
 - **Deterministic:** sorted inputs, fixed thresholds, no randomness. Covers
-  already use a seeded order.
+  use a fixed seeded order (`coverSeed`), so a cover changes only when its
+  album's photos do.
 - **Pipeline:**
   1. Start from the existing day runs and trips.
   2. Split days by time gaps.

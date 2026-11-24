@@ -161,7 +161,7 @@ struct CuratedAlbums {
     /// The trips to show: today's, each kept as the album it was before, and
     /// those the rules no longer find, as they were. Newest first.
     func keep(
-        trips found: [CollectionSummary], saved all: [Saved]?, limit: Int, seed: String,
+        trips found: [CollectionSummary], saved all: [Saved]?, limit: Int,
         rejudge: (String) -> TripVerdict = { _ in .unknown }
     ) async -> [CollectionSummary] {
         guard let all else { return found }
@@ -216,7 +216,7 @@ struct CuratedAlbums {
             }
         }
 
-        let restored = await restore(Self.within(limit, of: shown.map(\.key), waiting), seed: seed)
+        let restored = await restore(Self.within(limit, of: shown.map(\.key), waiting))
         changes.deletes += restored.gone
         changes.deletes += restored.kept.map(\.0.id).filter(notTrips.contains)
         await write(changes)
@@ -235,7 +235,7 @@ struct CuratedAlbums {
     /// day inside a trip: an occasion those days were has become part of it.
     func keep(
         occasions found: [CollectionsController.Occasion], saved all: [Saved]?, claimed: Set<String>,
-        outside: SQLQueryString = "", standing: Standing, limit: Int, seed: String
+        outside: SQLQueryString = "", standing: Standing, limit: Int
     ) async -> [CollectionsController.Occasion] {
         guard let all else { return found }
         let kind = CollectionKind.day.rawValue
@@ -299,7 +299,7 @@ struct CuratedAlbums {
         }
 
         let restored = await restore(
-            Self.within(limit, of: shown.map(\.summary.key), waiting), seed: seed, outside: outside
+            Self.within(limit, of: shown.map(\.summary.key), waiting), outside: outside
         )
         changes.deletes += restored.gone
         await write(changes)
@@ -442,7 +442,7 @@ struct CuratedAlbums {
     /// none left at all is gone. `outside` leaves out the parts of event days
     /// that weren't the event (`EventScope`).
     private func restore(
-        _ rows: [Saved], seed: String, outside: SQLQueryString = ""
+        _ rows: [Saved], outside: SQLQueryString = ""
     ) async -> (kept: [(Saved, Photos)], gone: [UUID]) {
         guard !rows.isEmpty else { return ([], []) }
         // Each album as its days, so the library is read once, matched by day.
@@ -458,7 +458,7 @@ struct CuratedAlbums {
                        count(*) FILTER (WHERE sa.deleted_at IS NULL AND a.media_type = 'video')::int
                            AS videos,
                        count(DISTINCT date_trunc('minute', \(unsafeRaw: local)))::int AS moments,
-                       COALESCE((ARRAY_AGG(a.id ORDER BY \(unsafeRaw: CollectionsController.coverOrder(seed: seed)))
+                       COALESCE((ARRAY_AGG(a.id ORDER BY \(unsafeRaw: CollectionsController.coverOrder))
                                     FILTER (WHERE sa.deleted_at IS NULL))
                                 [1:\(unsafeRaw: String(CollectionsController.coverDepth))], '{}')
                            AS "coverAssetIDs"

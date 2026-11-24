@@ -584,7 +584,7 @@ struct YearlyPatterns {
     /// The traditions themselves, from the days the occasions query brought
     /// back. The soonest to come round first.
     func traditions(
-        rows: [CollectionsController.DayRow], today: Date, turn: Int,
+        rows: [CollectionsController.DayRow], today: Date,
         holidays: [String: String], named: [String: String], annual: [String: String],
         events: [String: CurationVocabulary.Event]
     ) -> [Tradition] {
@@ -644,8 +644,9 @@ struct YearlyPatterns {
             }
 
             let summaries = cards.map(\.summary)
-            // A different year on the card each day, and the same all day.
-            let turned = CollectionsController.rotated(summaries, by: turn)
+            // Which year leads the card. It was a different one each day; now
+            // it's the one the last of those days picked. See `coverSeed`.
+            let turned = CollectionsController.rotated(summaries, by: CollectionsController.coverTurn)
             let covers = Array(turned.compactMap(\.coverAssetIDs.first).prefix(CollectionsController.coverDepth))
 
             let next = Self.next(pattern, after: todayNumber, holidays: calendar)
