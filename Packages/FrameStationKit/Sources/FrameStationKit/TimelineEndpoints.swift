@@ -209,8 +209,13 @@ extension FrameStationClient {
         URL(string: "v1/assets/\(assetID)/thumb?size=\(size)&v=\(version)", relativeTo: baseURL)
     }
 
-    public func previewURL(assetID: UUID) -> URL? {
-        URL(string: "v1/assets/\(assetID)/preview", relativeTo: baseURL)
+    /// The full-screen picture, versioned the way thumbnails are and for the
+    /// same reason: a video's preview is drawn from its poster, so a poster
+    /// made again (an HDR clip's, tone-mapped since v5) is a new preview, and
+    /// without `v` a device that had opened the clip went on showing the gray
+    /// one from its cache. The server reads no `v`.
+    public func previewURL(assetID: UUID, version: Int = 0) -> URL? {
+        URL(string: "v1/assets/\(assetID)/preview?v=\(version)", relativeTo: baseURL)
     }
 
     public func originalURL(assetID: UUID) -> URL? {

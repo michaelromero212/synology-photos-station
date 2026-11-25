@@ -171,9 +171,11 @@ public actor ThumbnailLoader {
         return decoded
     }
 
-    public func preview(assetID: UUID, targetPixels: Int = 2048) async -> PlatformImage? {
-        guard let url = await client.previewURL(assetID: assetID) else { return nil }
-        return await image(at: url, key: "\(assetID)-preview", targetPixels: targetPixels)
+    /// The version is in the key as well as the URL, as for `thumbnail`. See
+    /// `previewURL(assetID:version:)`.
+    public func preview(assetID: UUID, targetPixels: Int = 2048, version: Int = 0) async -> PlatformImage? {
+        guard let url = await client.previewURL(assetID: assetID, version: version) else { return nil }
+        return await image(at: url, key: "\(assetID)-preview-\(version)", targetPixels: targetPixels)
     }
 
     // MARK: - Faces

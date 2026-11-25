@@ -460,7 +460,9 @@ private struct DeletedItemPage: View {
             image = small
         }
         guard item.mediaType != .video,
-              let full = await loader.preview(assetID: item.assetID) else { return }
+              let full = await loader.preview(
+                  assetID: item.assetID, version: item.thumbnailVersion
+              ) else { return }
         image = full
     }
 }

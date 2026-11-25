@@ -90,7 +90,9 @@ final class AssetDetailModel {
         guard let loader, !hasLoadedPreview, !isLoadingPreview else { return }
         isLoadingPreview = true
         defer { isLoadingPreview = false }
-        if let preview = await loader.preview(assetID: item.assetID) {
+        if let preview = await loader.preview(
+            assetID: item.assetID, version: item.thumbnailVersion
+        ) {
             hasLoadedPreview = true
             withAnimation(.easeOut(duration: 0.2)) { image = preview }
         } else if !Task.isCancelled {

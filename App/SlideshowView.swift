@@ -195,7 +195,7 @@ private struct SlidePhoto: View {
             }
         }
         .task(id: item.assetID) {
-            image = await loader?.preview(assetID: item.assetID)
+            image = await loader?.preview(assetID: item.assetID, version: item.thumbnailVersion)
             guard SharpPhoto.isAllowed, let client else { return }
             // No size known here, so the limit is the NAS's to refuse: a RAW
             // past it simply stays on its preview.
