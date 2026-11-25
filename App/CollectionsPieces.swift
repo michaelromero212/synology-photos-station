@@ -215,6 +215,9 @@ struct CollectionsSectionHeader: View {
     var note: String?
     /// Where the title leads, when it leads anywhere.
     var destination: (() -> AnyView)?
+    /// Or the same pushed by value, for a screen that has to be in the Albums
+    /// tab's path. See `AlbumsRoute`.
+    var route: AlbumsRoute?
     var isCollapsed = false
     /// Folds the section away and back; nil where sections don't fold.
     var onToggle: (() -> Void)?
@@ -226,6 +229,14 @@ struct CollectionsSectionHeader: View {
                     NavigationLink {
                         destination()
                     } label: {
+                        heading(chevron: true)
+                    }
+                    .buttonStyle(.plain)
+                    #if os(macOS)
+                    .help("Show All \(title)")
+                    #endif
+                } else if let route {
+                    NavigationLink(value: route) {
                         heading(chevron: true)
                     }
                     .buttonStyle(.plain)
@@ -335,6 +346,11 @@ struct CollectionsSectionHeader: View {
 /// every card on the page is the same shape whatever it holds.
 struct CollectionTile<Cover: View>: View {
     let title: String
+    /// A line over the name saying why the card is here ("A TRIP", "2 YEARS
+    /// AGO"), as the cards along the top of the page say it. Memories' own
+    /// screen draws those cards at this size, and the big card's type covered
+    /// most of the picture there.
+    var kicker: String?
     /// The line under the name: a count, dates, who it's shared with.
     var detail: String?
     let width: CGFloat
@@ -394,6 +410,15 @@ struct CollectionTile<Cover: View>: View {
                 startPoint: .bottom, endPoint: .top
             )
             VStack(alignment: .leading, spacing: 2) {
+                if let kicker {
+                    Text(kicker)
+                        .font(kickerFont)
+                        .tracking(0.8)
+                        .foregroundStyle(.tint)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)
+                        .padding(.bottom, 1)
+                }
                 Text(title)
                     .font(titleFont)
                     .lineLimit(2)
@@ -441,6 +466,9 @@ struct CollectionTile<Cover: View>: View {
         return isLarge ? .caption : .caption2
         #endif
     }
+
+    /// As the big cards along the top draw it (`CollectionHeroCard`).
+    private var kickerFont: Font { .caption2.weight(.heavy) }
 
     private var inset: CGFloat {
         #if os(macOS)
@@ -736,6 +764,54 @@ struct CollectionsEmptyCard: View {
         #else
         return 22
         #endif
+    }
+}
+
+// MARK: - A section on a screen of its own
+
+/// A whole section of the Albums page on a screen of its own: what the ›
+/// after its title opens. Every card in it, in the page's columns at the
+/// bigger size, two across a phone, the way Photos opens "Pinned ›" or
+/// "Albums ›" into a grid of cards bigger than the row's.
+///
+/// One screen for every section without a list of its own (Memories, Pinned,
+/// Albums, Shared Albums, Utilities), laid out like the lists that came
+/// first (`CollectionListView`, `MediaTypesView`, `TraditionListView`), so
+/// whichever › was tapped, what opens looks the same. What's on it is the
+/// caller's, read from the stores in the caller's own body: its counts move
+/// with the page's, rather than staying as they were when the › was tapped.
+struct CollectionsSectionScreen<Cards: View>: View {
+    let title: String
+    /// Drawn instead of the cards when there are none. The › only leads here
+    /// while there's something to show, but the last album can be deleted
+    /// from here, and a blank screen would look broken.
+    var empty: CollectionsEmptyCard?
+    /// The cards, each `side` points square.
+    @ViewBuilder let cards: (_ side: CGFloat) -> Cards
+
+    var body: some View {
+        GeometryReader { proxy in
+            let layout = CollectionsLayout(width: proxy.size.width)
+            ScrollView {
+                Group {
+                    if let empty {
+                        empty
+                    } else {
+                        LazyVGrid(
+                            columns: layout.columns(.medium), alignment: .leading,
+                            spacing: layout.gap
+                        ) {
+                            cards(layout.side(.medium))
+                        }
+                    }
+                }
+                .padding(.horizontal, layout.margin)
+                .padding(.vertical, CollectionsLayout.pagePadding)
+            }
+        }
+        .navigationTitle(title)
+        // The floating tab bar is drawn over this — see `FloatingTabBar`.
+        .floatingTabBarClearance()
     }
 }
 

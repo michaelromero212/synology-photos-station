@@ -410,6 +410,19 @@ struct SharedAlbumRoute: Hashable {
     }
 }
 
+/// A screen the Albums tab pushes by value, and so keeps in its path: a shared
+/// album, or Shared Albums on a screen of its own.
+///
+/// Shared Albums is pushed this way, where the page's other sections are pushed
+/// as views, because its cards push shared albums by value. Whatever a view
+/// link pushed stays above everything in the path, so a library opened from a
+/// Shared Albums pushed as a view went in underneath it: the tap seemed to do
+/// nothing, and Back uncovered the library (the iPhone simulator, iOS 27).
+enum AlbumsRoute: Hashable {
+    case shared(SharedAlbumRoute)
+    case sharedAlbums
+}
+
 /// Where a shared album's route leads.
 ///
 /// A shared library and an album shared with people both open as a library's
@@ -512,10 +525,6 @@ struct AlbumsView: View {
     @State private var store: AlbumStore?
     @State private var collections: CollectionsStore?
     @State private var showCreate = false
-    /// The album waiting on "Delete Album?". Deleting used to happen on the
-    /// menu tap itself, and an album somebody built by hand was one slip away
-    /// from gone.
-    @State private var deleting: AlbumDTO?
     /// The card being named, if any. Held here rather than per-card so only one
     /// sheet can ever be up.
     ///
@@ -605,20 +614,7 @@ struct AlbumsView: View {
             }
         }
         #endif
-        .navigationDestination(item: $pickedPlace) { place in
-            if let space = session.personalSpace {
-                CollectionDetailView(
-                    session: session, space: space,
-                    // `.revisit` is the kind that means "everything from one
-                    // place, whenever it was" — exactly this, and already
-                    // handled end to end.
-                    collection: CollectionSummary(
-                        kind: .revisit, key: place, title: place,
-                        subtitle: nil, count: 0, coverAssetIDs: []
-                    )
-                )
-            }
-        }
+        .placeDestination($pickedPlace, session: session, space: session.personalSpace)
         // The albums list needs no task of its own. The store comes from the
         // session, already built (see `init`), and the `.onAppear` below asks
         // again when it's stale (`AlbumStore.isStale`). This used to fetch it on
@@ -719,19 +715,19 @@ struct AlbumsView: View {
                 VStack(alignment: .leading, spacing: CollectionsLayout.sectionSpacing) {
                     let space = session.personalSpace
                     let found = collections?.page
-                    if let space, let found {
-                        memories(found, space: space, layout: layout)
-                        pinned(found, space: space, layout: layout)
+                    if let space, let collections, let found {
+                        memories(found, space: space, store: collections, layout: layout)
+                        pinned(found, space: space, store: collections, layout: layout)
                         people(found, space: space, layout: layout)
                     }
                     albums(store, layout: layout)
                     shared(store, layout: layout)
-                    if let space, let found {
+                    if let space, let collections, let found {
                         trips(found, space: space, layout: layout)
                         occasions(found, space: space, layout: layout)
                         traditions(found, space: space, layout: layout)
                         mediaTypes(found, space: space, layout: layout)
-                        utilities(found, space: space, layout: layout)
+                        utilities(found, space: space, store: collections, layout: layout)
                     }
                 }
                 .padding(.vertical, CollectionsLayout.pagePadding)
@@ -780,15 +776,18 @@ struct AlbumsView: View {
     /// A titled section. What's in it runs from one edge of the page to the
     /// other: a row that scrolls sideways insets its own cards, and everything
     /// else is held in by the margin where it's drawn.
+    ///
+    /// The title opens the section on a screen of its own, `destination`, or
+    /// `route` for one pushed by value. See `AlbumsRoute`.
     private func section<Content: View>(
         _ key: String, _ title: String, note: String? = nil,
-        destination: (() -> AnyView)? = nil, layout: CollectionsLayout,
-        @ViewBuilder content: () -> Content
+        destination: (() -> AnyView)? = nil, route: AlbumsRoute? = nil,
+        layout: CollectionsLayout, @ViewBuilder content: () -> Content
     ) -> some View {
         let collapsed = isCollapsed(key)
         return VStack(alignment: .leading, spacing: CollectionsLayout.headerSpacing) {
             CollectionsSectionHeader(
-                title: title, note: note, destination: destination,
+                title: title, note: note, destination: destination, route: route,
                 isCollapsed: collapsed, onToggle: toggle(key)
             )
             .padding(.horizontal, layout.margin)
@@ -809,19 +808,26 @@ struct AlbumsView: View {
     /// anything.
     @ViewBuilder
     private func memories(
-        _ found: CollectionsResponse, space: SpaceDTO, layout: CollectionsLayout
+        _ found: CollectionsResponse, space: SpaceDTO, store: CollectionsStore,
+        layout: CollectionsLayout
     ) -> some View {
         let cards = found.featured ?? found.hero.map { [$0] } ?? []
         if !cards.isEmpty {
             let size = layout.memorySize
-            section("memories", "Memories", layout: layout) {
+            section(
+                "memories", "Memories",
+                destination: { AnyView(MemoriesView(session: session, space: space, store: store)) },
+                layout: layout
+            ) {
                 CollectionsShelf(layout: layout) {
                     ForEach(cards, id: \.featuredID) { card in
-                        heroLink(card, space: space, size: size)
-                            // Room for the card's shadow, which the row would
-                            // clip. It falls further below a card than above.
-                            .padding(.top, 12)
-                            .padding(.bottom, 24)
+                        MemoryCard(session: session, space: space, card: card, look: .hero(size)) {
+                            naming = $0
+                        }
+                        // Room for the card's shadow, which the row would
+                        // clip. It falls further below a card than above.
+                        .padding(.top, 12)
+                        .padding(.bottom, 24)
                     }
                 }
                 .padding(.top, -12)
@@ -830,75 +836,27 @@ struct AlbumsView: View {
         }
     }
 
-    private func heroLink(_ card: CollectionSummary, space: SpaceDTO, size: CGSize) -> some View {
-        NavigationLink {
-            CollectionDetailView(session: session, space: space, collection: card)
-        } label: {
-            CollectionHeroCard(
-                collection: card, loader: session.loader, width: size.width, height: size.height
-            )
-        }
-        .buttonStyle(.plain)
-        .nameable(card) { naming = $0 }
-    }
-
     /// What somebody comes to the page for, whatever the library has noticed:
-    /// Photos' pinned row, in Photos' order, with how much is in each.
-    ///
-    /// Recently Deleted is always here, at zero too. The NAS leaves its card
-    /// out when nothing is in it, and a card that only appears once you've
-    /// deleted something is a place nobody knows to look until they need it.
+    /// Photos' pinned row, in Photos' order, with how much is in each. Never
+    /// empty, so its title always opens it; see `PinnedCards`.
     private func pinned(
-        _ found: CollectionsResponse, space: SpaceDTO, layout: CollectionsLayout
+        _ found: CollectionsResponse, space: SpaceDTO, store: CollectionsStore,
+        layout: CollectionsLayout
     ) -> some View {
-        let kinds = ["video", "screenshot"].compactMap { key in
-            found.mediaTypes.first { $0.key == key }
-        }
-        let side = layout.side(.small)
-        return section("pinned", "Pinned", layout: layout) {
+        section(
+            "pinned", "Pinned",
+            destination: {
+                AnyView(PinnedView(
+                    session: session, space: space, store: store, placeTotal: $placeTotal
+                ))
+            },
+            layout: layout
+        ) {
             cardRow(layout, .small) {
-                if let favorites = found.favorites {
-                    tile(
-                        favorites, space: space, side: side,
-                        detail: itemsLine(favorites.count), badge: "heart.fill"
-                    )
-                }
-                if let recent = found.recentlyAdded {
-                    tile(recent, space: space, side: side, detail: itemsLine(recent.count))
-                }
-                ForEach(kinds) { kind in
-                    tile(kind, space: space, side: side, detail: itemsLine(kind.count))
-                }
-                if placeTotal > 0 {
-                    NavigationLink {
-                        placesList(space)
-                    } label: {
-                        CollectionTile(
-                            title: "Places",
-                            detail: placeTotal == 1 ? "1 place" : "\(placeTotal.formatted()) places",
-                            width: side
-                        ) {
-                            SymbolCover(
-                                symbol: "map.fill",
-                                colors: [Color(red: 0.2, green: 0.55, blue: 0.55),
-                                         Color(red: 0.08, green: 0.25, blue: 0.38)]
-                            )
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-                NavigationLink {
-                    RecentlyDeletedView(session: session, space: space)
-                } label: {
-                    CollectionTile(
-                        title: "Recently Deleted",
-                        detail: itemsLine(found.recentlyDeleted?.count ?? 0),
-                        width: side
-                    ) {
-                        SymbolCover(symbol: "trash", colors: [Color(white: 0.45), Color(white: 0.22)])
-                    }
-                }
-                .buttonStyle(.plain)
+                PinnedCards(
+                    session: session, space: space, found: found, placeTotal: placeTotal,
+                    side: layout.side(.small)
+                ) { pickedPlace = $0 }
             }
         }
     }
@@ -952,102 +910,22 @@ struct AlbumsView: View {
         let side = layout.side(.medium)
         return section(
             "albums", "Albums", note: albums.isEmpty ? nil : "Only you can see these.",
+            destination: albums.isEmpty ? nil : {
+                AnyView(PersonalAlbumsView(session: session, store: store))
+            },
             layout: layout
         ) {
             if !albums.isEmpty {
                 cardGrid(layout, .medium) {
                     ForEach(albums) { album in
-                        albumCell(album, store: store, side: side)
+                        AlbumCell(session: session, album: album, store: store, side: side)
                     }
                 }
             } else if store.hasLoaded {
-                CollectionsEmptyCard(
-                    symbol: "rectangle.stack", title: "No Albums Yet",
-                    message: "Make an album to keep photos together. Only you will see it.",
-                    actionTitle: "Create", action: startAlbum
-                )
-                .padding(.horizontal, layout.margin)
+                CollectionsEmptyCard.noAlbums(create: startAlbum)
+                    .padding(.horizontal, layout.margin)
             }
         }
-    }
-
-    private func albumCell(_ album: AlbumDTO, store: AlbumStore, side: CGFloat) -> some View {
-        browsableAlbumCell(
-            album,
-            card: AlbumCard(
-                album: album, side: side, loader: session.loader,
-                library: libraryName(of: album), me: session.user?.id
-            ),
-            store: store
-        )
-    }
-
-    private func browsableAlbumCell(
-        _ album: AlbumDTO, card: some View, store: AlbumStore
-    ) -> some View {
-        Group {
-            // An album shared with people opens the way a shared library
-            // does, as a timeline of its own space: the same route, the same
-            // screen, whether it's reached from here, the Mac's sidebar or a
-            // notification. Yours alone and a library's albums keep the
-            // album grid.
-            if let spaceID = album.ownSpace?.id {
-                NavigationLink(value: SharedAlbumRoute(spaceID: spaceID, albumID: album.id)) {
-                    card
-                }
-            } else {
-                NavigationLink {
-                    AlbumDetailView(session: session, album: album, store: store)
-                } label: {
-                    card
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            if album.mayManage {
-                Button(role: .destructive) {
-                    deleting = album
-                } label: {
-                    Label("Delete Album", systemImage: "trash")
-                }
-            }
-        }
-        // On the card, not the page: where the question appears as a
-        // popover, it points at the album it's asking about.
-        .confirmationDialog(
-            "Delete “\(album.name)”?",
-            isPresented: Binding(
-                get: { deleting?.id == album.id },
-                set: { if !$0 { deleting = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete Album", role: .destructive) {
-                Task { await store.delete(album) }
-            }
-        } message: {
-            Text(album.deletionMessage(library: libraryName(of: album)))
-        }
-    }
-
-    /// A shared library as an album card, the same as the albums made in it:
-    /// its most recently added photo for a cover, and who's in it and how
-    /// much. Opens the whole library.
-    private func libraryCell(_ space: SpaceDTO, store: AlbumStore, side: CGFloat) -> some View {
-        NavigationLink(value: SharedAlbumRoute(spaceID: space.id)) {
-            AlbumCard(
-                library: space, summary: store.libraries.first { $0.id == space.id },
-                side: side, loader: session.loader
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// The shared library a family album is in, by name.
-    private func libraryName(of album: AlbumDTO) -> String? {
-        guard let spaceID = album.spaceID else { return nil }
-        return session.sharedSpaces.first { $0.id == spaceID }?.name
     }
 
     /// Everything shared, in one section: the albums shared with people, then
@@ -1079,26 +957,19 @@ struct AlbumsView: View {
         let side = layout.side(.medium)
         // No line saying who can see these. It said what "shared" already
         // says, under the one title on the page that says it.
-        return section("shared", "Shared Albums", layout: layout) {
+        return section(
+            "shared", "Shared Albums", route: cards.isEmpty ? nil : .sharedAlbums,
+            layout: layout
+        ) {
             if !cards.isEmpty {
                 cardGrid(layout, .medium) {
                     ForEach(cards) { card in
-                        switch card {
-                        case .library(let space):
-                            libraryCell(space, store: store, side: side)
-                        case .album(let album):
-                            albumCell(album, store: store, side: side)
-                        }
+                        SharedCell(session: session, entry: card, store: store, side: side)
                     }
                 }
             } else if store.hasLoaded {
-                CollectionsEmptyCard(
-                    symbol: "person.2", title: "No Shared Albums Yet",
-                    message: "Share photos and videos with just the people you choose, "
-                        + "and let them add their own.",
-                    actionTitle: "Start Sharing", action: startAlbum
-                )
-                .padding(.horizontal, layout.margin)
+                CollectionsEmptyCard.noSharedAlbums(start: startAlbum)
+                    .padding(.horizontal, layout.margin)
             }
         }
     }
@@ -1155,17 +1026,19 @@ struct AlbumsView: View {
     }
 
     /// Trips, or holidays and occasions: the ones the server chose, as cards,
-    /// with the title leading to the rest when there are more.
+    /// with the title leading to every one of them.
     private func curated(
         _ key: String, _ title: String, rows: [CollectionSummary], all: [CollectionSummary]?,
         seeAll: KeyPath<CollectionsResponse, [CollectionSummary]?>, space: SpaceDTO,
         layout: CollectionsLayout, empty: CollectionsEmptyCard
     ) -> some View {
-        // Only when the list would show something the page doesn't. A server
-        // that predates it sends no list, and then the title leads nowhere
+        // Whenever there's anything in the list, not only when it holds more
+        // than the row: like every other section's, the title opens the
+        // section on a screen of its own, with bigger cards. A server that
+        // predates the list sends none, and then the title leads nowhere
         // rather than to an empty screen.
         var destination: (() -> AnyView)?
-        if let all, all.count > rows.count, let collections {
+        if let all, !all.isEmpty, let collections {
             destination = {
                 AnyView(CollectionListView(
                     session: session, space: space, title: title,
@@ -1181,8 +1054,11 @@ struct AlbumsView: View {
             } else {
                 cardRow(layout, .medium) {
                     ForEach(rows) { row in
-                        tile(row, space: space, side: side, detail: row.subtitle ?? itemsLine(row.count))
-                            .nameable(row) { naming = $0 }
+                        CollectionCard(
+                            session: session, space: space, collection: row, side: side,
+                            detail: row.subtitle ?? itemsLine(row.count)
+                        )
+                        .nameable(row) { naming = $0 }
                     }
                 }
             }
@@ -1191,7 +1067,7 @@ struct AlbumsView: View {
 
     /// What comes around every year, the soonest first: each Christmas
     /// together, a birthday, a day you named. Each opens on its years, and
-    /// the title leads to the rest when there are more.
+    /// the title leads to every one of them.
     ///
     /// From a server that predates it there's no section at all, rather than
     /// one saying nothing is there.
@@ -1206,9 +1082,9 @@ struct AlbumsView: View {
             let side = layout.side(.medium)
             section(
                 "traditions", "Over the Years",
-                destination: traditions.count > shown.count ? {
+                destination: traditions.isEmpty ? nil : {
                     AnyView(TraditionListView(session: session, space: space, store: collections))
-                } : nil,
+                },
                 layout: layout
             ) {
                 if shown.isEmpty {
@@ -1272,12 +1148,22 @@ struct AlbumsView: View {
     }
 
     /// The tools: Recently Deleted always, at zero too, then what arrived
-    /// lately and where it was taken.
+    /// lately and where it was taken. Never empty, so its title always opens
+    /// them as cards.
     private func utilities(
-        _ found: CollectionsResponse, space: SpaceDTO, layout: CollectionsLayout
+        _ found: CollectionsResponse, space: SpaceDTO, store: CollectionsStore,
+        layout: CollectionsLayout
     ) -> some View {
         let count = 1 + (found.recentlyAdded == nil ? 0 : 1) + (placeTotal > 0 ? 1 : 0)
-        return section("utilities", "Utilities", layout: layout) {
+        return section(
+            "utilities", "Utilities",
+            destination: {
+                AnyView(UtilitiesView(
+                    session: session, space: space, store: store, placeTotal: $placeTotal
+                ))
+            },
+            layout: layout
+        ) {
             pills(layout, count: count) {
                 NavigationLink {
                     RecentlyDeletedView(session: session, space: space)
@@ -1314,24 +1200,7 @@ struct AlbumsView: View {
     /// behind its title: as many as the server sends for a row.
     private static let shelfLimit = 12
 
-    /// A collection as a card, opening its photos.
-    private func tile(
-        _ collection: CollectionSummary, space: SpaceDTO, side: CGFloat,
-        detail: String?, badge: String? = nil
-    ) -> some View {
-        NavigationLink {
-            CollectionDetailView(session: session, space: space, collection: collection)
-        } label: {
-            CollectionTile(title: collection.title, detail: detail, width: side, badge: badge) {
-                CollectionCover(assetIDs: collection.coverAssetIDs, loader: session.loader, size: 512)
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Every place the library knows, Search's own list: a way in by *where*,
-    /// which for an old library is often the only way in somebody has. A
-    /// place picked there opens here, as a `revisit` collection.
+    /// Every place the library knows, from Utilities' row. See `PlacesCard`.
     private func placesList(_ space: SpaceDTO) -> some View {
         AllPlacesView(session: session, space: space, total: placeTotal) { name in
             pickedPlace = name
@@ -1557,6 +1426,512 @@ extension AlbumCard {
             coverAssetID: summary?.coverAssetID, side: side, loader: loader,
             placeholder: "person.2", badge: "person.2.fill"
         )
+    }
+}
+
+// MARK: - Cards the page and its sections' screens share
+
+/// A collection as a card, opening its photos: a pinned collection, a trip,
+/// an occasion. The same card on the page's rows and on the screens their
+/// titles open.
+struct CollectionCard: View {
+    let session: AppSession
+    let space: SpaceDTO
+    let collection: CollectionSummary
+    let side: CGFloat
+    var detail: String?
+    /// See `CollectionTile.badge`.
+    var badge: String?
+
+    var body: some View {
+        NavigationLink {
+            CollectionDetailView(session: session, space: space, collection: collection)
+        } label: {
+            CollectionTile(title: collection.title, detail: detail, width: side, badge: badge) {
+                CollectionCover(assetIDs: collection.coverAssetIDs, loader: session.loader, size: 512)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One of the memories, opening its photos and saying why it's there: on the
+/// page's top row and on Memories' own screen.
+struct MemoryCard: View {
+    /// How big, and so which card.
+    enum Look {
+        /// The page's top row: the big card, sized by the page
+        /// (`CollectionsLayout.memorySize`).
+        case hero(CGSize)
+        /// Memories' own screen: every other card, `side` points square, with
+        /// the big card's reason over its name. The big card's own type at
+        /// two across a phone covered most of its picture and cut its dates
+        /// off.
+        case tile(side: CGFloat)
+    }
+
+    let session: AppSession
+    let space: SpaceDTO
+    let card: CollectionSummary
+    let look: Look
+    /// "Name This Day", from a long press. See `nameable`.
+    let onName: (CollectionSummary) -> Void
+
+    var body: some View {
+        NavigationLink {
+            CollectionDetailView(session: session, space: space, collection: card)
+        } label: {
+            switch look {
+            case .hero(let size):
+                CollectionHeroCard(
+                    collection: card, loader: session.loader, width: size.width,
+                    height: size.height
+                )
+            case .tile(let side):
+                CollectionTile(
+                    title: card.title, kicker: card.kickerLine,
+                    detail: card.subtitle ?? itemsLine(card.count), width: side
+                ) {
+                    CollectionCover(assetIDs: card.coverAssetIDs, loader: session.loader, size: 512)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .nameable(card, onName: onName)
+    }
+}
+
+/// Every place the library knows, Search's own list: a way in by *where*,
+/// which for an old library is often the only way in somebody has. A place
+/// picked there opens as a screen of its own; see `placeDestination`.
+struct PlacesCard: View {
+    let session: AppSession
+    let space: SpaceDTO
+    let total: Int
+    let side: CGFloat
+    let onPick: (String) -> Void
+
+    var body: some View {
+        NavigationLink {
+            AllPlacesView(session: session, space: space, total: total, onPick: onPick)
+        } label: {
+            CollectionTile(
+                title: "Places",
+                detail: total == 1 ? "1 place" : "\(total.formatted()) places",
+                width: side
+            ) {
+                SymbolCover(
+                    symbol: "map.fill",
+                    colors: [Color(red: 0.2, green: 0.55, blue: 0.55),
+                             Color(red: 0.08, green: 0.25, blue: 0.38)]
+                )
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// What was removed and can still come back, as a card.
+struct RecentlyDeletedCard: View {
+    let session: AppSession
+    let space: SpaceDTO
+    let count: Int
+    let side: CGFloat
+
+    var body: some View {
+        NavigationLink {
+            RecentlyDeletedView(session: session, space: space)
+        } label: {
+            CollectionTile(title: "Recently Deleted", detail: itemsLine(count), width: side) {
+                SymbolCover(symbol: "trash", colors: [Color(white: 0.45), Color(white: 0.22)])
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// What's pinned, as cards, in Photos' order: Favorites, Recently Added,
+/// Videos and Screenshots, Places, and Recently Deleted. The page's row and
+/// Pinned's own screen draw the same cards from here, each at its own size.
+///
+/// Recently Deleted is always here, at zero too. The NAS leaves its card out
+/// when nothing is in it, and a card that only appears once you've deleted
+/// something is a place nobody knows to look until they need it.
+struct PinnedCards: View {
+    let session: AppSession
+    let space: SpaceDTO
+    let found: CollectionsResponse
+    /// How many places the library knows. None, and there's no Places card.
+    let placeTotal: Int
+    let side: CGFloat
+    /// A place picked from Places' list.
+    let onPickPlace: (String) -> Void
+
+    /// Videos and screenshots, the kinds Photos pins.
+    private var kinds: [CollectionSummary] {
+        ["video", "screenshot"].compactMap { key in
+            found.mediaTypes.first { $0.key == key }
+        }
+    }
+
+    var body: some View {
+        if let favorites = found.favorites {
+            CollectionCard(
+                session: session, space: space, collection: favorites, side: side,
+                detail: itemsLine(favorites.count), badge: "heart.fill"
+            )
+        }
+        if let recent = found.recentlyAdded {
+            CollectionCard(
+                session: session, space: space, collection: recent, side: side,
+                detail: itemsLine(recent.count)
+            )
+        }
+        ForEach(kinds) { kind in
+            CollectionCard(
+                session: session, space: space, collection: kind, side: side,
+                detail: itemsLine(kind.count)
+            )
+        }
+        if placeTotal > 0 {
+            PlacesCard(
+                session: session, space: space, total: placeTotal, side: side, onPick: onPickPlace
+            )
+        }
+        RecentlyDeletedCard(
+            session: session, space: space, count: found.recentlyDeleted?.count ?? 0, side: side
+        )
+    }
+}
+
+/// An album as a card, opening it: the same card and the same long press on
+/// the Albums page and on the screens its sections open.
+///
+/// An album shared with people opens the way a shared library does, as a
+/// timeline of its own space: the same route, the same screen, whether it's
+/// reached from here, the Mac's sidebar or a notification. Yours alone and a
+/// library's albums keep the album grid.
+struct AlbumCell: View {
+    let session: AppSession
+    let album: AlbumDTO
+    let store: AlbumStore
+    let side: CGFloat
+
+    /// Whether "Delete Album?" is up. Deleting used to happen on the menu tap
+    /// itself, and an album somebody built by hand was one slip away from
+    /// gone. Each card asks for itself, so the page and the screens a section
+    /// opens ask the same way without sharing anything.
+    @State private var confirmingDelete = false
+
+    var body: some View {
+        let library = album.libraryName(in: session)
+        let card = AlbumCard(
+            album: album, side: side, loader: session.loader, library: library,
+            me: session.user?.id
+        )
+        Group {
+            if let spaceID = album.ownSpace?.id {
+                NavigationLink(
+                    value: AlbumsRoute.shared(SharedAlbumRoute(spaceID: spaceID, albumID: album.id))
+                ) {
+                    card
+                }
+            } else {
+                NavigationLink {
+                    AlbumDetailView(session: session, album: album, store: store)
+                } label: {
+                    card
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if album.mayManage {
+                Button(role: .destructive) {
+                    confirmingDelete = true
+                } label: {
+                    Label("Delete Album", systemImage: "trash")
+                }
+            }
+        }
+        // On the card, not the page: where the question appears as a
+        // popover, it points at the album it's asking about.
+        .confirmationDialog(
+            "Delete “\(album.name)”?", isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Album", role: .destructive) {
+                Task { await store.delete(album) }
+            }
+        } message: {
+            Text(album.deletionMessage(library: library))
+        }
+    }
+}
+
+/// A shared library as an album card, the same as the albums made in it: its
+/// most recently added photo for a cover, and who's in it and how much. Opens
+/// the whole library.
+struct LibraryCell: View {
+    let session: AppSession
+    let space: SpaceDTO
+    let store: AlbumStore
+    let side: CGFloat
+
+    var body: some View {
+        NavigationLink(value: AlbumsRoute.shared(SharedAlbumRoute(spaceID: space.id))) {
+            AlbumCard(
+                library: space, summary: store.libraries.first { $0.id == space.id },
+                side: side, loader: session.loader
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One card under Shared Albums: a whole shared library, or an album.
+struct SharedCell: View {
+    let session: AppSession
+    let entry: AlbumStore.SharedEntry
+    let store: AlbumStore
+    let side: CGFloat
+
+    var body: some View {
+        switch entry {
+        case .library(let space):
+            LibraryCell(session: session, space: space, store: store, side: side)
+        case .album(let album):
+            AlbumCell(session: session, album: album, store: store, side: side)
+        }
+    }
+}
+
+extension AlbumDTO {
+    /// The shared library a family album is in, by name.
+    @MainActor
+    func libraryName(in session: AppSession) -> String? {
+        guard let spaceID else { return nil }
+        return session.sharedSpaces.first { $0.id == spaceID }?.name
+    }
+}
+
+extension CollectionsEmptyCard {
+    /// Albums with none in it yet. `create` is New Album, where there's a way
+    /// to it from here.
+    static func noAlbums(create: (() -> Void)?) -> CollectionsEmptyCard {
+        CollectionsEmptyCard(
+            symbol: "rectangle.stack", title: "No Albums Yet",
+            message: "Make an album to keep photos together. Only you will see it.",
+            actionTitle: "Create", action: create
+        )
+    }
+
+    /// Shared Albums with none in it yet. `start` is New Album, where there's
+    /// a way to it from here.
+    static func noSharedAlbums(start: (() -> Void)?) -> CollectionsEmptyCard {
+        CollectionsEmptyCard(
+            symbol: "person.2", title: "No Shared Albums Yet",
+            message: "Share photos and videos with just the people you choose, "
+                + "and let them add their own.",
+            actionTitle: "Start Sharing", action: start
+        )
+    }
+}
+
+extension CollectionSummary {
+    /// Everything from one place, whenever it was: what a place picked from
+    /// All Places opens. `.revisit` is the kind that means exactly this, and
+    /// it's already handled end to end.
+    static func place(_ name: String) -> CollectionSummary {
+        CollectionSummary(
+            kind: .revisit, key: name, title: name, subtitle: nil, count: 0, coverAssetIDs: []
+        )
+    }
+}
+
+extension View {
+    /// Opens the place picked from All Places as a screen of its own. Put on
+    /// the screen the Places card is on, never inside its grid: a destination
+    /// in a lazy container is gone once the card scrolls away.
+    func placeDestination(
+        _ picked: Binding<String?>, session: AppSession, space: SpaceDTO?
+    ) -> some View {
+        navigationDestination(item: picked) { place in
+            if let space {
+                CollectionDetailView(session: session, space: space, collection: .place(place))
+            }
+        }
+    }
+}
+
+// MARK: - Sections on screens of their own
+
+// What the › after a section's title opens, for the sections that had no list
+// of their own. Each draws the section's own cards (above) in
+// `CollectionsSectionScreen`'s grid, from the page's stores, read in its own
+// body: what the page shows changes under a screen pushed over it, and a copy
+// taken when the › was tapped would go on showing yesterday's counts.
+
+/// Every card the NAS picked for today, each saying why it's there: what
+/// Memories' title opens.
+///
+/// The row holds still while either is on screen (`CollectionsStore.take`),
+/// so these are the cards just swiped past, in the same order.
+struct MemoriesView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let store: CollectionsStore
+
+    @State private var naming: CollectionSummary?
+
+    var body: some View {
+        let cards = store.page.map { page in page.featured ?? page.hero.map { [$0] } ?? [] } ?? []
+        CollectionsSectionScreen(title: "Memories") { side in
+            ForEach(cards, id: \.featuredID) { card in
+                MemoryCard(
+                    session: session, space: space, card: card, look: .tile(side: side)
+                ) { naming = $0 }
+            }
+        }
+        #if !os(tvOS)
+        .sheet(item: $naming) { collection in
+            NameOccasionSheet(
+                session: session, spaceID: space.id, collection: collection
+            ) { changed in
+                naming = nil
+                // The server decides what a day ends up called. See the
+                // page's own sheet.
+                if changed { Task { await store.refresh() } }
+            }
+        }
+        #endif
+        .keepsUp(with: store, session: session)
+    }
+}
+
+/// Everything pinned, as cards: what Pinned's title opens.
+struct PinnedView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let store: CollectionsStore
+    /// How many places the library knows, as the page has it now.
+    @Binding var placeTotal: Int
+
+    /// The place picked from Places, pushed as its own screen.
+    @State private var pickedPlace: String?
+
+    var body: some View {
+        let found = store.page
+        CollectionsSectionScreen(title: "Pinned") { side in
+            if let found {
+                PinnedCards(
+                    session: session, space: space, found: found, placeTotal: placeTotal,
+                    side: side
+                ) { pickedPlace = $0 }
+            }
+        }
+        .placeDestination($pickedPlace, session: session, space: space)
+        .keepsUp(with: store, session: session)
+    }
+}
+
+/// Every album of your own: what Albums' title opens. The same cards as the
+/// page's, opening the same way, with the same long press.
+struct PersonalAlbumsView: View {
+    @Bindable var session: AppSession
+    let store: AlbumStore
+
+    var body: some View {
+        let albums = store.personal
+        CollectionsSectionScreen(
+            title: "Albums", empty: albums.isEmpty ? .noAlbums(create: nil) : nil
+        ) { side in
+            ForEach(albums) { album in
+                AlbumCell(session: session, album: album, store: store, side: side)
+            }
+        }
+        .keepsUp(with: store, session: session)
+    }
+}
+
+/// Everything shared, in the page's order: what Shared Albums' title opens.
+/// See `AlbumStore.sharedEntries`.
+///
+/// Pushed by value, `AlbumsRoute.sharedAlbums`, from where the Albums tab's
+/// path is kept (`RootTabView`, and `MacRootView` on a Mac): its cards push
+/// shared albums by value, which only lands on top from a screen that's in
+/// the path itself.
+struct SharedAlbumsView: View {
+    @Bindable var session: AppSession
+    let store: AlbumStore
+
+    var body: some View {
+        let entries = store.sharedEntries(libraries: session.sharedSpaces)
+        CollectionsSectionScreen(
+            title: "Shared Albums", empty: entries.isEmpty ? .noSharedAlbums(start: nil) : nil
+        ) { side in
+            ForEach(entries) { entry in
+                SharedCell(session: session, entry: entry, store: store, side: side)
+            }
+        }
+        .keepsUp(with: store, session: session)
+    }
+}
+
+/// The tools as cards, in the row's order: Recently Deleted always, at zero
+/// too, then what arrived lately and where it was taken. What Utilities'
+/// title opens. The same cards as Pinned's, symbols and all.
+struct UtilitiesView: View {
+    @Bindable var session: AppSession
+    let space: SpaceDTO
+    let store: CollectionsStore
+    /// How many places the library knows, as the page has it now.
+    @Binding var placeTotal: Int
+
+    /// The place picked from Places, pushed as its own screen.
+    @State private var pickedPlace: String?
+
+    var body: some View {
+        let found = store.page
+        CollectionsSectionScreen(title: "Utilities") { side in
+            RecentlyDeletedCard(
+                session: session, space: space, count: found?.recentlyDeleted?.count ?? 0,
+                side: side
+            )
+            if let recent = found?.recentlyAdded {
+                CollectionCard(
+                    session: session, space: space, collection: recent, side: side,
+                    detail: itemsLine(recent.count)
+                )
+            }
+            if placeTotal > 0 {
+                PlacesCard(session: session, space: space, total: placeTotal, side: side) {
+                    pickedPlace = $0
+                }
+            }
+        }
+        .placeDestination($pickedPlace, session: session, space: space)
+        .keepsUp(with: store, session: session)
+    }
+}
+
+extension View {
+    /// What a screen a section's title opens does to keep up, as the page
+    /// does: asks again on arriving if what it shows has gone stale, follows
+    /// changes while it's up (`LiveCounts`), and holds its covers still with
+    /// the page's (`HoldsCovers`). Nothing on it changes in front of you that
+    /// you didn't change yourself.
+    fileprivate func keepsUp(with store: CollectionsStore, session: AppSession) -> some View {
+        onAppear { Task { await store.refreshIfStale() } }
+            .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+            .holdsCovers(store)
+    }
+
+    /// The same, for a screen of albums.
+    fileprivate func keepsUp(with store: AlbumStore, session: AppSession) -> some View {
+        onAppear { Task { await store.refreshIfStale() } }
+            .modifier(LiveCounts(session: session) { await store.refreshIfChanged() })
+            .holdsCovers(store)
     }
 }
 

@@ -912,13 +912,20 @@ struct CollectionHeroCard: View {
         return [collection.subtitle, counted].compactMap { $0 }.joined(separator: " · ")
     }
 
+    private var kicker: String { collection.kickerLine }
+}
+
+extension CollectionSummary {
     /// Says what *kind* of thing you are looking at, so a hero that changes
     /// daily never leaves you guessing why this card is the one. The server's
     /// own line wins where it has one — "CHRISTMAS IS COMING UP" says more
     /// than the kind can.
-    private var kicker: String {
-        if let kicker = collection.kicker { return kicker }
-        switch collection.kind {
+    ///
+    /// Here rather than on the card, so Memories' own screen, whose cards are
+    /// the size of every other card's, says the same thing on each.
+    var kickerLine: String {
+        if let kicker { return kicker }
+        switch kind {
         case .onThisDay: return "ON THIS DAY"
         case .anniversary: return "THIS WEEK, BACK THEN"
         case .trip: return "A TRIP"

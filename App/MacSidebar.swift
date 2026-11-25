@@ -312,9 +312,17 @@ struct MacRootView: View {
                 // The field is the pushed screen's own: the window's belongs
                 // to the page underneath, and leaving this screen should come
                 // back to the page as it was.
-                .navigationDestination(for: SharedAlbumRoute.self) { route in
-                    MacSearchLens(session: session, space: route.target(in: session).searchSpace) {
-                        shared(route, isPushed: true)
+                //
+                // Shared Albums' own screen by value too, so a card on it opens
+                // on top of it. See `AlbumsRoute`.
+                .navigationDestination(for: AlbumsRoute.self) { route in
+                    switch route {
+                    case .shared(let route):
+                        MacSearchLens(session: session, space: route.target(in: session).searchSpace) {
+                            shared(route, isPushed: true)
+                        }
+                    case .sharedAlbums:
+                        SharedAlbumsView(session: session, store: albums)
                     }
                 }
 

@@ -66,7 +66,11 @@ struct RootTabView: View {
     /// the shared album it landed in, and that album is now a screen *inside*
     /// another tab rather than a tab of its own. Only the parent can both
     /// switch tabs and push.
-    @State private var albumsPath: [SharedAlbumRoute] = []
+    ///
+    /// Shared albums, and the one section of the page whose cards open them
+    /// (`AlbumsRoute.sharedAlbums`), which has to be in here to stay under
+    /// what it opens.
+    @State private var albumsPath: [AlbumsRoute] = []
 
     #if os(iOS)
     /// The library the search sheet is searching, and whether it is up at all.
@@ -175,7 +179,7 @@ struct RootTabView: View {
             if pending.reviewingReports { session.pendingReportReview = pending.spaceID }
             let route = SharedAlbumRoute(spaceID: pending.spaceID)
             tab = .albums
-            DispatchQueue.main.async { albumsPath = [route] }
+            DispatchQueue.main.async { albumsPath = [.shared(route)] }
         }
         .sheet(item: $searchSpace) { space in
             NavigationStack {
@@ -385,8 +389,13 @@ struct RootTabView: View {
     private var albumsTab: some View {
         NavigationStack(path: $albumsPath) {
             AlbumsView(session: session)
-                .navigationDestination(for: SharedAlbumRoute.self) { route in
-                    sharedAlbum(route)
+                .navigationDestination(for: AlbumsRoute.self) { route in
+                    switch route {
+                    case .shared(let route):
+                        sharedAlbum(route)
+                    case .sharedAlbums:
+                        SharedAlbumsView(session: session, store: session.albumStore())
+                    }
                 }
         }
     }
@@ -415,7 +424,7 @@ struct RootTabView: View {
     /// library; one button in one place, searching whatever you are looking
     /// at, is simpler, and it is where Photos keeps it.
     private var spaceOnScreen: SpaceDTO? {
-        if tab == .albums, let route = albumsPath.last,
+        if tab == .albums, case .shared(let route)? = albumsPath.last,
            let shared = route.target(in: session).searchSpace {
             return shared
         }
@@ -528,7 +537,7 @@ struct RootTabView: View {
         // is right from any tab.
         let route = SharedAlbumRoute(spaceID: review.destinationID)
         tab = .albums
-        DispatchQueue.main.async { albumsPath = [route] }
+        DispatchQueue.main.async { albumsPath = [.shared(route)] }
     }
 
     /// Clears the originals from the album they were shared out of.

@@ -1626,9 +1626,14 @@ column of list rows and the Mac a page of its own in a different order.
 - **The order** is the same everywhere: Memories, Pinned, People, Albums,
   Shared Albums, Trips, Holidays & Occasions, Over the Years, Media Types,
   Utilities.
-- **Each section's title** has a › where it opens the rest, and a round button
-  that folds the section away, kept per device in `albums.collapsedSections`.
-  A TV's sections don't fold.
+- **Each section's title** has a › that opens the whole section as a grid of
+  bigger cards, two across on a phone, as Photos does (since 2026-11-25; it
+  used to show only where a section had more than fit). A section with
+  nothing in it has none, so it never opens an empty screen. Every one of
+  those screens holds its covers still (`HoldsCovers`). Shared Albums is
+  pushed by value (`AlbumsRoute`), so a card on it opens on top of it. A
+  round button folds the section away, kept per device in
+  `albums.collapsedSections`. A TV's sections don't fold.
 - **Cards** carry their names on the picture (`CollectionTile`). People are
   rounded-square face cards (`PersonTile`): the NAS's crops are square, and a
   taller card cut from one showed a face from ear to ear. Media Types and
