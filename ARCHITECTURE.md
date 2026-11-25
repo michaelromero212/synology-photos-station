@@ -116,6 +116,13 @@ would on all four. And a photo opened before its thumbnail is made gets one
 then and there, at full priority, so its tile isn't gray when you go back to
 the grid.
 
+**Video thumbnails carry a version.** `Derivatives.videoThumbnailVersion` is 5,
+an HDR clip's tone-mapped poster. A plain poster, every SDR clip's and any HDR
+clip that fell back, keeps 4 (`plainVideoThumbnailVersion`) and is never redone.
+At boot, `enqueueMissingThumbnails` requeues the videos below 5 that are HDR or
+not yet measured, and only on a machine that can tone-map; every video below 4
+is requeued as before. Photos keep their own number.
+
 ---
 
 
@@ -258,6 +265,18 @@ One DSM shared folder, one service account. No per-user folders.
   incoming/<uploadSessionId>/         ← upload.data, each chunk written in place
   pgdata/
 ```
+
+**An HDR clip's poster is tone-mapped to SDR.** Its range (HLG or PQ, as
+`HDRVideo.range` reads it) is run through zscale and tonemap
+(`Derivatives.toneMapFilter`: mobius, with HDR reference white at 203 nits),
+and the frame is fit to at most 2048 px before it's written. Untoned, an
+iPhone clip's poster came out gray and flat; he caught it on an album cover
+(2026-11-25). If this machine's ffmpeg can't tone-map, checked once at boot or
+failing on a clip, the poster is written exactly as before and the clip stays
+at version 4, to be retried by a boot that can. Each boot logs whether HDR
+posters are tone-mapped. `FRAMESTATION_HDR_POSTERS=off|on` skips the check.
+The Dockerfile fails the image build if its ffmpeg lacks zscale or tonemap, or
+if the chain doesn't put HLG white and 18% gray in range.
 
 ### Browsable trees
 
@@ -679,7 +698,7 @@ CREATE TABLE assets (
   camera_make     text, camera_model text, lens text,
   iso             int, aperture real, shutter text, focal_len real,
   exposure_bias   real,                   -- the "0 ev" field
-  dynamic_range   text,                   -- standard | hdr, from gain-map presence
+  dynamic_range   text,                   -- standard | hdr. A photo's from gain-map presence; a video's from its transfer, HLG or PQ being hdr. Read when its poster is made, and by the ladder, so every video is measured
   orientation     int,
   is_raw          boolean NOT NULL DEFAULT false,
   live_group_id   uuid,                   -- shared by the still + paired video
@@ -1205,6 +1224,16 @@ travels, wherever they go:
   whose provinces are what people go to (Canada, Australia, New Zealand, the
   UK) keep them abroad too: "Ten days in Scotland".
 
+**A region's name can be shared between countries.** 53 region names are, and
+the first in the list used to win: "Florida" was Puerto Rico's municipality and
+"Montana" Bulgaria's province. A Clearwater and Orlando trip came out "Puerto
+Rico Beach Trip 2012" (he caught it 2026-11-25). Now a trip's country comes from
+its place labels. A label the geocoder wrote is matched whole first
+(`Geocoder.country(ofLabel:)`, through `countryOfSharedRegionLabel`). Any other
+label goes by the country where most people live in a region of that name.
+`Scripts/smoke-destinations.sh` checks that two days in Bozeman and Missoula
+are "Montana Trip 2019", not Bulgaria's.
+
 A trip is named the way the family would name the album: where, what kind
 of stay, and the year. "OBX Beach Week 2025", "WDW Vacation 2025", "Asheville
 Weekend 2024". Never how many days it was: nobody says "seven days in the
@@ -1704,6 +1733,19 @@ after a change made on this device (`AppSession.editRevision`, which leaves out
 backup uploads), or on a pull to refresh. The page is also asked for from the
 root at launch and each time the app comes back (`RootTabView`, the Mac's
 sidebar), so it's usually current before anyone opens it.
+
+**Covers carry their versions.** Every cover now comes with its thumbnail
+version: `CollectionSummary.coverVersions` and `Tradition.coverVersions`, index
+for index with `coverAssetIDs`, and `AlbumDTO.coverVersion` and
+`SharedLibrarySummary.coverVersion`. The collections page fills them with one
+lookup over every cover (`CollectionsController.thumbVersions(of:on:)`), and
+the album list does the same. The app caches and fetches covers by version, as
+the grid does, so a cover made again reaches every device. Before, covers were
+asked for at version 0 and a stale one stayed cached forever. The fields are
+optional, so the NAS and the apps can ship in either order; a fixed cover
+needs both. Full-screen previews (`ThumbnailLoader.preview` and `previewURL`)
+carry the item's version the same way, and a video's preview is drawn from its
+poster.
 
 `Scripts/smoke-albums-steady.sh` checks that covers hold across days and that
 the row is dealt as described.
