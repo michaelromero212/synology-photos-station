@@ -30,11 +30,20 @@ enum Derivatives {
     /// photo alone.
     /// v4: the poster is the sharpest of a few early frames, not whatever was
     /// on screen one second in. See `extractPoster`.
-    static let videoThumbnailVersion = 4
+    /// v5: an HDR clip's poster is tone-mapped to SDR, where it came out gray
+    /// and flat. See `toneMapFilter`. Only HDR posters changed, so a poster
+    /// written the plain way is still v4's and keeps that number: see
+    /// `plainVideoThumbnailVersion`.
+    static let videoThumbnailVersion = 5
 
-    static func thumbnailVersion(for mediaType: MediaType) -> Int {
-        mediaType == .video ? videoThumbnailVersion : thumbnailVersion
-    }
+    /// The version of a video thumbnail whose poster was written the plain
+    /// way: every SDR clip's, and an HDR clip's where tone mapping failed.
+    /// Nothing about those changed in v5, so they stay at 4. An SDR clip is
+    /// then never rebuilt for v5, nor its thumbnail fetched again by every
+    /// device for the same picture, and an HDR clip written plain still reads
+    /// as not converted, to be made again (see
+    /// `MetadataBackfill.enqueueMissingThumbnails`).
+    static let plainVideoThumbnailVersion = 4
 
     /// The widest aspect a thumbnail is sized for. Past this a panorama would
     /// turn into an enormous strip for no gain — the square grid only ever shows
@@ -85,6 +94,15 @@ enum Derivatives {
         var thumbHash: [UInt8]?
         var width: Int?
         var height: Int?
+        /// What these thumbnails are, for `assets.thumb_version`: the photo
+        /// version, or for a video whichever its poster came out as.
+        var version: Int
+        /// A video's range, read for its poster and recorded with it. Nil for
+        /// a photo, whose range comes with its metadata.
+        var range: HDRVideo.Range?
+        /// Why an HDR clip's poster was written the plain way, kept beside
+        /// its job. Nil when it wasn't.
+        var posterNote: String?
     }
 
     /// Builds the eager derivative set and the ThumbHash placeholder.
@@ -101,9 +119,27 @@ enum Derivatives {
         // Videos can't be handed to vips directly; render a poster frame first
         // and treat that as the image source for everything downstream.
         let imageSource: URL
+        var output = Output(version: thumbnailVersion)
         if mediaType == .video {
             let poster = directory.appendingPathComponent("poster.jpg")
-            try await extractPoster(from: blob, to: poster, logger: logger)
+            // Read every time a poster is made, so every video has its range
+            // on record: what tells the boot pass which posters still want
+            // tone mapping, and what the Information panel shows.
+            let signal = await HDRVideo.signal(blob)
+            let made = try await extractPoster(
+                from: blob, to: poster, signal: signal, logger: logger
+            )
+            output.range = signal.range
+            output.version = made.isToneMapped ? videoThumbnailVersion : plainVideoThumbnailVersion
+            if made.isToneMapped {
+                logger.info("derive \(sha256.prefix(8)): \(signal.range.playlistValue) poster tone-mapped")
+            } else if let problem = made.problem {
+                output.posterNote = "HDR poster not tone-mapped: \(problem)"
+                logger.warning("""
+                    derive \(sha256.prefix(8)): \(signal.range.playlistValue) poster not \
+                    tone-mapped, written as before: \(problem)
+                    """)
+            }
             imageSource = poster
             // The full-screen preview was rendered from the old poster, and
             // `makePreview` keeps whatever it finds. Removed, it's rebuilt
@@ -114,8 +150,6 @@ enum Derivatives {
         } else {
             imageSource = blob
         }
-
-        var output = Output()
 
         // The ≤100 px render comes first now: it is both the ThumbHash input and
         // where the aspect ratio comes from, and the eager thumbnails need that
@@ -199,7 +233,7 @@ enum Derivatives {
         if mediaType == .video {
             let poster = directory.appendingPathComponent("poster.jpg")
             if !FileManager.default.fileExists(atPath: poster.path) {
-                try await extractPoster(from: blob, to: poster)
+                try await extractPoster(from: blob, to: poster, signal: await HDRVideo.signal(blob))
             }
             source = poster
         } else {
@@ -306,9 +340,16 @@ enum Derivatives {
     /// adjusting its exposure, so the start was never used. A fixed second in
     /// is often mid-pan or mid-motion, though, and made a smeared grid tile.
     /// Measuring a handful costs a few seconds of background work per video.
+    ///
+    /// An HDR clip's frame is tone-mapped to SDR on its way to the JPEG (see
+    /// `toneMapFilter`). Where that can't be done, or ffmpeg fails at it, the
+    /// frame is written the plain way after all, so no clip is ever left
+    /// without a poster, and the result says it wasn't tone-mapped, so the
+    /// clip isn't counted as converted.
+    @discardableResult
     static func extractPoster(
-        from video: URL, to destination: URL, logger: Logger? = nil
-    ) async throws {
+        from video: URL, to destination: URL, signal: HDRVideo.Signal, logger: Logger? = nil
+    ) async throws -> Poster {
         let chosen = await posterTime(for: video)
         if let chosen, chosen != posterBaseline, let logger {
             logger.info("""
@@ -319,21 +360,78 @@ enum Derivatives {
 
         // The chosen frame, else one second in as before, else the very first
         // frame, which every clip has.
-        for time in [chosen ?? posterBaseline, nil] {
-            try? FileManager.default.removeItem(at: destination)
-            let seek = time.map { ["-ss", String(format: "%.3f", $0)] } ?? []
-            let written = (try? await Shell.runChecked(
-                "ffmpeg",
-                ["-y"] + seek + ["-i", video.path, "-frames:v", "1", "-q:v", "3", destination.path],
-                timeout: 180
-            )) != nil
-            // Not just present: a seek past the end can leave an empty file.
-            let size = (try? FileManager.default.attributesOfItem(
-                atPath: destination.path
-            ))?[.size] as? NSNumber
-            if written, let size, size.int64Value > 0 { return }
+        let times = [chosen ?? posterBaseline, nil]
+
+        var poster = Poster()
+        if signal.range.isHDR {
+            if let problem = await toneMapProblem() {
+                poster.problem = problem
+            } else {
+                let filter = toneMapFilter(for: signal)
+                var failure = "no frame came out"
+                for time in times {
+                    guard let problem = await writeFrame(of: video, at: time, to: destination, filter: filter)
+                    else { return Poster(isToneMapped: true) }
+                    failure = problem
+                }
+                poster.problem = "ffmpeg failed to tone-map it: \(failure)"
+            }
+        }
+        for time in times {
+            if await writeFrame(of: video, at: time, to: destination, filter: nil) == nil { return poster }
         }
         throw DerivativeError.posterFailed(video.lastPathComponent)
+    }
+
+    /// What `extractPoster` wrote.
+    struct Poster {
+        /// Tone-mapped from HDR, rather than written the plain way.
+        var isToneMapped = false
+        /// Why an HDR clip's poster wasn't tone-mapped. Nil for an SDR clip,
+        /// which never is.
+        var problem: String?
+    }
+
+    /// Writes one frame of `video` to `destination`: the frame at `time`, or
+    /// the first. Nil once it's written, otherwise what went wrong.
+    ///
+    /// Without a filter, exactly the command posters always had, so an SDR
+    /// clip's poster comes out the same bytes it always did.
+    private static func writeFrame(
+        of video: URL, at time: Double?, to destination: URL, filter: String?
+    ) async -> String? {
+        try? FileManager.default.removeItem(at: destination)
+        let seek = time.map { ["-ss", String(format: "%.3f", $0)] } ?? []
+        // Errors only when filtering, so what ffmpeg says on failing is the
+        // reason rather than its banner.
+        let arguments = (filter == nil ? ["-y"] : ["-y", "-v", "error"])
+            + seek + ["-i", video.path, "-frames:v", "1"]
+            + (filter.map { ["-vf", $0] } ?? [])
+            + ["-q:v", "3", destination.path]
+        do {
+            try await Shell.runChecked("ffmpeg", arguments, timeout: 180)
+        } catch {
+            return reason(error)
+        }
+        // Not just present: a seek past the end can leave an empty file.
+        let size = (try? FileManager.default.attributesOfItem(
+            atPath: destination.path
+        ))?[.size] as? NSNumber
+        guard let size, size.int64Value > 0 else { return "an empty file" }
+        return nil
+    }
+
+    /// The first thing ffmpeg said, which with `-v error` is why it stopped,
+    /// without the filter's address it starts with.
+    private static func reason(_ error: Error) -> String {
+        guard case ShellError.failed(_, let status, let stderr) = error else {
+            return String(describing: error)
+        }
+        let first = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let said = first
+            .replacingOccurrences(of: #"^\[[^\]]*\] *"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return said.isEmpty ? "ffmpeg exited \(status)" : String(said.prefix(200))
     }
 
     /// When to take the poster from, or nil if no frame could be measured.
@@ -440,6 +538,120 @@ enum Derivatives {
             timeout: 60
         ), result.status == 0 else { return nil }
         return Double(result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    // MARK: - HDR posters
+
+    /// HDR reference white in nits, per ITU-R BT.2408: where an HLG camera
+    /// puts a white shirt or a page (75% of its signal), and what an SDR
+    /// poster's white stands for.
+    static let posterReferenceWhite = 203.0
+
+    /// The brightest an HDR poster's highlights are kept apart up to, in nits:
+    /// HLG's nominal peak, and what most PQ video is mastered to.
+    static let posterHDRPeak = 1000.0
+
+    /// Where the tone curve starts to bend, as a fraction of SDR white.
+    static let posterKnee = 0.6
+
+    /// The ffmpeg filters that make an HDR frame its SDR poster.
+    ///
+    /// An iPhone records HLG: a signal for a bright HDR screen, with reference
+    /// white at 75% and the rest of the range left for highlights. Written to a
+    /// JPEG as it was, that 75% is a light gray, and BT.2020's colors read as
+    /// BT.709's come out pale: the poster was gray and flat. These turn it into
+    /// the picture Photos shows on an SDR screen.
+    ///
+    /// 1. Scaled to fit `previewSize`, the largest anything is made from the
+    ///    poster, before any of it is in floating point. At 4K each stage is
+    ///    about 100 MB and four times the work, on a J4125 running four lanes.
+    /// 2. To linear light, with the clip's transfer, colors, matrix and range
+    ///    said outright, and the colors said again for the frame it hands on.
+    ///    ffmpeg 4.4's zscale otherwise takes them from the frame, and stops
+    ///    with "no path between colorspaces" when a frame doesn't carry them.
+    ///    `npl` set to reference white makes that white 1.0, SDR's white, so
+    ///    everything below it lands about where SDR video puts it: 18% gray at
+    ///    39% (SDR has it at 41%), a face at 65% HLG at 77%.
+    /// 3. BT.2020's colors to BT.709's, which sRGB shares.
+    /// 4. `mobius` leaves everything up to `posterKnee` of white exactly as it
+    ///    is, shadows, faces and mid-tones, and rolls off smoothly above it,
+    ///    so highlights up to HDR's peak fit under SDR white rather than
+    ///    clipping: white lands at 91%, twice as bright at 97%, the peak at
+    ///    100%. `desat=0`, as the default fades every highlight's color. The
+    ///    usual chain, `npl=100` with `hable`, leaves white at 76%: the same
+    ///    gray the untoned poster had, only in the right colors.
+    /// 5. To sRGB, which is what a JPEG with no profile is read as, and left as
+    ///    RGB, so ffmpeg makes the JPEG's YCbCr itself, by JPEG's own (BT.601)
+    ///    numbers. Handed video's BT.709 YCbCr instead, a JPEG reader shifts
+    ///    every color a little.
+    ///
+    /// Server/Dockerfile runs this chain for an iPhone clip's tags and fails
+    /// the image if white and gray don't come out where they should.
+    static func toneMapFilter(for signal: HDRVideo.Signal) -> String {
+        let side = previewSize
+        let range = signal.isFullRange ? "full" : "limited"
+        let peak = String(format: "%.3f", posterHDRPeak / posterReferenceWhite)
+        return [
+            "scale=w='if(gte(iw,ih),min(\(side),trunc(iw/2)*2),-2)'"
+                + ":h='if(gte(iw,ih),-2,min(\(side),trunc(ih/2)*2))':flags=lanczos",
+            "zscale=tin=\(signal.range.transfer):pin=\(signal.primaries):min=\(signal.matrix)"
+                + ":rin=\(range):t=linear:p=\(signal.primaries):npl=\(Int(posterReferenceWhite))",
+            "format=gbrpf32le",
+            "zscale=p=bt709",
+            "tonemap=tonemap=mobius:param=\(posterKnee):desat=0:peak=\(peak)",
+            "zscale=t=iec61966-2-1:d=error_diffusion",
+            "format=gbrp",
+        ].joined(separator: ",")
+    }
+
+    /// Nil when this machine can tone-map an HDR poster, otherwise why not.
+    /// Checked once, by putting a frame of 10-bit test pattern through
+    /// `toneMapFilter` into a JPEG, as a poster is written. Homebrew's ffmpeg
+    /// has no zscale, so on a Mac every HDR clip gets the plain poster.
+    ///
+    /// `FRAMESTATION_HDR_POSTERS` overrides it: `off` to write every poster
+    /// the plain way, `on` to tone-map without the check.
+    static func toneMapProblem() async -> String? {
+        await ToneMapCheck.shared.problem()
+    }
+
+    private actor ToneMapCheck {
+        static let shared = ToneMapCheck()
+        private var result: String??
+
+        func problem() async -> String? {
+            if let result { return result }
+            let found = await check()
+            result = .some(found)
+            return found
+        }
+
+        private func check() async -> String? {
+            switch Environment.get("FRAMESTATION_HDR_POSTERS") {
+            case "off": return "turned off by FRAMESTATION_HDR_POSTERS"
+            case "on": return nil
+            default: break
+            }
+            let probe = FileManager.default.temporaryDirectory
+                .appendingPathComponent("tone-map-check-\(UUID().uuidString).jpg")
+            defer { try? FileManager.default.removeItem(at: probe) }
+            let iPhone = HDRVideo.Signal(
+                range: .hlg, primaries: "bt2020", matrix: "bt2020nc", isFullRange: false
+            )
+            do {
+                try await Shell.runChecked(
+                    "ffmpeg",
+                    ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=256x144:rate=1:duration=1",
+                     "-frames:v", "1", "-vf", "format=yuv420p10le," + Derivatives.toneMapFilter(for: iPhone),
+                     "-q:v", "3", probe.path],
+                    timeout: 60
+                )
+            } catch {
+                return "this ffmpeg can't tone-map (\(Derivatives.reason(error)))"
+            }
+            let size = (try? FileManager.default.attributesOfItem(atPath: probe.path))?[.size] as? NSNumber
+            return (size?.int64Value ?? 0) > 0 ? nil : "this ffmpeg can't tone-map (it wrote nothing)"
+        }
     }
 
     static func missingTools() -> [String] {

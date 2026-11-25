@@ -219,9 +219,34 @@ enum MetadataBackfill {
     /// queue. Bounded per boot; a rebuilt thumbnail stamps the current version,
     /// so a healed asset drops out of the next pass and the regeneration doesn't
     /// repeat every restart.
+    ///
+    /// A video's version says what its poster came out as, so only the videos
+    /// a change touched go back in line. Since v5 that's an HDR clip whose
+    /// poster isn't tone-mapped yet, and one whose range was never read (every
+    /// video before v5 that no ladder job looked at), whose job reads it. An
+    /// SDR clip stays at 4, is never made again for v5, and once measured
+    /// drops out for good. An HDR clip only goes back where this ffmpeg can
+    /// tone-map: elsewhere it would just be written plain again every boot,
+    /// and it waits for the first boot that can. One that fails even there is
+    /// tried again each boot, a few seconds of background work apiece, until
+    /// a fix lets it through.
+    ///
+    /// The same queue as every rebuild, so the same pace: thumbnails first,
+    /// but after any photo with none yet, on lanes that run behind the server
+    /// for the processor (`Shell.isBackground`).
     static func enqueueMissingThumbnails(on app: Application) async {
+        let toneMapProblem = await Derivatives.toneMapProblem()
+        if let toneMapProblem {
+            app.logger.warning("""
+                HDR posters: \(toneMapProblem), so HDR clips get plain posters \
+                until a boot that can tone-map them
+                """)
+        } else {
+            app.logger.info("HDR posters: tone-mapped to SDR")
+        }
         do {
-            try await app.sql.raw("""
+            struct Queued: Decodable { let id: UUID }
+            let queued = try await app.sql.raw("""
                 WITH todo AS (
                     SELECT DISTINCT a.id
                     FROM assets a
@@ -230,7 +255,13 @@ enum MetadataBackfill {
                        -- Videos have their own version, so a change to how
                        -- posters are picked rebuilds only the videos.
                        OR (a.media_type = 'video'
-                           AND a.thumb_version < \(bind: Derivatives.videoThumbnailVersion))
+                           AND a.thumb_version < \(bind: Derivatives.plainVideoThumbnailVersion))
+                       -- And a change to HDR posters only the videos that are,
+                       -- or might be, HDR.
+                       OR (a.media_type = 'video'
+                           AND a.thumb_version < \(bind: Derivatives.videoThumbnailVersion)
+                           AND (a.dynamic_range IS NULL
+                                OR (a.dynamic_range = 'hdr' AND \(bind: toneMapProblem == nil))))
                        OR (a.media_type <> 'video'
                            AND a.thumb_version < \(bind: Derivatives.thumbnailVersion))
                     LIMIT 5000
@@ -239,7 +270,11 @@ enum MetadataBackfill {
                 SELECT id, 'thumbnails' FROM todo
                 ON CONFLICT (asset_id, kind)
                 DO UPDATE SET state = 'pending', attempts = 0, last_error = NULL
-                """).run()
+                RETURNING asset_id AS id
+                """).all(decoding: Queued.self)
+            if !queued.isEmpty {
+                app.logger.info("thumbnails: \(queued.count) asset(s) queued to be made or made again")
+            }
         } catch {
             app.logger.error("thumbnail heal failed: \(String(reflecting: error))")
         }

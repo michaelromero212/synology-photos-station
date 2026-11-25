@@ -75,6 +75,9 @@ actor DerivationWorker {
     /// the same thumbnails: it is as ready as the photo the moment the photo is.
     ///
     /// Only copies still waiting. One already marked has its own say.
+    ///
+    /// A video's range comes too, read as its poster was made: without it the
+    /// copy would read as never measured, and be made again to measure it.
     static func readyCopies(of assetID: UUID, on sql: any SQLDatabase) async throws -> [UUID] {
         struct Copy: Decodable { let id: UUID }
         return try await sql.raw("""
@@ -82,6 +85,7 @@ actor DerivationWorker {
             SET thumbhash     = COALESCE(c.thumbhash, o.thumbhash),
                 width         = COALESCE(c.width, o.width),
                 height        = COALESCE(c.height, o.height),
+                dynamic_range = COALESCE(c.dynamic_range, o.dynamic_range),
                 derived_at    = o.derived_at,
                 thumb_version = o.thumb_version
             FROM assets o
@@ -316,6 +320,9 @@ actor DerivationWorker {
 
             app.logger.info("derivation start \(job.kind) \(asset.sha256.prefix(8)) (\(asset.mediaType))")
 
+            // Kept beside a job that's done, as for one closed without being
+            // built: an HDR poster written the plain way says why here.
+            var note: String?
             switch job.kind {
             case "metadata":
                 let metadata = try await MediaProbe.probe(url: blob, mediaType: mediaType)
@@ -335,6 +342,11 @@ actor DerivationWorker {
                 let thumbHash = output.thumbHash.map { ByteBuffer(bytes: $0) }
                 let width = output.width
                 let height = output.height
+                let version = output.version
+                // A video's, read as its poster was made. A photo's comes
+                // from its metadata and stays as it is.
+                let range = output.range?.recorded
+                note = output.posterNote
 
                 // Announced, not just recorded.
                 //
@@ -360,7 +372,8 @@ actor DerivationWorker {
                                 width         = COALESCE(width, \(bind: width)),
                                 height        = COALESCE(height, \(bind: height)),
                                 derived_at    = now(),
-                                thumb_version = \(bind: Derivatives.thumbnailVersion(for: mediaType))
+                                thumb_version = \(bind: version),
+                                dynamic_range = COALESCE(\(bind: range), dynamic_range)
                             WHERE id = \(bind: assetID)
                             """).run()
 
@@ -426,7 +439,7 @@ actor DerivationWorker {
             }
 
             app.logger.info("derivation done \(job.kind) \(asset.sha256.prefix(8))")
-            try await finish(job: job, app: app, error: nil)
+            try await finish(job: job, app: app, error: nil, note: note)
         } catch {
             app.logger.error("derivation \(job.kind) failed for \(job.assetID): \(error)")
             try? await finish(job: job, app: app, error: String(describing: error))

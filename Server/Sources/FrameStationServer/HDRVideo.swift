@@ -2,7 +2,8 @@ import Foundation
 import Vapor
 
 /// HDR video away from home: what a clip was recorded in, and what this
-/// machine can encode it with.
+/// machine can encode it with. (Its poster, made SDR for the grid, is in
+/// `Derivatives`.)
 ///
 /// Every iPhone since the 12 records HDR — 10-bit HEVC, HLG — and the stream
 /// ladder used to make 8-bit H.264 of it. The HLG tags came through, so it
@@ -48,6 +49,16 @@ enum HDRVideo {
 
         /// What `assets.dynamic_range` records, as photos already do.
         var recorded: String { isHDR ? "hdr" : "standard" }
+
+        /// From ffprobe's name for a stream's transfer. Anything else, or
+        /// none, is SDR.
+        init(transfer: String?) {
+            switch transfer {
+            case "arib-std-b67": self = .hlg
+            case "smpte2084": self = .pq
+            default: self = .sdr
+            }
+        }
     }
 
     /// The range, read off the first video stream's transfer. A clip ffprobe
@@ -64,11 +75,51 @@ enum HDRVideo {
             timeout: 120
         ), let stream = (try? JSONDecoder().decode(Output.self, from: output.stdout))?.streams.first
         else { return .sdr }
-        switch stream.color_transfer {
-        case "arib-std-b67": return .hlg
-        case "smpte2084": return .pq
-        default: return .sdr
+        return Range(transfer: stream.color_transfer)
+    }
+
+    /// What a poster needs to know of a clip's picture to turn it into SDR:
+    /// its range, and the colors it's tagged with, in the names zscale takes.
+    struct Signal: Sendable, Equatable {
+        var range: Range
+        var primaries: String
+        var matrix: String
+        var isFullRange: Bool
+
+        static let sdr = Signal(range: .sdr, primaries: "bt709", matrix: "bt709", isFullRange: false)
+    }
+
+    /// The range and colors, read off the first video stream in one ffprobe,
+    /// the range as `range(_:)` reads it. A tag that's missing, or one a phone
+    /// doesn't record HDR in, reads as what every iPhone records: BT.2020
+    /// colors and limited range. (Only an HDR clip's colors are ever used.)
+    static func signal(_ file: URL) async -> Signal {
+        struct Output: Decodable {
+            struct Stream: Decodable {
+                let color_transfer: String?
+                let color_primaries: String?
+                let color_space: String?
+                let color_range: String?
+            }
+            let streams: [Stream]
         }
+        guard let output = try? await Shell.run(
+            "ffprobe",
+            ["-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer,color_primaries,color_space,color_range",
+             "-of", "json", file.path],
+            timeout: 120
+        ), let stream = (try? JSONDecoder().decode(Output.self, from: output.stdout))?.streams.first
+        else { return .sdr }
+        func known(_ value: String?, in names: [String], else fallback: String) -> String {
+            value.flatMap { names.contains($0) ? $0 : nil } ?? fallback
+        }
+        return Signal(
+            range: Range(transfer: stream.color_transfer),
+            primaries: known(stream.color_primaries, in: ["bt709", "bt2020"], else: "bt2020"),
+            matrix: known(stream.color_space, in: ["bt709", "bt2020nc", "bt2020c"], else: "bt2020nc"),
+            isFullRange: stream.color_range == "pc"
+        )
     }
 
     /// How an HDR ladder is encoded here.

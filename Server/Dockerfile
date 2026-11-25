@@ -85,7 +85,8 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     #   libvips-tools  thumbnails and the ThumbHash source render
     #   libheif1       HEIC/HEIF decode — most of an iPhone library
     #   libexif / exiftool  EXIF, including lens and exposure
-    #   ffmpeg         video probe and poster frames
+    #   ffmpeg         video probe and poster frames, HDR ones tone-mapped
+    #                  with zscale (Ubuntu's ffmpeg links libzimg for it)
     #
     # --no-install-recommends matters here more than anywhere else in the file.
     # ffmpeg and exiftool each recommend a long tail of extra codecs, docs and
@@ -161,6 +162,32 @@ RUN version="$(dpkg-query -W -f='${Version}' libheif1)" \
         || (echo "ERROR: vips can't decode a HEIC with an HDR gain map" && exit 1)) \
     && echo "libheif $version: decodes HEICs with HDR gain maps" \
     && rm /tmp/hdr-gain-map.heic
+
+# And able to make an HDR video's poster. zscale and tonemap turn an iPhone's
+# HLG frame into the SDR picture its thumbnails are cut from
+# (Derivatives.toneMapFilter); without them every HDR clip's poster is written
+# as before, gray and flat. Listed, then run: flat 10-bit frames of HLG
+# reference white (75%) and 18% gray (38%), through the chain the server uses
+# for an iPhone clip, into a JPEG as a poster is written, and measured. White
+# has to come out near white and gray near the middle, about 232 and 101 of
+# 255, not the 191 and 97 they keep untoned. The server checks its own chain
+# at boot as well, and Scripts/smoke-poster.sh checks that it's this one.
+RUN chain="scale=w='if(gte(iw,ih),min(2048,trunc(iw/2)*2),-2)':h='if(gte(iw,ih),-2,min(2048,trunc(ih/2)*2))':flags=lanczos,zscale=tin=arib-std-b67:pin=bt2020:min=bt2020nc:rin=limited:t=linear:p=bt2020:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:param=0.6:desat=0:peak=4.926,zscale=t=iec61966-2-1:d=error_diffusion,format=gbrp"; \
+    for filter in zscale tonemap; do \
+      ffmpeg -hide_banner -filters 2>/dev/null | awk '{ print $2 }' | grep -qx "$filter" \
+        || { echo "ERROR: ffmpeg has no $filter filter; HDR video posters would come out gray"; exit 1; }; \
+    done; \
+    level() { \
+      ffmpeg -v error -y -f lavfi -i "nullsrc=s=64x64:d=1,format=yuv420p10le,lutyuv=y=$1:u=512:v=512" \
+        -frames:v 1 -vf "$chain" -q:v 3 /tmp/hdr-poster.jpg \
+      && vips avg /tmp/hdr-poster.jpg; \
+    }; \
+    white="$(level 721)" && gray="$(level 397)" \
+      || { echo "ERROR: ffmpeg can't tone-map an HLG frame into a poster"; exit 1; }; \
+    rm -f /tmp/hdr-poster.jpg; \
+    awk -v w="$white" -v g="$gray" 'BEGIN { exit !(w >= 215 && w <= 250 && g >= 85 && g <= 120) }' \
+      || { echo "ERROR: an HDR poster's white came out $white and its gray $gray of 255, not about 232 and 101"; exit 1; }; \
+    echo "ffmpeg: tone-maps HDR posters, white $white and gray $gray of 255"
 
 RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app vapor
 
