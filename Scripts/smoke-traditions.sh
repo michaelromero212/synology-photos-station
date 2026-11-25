@@ -69,6 +69,14 @@ photos(){ q "WITH made AS (
     FROM generate_series(1, $2) g RETURNING id)
   INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
   SELECT '$SPACE', id, '$USER_ID' FROM made" >/dev/null; }
+# videos <day> <how many>: the same, as videos.
+videos(){ q "WITH made AS (
+    INSERT INTO assets (sha256, byte_size, media_type, mime, blob_ext, local_captured_at, place_name, lat, lon)
+    SELECT 'TRADV' || md5('$1' || g || clock_timestamp()::text), 1000, 'video', 'video/mp4', 'mp4',
+           '$1'::date + make_interval(hours => 9 + (g % 10)), $CULPEPER
+    FROM generate_series(1, $2) g RETURNING id)
+  INSERT INTO space_assets (space_id, asset_id, uploaded_by_user_id)
+  SELECT '$SPACE', id, '$USER_ID' FROM made" >/dev/null; }
 # observe <day> <how many show it> [what] [people]: what the person's phone saw
 # in that day's photos, the first few a birthday cake (or `what`, with
 # `people` in frame) and the rest sky.
@@ -269,6 +277,20 @@ check "says which day it is" "August 14 · 3 years · 2023–2025" "$(T field da
 check "and each year carries its year" "Mom's birthday 2023|Mom's birthday 2024|Mom's birthday 2025" \
   "$(T years date:08-14)"
 check "renaming it renames every year" "2025-08-14 Mom's birthday True True" "$(T naming date:08-14)"
+
+echo "A year of only videos doesn't lead its card"
+# Photos on February 9, 2015, and only videos on it in 2016 and 2017, years
+# the library's every-other-day photos don't reach. The turn
+# that picks which year leads (`coverTurn`) lands on the middle one, whose
+# cover could only be a video's frame: a far-off concert crowd led his
+# "Birthday on September 20" (2026-11-25). A year with photos leads instead.
+photos 2015-02-09 5; videos 2016-02-09 6; videos 2017-02-09 6
+check "naming February 9 for every year" "204" "$(name 2017-02-09 "Ski day")"
+page
+check "the three years are one card" "Ski day 2015|Ski day 2016|Ski day 2017" "$(T years date:02-09)"
+LEAD=$(T field date:02-09 coverAssetIDs | python3 -c "import sys, ast; print(ast.literal_eval(sys.stdin.read().strip())[0])")
+check "and its cover is a photo, from the year with photos" "photo 2015-02-09" \
+  "$(q "SELECT media_type || ' ' || local_captured_at::date FROM assets WHERE id = '$LEAD'")"
 
 echo "Next year"
 photos 2026-12-25 5; photos 2026-04-05 5

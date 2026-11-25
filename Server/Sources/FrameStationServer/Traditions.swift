@@ -596,6 +596,8 @@ struct YearlyPatterns {
         var drawn: [(tradition: Tradition, wait: Int, years: Int)] = []
         for pattern in patterns {
             var cards: [(summary: CollectionSummary, year: Int, place: String?)] = []
+            // The years with nothing but videos, by card. See `leading` below.
+            var videoOnly = Set<String>()
             for member in pattern.members {
                 let found = member.compactMap { byDay[$0] }
                 guard !found.isEmpty else { continue }
@@ -607,7 +609,9 @@ struct YearlyPatterns {
                 if case .holiday = pattern.source { needed = CollectionsController.holidayMoments }
                 guard pattern.source == .named || run.days.contains(where: { named[$0.day] != nil })
                     || run.moments >= needed else { continue }
-                cards.append(card(for: run, in: pattern, holidays: holidays, named: named, annual: annual, events: events))
+                let made = card(for: run, in: pattern, holidays: holidays, named: named, annual: annual, events: events)
+                if found.allSatisfy({ $0.videoCount >= $0.count }) { videoOnly.insert(made.summary.key) }
+                cards.append(made)
             }
             let years = Set(cards.map(\.year))
             switch pattern.source {
@@ -645,9 +649,15 @@ struct YearlyPatterns {
 
             let summaries = cards.map(\.summary)
             // Which year leads the card. It was a different one each day; now
-            // it's the one the last of those days picked. See `coverSeed`.
+            // it's the one the last of those days picked (see `coverSeed`),
+            // unless that year has nothing but videos while another year has
+            // photos. Its cover could only be a frame of one, and a far-off
+            // frame of a dark arena said nothing about a birthday (his word,
+            // 2026-11-25). The next year in the same turn that has photos
+            // leads instead, so a card led by photos keeps its cover.
             let turned = CollectionsController.rotated(summaries, by: CollectionsController.coverTurn)
-            let covers = Array(turned.compactMap(\.coverAssetIDs.first).prefix(CollectionsController.coverDepth))
+            let leading = turned.filter { !videoOnly.contains($0.key) } + turned.filter { videoOnly.contains($0.key) }
+            let covers = Array(leading.compactMap(\.coverAssetIDs.first).prefix(CollectionsController.coverDepth))
 
             let next = Self.next(pattern, after: todayNumber, holidays: calendar)
             let tradition = Tradition(
