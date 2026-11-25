@@ -172,6 +172,10 @@ RUN version="$(dpkg-query -W -f='${Version}' libheif1)" \
 # has to come out near white and gray near the middle, about 232 and 101 of
 # 255, not the 191 and 97 they keep untoned. The server checks its own chain
 # at boot as well, and Scripts/smoke-poster.sh checks that it's this one.
+# Then the same frames through the chain a face circle is cut with, which is
+# this one without its first step (full size, `toneMapFilter(fit: nil)`), into
+# a PNG as a face's frame is written: a face whose chain failed on the NAS
+# would keep a gray circle under its new version, and nothing would retry it.
 RUN chain="scale=w='if(gte(iw,ih),min(2048,trunc(iw/2)*2),-2)':h='if(gte(iw,ih),-2,min(2048,trunc(ih/2)*2))':flags=lanczos,zscale=tin=arib-std-b67:pin=bt2020:min=bt2020nc:rin=limited:t=linear:p=bt2020:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:param=0.6:desat=0:peak=4.926,zscale=t=iec61966-2-1:d=error_diffusion,format=gbrp"; \
     for filter in zscale tonemap; do \
       ffmpeg -hide_banner -filters 2>/dev/null | awk '{ print $2 }' | grep -qx "$filter" \
@@ -187,7 +191,19 @@ RUN chain="scale=w='if(gte(iw,ih),min(2048,trunc(iw/2)*2),-2)':h='if(gte(iw,ih),
     rm -f /tmp/hdr-poster.jpg; \
     awk -v w="$white" -v g="$gray" 'BEGIN { exit !(w >= 215 && w <= 250 && g >= 85 && g <= 120) }' \
       || { echo "ERROR: an HDR poster's white came out $white and its gray $gray of 255, not about 232 and 101"; exit 1; }; \
-    echo "ffmpeg: tone-maps HDR posters, white $white and gray $gray of 255"
+    echo "ffmpeg: tone-maps HDR posters, white $white and gray $gray of 255"; \
+    face="${chain#*lanczos,}"; \
+    flevel() { \
+      ffmpeg -v error -y -f lavfi -i "nullsrc=s=64x64:d=1,format=yuv420p10le,lutyuv=y=$1:u=512:v=512" \
+        -frames:v 1 -vf "$face" /tmp/hdr-face.png \
+      && vips avg /tmp/hdr-face.png; \
+    }; \
+    fwhite="$(flevel 721)" && fgray="$(flevel 397)" \
+      || { echo "ERROR: ffmpeg can't tone-map an HLG frame into a face"; exit 1; }; \
+    rm -f /tmp/hdr-face.png; \
+    awk -v w="$fwhite" -v g="$fgray" 'BEGIN { exit !(w >= 215 && w <= 250 && g >= 85 && g <= 120) }' \
+      || { echo "ERROR: an HDR face's white came out $fwhite and its gray $fgray of 255, not about 232 and 101"; exit 1; }; \
+    echo "ffmpeg: tone-maps HDR faces, white $fwhite and gray $fgray of 255"
 
 RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app vapor
 

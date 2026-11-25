@@ -356,7 +356,9 @@ faces are used for anything.
      from a photo their phone rated well. Someone with no clean face gets
      their best one anyway. A face small in its photo is cut from a bigger
      render of it (up to 4,096 pixels, never past the photo's own size), so
-     the circle is real pixels rather than enlarged ones. Crop version 4.
+     the circle is real pixels rather than enlarged ones. Crop version 4,
+     and 5 for a face cut from an HDR video, whose frame is tone-mapped the
+     way posters are, at full size (2026-11-25, `FaceCrop.hdrVideoVersion`).
    - **Circles cut ahead** (`FaceCropWarmer`, 2026-11-10). Cutting a circle
      takes a second or more on the NAS's Celeron, and version 4 made every
      circle new, so scrolling People showed gray circles filling in a few
