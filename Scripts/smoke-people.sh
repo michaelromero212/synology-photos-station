@@ -15,6 +15,8 @@
 #  - a photo's people, and correcting them: someone else, someone new, nobody;
 #  - a face lying on its side is stood up in its picture, and an upright one
 #    isn't turned;
+#  - a face from HDR video moves to crop version 5 once its clip is measured,
+#    and its v4 circles go; a face from SDR video stays at 4;
 #  - who was there, under a day's title; a birthday named for whose it was,
 #    with the age a child turned, from the cake where two photos of it say so
 #    and from first appearance otherwise; a family's Christmas under their
@@ -128,9 +130,11 @@ class H(http.server.BaseHTTPRequestHandler):
                           "score": 0.95, "size": size, "sharpness": sharp,
                           "embedding": b64(face_vector(who, int(hashlib.sha256((sha + str(i)).encode()).hexdigest()[:8], 16)))})
         scene = b64(unit(np.random.default_rng(int(sha[:8], 16)).standard_normal(768)))
+        # A video's faces are in the frame a second in.
+        ms = 1000 if request.get("kind") == "video" else None
         self.reply({"protocol": 1, "analyzer": 1, "timings": {"totalMS": 1},
                     "models": {"scene": "siglip2-base-patch32-256@0ddb7507cfcb"},
-                    "frames": [{"ms": None, "width": 640, "height": 480, "scene": scene, "faces": faces}]})
+                    "frames": [{"ms": ms, "width": 640, "height": 480, "scene": scene, "faces": faces}]})
 socketserver.UnixStreamServer(sock, H).serve_forever()
 PY
 rm -f "$SOCK"; "$PY" "$ROOT/fake.py" "$SOCK" "$ROOT/plan.json" > "$ROOT/analyzer.log" 2>&1 & ANALYZER=$!
@@ -300,6 +304,80 @@ along(){ curl -s "$API/v1/spaces/$P1/assets/$1/faces/0" -H "$A1" -o "$ROOT/files
     "$(vips getpoint "$ROOT/files/along.jpg" 8 8)" "$(vips getpoint "$ROOT/files/along.jpg" 247 8)"; }
 check "a face lying on its side is stood up" "green" "$(along "$TILTED")"
 check "an upright face isn't turned" "red" "$(along "$UPRIGHT")"
+
+echo "Faces from HDR video"
+# An iPhone records HLG, and a face cut from its frame as it was came out gray
+# and flat. Such a face is cut from the frame tone-mapped, and only those faces
+# move to crop version 5, going by the clip's measured range: one the NAS
+# hasn't measured yet stays at 4 until it is. Homebrew's ffmpeg has no zscale,
+# so here the frame is taken the plain way, and the v5 circle is still made;
+# how it looks is for the NAS's own ffmpeg to show.
+#
+# clip <name> <day> <transfer, or sdr> <faces…> → asset id, with the plan
+# recorded. HDR as an iPhone records it: 10-bit, BT.2020, HLG (arib-std-b67),
+# in HEVC where there's an encoder for it. Tagged on the frames as well as the
+# output: ffmpeg 8 takes the colors from the frames, and the test pattern's
+# have none.
+case "$(ffmpeg -hide_banner -encoders 2>/dev/null)" in
+  *libx265*) HEVC="-c:v libx265 -preset ultrafast -x265-params log-level=error -tag:v hvc1" ;;
+  *) HEVC="-c:v libx264 -profile:v high10" ;;
+esac
+clip(){
+  local name=$1 day=$2 trc=$3; shift 3
+  local f="$ROOT/files/$name.mov" sha size up
+  if [ "$trc" = sdr ]; then
+    ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=30:duration=2" -c:v libx264 -pix_fmt yuv420p "$f"
+  else
+    ffmpeg -v error -y -f lavfi -i "testsrc2=size=640x360:rate=30:duration=2" \
+      -vf "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=$trc:colorspace=bt2020nc:range=tv" \
+      $HEVC -color_primaries bt2020 -color_trc "$trc" -colorspace bt2020nc -color_range tv "$f"
+  fi
+  sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
+  python3 -c "import json,os,sys; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {}; d[sys.argv[2]]=sys.argv[3:]; json.dump(d, open(p,'w'))" "$ROOT/plan.json" "$sha" "$@"
+  up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$A1" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$P1\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$name.mov\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
+  curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$A1" --data-binary "@$f" >/dev/null
+  curl -s -X POST "$API/v1/uploads/$up/commit" -H "$A1" -H 'Content-Type: application/json' \
+    -d "{\"spaceID\":\"$P1\",\"mediaType\":\"video\",\"mime\":\"video/quicktime\",\"width\":640,\"height\":360,\"durationMs\":2000,\"capturedAt\":\"2025-${day}T12:00:00Z\",\"capturedTZOffset\":0,\"isRaw\":false,\"burstPick\":false}" | jq '["assetID"]'
+}
+# The circles cut from a file, by version and size: "face4 face4-768px".
+circles(){ (cd "$ROOT/blobroot/derivatives/${1:0:2}/${1:2:2}/$1" 2>/dev/null && ls face*.jpg 2>/dev/null) \
+  | sed -E 's/^(face[0-9]+)-[0-9]+(-[0-9]+){4}(-768px)?\.jpg$/\1\3/' | sort | tr '\n' ' ' | sed 's/ $//'; }
+face_key(){ curl -s "$API/v1/spaces/$P1/people" -H "$A1" | python3 -c 'import sys,json; print([p["face"] for p in json.load(sys.stdin)["people"] if p.get("name") == sys.argv[1]][0])' "$1"; }
+HDRV=$(clip hlg "06-20" arib-std-b67 stranger); SDRV=$(clip sdr "06-21" sdr stranger)
+# Each clip's face found, and every job of theirs over: the ladder job reads
+# the range again, and mustn't once it's set by hand below.
+clips_settled(){
+  [ "$(q "SELECT count(*) FROM nas_faces f JOIN assets a ON a.sha256 = f.sha256
+          WHERE a.id IN ('$HDRV', '$SDRV') AND f.frame_ms = 1000")" = "2" ] &&
+  [ "$(q "SELECT count(*) FROM derivation_jobs WHERE asset_id IN ('$HDRV', '$SDRV')
+          AND (state IN ('pending', 'running') OR (state = 'failed' AND attempts < 3))")" = "0" ]
+}
+until_true 120 clips_settled
+HSHA=$(q "SELECT sha256 FROM assets WHERE id = '$HDRV'"); SSHA=$(q "SELECT sha256 FROM assets WHERE id = '$SDRV'")
+check "each clip's range is measured as its poster is made" "hdr standard" \
+  "$(q "SELECT dynamic_range FROM assets WHERE id = '$HDRV'") $(q "SELECT dynamic_range FROM assets WHERE id = '$SDRV'")"
+# As the NAS has the clips its background pass hasn't measured yet. Then each
+# face is someone new, so each is a person's circle.
+q "UPDATE assets SET dynamic_range = NULL WHERE id = '$HDRV'" >/dev/null
+curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/assets/$HDRV/faces/0/person" -H "$A1" -H 'Content-Type: application/json' -d '{"newName":"Hana"}'
+curl -s -o /dev/null -X PUT "$API/v1/spaces/$P1/assets/$SDRV/faces/0/person" -H "$A1" -H 'Content-Type: application/json' -d '{"newName":"Sid"}'
+check "not yet measured, an HDR clip's face is still at v4" "${HSHA:0:12}-0-v4" "$(face_key Hana)"
+check "an SDR clip's face is at v4" "${SSHA:0:12}-0-v4" "$(face_key Sid)"
+until_true 30 '[ "$(circles "$HSHA")|$(circles "$SSHA")" = "face4 face4-768px|face4 face4-768px" ]'
+check "and both are cut ahead, small and large" "face4 face4-768px|face4 face4-768px" "$(circles "$HSHA")|$(circles "$SSHA")"
+# Then its poster or ladder job measures it.
+q "UPDATE assets SET dynamic_range = 'hdr' WHERE id = '$HDRV'" >/dev/null
+check "measured HDR, its face's key moves to v5" "${HSHA:0:12}-0-v5" "$(face_key Hana)"
+check "the SDR clip's stays at v4" "${SSHA:0:12}-0-v4" "$(face_key Sid)"
+HANA=$(q "SELECT id FROM people WHERE user_id = '$U1' AND name = 'Hana'")
+check "its circle is served, small and large" "200 200" \
+  "$(code "$API/v1/spaces/$P1/people/$HANA/face" -H "$A1") $(code "$API/v1/spaces/$P1/people/$HANA/face?size=768" -H "$A1")"
+check "cut at v5, and its v4 circles from the gray frame are gone" "face5 face5-768px" "$(circles "$HSHA")"
+check "the SDR clip's v4 circles stay" "face4 face4-768px" "$(circles "$SSHA")"
+has "here the frame is taken the plain way, and the log says which face and why" \
+  "people: face ${HSHA:0:12}-0 from an HDR clip not tone-mapped, cut as before: this ffmpeg can't tone-map (No such filter: 'zscale')" \
+  "$(cat "$ROOT/server.log")"
 
 echo "Not this person, and the same person"
 check "not Emma takes the photo out" "8" "$(curl -s -X POST "$API/v1/spaces/$P1/people/$E/remove" -H "$A1" -H 'Content-Type: application/json' -d "{\"assetIDs\":[\"${EMMA[5]}\"]}" | jq '["photoCount"]')"

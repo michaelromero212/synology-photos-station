@@ -59,11 +59,14 @@ struct PeopleController: RouteCollection {
     /// biggest, the most like them, from a photo the owner's phone rated
     /// well. Someone with no clean face gets their best one anyway: level
     /// first, then a photo, then the clearest.
+    ///
+    /// With the crop version its circle is cut at, decided as `FaceCrop.crop`
+    /// decides the file's name (see `FaceCrop.version`).
     static func covers(
         of people: [UUID], userID: UUID, spaceID: UUID, on sql: any SQLDatabase
-    ) async throws -> [UUID: (sha256: String, ordinal: Int)] {
+    ) async throws -> [UUID: (sha256: String, ordinal: Int, version: Int)] {
         guard !people.isEmpty else { return [:] }
-        struct Cover: Decodable { let personID: UUID; let sha256: String; let ordinal: Int }
+        struct Cover: Decodable { let personID: UUID; let sha256: String; let ordinal: Int; let isHDRVideo: Bool }
         // Landmarks are x, y pairs in fractions of the frame: right eye, left
         // eye, nose, then the mouth's corners. Scaled by the photo's own
         // width and height, which are as it's shown, so angles are true.
@@ -112,13 +115,23 @@ struct PeopleController: RouteCollection {
                            AND cy - side / 2 >= 0 AND cy + side / 2 <= h AS clean,
                        score * least(size_px, 200) * (0.5 + sharper) * likeness * (2 + aesthetic) AS quality
                 FROM measured
+            ),
+            picked AS (
+                SELECT DISTINCT ON (person_id) person_id, sha256, ordinal
+                FROM judged
+                ORDER BY person_id, clean DESC, (clean AND recent) DESC, level DESC, still DESC,
+                         quality DESC, sha256, ordinal
             )
-            SELECT DISTINCT ON (person_id) person_id AS "personID", sha256, ordinal::int AS ordinal
-            FROM judged
-            ORDER BY person_id, clean DESC, (clean AND recent) DESC, level DESC, still DESC,
-                     quality DESC, sha256, ordinal
+            -- Whether it's an HDR video's, for its key, only for the face
+            -- picked: one look-up per person, not per face.
+            SELECT person_id AS "personID", sha256, ordinal::int AS ordinal,
+                   \(unsafeRaw: FaceCrop.hdrVideo(sha256: "picked.sha256")) AS "isHDRVideo"
+            FROM picked
             """).all(decoding: Cover.self)
-        return Dictionary(rows.map { ($0.personID, ($0.sha256, $0.ordinal)) }, uniquingKeysWith: { first, _ in first })
+        return Dictionary(
+            rows.map { ($0.personID, ($0.sha256, $0.ordinal, FaceCrop.version(isHDRVideo: $0.isHDRVideo))) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     /// A face placed this close to someone's others is surely them.
@@ -287,7 +300,7 @@ struct PeopleController: RouteCollection {
         // this seldom looks for anyone more.
         let wanted = Array(Set(rows.map(\.id) + rows.compactMap(\.maybeID)))
         let cover = try await Self.covers(of: wanted, userID: userID, spaceID: spaceID, on: sql)
-            .mapValues { "\($0.sha256.prefix(12))-\($0.ordinal)-v\(FaceCrop.version)" }
+            .mapValues { "\($0.sha256.prefix(12))-\($0.ordinal)-v\($0.version)" }
         return rows.map { row in
             var maybe: PersonMaybe?
             if let id = row.maybeID, let name = row.maybeName {
@@ -857,7 +870,41 @@ enum FaceCrop {
     /// cache goes on serving the old ones. 2: leveled by the eyes. 3: a
     /// photo's rotation tag applied once, not twice (see the last step). 4: a
     /// face small in its photo cut from a bigger render.
+    ///
+    /// 5, `hdrVideoVersion`: a face from an HDR video, cut from its frame
+    /// tone-mapped to SDR, where it came out gray and flat (see
+    /// `extractFrame`). Only those faces changed, so only they moved: a
+    /// photo's face, an SDR clip's and one from a clip not yet measured stay
+    /// at 4, and none of them is cut again, or fetched again by every device,
+    /// for the same picture. Which a face is comes from the database
+    /// (`hdrVideo`), asked alike for its key (`PeopleController.covers`) and
+    /// its file name (`crop`), so the two never disagree. When a clip's
+    /// poster or ladder job first measures it as HDR, its faces' keys move to
+    /// 5 and every device fetches them anew; the v5 circle is cut then, and
+    /// the gray v4 ones are deleted.
     static let version = 4
+    static let hdrVideoVersion = 5
+
+    /// A face's version: `hdrVideoVersion` for one from an HDR video,
+    /// `version` for every other.
+    static func version(isHDRVideo: Bool) -> Int {
+        isHDRVideo ? hdrVideoVersion : version
+    }
+
+    /// Whether a file's faces are an HDR video's, as SQL for the column that
+    /// holds its content hash: a video with a row measured HDR. One file can
+    /// have several rows, a shared library's copy or one an import kept, and
+    /// each is measured on its own, while its circles are one set beside its
+    /// thumbnails. So this goes by the file, not by whichever of its rows a
+    /// query reads: a key at 5 is never served the gray circle at 4. A clip
+    /// not yet measured (NULL) isn't one, until it is.
+    static func hdrVideo(sha256 column: String) -> String {
+        """
+        EXISTS (SELECT 1 FROM assets clip WHERE clip.sha256 = \(column)
+                AND clip.media_type = 'video' AND clip.dynamic_range = 'hdr')
+        """
+    }
+
     /// The most a photo is rendered at for a small face: a 48-megapixel
     /// photo's long side is about 8,000.
     static let largestRender = 4096
@@ -879,30 +926,40 @@ enum FaceCrop {
     ) async throws -> (url: URL, made: Bool) {
         let isLarge = size != Self.size
         let size = isLarge ? largeSize : Self.size
-        struct Face: Decodable { let box: [Float]; let landmarks: [Float]; let frameMS: Int? }
+        // The face and its file in one query: the file decides the version
+        // in the name, and a circle already made still costs one query and a
+        // file check.
+        struct Face: Decodable {
+            let box: [Float]
+            let landmarks: [Float]
+            let frameMS: Int?
+            let storagePath: String?
+            let blobExt: String
+            let mediaType: String
+            let isHDRVideo: Bool
+        }
         guard let face = try await app.sql.raw("""
-            SELECT box, landmarks, frame_ms AS "frameMS" FROM nas_faces
-            WHERE user_id = \(bind: userID) AND sha256 = \(bind: sha256) AND ordinal = \(bind: ordinal)
+            SELECT f.box, f.landmarks, f.frame_ms AS "frameMS",
+                   a.storage_path AS "storagePath", a.blob_ext AS "blobExt", a.media_type AS "mediaType",
+                   \(unsafeRaw: hdrVideo(sha256: "f.sha256")) AS "isHDRVideo"
+            FROM nas_faces f
+            JOIN assets a ON a.sha256 = f.sha256
+            WHERE f.user_id = \(bind: userID) AND f.sha256 = \(bind: sha256) AND f.ordinal = \(bind: ordinal)
+            LIMIT 1
             """).first(decoding: Face.self), face.box.count == 4
         else { throw Abort(.notFound) }
         let directory = app.blobStore.derivativeDirectory(sha256: sha256)
         let boxKey = face.box.map { String(Int(($0 * 10_000).rounded())) }.joined(separator: "-")
-        let target = directory.appendingPathComponent(
-            "face\(version)-\(ordinal)-\(boxKey)\(isLarge ? "-\(size)px" : "").jpg"
-        )
+        let target = directory.appendingPathComponent(fileName(
+            version: version(isHDRVideo: face.isHDRVideo), ordinal: ordinal, boxKey: boxKey, size: size
+        ))
         if FileManager.default.fileExists(atPath: target.path) { return (target, false) }
 
-        struct File: Decodable { let storagePath: String?; let blobExt: String; let mediaType: String }
-        guard let file = try await app.sql.raw("""
-            SELECT storage_path AS "storagePath", blob_ext AS "blobExt", media_type AS "mediaType"
-            FROM assets WHERE sha256 = \(bind: sha256) LIMIT 1
-            """).first(decoding: File.self)
-        else { throw Abort(.notFound) }
         let source: URL
-        if let library = file.storagePath, FileManager.default.fileExists(atPath: library) {
+        if let library = face.storagePath, FileManager.default.fileExists(atPath: library) {
             source = URL(fileURLWithPath: library)
         } else {
-            source = app.blobStore.blobPath(sha256: sha256, fileExtension: file.blobExt)
+            source = app.blobStore.blobPath(sha256: sha256, fileExtension: face.blobExt)
         }
         guard FileManager.default.fileExists(atPath: source.path) else { throw Abort(.notFound) }
 
@@ -914,11 +971,12 @@ enum FaceCrop {
         // Upright, as the analyzer saw it: vips turns photos by their EXIF,
         // ffmpeg turns video frames by their rotation.
         var still = source
-        if file.mediaType == MediaType.video.rawValue {
+        if face.mediaType == MediaType.video.rawValue {
             let frame = work.appendingPathComponent("frame.png")
-            let seconds = String(format: "%.3f", Double(face.frameMS ?? 0) / 1000)
-            try await Shell.runChecked("ffmpeg", ["-nostdin", "-loglevel", "error", "-ss", seconds,
-                                                  "-i", source.path, "-frames:v", "1", "-y", frame.path], timeout: 120)
+            try await extractFrame(
+                of: source, atMS: face.frameMS ?? 0, to: frame, isHDR: face.isHDRVideo,
+                face: "\(sha256.prefix(12))-\(ordinal)", logger: app.logger
+            )
             still = frame
         }
         var upright = work.appendingPathComponent("upright.v")
@@ -970,7 +1028,64 @@ enum FaceCrop {
         )
         try? FileManager.default.removeItem(at: target)
         try FileManager.default.moveItem(at: partial, to: target)
+        // Its v4 circles, both sizes, were cut from the gray frame, and
+        // nothing asks for them once its key has moved, so they go now rather
+        // than stay beside the new ones as waste.
+        if face.isHDRVideo {
+            for old in [Self.size, largeSize] {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(
+                    fileName(version: version, ordinal: ordinal, boxKey: boxKey, size: old)
+                ))
+            }
+        }
         return (target, true)
+    }
+
+    /// A crop's file name. The small one keeps the name it always had.
+    private static func fileName(version: Int, ordinal: Int, boxKey: String, size: Int) -> String {
+        "face\(version)-\(ordinal)-\(boxKey)\(size == Self.size ? "" : "-\(size)px").jpg"
+    }
+
+    /// A video face's frame, as a PNG. An HDR clip's is tone-mapped to SDR as
+    /// its poster is (`Derivatives.toneMapFilter`): untoned, an iPhone's HLG
+    /// frame is a light gray, and its faces came out gray and flat. Unlike the
+    /// poster's, it stays at its own size, as a small face is cut from up to
+    /// `largestRender`. Where this machine can't tone-map (Homebrew's ffmpeg
+    /// has no zscale), or ffmpeg fails at it, the frame is taken the plain way,
+    /// as every face's was before, so a circle is still made, and the log says
+    /// which face.
+    private static func extractFrame(
+        of video: URL, atMS ms: Int, to frame: URL, isHDR: Bool, face: String, logger: Logger
+    ) async throws {
+        let seconds = String(format: "%.3f", Double(ms) / 1000)
+        let arguments = ["-nostdin", "-loglevel", "error", "-ss", seconds,
+                         "-i", video.path, "-frames:v", "1", "-y"]
+        if isHDR {
+            guard let problem = await toneMapFrame(arguments, of: video, to: frame) else { return }
+            logger.warning("people: face \(face) from an HDR clip not tone-mapped, cut as before: \(problem)")
+        }
+        try await Shell.runChecked("ffmpeg", arguments + [frame.path], timeout: 120)
+    }
+
+    /// Writes an HDR clip's frame tone-mapped: nil once it's written,
+    /// otherwise why it wasn't. One ffprobe for the colors the clip is tagged
+    /// with, which the filters say outright.
+    private static func toneMapFrame(_ arguments: [String], of video: URL, to frame: URL) async -> String? {
+        if let problem = await Derivatives.toneMapProblem() { return problem }
+        let signal = await HDRVideo.signal(video)
+        guard signal.range.isHDR else { return "ffprobe doesn't read it as HDR" }
+        do {
+            try await Shell.runChecked(
+                "ffmpeg", arguments + ["-vf", Derivatives.toneMapFilter(for: signal, fit: nil), frame.path],
+                timeout: 120
+            )
+        } catch {
+            return "ffmpeg failed to tone-map it: \(Derivatives.reason(error))"
+        }
+        // Not just present: a frame ffmpeg couldn't filter can leave an empty
+        // file and still exit 0.
+        let size = (try? FileManager.default.attributesOfItem(atPath: frame.path))?[.size] as? NSNumber
+        return (size?.int64Value ?? 0) > 0 ? nil : "ffmpeg wrote nothing"
     }
 
     /// The clockwise quarter turn (`vips rot`'s `d90`, `d180` or `d270`) that

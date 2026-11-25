@@ -367,7 +367,7 @@ enum Derivatives {
             if let problem = await toneMapProblem() {
                 poster.problem = problem
             } else {
-                let filter = toneMapFilter(for: signal)
+                let filter = toneMapFilter(for: signal, fit: previewSize)
                 var failure = "no frame came out"
                 for time in times {
                     guard let problem = await writeFrame(of: video, at: time, to: destination, filter: filter)
@@ -423,7 +423,7 @@ enum Derivatives {
 
     /// The first thing ffmpeg said, which with `-v error` is why it stopped,
     /// without the filter's address it starts with.
-    private static func reason(_ error: Error) -> String {
+    static func reason(_ error: Error) -> String {
         guard case ShellError.failed(_, let status, let stderr) = error else {
             return String(describing: error)
         }
@@ -554,7 +554,8 @@ enum Derivatives {
     /// Where the tone curve starts to bend, as a fraction of SDR white.
     static let posterKnee = 0.6
 
-    /// The ffmpeg filters that make an HDR frame its SDR poster.
+    /// The ffmpeg filters that make an HDR frame its SDR poster, or the SDR
+    /// frame a face's circle is cut from (`FaceCrop`).
     ///
     /// An iPhone records HLG: a signal for a bright HDR screen, with reference
     /// white at 75% and the rest of the range left for highlights. Written to a
@@ -562,9 +563,12 @@ enum Derivatives {
     /// BT.709's come out pale: the poster was gray and flat. These turn it into
     /// the picture Photos shows on an SDR screen.
     ///
-    /// 1. Scaled to fit `previewSize`, the largest anything is made from the
-    ///    poster, before any of it is in floating point. At 4K each stage is
-    ///    about 100 MB and four times the work, on a J4125 running four lanes.
+    /// 1. Scaled to fit `fit`, before any of it is in floating point: for a
+    ///    poster `previewSize`, the largest anything is made from it. At 4K
+    ///    each stage is about 100 MB and four times the work, on a J4125
+    ///    running four lanes. A face's frame isn't scaled (`fit` nil): a
+    ///    small face is cut from up to `FaceCrop.largestRender`, so a 4K
+    ///    frame has to stay 4K.
     /// 2. To linear light, with the clip's transfer, colors, matrix and range
     ///    said outright, and the colors said again for the frame it hands on.
     ///    ffmpeg 4.4's zscale otherwise takes them from the frame, and stops
@@ -585,15 +589,17 @@ enum Derivatives {
     ///    numbers. Handed video's BT.709 YCbCr instead, a JPEG reader shifts
     ///    every color a little.
     ///
-    /// Server/Dockerfile runs this chain for an iPhone clip's tags and fails
-    /// the image if white and gray don't come out where they should.
-    static func toneMapFilter(for signal: HDRVideo.Signal) -> String {
-        let side = previewSize
+    /// Server/Dockerfile runs this chain for an iPhone clip's tags, as a
+    /// poster's, and fails the image if white and gray don't come out where
+    /// they should. A face's is the same chain without the first step.
+    static func toneMapFilter(for signal: HDRVideo.Signal, fit: Int?) -> String {
         let range = signal.isFullRange ? "full" : "limited"
         let peak = String(format: "%.3f", posterHDRPeak / posterReferenceWhite)
-        return [
+        let scale = fit.map { side in
             "scale=w='if(gte(iw,ih),min(\(side),trunc(iw/2)*2),-2)'"
-                + ":h='if(gte(iw,ih),-2,min(\(side),trunc(ih/2)*2))':flags=lanczos",
+                + ":h='if(gte(iw,ih),-2,min(\(side),trunc(ih/2)*2))':flags=lanczos"
+        }
+        return ([scale].compactMap { $0 } + [
             "zscale=tin=\(signal.range.transfer):pin=\(signal.primaries):min=\(signal.matrix)"
                 + ":rin=\(range):t=linear:p=\(signal.primaries):npl=\(Int(posterReferenceWhite))",
             "format=gbrpf32le",
@@ -601,13 +607,14 @@ enum Derivatives {
             "tonemap=tonemap=mobius:param=\(posterKnee):desat=0:peak=\(peak)",
             "zscale=t=iec61966-2-1:d=error_diffusion",
             "format=gbrp",
-        ].joined(separator: ",")
+        ]).joined(separator: ",")
     }
 
     /// Nil when this machine can tone-map an HDR poster, otherwise why not.
     /// Checked once, by putting a frame of 10-bit test pattern through
     /// `toneMapFilter` into a JPEG, as a poster is written. Homebrew's ffmpeg
-    /// has no zscale, so on a Mac every HDR clip gets the plain poster.
+    /// has no zscale, so on a Mac every HDR clip gets the plain poster, and
+    /// its faces are cut from the plain frame.
     ///
     /// `FRAMESTATION_HDR_POSTERS` overrides it: `off` to write every poster
     /// the plain way, `on` to tone-map without the check.
@@ -642,7 +649,8 @@ enum Derivatives {
                 try await Shell.runChecked(
                     "ffmpeg",
                     ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=256x144:rate=1:duration=1",
-                     "-frames:v", "1", "-vf", "format=yuv420p10le," + Derivatives.toneMapFilter(for: iPhone),
+                     "-frames:v", "1", "-vf",
+                     "format=yuv420p10le," + Derivatives.toneMapFilter(for: iPhone, fit: Derivatives.previewSize),
                      "-q:v", "3", probe.path],
                     timeout: 60
                 )
