@@ -905,6 +905,11 @@ struct AlbumsView: View {
 
     /// Personal albums, and only those. New Album's "Personal" says this is
     /// where one goes, and the note under the title says who sees them.
+    ///
+    /// One row, as every other section has, with the rest behind the title.
+    /// It used to lay out every album in the page's columns, so the page and
+    /// the screen behind the › showed the same four, and he asked for a single
+    /// row here and the whole set there (2026-11-25).
     private func albums(_ store: AlbumStore, layout: CollectionsLayout) -> some View {
         let albums = store.personal
         let side = layout.side(.medium)
@@ -916,8 +921,8 @@ struct AlbumsView: View {
             layout: layout
         ) {
             if !albums.isEmpty {
-                cardGrid(layout, .medium) {
-                    ForEach(albums) { album in
+                cardRow(layout, .medium) {
+                    ForEach(oneRow(albums, layout)) { album in
                         AlbumCell(session: session, album: album, store: store, side: side)
                     }
                 }
@@ -957,13 +962,15 @@ struct AlbumsView: View {
         let side = layout.side(.medium)
         // No line saying who can see these. It said what "shared" already
         // says, under the one title on the page that says it.
+        //
+        // One row, with the rest behind the title, as Albums above it.
         return section(
             "shared", "Shared Albums", route: cards.isEmpty ? nil : .sharedAlbums,
             layout: layout
         ) {
             if !cards.isEmpty {
-                cardGrid(layout, .medium) {
-                    ForEach(cards) { card in
+                cardRow(layout, .medium) {
+                    ForEach(oneRow(cards, layout)) { card in
                         SharedCell(session: session, entry: card, store: store, side: side)
                     }
                 }
@@ -972,6 +979,13 @@ struct AlbumsView: View {
                     .padding(.horizontal, layout.margin)
             }
         }
+    }
+
+    /// As many of `items` as one row of the page holds: a sideways row's worth
+    /// where rows scroll, and the cards that fit across anywhere wider. The
+    /// same cut the curated sections make; the rest are behind the ›.
+    private func oneRow<Item>(_ items: [Item], _ layout: CollectionsLayout) -> [Item] {
+        Array(items.prefix(layout.scrollsSideways ? Self.shelfLimit : layout.across(.medium)))
     }
 
     /// Albums shared with people first, then each shared library and its
