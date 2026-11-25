@@ -69,9 +69,25 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     /// the hero used to crossfade through these, and motion on the card at the
     /// top of the page read as the page not having finished arriving.
     public let coverAssetIDs: [UUID]
+    /// Which thumbnail of each cover the NAS has made, index for index with
+    /// `coverAssetIDs`: its `assets.thumb_version`, as `TimelineItem` carries
+    /// it. See `covers`.
+    ///
+    /// Optional so an older server's answer still decodes, and an older app
+    /// ignores it. Missing reads as 0, which is what every cover was asked
+    /// for before this.
+    public let coverVersions: [Int]?
 
     /// The one to use where only one is wanted.
     public var coverAssetID: UUID? { coverAssetIDs.first }
+
+    /// Each cover with its thumbnail's version, best first.
+    ///
+    /// The version goes in the thumbnail's URL and cache key, so a cover the
+    /// NAS makes again (a washed-out video poster redone) is fetched fresh.
+    /// Asked for as version 0 always, it was the same key forever, and a
+    /// device kept the old picture for as long as it kept its cache.
+    public var covers: [CoverThumbnail] { CoverThumbnail.pairs(coverAssetIDs, coverVersions) }
     /// True when `title` is what somebody typed rather than what the library
     /// worked out. Lets the card offer "Rename" instead of "Name this", and
     /// lets it offer to take the name back off again.
@@ -102,7 +118,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
 
     public init(
         kind: CollectionKind, key: String, title: String,
-        subtitle: String?, count: Int, coverAssetIDs: [UUID],
+        subtitle: String?, count: Int, coverAssetIDs: [UUID], coverVersions: [Int]? = nil,
         isNamed: Bool = false, recursAnnually: Bool = false,
         kicker: String? = nil, tradition: String? = nil
     ) {
@@ -112,6 +128,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
         self.subtitle = subtitle
         self.count = count
         self.coverAssetIDs = coverAssetIDs
+        self.coverVersions = coverVersions
         self.isNamed = isNamed
         self.recursAnnually = recursAnnually
         self.kicker = kicker
@@ -122,7 +139,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     public func withKicker(_ kicker: String?) -> CollectionSummary {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            coverAssetIDs: coverAssetIDs, coverVersions: coverVersions, isNamed: isNamed,
             recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
         )
     }
@@ -131,7 +148,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     public func inTradition(_ tradition: String?) -> CollectionSummary {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            coverAssetIDs: coverAssetIDs, coverVersions: coverVersions, isNamed: isNamed,
             recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
         )
     }
@@ -140,7 +157,7 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     public func withTitle(_ title: String) -> CollectionSummary {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            coverAssetIDs: coverAssetIDs, coverVersions: coverVersions, isNamed: isNamed,
             recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
         )
     }
@@ -149,9 +166,48 @@ public struct CollectionSummary: Codable, Sendable, Hashable, Identifiable {
     public func withSubtitle(_ subtitle: String?) -> CollectionSummary {
         CollectionSummary(
             kind: kind, key: key, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: coverAssetIDs, isNamed: isNamed,
+            coverAssetIDs: coverAssetIDs, coverVersions: coverVersions, isNamed: isNamed,
             recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
         )
+    }
+
+    /// The same card under these covers, each with the version beside it.
+    /// Itself when they're the ones it has.
+    public func withCovers(_ assetIDs: [UUID], versions: [Int]?) -> CollectionSummary {
+        guard assetIDs != coverAssetIDs || versions != coverVersions else { return self }
+        return CollectionSummary(
+            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
+            coverAssetIDs: assetIDs, coverVersions: versions, isNamed: isNamed,
+            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
+        )
+    }
+
+    /// The same card with each cover's version from `versions`, by asset; 0
+    /// for one it doesn't hold.
+    public func withCoverVersions(_ versions: [UUID: Int]) -> CollectionSummary {
+        withCovers(coverAssetIDs, versions: coverAssetIDs.map { versions[$0] ?? 0 })
+    }
+}
+
+/// A cover as the app fetches it: the photograph, and which of its
+/// thumbnails the NAS has made.
+public struct CoverThumbnail: Hashable, Sendable {
+    public let assetID: UUID
+    /// `assets.thumb_version`. 0 from a server that doesn't say.
+    public let version: Int
+
+    public init(assetID: UUID, version: Int = 0) {
+        self.assetID = assetID
+        self.version = version
+    }
+
+    /// `assetIDs` with `versions` beside them, index for index, and 0 past
+    /// the end of `versions`, or without them.
+    static func pairs(_ assetIDs: [UUID], _ versions: [Int]?) -> [CoverThumbnail] {
+        assetIDs.enumerated().map { index, assetID in
+            let version = versions.flatMap { index < $0.count ? $0[index] : nil } ?? 0
+            return CoverThumbnail(assetID: assetID, version: version)
+        }
     }
 }
 
@@ -379,6 +435,56 @@ public struct CollectionsResponse: Codable, Sendable, Hashable {
         hero == nil && trips.isEmpty && days.isEmpty && revisits.isEmpty
             && (people?.isEmpty ?? true)
     }
+
+    /// Every card in the answer, wherever it is: each section's, and each
+    /// year of a tradition and its naming card. Not the traditions' own
+    /// covers, which aren't on a card.
+    private var everyCard: [CollectionSummary] {
+        [hero, recentlyDeleted, recentlyAdded, favorites].compactMap { $0 }
+            + trips + days + revisits + mediaTypes
+            + (allTrips ?? []) + (allOccasions ?? []) + (featured ?? [])
+            + (wideTrips ?? []) + (wideDays ?? [])
+            + (traditions ?? []).flatMap { $0.years + [$0.naming].compactMap { $0 } }
+    }
+
+    /// Every photograph the answer draws as a cover, or holds in reserve for
+    /// one, once each: what the server looks up `coverVersions` for, in one
+    /// query for the whole page. Not the People row's faces, which are
+    /// pictures of their own (`PersonSummary.face`).
+    ///
+    /// A section added to this answer is added to `everyCard` and to
+    /// `withCoverVersions` as well, or its covers go back to being asked for as
+    /// version 0.
+    public var allCoverAssetIDs: Set<UUID> {
+        var assetIDs = Set(everyCard.flatMap(\.coverAssetIDs))
+        for tradition in traditions ?? [] { assetIDs.formUnion(tradition.coverAssetIDs) }
+        return assetIDs
+    }
+
+    /// The same answer with every cover's version from `versions`, by asset:
+    /// each section's cards, and each tradition, its years and its naming
+    /// card. 0 for an asset it doesn't hold.
+    public func withCoverVersions(_ versions: [UUID: Int]) -> CollectionsResponse {
+        func fill(_ card: CollectionSummary) -> CollectionSummary { card.withCoverVersions(versions) }
+        return CollectionsResponse(
+            hero: hero.map(fill),
+            trips: trips.map(fill),
+            days: days.map(fill),
+            revisits: revisits.map(fill),
+            mediaTypes: mediaTypes.map(fill),
+            recentlyDeleted: recentlyDeleted.map(fill),
+            recentlyAdded: recentlyAdded.map(fill),
+            favorites: favorites.map(fill),
+            allTrips: allTrips?.map(fill),
+            allOccasions: allOccasions?.map(fill),
+            featured: featured?.map(fill),
+            traditions: traditions?.map { $0.withCoverVersions(versions) },
+            wideTrips: wideTrips?.map(fill),
+            wideDays: wideDays?.map(fill),
+            people: people,
+            together: together
+        )
+    }
 }
 
 // MARK: - Over the Years
@@ -402,6 +508,9 @@ public struct Tradition: Codable, Sendable, Hashable, Identifiable {
     public let count: Int
     /// A photo from one of its years, a different year each day, best first.
     public let coverAssetIDs: [UUID]
+    /// Each cover's thumbnail version, index for index with `coverAssetIDs`.
+    /// Optional, and missing reads as 0, as `CollectionSummary.coverVersions`.
+    public let coverVersions: [Int]?
     /// Each year of it, oldest first (newest first before November 2026):
     /// the latest 25, read as a story. Kind `.day`, keyed by its days, or
     /// `.trip` for a trip taken every year, so each opens on its own photos.
@@ -417,8 +526,12 @@ public struct Tradition: Codable, Sendable, Hashable, Identifiable {
     /// The one to use where only one is wanted.
     public var coverAssetID: UUID? { coverAssetIDs.first }
 
+    /// Each cover with its thumbnail's version. See `CollectionSummary.covers`.
+    public var covers: [CoverThumbnail] { CoverThumbnail.pairs(coverAssetIDs, coverVersions) }
+
     public init(
         id: String, title: String, subtitle: String?, count: Int, coverAssetIDs: [UUID],
+        coverVersions: [Int]? = nil,
         years: [CollectionSummary], next: String? = nil, naming: CollectionSummary? = nil
     ) {
         self.id = id
@@ -426,13 +539,26 @@ public struct Tradition: Codable, Sendable, Hashable, Identifiable {
         self.subtitle = subtitle
         self.count = count
         self.coverAssetIDs = coverAssetIDs
+        self.coverVersions = coverVersions
         self.years = years
         self.next = next
         self.naming = naming
     }
 
+    /// The same tradition with each cover's version from `versions`, by
+    /// asset: its own, each year's and its naming card's. 0 for an asset it
+    /// doesn't hold.
+    public func withCoverVersions(_ versions: [UUID: Int]) -> Tradition {
+        Tradition(
+            id: id, title: title, subtitle: subtitle, count: count, coverAssetIDs: coverAssetIDs,
+            coverVersions: coverAssetIDs.map { versions[$0] ?? 0 },
+            years: years.map { $0.withCoverVersions(versions) }, next: next,
+            naming: naming?.withCoverVersions(versions)
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, title, subtitle, count, coverAssetIDs, years, next, naming
+        case id, title, subtitle, count, coverAssetIDs, coverVersions, years, next, naming
     }
 
     /// Year by year, as the page reads its cards: a year this build can't
@@ -445,6 +571,7 @@ public struct Tradition: Codable, Sendable, Hashable, Identifiable {
         subtitle = (try? container.decodeIfPresent(String.self, forKey: .subtitle)) ?? nil
         count = ((try? container.decodeIfPresent(Int.self, forKey: .count)) ?? nil) ?? 0
         coverAssetIDs = ((try? container.decodeIfPresent([UUID].self, forKey: .coverAssetIDs)) ?? nil) ?? []
+        coverVersions = (try? container.decodeIfPresent([Int].self, forKey: .coverVersions)) ?? nil
         years = ((try? container.decodeIfPresent([Skippable<CollectionSummary>].self, forKey: .years)) ?? nil)?
             .compactMap(\.value) ?? []
         next = (try? container.decodeIfPresent(String.self, forKey: .next)) ?? nil

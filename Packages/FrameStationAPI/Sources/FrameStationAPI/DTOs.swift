@@ -257,6 +257,9 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
     public let itemCount: Int
     /// For the cover thumbnail. Nil while the album is empty.
     public let coverAssetID: UUID?
+    /// Which thumbnail of the cover the NAS has made, `assets.thumb_version`.
+    /// Optional, and missing reads as 0, as `CollectionSummary.coverVersions`.
+    public let coverVersion: Int?
     public let createdAt: Date
     public let updatedAt: Date
     /// The shared library a family album belongs to. Nil for an album that's
@@ -278,7 +281,7 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
 
     public init(
         id: UUID, name: String, itemCount: Int,
-        coverAssetID: UUID?, createdAt: Date, updatedAt: Date,
+        coverAssetID: UUID?, coverVersion: Int? = nil, createdAt: Date, updatedAt: Date,
         spaceID: UUID? = nil, canManage: Bool? = nil, canAdd: Bool? = nil,
         people: [UserDTO]? = nil, owner: UserDTO? = nil
     ) {
@@ -286,6 +289,7 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
         self.name = name
         self.itemCount = itemCount
         self.coverAssetID = coverAssetID
+        self.coverVersion = coverVersion
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.spaceID = spaceID
@@ -293,6 +297,11 @@ public struct AlbumDTO: Codable, Sendable, Identifiable, Hashable {
         self.canAdd = canAdd
         self.people = people
         self.owner = owner
+    }
+
+    /// The cover with its thumbnail's version. See `CollectionSummary.covers`.
+    public var cover: CoverThumbnail? {
+        coverAssetID.map { CoverThumbnail(assetID: $0, version: coverVersion ?? 0) }
     }
 
     /// Seen by somebody other than you: shared with people, or in a library.
@@ -340,13 +349,25 @@ public struct SharedLibrarySummary: Codable, Sendable, Identifiable, Hashable {
     public let itemCount: Int
     /// Nil while the library is empty.
     public let coverAssetID: UUID?
+    /// Which thumbnail of the cover the NAS has made, `assets.thumb_version`.
+    /// Optional, and missing reads as 0, as `CollectionSummary.coverVersions`.
+    public let coverVersion: Int?
 
-    public init(id: UUID, name: String, memberCount: Int, itemCount: Int, coverAssetID: UUID?) {
+    public init(
+        id: UUID, name: String, memberCount: Int, itemCount: Int, coverAssetID: UUID?,
+        coverVersion: Int? = nil
+    ) {
         self.id = id
         self.name = name
         self.memberCount = memberCount
         self.itemCount = itemCount
         self.coverAssetID = coverAssetID
+        self.coverVersion = coverVersion
+    }
+
+    /// The cover with its thumbnail's version. See `CollectionSummary.covers`.
+    public var cover: CoverThumbnail? {
+        coverAssetID.map { CoverThumbnail(assetID: $0, version: coverVersion ?? 0) }
     }
 }
 

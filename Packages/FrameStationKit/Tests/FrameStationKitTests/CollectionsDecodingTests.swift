@@ -74,7 +74,7 @@ final class CollectionsDecodingTests: XCTestCase {
         func summary(_ kind: CollectionKind, _ key: String) -> CollectionSummary {
             CollectionSummary(
                 kind: kind, key: key, title: "Title \(key)", subtitle: "Subtitle",
-                count: 7, coverAssetIDs: [UUID(), UUID()], isNamed: true,
+                count: 7, coverAssetIDs: [UUID(), UUID()], coverVersions: [5, 3], isNamed: true,
                 recursAnnually: true, kicker: "COMING UP"
             )
         }
@@ -187,14 +187,14 @@ final class CollectionsDecodingTests: XCTestCase {
     func testTraditionsRoundTrip() throws {
         let year = CollectionSummary(
             kind: .day, key: "2025-04-05", title: "April 5, 2025", subtitle: "Saturday",
-            count: 10, coverAssetIDs: [UUID()], recursAnnually: true
+            count: 10, coverAssetIDs: [UUID()], coverVersions: [4], recursAnnually: true
         )
         let original = CollectionsResponse(
             hero: nil, trips: [], days: [], recentlyDeleted: nil,
             traditions: [Tradition(
                 id: "date:04-05", title: "Birthday on April 5", subtitle: "7 years · 2019–2025",
-                count: 64, coverAssetIDs: [UUID()], years: [year], next: "2027-04-05",
-                naming: year
+                count: 64, coverAssetIDs: [UUID()], coverVersions: [5], years: [year],
+                next: "2027-04-05", naming: year
             )]
         )
 
@@ -202,5 +202,146 @@ final class CollectionsDecodingTests: XCTestCase {
         let decoded = try FrameStationCoding.decoder.decode(CollectionsResponse.self, from: data)
 
         XCTAssertEqual(decoded, original)
+    }
+
+    // MARK: - Cover versions
+    //
+    // A cover is fetched at its thumbnail's version, which is in the URL and
+    // the cache key, so a cover the NAS makes again is fetched fresh instead
+    // of kept from the cache forever.
+
+    private let first = UUID(uuidString: "9A4C4021-1DE7-428C-BE59-5D8EA41C7101")!
+    private let second = UUID(uuidString: "9A4C4021-1DE7-428C-BE59-5D8EA41C7102")!
+
+    private func trip(versions: String?) -> String {
+        """
+        {"kind":"trip","key":"2026-07-18","title":"Seven days in Duck","count":12,\
+        "coverAssetIDs":["\(first)","\(second)"],\(versions.map { "\"coverVersions\":\($0)," } ?? "")\
+        "isNamed":false,"recursAnnually":false}
+        """
+    }
+
+    private func christmas(versions: String?) -> String {
+        """
+        {"id":"holiday:Christmas","title":"Christmas","count":12,"coverAssetIDs":["\(first)"],\
+        \(versions.map { "\"coverVersions\":\($0)," } ?? "")"years":[\(trip(versions: versions == nil ? nil : "[6,7]"))]}
+        """
+    }
+
+    /// From a server before cover versions, every cover is version 0: what
+    /// the app asked for before, so nothing it has cached is lost.
+    func testCoversFromAnOlderServerAreVersionZero() throws {
+        let page = try decode("""
+            {"trips":[\(trip(versions: nil))],"days":[],"revisits":[],"mediaTypes":[],
+             "traditions":[\(christmas(versions: nil))]}
+            """)
+
+        let trip = try XCTUnwrap(page.trips.first)
+        XCTAssertNil(trip.coverVersions)
+        XCTAssertEqual(trip.covers, [CoverThumbnail(assetID: first), CoverThumbnail(assetID: second)])
+        let christmas = try XCTUnwrap(page.traditions?.first)
+        XCTAssertNil(christmas.coverVersions)
+        XCTAssertEqual(christmas.covers, [CoverThumbnail(assetID: first, version: 0)])
+        XCTAssertEqual(christmas.years.first?.covers.map(\.version), [0, 0])
+    }
+
+    /// From a newer one, each cover's version is beside it, index for index.
+    func testCoverVersionsTravelBesideTheirCovers() throws {
+        let page = try decode("""
+            {"trips":[\(trip(versions: "[5,3]"))],"days":[],"revisits":[],"mediaTypes":[],
+             "traditions":[\(christmas(versions: "[5]"))]}
+            """)
+
+        XCTAssertEqual(page.trips.first?.covers, [
+            CoverThumbnail(assetID: first, version: 5), CoverThumbnail(assetID: second, version: 3),
+        ])
+        XCTAssertEqual(page.traditions?.first?.covers, [CoverThumbnail(assetID: first, version: 5)])
+        XCTAssertEqual(page.traditions?.first?.years.first?.covers.map(\.version), [6, 7])
+    }
+
+    /// Fewer versions than covers, which no server sends, still read index
+    /// for index, with 0 past their end.
+    func testVersionsShortOfTheCoversReadAsZeroPastTheirEnd() {
+        let card = CollectionSummary(
+            kind: .trip, key: "2026-07-18", title: "Seven days in Duck", subtitle: nil,
+            count: 12, coverAssetIDs: [first, second], coverVersions: [7]
+        )
+        XCTAssertEqual(card.covers.map(\.version), [7, 0])
+    }
+
+    /// The server fills them in one lookup for the whole page, so every card
+    /// has to be reached: each section's, each tradition, its years and its
+    /// naming card. The People row's faces are pictures of their own, and
+    /// nothing else on the page changes.
+    func testEveryCoverOnThePageGetsItsVersion() throws {
+        var made = 0
+        func card(_ kind: CollectionKind) -> CollectionSummary {
+            made += 1
+            return CollectionSummary(
+                kind: kind, key: "key-\(made)", title: "Card \(made)", subtitle: nil,
+                count: 12, coverAssetIDs: [UUID(), UUID()]
+            )
+        }
+        let tradition = Tradition(
+            id: "holiday:Christmas", title: "Christmas", subtitle: nil, count: 24,
+            coverAssetIDs: [UUID()], years: [card(.day), card(.day)], naming: card(.day)
+        )
+        let person = PersonSummary(id: UUID(), name: "Emma", photoCount: 40, face: "face-1")
+        let page = CollectionsResponse(
+            hero: card(.onThisDay), trips: [card(.trip)], days: [card(.day)],
+            revisits: [card(.revisit)], mediaTypes: [card(.mediaType)],
+            recentlyDeleted: card(.recentlyDeleted), recentlyAdded: card(.recentlyAdded),
+            favorites: card(.favorites), allTrips: [card(.trip)], allOccasions: [card(.day)],
+            featured: [card(.trip)], traditions: [tradition], wideTrips: [card(.trip)],
+            wideDays: [card(.day)], people: [person]
+        )
+
+        // Thirteen cards across the sections and three in the tradition, two
+        // covers each, and the tradition's own.
+        let assetIDs = page.allCoverAssetIDs
+        XCTAssertEqual(assetIDs.count, 16 * 2 + 1)
+        // Every version different, so a cover given its neighbor's shows.
+        let versions = Dictionary(uniqueKeysWithValues: assetIDs.enumerated().map { ($1, $0 + 1) })
+        let filled = page.withCoverVersions(versions)
+
+        func cards(_ page: CollectionsResponse) -> [CollectionSummary] {
+            [page.hero, page.recentlyDeleted, page.recentlyAdded, page.favorites].compactMap { $0 }
+                + page.trips + page.days + page.revisits + page.mediaTypes
+                + (page.allTrips ?? []) + (page.allOccasions ?? []) + (page.featured ?? [])
+                + (page.wideTrips ?? []) + (page.wideDays ?? [])
+                + (page.traditions ?? []).flatMap { $0.years + [$0.naming].compactMap { $0 } }
+        }
+        let before = cards(page), after = cards(filled)
+        XCTAssertEqual(after.count, 16)
+        for (card, was) in zip(after, before) {
+            XCTAssertEqual(card.coverVersions, card.coverAssetIDs.map { versions[$0] ?? -1 }, card.title)
+            XCTAssertEqual(card.withCovers(card.coverAssetIDs, versions: nil), was, card.title)
+        }
+        let christmas = try XCTUnwrap(filled.traditions?.first)
+        XCTAssertEqual(christmas.coverVersions, tradition.coverAssetIDs.map { versions[$0] ?? -1 })
+        XCTAssertEqual(filled.people, [person])
+
+        // A cover the lookup found no row for reads as 0.
+        XCTAssertEqual(page.withCoverVersions([:]).trips.first?.coverVersions, [0, 0])
+    }
+
+    /// A card changed for the page keeps its versions, and one put under
+    /// other covers takes theirs: a held cover keeps the version it was drawn
+    /// at, whatever the new answer says.
+    func testVersionsStayWithTheirCovers() {
+        let card = CollectionSummary(
+            kind: .day, key: "2025-12-25", title: "Christmas 2025", subtitle: nil,
+            count: 12, coverAssetIDs: [first, second], coverVersions: [5, 3]
+        )
+        XCTAssertEqual(card.withKicker("CHRISTMAS IS COMING UP").coverVersions, [5, 3])
+        XCTAssertEqual(card.withTitle("Deem Christmas 2025").coverVersions, [5, 3])
+        XCTAssertEqual(card.withSubtitle("With Emma").coverVersions, [5, 3])
+        XCTAssertEqual(card.inTradition("holiday:Christmas").coverVersions, [5, 3])
+
+        let drawn = UUID()
+        let held = card.withCovers([drawn], versions: [4])
+        XCTAssertEqual(held.covers, [CoverThumbnail(assetID: drawn, version: 4)])
+        XCTAssertEqual(held.title, card.title)
+        XCTAssertEqual(card.withCovers(card.coverAssetIDs, versions: card.coverVersions), card)
     }
 }

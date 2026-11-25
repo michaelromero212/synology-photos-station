@@ -71,7 +71,9 @@ final class AssetDetailModel {
 
         // The cached 512 first, so something real is on screen while the server
         // renders the 2048 preview.
-        if let cached = await loader.thumbnail(assetID: item.assetID, size: 512), image == nil {
+        if let cached = await loader.thumbnail(
+            assetID: item.assetID, size: 512, version: item.thumbnailVersion
+        ), image == nil {
             image = cached
         }
 

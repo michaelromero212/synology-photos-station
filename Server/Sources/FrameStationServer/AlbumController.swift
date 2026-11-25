@@ -120,8 +120,12 @@ struct AlbumController: RouteCollection {
     }
 
     /// `roster` is the album's people when it's shared with people, nil
-    /// otherwise.
-    private func dto(_ access: Access, roster: [Member]?, caller: UUID) -> AlbumDTO {
+    /// otherwise. `coverVersion` is the cover's thumbnail version, which only
+    /// the list looks up: its answer is the one the Albums page draws covers
+    /// from.
+    private func dto(
+        _ access: Access, roster: [Member]?, caller: UUID, coverVersion: Int? = nil
+    ) -> AlbumDTO {
         let row = access.album
         let people = roster.map { members in
             members.filter { $0.id != caller }
@@ -132,6 +136,7 @@ struct AlbumController: RouteCollection {
         return AlbumDTO(
             id: row.id, name: row.name,
             itemCount: row.itemCount, coverAssetID: row.coverAssetID,
+            coverVersion: coverVersion,
             createdAt: row.createdAt, updatedAt: row.updatedAt,
             spaceID: row.spaceID, canManage: access.manage, canAdd: access.add,
             people: people, owner: owner
@@ -174,16 +179,31 @@ struct AlbumController: RouteCollection {
         let rosters = try await Self.roster(
             of: rows.filter(\.isPeopleAlbum).compactMap(\.spaceID), on: req.sql
         )
+        let shelves = family ? try await libraries(of: device.userID, on: req.sql) : nil
+        // Which thumbnail each cover is, albums' and libraries' in one
+        // lookup, as the Albums page does it. See
+        // `CollectionsController.thumbVersions`.
+        let versions = try await CollectionsController.thumbVersions(
+            of: Set(rows.compactMap(\.coverAssetID) + (shelves ?? []).compactMap(\.coverAssetID)),
+            on: req.sql
+        )
         return AlbumListResponse(
             albums: rows.map { row in
                 dto(
                     Self.access(row, caller: device.userID),
                     roster: row.isPeopleAlbum ? rosters[row.spaceID ?? UUID()] ?? [] : nil,
-                    caller: device.userID
+                    caller: device.userID,
+                    coverVersion: row.coverAssetID.map { versions[$0] ?? 0 }
                 )
             },
             includesFamilyAlbums: family ? true : nil,
-            libraries: family ? try await libraries(of: device.userID, on: req.sql) : nil,
+            libraries: shelves?.map { library in
+                SharedLibrarySummary(
+                    id: library.id, name: library.name, memberCount: library.memberCount,
+                    itemCount: library.itemCount, coverAssetID: library.coverAssetID,
+                    coverVersion: library.coverAssetID.map { versions[$0] ?? 0 }
+                )
+            },
             includesPeopleAlbums: people ? true : nil
         )
     }

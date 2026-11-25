@@ -434,8 +434,12 @@ extension View {
 }
 
 /// A cover the Albums page draws, at the size it's drawn.
+///
+/// The version is part of it, so a cover the NAS has made again is a
+/// different picture to warm, and the old one already in memory doesn't
+/// count as the new one being in.
 struct CoverPicture: Hashable, Sendable {
-    let assetID: UUID
+    let cover: CoverThumbnail
     let size: Int
     /// Drawn by `CollectionCover`, which takes letterbox bars off and keeps
     /// the result; so the warm-up does that too, off the main thread.
@@ -464,17 +468,21 @@ enum CoverWarmer {
 
     private static func fetch(_ picture: CoverPicture, loader: ThumbnailLoader) async {
         guard !Task.isCancelled else { return }
-        let held = loader.cachedThumbnail(assetID: picture.assetID, size: picture.size)
+        let cover = picture.cover
+        let held = loader.cachedThumbnail(
+            assetID: cover.assetID, size: picture.size, version: cover.version
+        )
         let image: PlatformImage?
         if let held {
             image = held
         } else {
             image = await loader.thumbnail(
-                assetID: picture.assetID, size: picture.size, isPrefetch: true
+                assetID: cover.assetID, size: picture.size, version: cover.version,
+                isPrefetch: true
             )
         }
         guard let image, picture.trimmed else { return }
-        _ = Letterbox.trimmed(image, key: "\(picture.assetID)-\(picture.size)")
+        _ = Letterbox.trimmed(image, key: Letterbox.key(cover, size: picture.size))
     }
 }
 
@@ -488,19 +496,19 @@ extension CollectionsResponse {
     /// has the rest ready for a wider window.
     var pagePictures: [CoverPicture] {
         var pictures: [CoverPicture] = []
-        func add(_ covers: [UUID]?) {
+        func add(_ covers: [CoverThumbnail]?) {
             guard let first = covers?.first else { return }
-            pictures.append(CoverPicture(assetID: first, size: 512, trimmed: true))
+            pictures.append(CoverPicture(cover: first, size: 512, trimmed: true))
         }
-        for card in featured ?? hero.map({ [$0] }) ?? [] { add(card.coverAssetIDs) }
-        add(favorites?.coverAssetIDs)
-        add(recentlyAdded?.coverAssetIDs)
+        for card in featured ?? hero.map({ [$0] }) ?? [] { add(card.covers) }
+        add(favorites?.covers)
+        add(recentlyAdded?.covers)
         for type in mediaTypes where type.key == "video" || type.key == "screenshot" {
-            add(type.coverAssetIDs)
+            add(type.covers)
         }
-        for trip in (wideTrips ?? trips).prefix(12) { add(trip.coverAssetIDs) }
-        for day in onceDays(limit: 12) { add(day.coverAssetIDs) }
-        for tradition in (traditions ?? []).prefix(12) { add(tradition.coverAssetIDs) }
+        for trip in (wideTrips ?? trips).prefix(12) { add(trip.covers) }
+        for day in onceDays(limit: 12) { add(day.covers) }
+        for tradition in (traditions ?? []).prefix(12) { add(tradition.covers) }
         return pictures
     }
 
@@ -509,14 +517,16 @@ extension CollectionsResponse {
     /// exactly as it is and every card still here under the cover it has.
     func keepingCovers(of shown: CollectionsResponse) -> CollectionsResponse {
         // Matched on the card, kind and key. The top row isn't in here: it's
-        // kept whole.
-        var covers: [String: [UUID]] = [:]
+        // kept whole. The drawn card itself is kept, so each cover keeps the
+        // version it was drawn at: the answer's may be a newer picture of the
+        // same photo, which waits with the rest of the answer.
+        var drawn: [String: CollectionSummary] = [:]
         let drawnCards = [shown.recentlyAdded, shown.favorites, shown.recentlyDeleted].compactMap { $0 }
             + shown.trips + (shown.wideTrips ?? []) + shown.days + (shown.wideDays ?? [])
             + (shown.allTrips ?? []) + (shown.allOccasions ?? []) + shown.mediaTypes + shown.revisits
-        for card in drawnCards where covers[card.id] == nil { covers[card.id] = card.coverAssetIDs }
+        for card in drawnCards where drawn[card.id] == nil { drawn[card.id] = card }
         func keep(_ card: CollectionSummary) -> CollectionSummary {
-            covers[card.id].map(card.withCovers) ?? card
+            drawn[card.id].map(card.withCovers(of:)) ?? card
         }
 
         // The server leaves each card in the top row out of the sections
@@ -571,29 +581,27 @@ extension CollectionsResponse {
 }
 
 extension CollectionSummary {
-    /// The same card under other covers.
-    func withCovers(_ covers: [UUID]) -> CollectionSummary {
-        guard covers != coverAssetIDs else { return self }
-        return CollectionSummary(
-            kind: kind, key: key, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: covers, isNamed: isNamed,
-            recursAnnually: recursAnnually, kicker: kicker, tradition: tradition
-        )
+    /// The same card under the covers `drawn` has, each at the version it
+    /// was drawn at.
+    func withCovers(of drawn: CollectionSummary) -> CollectionSummary {
+        withCovers(drawn.coverAssetIDs, versions: drawn.coverVersions)
     }
 }
 
 extension Tradition {
     /// The same tradition under the covers `drawn` has, its own and each
-    /// year's still in it.
+    /// year's still in it, each at the version it was drawn at.
     func withCovers(of drawn: Tradition) -> Tradition {
         let before = Dictionary(
-            drawn.years.map { ($0.id, $0.coverAssetIDs) }, uniquingKeysWith: { first, _ in first }
+            drawn.years.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
         )
-        let kept = years.map { year in before[year.id].map(year.withCovers) ?? year }
-        guard drawn.coverAssetIDs != coverAssetIDs || kept != years else { return self }
+        let kept = years.map { year in before[year.id].map(year.withCovers(of:)) ?? year }
+        guard drawn.coverAssetIDs != coverAssetIDs || drawn.coverVersions != coverVersions
+                || kept != years else { return self }
         return Tradition(
             id: id, title: title, subtitle: subtitle, count: count,
-            coverAssetIDs: drawn.coverAssetIDs, years: kept, next: next, naming: naming
+            coverAssetIDs: drawn.coverAssetIDs, coverVersions: drawn.coverVersions,
+            years: kept, next: next, naming: naming
         )
     }
 }
@@ -618,15 +626,18 @@ extension PersonSummary {
 /// Still, and there the moment it is. The hero used to crossfade through five
 /// covers and fade each one in as it landed; on the one card at the top of the
 /// page that read as the page still settling, and he asked for the picture to
-/// simply show up. The ids after the first are stand-ins, tried in order when
-/// the first can't be drawn.
+/// simply show up. The covers after the first are stand-ins, tried in order
+/// when the first can't be drawn.
+///
+/// Each cover is fetched at its version (`CoverThumbnail`), so a cover the NAS
+/// has made again is a new picture here too, not the old one from the cache.
 ///
 /// Letterboxed frames are trimmed — see `Letterbox`. A video exported from
 /// iMovie, saved from a feed or transferred off a camcorder often carries its
 /// black bars inside the picture, and filling a card with it fills the card
 /// with bars.
 struct CollectionCover: View {
-    let assetIDs: [UUID]
+    let covers: [CoverThumbnail]
     let loader: ThumbnailLoader?
     let size: Int
 
@@ -634,18 +645,18 @@ struct CollectionCover: View {
     @State private var loaded: Loaded?
 
     private struct Loaded {
-        let assetIDs: [UUID]
+        let covers: [CoverThumbnail]
         let image: PlatformImage
     }
 
-    init(assetIDs: [UUID], loader: ThumbnailLoader?, size: Int = 512) {
-        self.assetIDs = assetIDs
+    init(covers: [CoverThumbnail], loader: ThumbnailLoader?, size: Int = 512) {
+        self.covers = covers
         self.loader = loader
         self.size = size
         // Already decoded in memory: drawn on the first frame rather than one
         // after it, so coming back to the page doesn't blink the hero gray.
-        _loaded = State(initialValue: Self.held(assetIDs, loader: loader, size: size)
-            .map { Loaded(assetIDs: assetIDs, image: $0) })
+        _loaded = State(initialValue: Self.held(covers, loader: loader, size: size)
+            .map { Loaded(covers: covers, image: $0) })
     }
 
     /// What to draw: what this card fetched, unless it has been handed other
@@ -659,15 +670,17 @@ struct CollectionCover: View {
     /// there. Failing that, the old one stays until the new one comes, as it
     /// always has.
     private var image: PlatformImage? {
-        if let loaded, loaded.assetIDs == assetIDs { return loaded.image }
-        guard !assetIDs.isEmpty else { return nil }
-        return Self.held(assetIDs, loader: loader, size: size) ?? loaded?.image
+        if let loaded, loaded.covers == covers { return loaded.image }
+        guard !covers.isEmpty else { return nil }
+        return Self.held(covers, loader: loader, size: size) ?? loaded?.image
     }
 
-    private static func held(_ assetIDs: [UUID], loader: ThumbnailLoader?, size: Int) -> PlatformImage? {
-        assetIDs.first.flatMap { first in
-            loader?.cachedThumbnail(assetID: first, size: size)
-                .map { Letterbox.trimmed($0, key: "\(first)-\(size)") }
+    private static func held(
+        _ covers: [CoverThumbnail], loader: ThumbnailLoader?, size: Int
+    ) -> PlatformImage? {
+        covers.first.flatMap { first in
+            loader?.cachedThumbnail(assetID: first.assetID, size: size, version: first.version)
+                .map { Letterbox.trimmed($0, key: Letterbox.key(first, size: size)) }
         }
     }
 
@@ -691,21 +704,23 @@ struct CollectionCover: View {
                 }
             }
             .clipped()
-            .task(id: assetIDs) { await load() }
+            .task(id: covers) { await load() }
     }
 
     private func load() async {
-        guard let loader, loaded?.assetIDs != assetIDs else { return }
-        let assetIDs = assetIDs
-        for assetID in assetIDs.prefix(3) {
+        guard let loader, loaded?.covers != covers else { return }
+        let covers = covers
+        for cover in covers.prefix(3) {
             guard !Task.isCancelled else { return }
-            if let cover = await loader.thumbnail(assetID: assetID, size: size) {
-                let trimmed = Letterbox.trimmed(cover, key: "\(assetID)-\(size)")
+            if let image = await loader.thumbnail(
+                assetID: cover.assetID, size: size, version: cover.version
+            ) {
+                let trimmed = Letterbox.trimmed(image, key: Letterbox.key(cover, size: size))
                 // No animation, even one inherited from whatever redrew the
                 // page: the picture is either there or it isn't.
                 var instant = Transaction()
                 instant.disablesAnimations = true
-                withTransaction(instant) { loaded = Loaded(assetIDs: assetIDs, image: trimmed) }
+                withTransaction(instant) { loaded = Loaded(covers: covers, image: trimmed) }
                 return
             }
         }
@@ -721,6 +736,13 @@ enum Letterbox {
     /// Keyed like the loader's own memory cache, so a card rebuilt by its parent
     /// doesn't measure the same picture again. `NSCache` is its own lock.
     nonisolated(unsafe) private static let cache = NSCache<NSString, PlatformImage>()
+
+    /// A cover's key here, version and all, as the loader keys the picture
+    /// itself. Without the version, a cover the NAS has made again would come
+    /// back from here as the old picture, trimmed.
+    static func key(_ cover: CoverThumbnail, size: Int) -> String {
+        "\(cover.assetID)-\(size)-\(cover.version)"
+    }
 
     static func trimmed(_ image: PlatformImage, key: String) -> PlatformImage {
         if let hit = cache.object(forKey: key as NSString) { return hit }
@@ -844,7 +866,7 @@ struct CollectionHeroCard: View {
             .frame(width: width, height: height)
             .overlay {
                 ZStack(alignment: .bottomLeading) {
-                    CollectionCover(assetIDs: collection.coverAssetIDs, loader: loader)
+                    CollectionCover(covers: collection.covers, loader: loader)
 
                     // Three stops rather than two. A straight black-to-clear ramp
                     // grays the middle of the photograph to hold text that only
@@ -975,7 +997,7 @@ struct CollectionListView: View {
                                 width: side
                             ) {
                                 CollectionCover(
-                                    assetIDs: row.coverAssetIDs, loader: session.loader, size: 512
+                                    covers: row.covers, loader: session.loader, size: 512
                                 )
                             }
                         }
@@ -2305,7 +2327,7 @@ struct MediaTypesView: View {
                         } label: {
                             CollectionTile(title: type.title, detail: itemsLine(type.count), width: side) {
                                 CollectionCover(
-                                    assetIDs: type.coverAssetIDs, loader: session.loader, size: 512
+                                    covers: type.covers, loader: session.loader, size: 512
                                 )
                             }
                         }

@@ -132,7 +132,7 @@ struct TraditionView: View {
                                     width: side
                                 ) {
                                     CollectionCover(
-                                        assetIDs: year.coverAssetIDs, loader: session.loader, size: 512
+                                        covers: year.covers, loader: session.loader, size: 512
                                     )
                                 }
                             }
@@ -167,7 +167,7 @@ struct TraditionTile: View {
             title: tradition.title, detail: tradition.subtitle ?? itemsLine(tradition.count),
             width: side
         ) {
-            CollectionCover(assetIDs: tradition.coverAssetIDs, loader: loader, size: 512)
+            CollectionCover(covers: tradition.covers, loader: loader, size: 512)
         }
     }
 }

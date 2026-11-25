@@ -454,7 +454,9 @@ private struct DeletedItemPage: View {
 
     private func load() async {
         guard let loader = session.loader else { return }
-        if image == nil, let small = await loader.thumbnail(assetID: item.assetID, size: 512) {
+        if image == nil, let small = await loader.thumbnail(
+            assetID: item.assetID, size: 512, version: item.thumbnailVersion
+        ) {
             image = small
         }
         guard item.mediaType != .video,

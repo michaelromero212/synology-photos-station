@@ -428,19 +428,22 @@ struct AddToAlbumSheet: View {
         switch destination {
         case .album(let album):
             AlbumRowCover(
-                assetID: album.coverAssetID,
+                cover: album.cover,
                 placeholder: album.isFamily ? "person.2" : "rectangle.stack",
                 loader: session.loader, side: side
             )
         case .library(let space):
             AlbumRowCover(
-                assetID: store.libraries.first { $0.id == space.id }?.coverAssetID,
+                cover: store.libraries.first { $0.id == space.id }?.cover,
                 placeholder: "person.2", loader: session.loader, side: side
             )
         case .new:
             // What its cover will be: the first photo going into it.
             AlbumRowCover(
-                assetID: items.first?.assetID, placeholder: "rectangle.stack.badge.plus",
+                cover: items.first.map {
+                    CoverThumbnail(assetID: $0.assetID, version: $0.thumbnailVersion)
+                },
+                placeholder: "rectangle.stack.badge.plus",
                 loader: session.loader, side: side
             )
         }
@@ -981,8 +984,9 @@ private struct StackTile: View {
 }
 
 /// An album's cover at the size of a list row, or its symbol until there is one.
+/// At its version, as the Albums page's cards fetch it (`CollectionCover`).
 private struct AlbumRowCover: View {
-    let assetID: UUID?
+    let cover: CoverThumbnail?
     let placeholder: String
     let loader: ThumbnailLoader?
     var side: CGFloat = 44
@@ -1008,9 +1012,9 @@ private struct AlbumRowCover: View {
         }
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .task(id: assetID) {
-            guard let assetID, let loader else { return }
-            image = await loader.thumbnail(assetID: assetID)
+        .task(id: cover) {
+            guard let cover, let loader else { return }
+            image = await loader.thumbnail(assetID: cover.assetID, version: cover.version)
         }
     }
 }

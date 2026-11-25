@@ -217,10 +217,10 @@ final class AlbumStore {
     ) -> [CoverPicture] {
         // Every device's cards draw through `CollectionCover`, which trims
         // letterboxing.
-        let covers = albums.filter { !$0.isFamily }.compactMap(\.coverAssetID)
-            + albums.filter(\.isFamily).compactMap(\.coverAssetID)
-            + libraries.compactMap(\.coverAssetID)
-        return covers.map { CoverPicture(assetID: $0, size: 512, trimmed: true) }
+        let covers = albums.filter { !$0.isFamily }.compactMap(\.cover)
+            + albums.filter(\.isFamily).compactMap(\.cover)
+            + libraries.compactMap(\.cover)
+        return covers.map { CoverPicture(cover: $0, size: 512, trimmed: true) }
     }
 
     // MARK: On screen
@@ -317,21 +317,21 @@ extension AlbumStore: CoverHolder {}
 extension AlbumListResponse {
     /// This list as the page draws it while it's held: its albums and
     /// libraries, counts and names, with every one still here under the cover
-    /// it has now. See `AlbumStore.take`.
+    /// it has now, at the version it was drawn at. See `AlbumStore.take`.
     func keepingCovers(
         albums shownAlbums: [AlbumDTO], libraries shownLibraries: [SharedLibrarySummary]
     ) -> AlbumListResponse {
-        let albumCovers = Dictionary(
-            shownAlbums.map { ($0.id, $0.coverAssetID) }, uniquingKeysWith: { first, _ in first }
+        let drawnAlbums = Dictionary(
+            shownAlbums.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
         )
-        let libraryCovers = Dictionary(
-            shownLibraries.map { ($0.id, $0.coverAssetID) }, uniquingKeysWith: { first, _ in first }
+        let drawnLibraries = Dictionary(
+            shownLibraries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
         )
         return AlbumListResponse(
-            albums: albums.map { album in albumCovers[album.id].map(album.withCover) ?? album },
+            albums: albums.map { album in drawnAlbums[album.id].map(album.withCover(of:)) ?? album },
             includesFamilyAlbums: includesFamilyAlbums,
             libraries: libraries?.map { library in
-                libraryCovers[library.id].map(library.withCover) ?? library
+                drawnLibraries[library.id].map(library.withCover(of:)) ?? library
             },
             includesPeopleAlbums: includesPeopleAlbums
         )
@@ -339,11 +339,14 @@ extension AlbumListResponse {
 }
 
 extension AlbumDTO {
-    /// The same album under another cover.
-    func withCover(_ cover: UUID?) -> AlbumDTO {
-        guard cover != coverAssetID else { return self }
+    /// The same album under the cover `drawn` has, at the version it was
+    /// drawn at.
+    func withCover(of drawn: AlbumDTO) -> AlbumDTO {
+        guard drawn.coverAssetID != coverAssetID || drawn.coverVersion != coverVersion
+        else { return self }
         return AlbumDTO(
-            id: id, name: name, itemCount: itemCount, coverAssetID: cover,
+            id: id, name: name, itemCount: itemCount,
+            coverAssetID: drawn.coverAssetID, coverVersion: drawn.coverVersion,
             createdAt: createdAt, updatedAt: updatedAt, spaceID: spaceID,
             canManage: canManage, canAdd: canAdd, people: people, owner: owner
         )
@@ -351,11 +354,14 @@ extension AlbumDTO {
 }
 
 extension SharedLibrarySummary {
-    /// The same library under another cover.
-    func withCover(_ cover: UUID?) -> SharedLibrarySummary {
-        guard cover != coverAssetID else { return self }
+    /// The same library under the cover `drawn` has, at the version it was
+    /// drawn at.
+    func withCover(of drawn: SharedLibrarySummary) -> SharedLibrarySummary {
+        guard drawn.coverAssetID != coverAssetID || drawn.coverVersion != coverVersion
+        else { return self }
         return SharedLibrarySummary(
-            id: id, name: name, memberCount: memberCount, itemCount: itemCount, coverAssetID: cover
+            id: id, name: name, memberCount: memberCount, itemCount: itemCount,
+            coverAssetID: drawn.coverAssetID, coverVersion: drawn.coverVersion
         )
     }
 }
@@ -1389,7 +1395,7 @@ extension CollectionSummary {
 private struct AlbumCard: View {
     let title: String
     let details: String
-    let coverAssetID: UUID?
+    let cover: CoverThumbnail?
     let side: CGFloat
     let loader: ThumbnailLoader?
     /// What stands in for the cover while there's none.
@@ -1399,11 +1405,9 @@ private struct AlbumCard: View {
 
     var body: some View {
         CollectionTile(title: title, detail: details, width: side, badge: badge) {
-            CollectionCover(
-                assetIDs: coverAssetID.map { [$0] } ?? [], loader: loader, size: 512
-            )
+            CollectionCover(covers: cover.map { [$0] } ?? [], loader: loader, size: 512)
             .overlay {
-                if coverAssetID == nil {
+                if cover == nil {
                     Image(systemName: placeholder)
                         .font(.largeTitle).foregroundStyle(.tertiary)
                 }
@@ -1423,7 +1427,7 @@ extension AlbumCard {
             ? ShareWording.card(for: album, me: me) : library
         self.init(
             title: album.name, details: with.map { "\($0) · \(count)" } ?? count,
-            coverAssetID: album.coverAssetID, side: side, loader: loader,
+            cover: album.cover, side: side, loader: loader,
             placeholder: album.isSharedWithPeople ? "person.2" : "rectangle.stack",
             badge: with == nil ? nil : "person.2.fill"
         )
@@ -1437,7 +1441,7 @@ extension AlbumCard {
         self.init(
             title: space.name,
             details: summary.map { "\(people) · \(itemsLine($0.itemCount))" } ?? people,
-            coverAssetID: summary?.coverAssetID, side: side, loader: loader,
+            cover: summary?.cover, side: side, loader: loader,
             placeholder: "person.2", badge: "person.2.fill"
         )
     }
@@ -1462,7 +1466,7 @@ struct CollectionCard: View {
             CollectionDetailView(session: session, space: space, collection: collection)
         } label: {
             CollectionTile(title: collection.title, detail: detail, width: side, badge: badge) {
-                CollectionCover(assetIDs: collection.coverAssetIDs, loader: session.loader, size: 512)
+                CollectionCover(covers: collection.covers, loader: session.loader, size: 512)
             }
         }
         .buttonStyle(.plain)
@@ -1506,7 +1510,7 @@ struct MemoryCard: View {
                     title: card.title, kicker: card.kickerLine,
                     detail: card.subtitle ?? itemsLine(card.count), width: side
                 ) {
-                    CollectionCover(assetIDs: card.coverAssetIDs, loader: session.loader, size: 512)
+                    CollectionCover(covers: card.covers, loader: session.loader, size: 512)
                 }
             }
         }

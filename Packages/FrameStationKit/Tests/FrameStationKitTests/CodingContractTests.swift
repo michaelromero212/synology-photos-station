@@ -189,6 +189,65 @@ final class CodingContractTests: XCTestCase {
         XCTAssertEqual(photo["numbers"] as? [Int], [2])
     }
 
+    /// An album list from a server before cover versions still decodes, each
+    /// cover at version 0, which is what the app asked for before. A newer
+    /// one says each album's and each library's version beside its cover.
+    func testAlbumCoversCarryTheirThumbnailVersion() throws {
+        let album = UUID(uuidString: "9A4C4021-1DE7-428C-BE59-5D8EA41C7201")!
+        let library = UUID(uuidString: "9A4C4021-1DE7-428C-BE59-5D8EA41C7202")!
+        let cover = UUID(uuidString: "9A4C4021-1DE7-428C-BE59-5D8EA41C7203")!
+        func list(albumVersion: String, libraryVersion: String) -> Data {
+            """
+            {"albums":[{"id":"\(album)","name":"Beach","itemCount":3,"coverAssetID":"\(cover)",\(albumVersion)\
+            "createdAt":"2026-07-24T19:28:00Z","updatedAt":"2026-07-24T19:28:00Z"},\
+            {"id":"\(UUID())","name":"Empty","itemCount":0,"coverAssetID":null,\
+            "createdAt":"2026-07-24T19:28:00Z","updatedAt":"2026-07-24T19:28:00Z"}],\
+            "libraries":[{"id":"\(library)","name":"Family","memberCount":3,"itemCount":40,\
+            \(libraryVersion)"coverAssetID":"\(cover)"}]}
+            """.data(using: .utf8)!
+        }
+
+        let older = try FrameStationCoding.decoder.decode(
+            AlbumListResponse.self, from: list(albumVersion: "", libraryVersion: "")
+        )
+        XCTAssertNil(older.albums.first?.coverVersion)
+        XCTAssertEqual(older.albums.first?.cover, CoverThumbnail(assetID: cover, version: 0))
+        XCTAssertNil(older.albums.last?.cover)
+        XCTAssertEqual(older.libraries?.first?.cover, CoverThumbnail(assetID: cover, version: 0))
+
+        let newer = try FrameStationCoding.decoder.decode(
+            AlbumListResponse.self,
+            from: list(albumVersion: "\"coverVersion\":5,", libraryVersion: "\"coverVersion\":4,")
+        )
+        XCTAssertEqual(newer.albums.first?.cover, CoverThumbnail(assetID: cover, version: 5))
+        XCTAssertNil(newer.albums.last?.cover)
+        XCTAssertEqual(newer.libraries?.first?.cover, CoverThumbnail(assetID: cover, version: 4))
+    }
+
+    func testAlbumListRoundTripsWithCoverVersions() throws {
+        let made = Date(timeIntervalSince1970: 1_784_921_280)
+        let original = AlbumListResponse(
+            albums: [AlbumDTO(
+                id: UUID(), name: "Beach", itemCount: 3, coverAssetID: UUID(), coverVersion: 5,
+                createdAt: made, updatedAt: made
+            )],
+            includesFamilyAlbums: true,
+            libraries: [SharedLibrarySummary(
+                id: UUID(), name: "Family", memberCount: 3, itemCount: 40, coverAssetID: UUID(),
+                coverVersion: 4
+            )],
+            includesPeopleAlbums: true
+        )
+
+        let data = try FrameStationCoding.encoder.encode(original)
+        let decoded = try FrameStationCoding.decoder.decode(AlbumListResponse.self, from: data)
+
+        XCTAssertEqual(decoded.albums, original.albums)
+        XCTAssertEqual(decoded.libraries, original.libraries)
+        XCTAssertEqual(decoded.albums.first?.coverVersion, 5)
+        XCTAssertEqual(decoded.libraries?.first?.coverVersion, 4)
+    }
+
     func testPlatformCoversEveryClientTarget() {
         // The server CHECK constraint on devices.platform must stay in step.
         XCTAssertEqual(

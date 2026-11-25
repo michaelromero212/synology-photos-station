@@ -7,6 +7,11 @@
 # tomorrow, and it has more to deal from than the four cards it once turned
 # round by one each day.
 #
+# And every cover says which thumbnail of its photo the NAS has made, on the
+# page and in the album list, so a cover made again (a washed-out video poster
+# redone, 2026-11-25) reaches the family's devices instead of the copy they
+# cached first.
+#
 #   FRAMESTATION_TEST_DIR=/tmp/framestation-test ./Scripts/smoke-albums-steady.sh
 #
 # Runs its own server against its own database and blob store. Never changes
@@ -58,17 +63,19 @@ USER_ID=$(echo "$R" | jq '["user"]["id"]'); AUTH="Authorization: Bearer $TOKEN"
 [ -n "$SPACE" ] || { echo "setup failed"; tail -20 "$ROOT/server.log"; exit 1; }
 
 N=0
+# put <name> <time> <latitude> <longitude> [space]: into the personal library
+# unless a space is given.
 put(){
   N=$((N + 1))
-  local f="$ROOT/files/$1.jpg" sha size up
+  local f="$ROOT/files/$1.jpg" sha size up space=${5:-$SPACE}
   vips gaussnoise "$ROOT/files/n.v" $((64 + N)) 64 >/dev/null 2>&1
   vips copy "$ROOT/files/n.v" "$f" >/dev/null 2>&1
   sha=$(shasum -a 256 "$f" | awk '{print $1}'); size=$(stat -f%z "$f")
   up=$(curl -s -X POST "$API/v1/uploads/probe" -H "$AUTH" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$SPACE\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$1.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
+    -d "{\"spaceID\":\"$space\",\"sha256\":\"$sha\",\"byteSize\":$size,\"filename\":\"$1.jpg\",\"isAutomaticBackup\":false}" | jq '["uploadID"]')
   curl -s -X PUT "$API/v1/uploads/$up/chunk/0" -H "$AUTH" --data-binary "@$f" >/dev/null
   curl -s -X POST "$API/v1/uploads/$up/commit" -H "$AUTH" -H 'Content-Type: application/json' \
-    -d "{\"spaceID\":\"$SPACE\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$((64 + N)),\"height\":64,\"capturedAt\":\"$2:00Z\",\"capturedTZOffset\":0,\"latitude\":$3,\"longitude\":$4,\"isRaw\":false,\"burstPick\":false}" \
+    -d "{\"spaceID\":\"$space\",\"mediaType\":\"photo\",\"mime\":\"image/jpeg\",\"width\":$((64 + N)),\"height\":64,\"capturedAt\":\"$2:00Z\",\"capturedTZOffset\":0,\"latitude\":$3,\"longitude\":$4,\"isRaw\":false,\"burstPick\":false}" \
     | jq '["assetID"]' > "$ROOT/ids/$1"
 }
 shoot(){ local i where=${!5}
@@ -104,6 +111,12 @@ for d in 20 21 22; do shoot "y$d-" "2025-06-$d" 9 4 NEW_YORK; done
 shoot x25 2024-12-25 9 6 CULPEPER; shoot t28 2024-11-28 9 4 CULPEPER
 shoot b22 2022-08-14 9 4 CULPEPER; shoot b23 2023-08-14 9 4 CULPEPER; shoot b24 2024-08-14 6 16 CULPEPER
 shoot f20 2025-02-20 9 5 CULPEPER; shoot r12 2025-04-12 9 5 CULPEPER
+# A shared library with a photo in it, which the album list draws as a card
+# with that photo for its cover. Nothing in it is on the personal page.
+FAMILY=$(curl -s -X POST "$API/v1/spaces" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"Family","memberIDs":[]}' | jq '["id"]')
+[ -n "$FAMILY" ] || { echo "no shared library"; exit 1; }
+put s1 2025-05-01T09:00 $CULPEPER "$FAMILY"
 settle
 for i in 1 2 3; do observe "b22$i" "$CAKE"; observe "b23$i" "$CAKE"; done
 for i in 1 2 3 4 5 6; do observe "x25$i" "$TREE"; done
@@ -114,6 +127,17 @@ for day in "2025-02-20 Science fair" "2025-04-12 Piano recital"; do
   curl -s -o /dev/null -X PUT "$API/v1/spaces/$SPACE/collections/name" -H "$AUTH" -H 'Content-Type: application/json' \
     -d "{\"day\":\"${day% *}\",\"name\":\"${day#* }\",\"everyYear\":false}"
 done
+# An album somebody made, of a photo from Asheville: a card of its own in the
+# album list.
+PLACED=$(q "SELECT id FROM space_assets WHERE space_id = '$SPACE' AND asset_id = '$(cat "$ROOT/ids/a101")'")
+curl -s -o /dev/null -X POST "$API/v1/albums" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Asheville\",\"spaceAssetIDs\":[\"$PLACED\"]}"
+# Every thumbnail made again, by one to three generations, as the NAS does
+# when it redraws them. Versions then differ from photo to photo, so a cover
+# given another's version, or its card's first one's, shows. Above the
+# current version, so nothing goes back on the queue for it.
+q "UPDATE assets SET thumb_version = thumb_version + 1 + get_byte(decode(md5(id::text), 'hex'), 0) % 3" >/dev/null
+q "SELECT id || ' ' || thumb_version FROM assets" > "$ROOT/versions.txt"
 
 echo "Reading the page on 17 days"
 # Fourteen in a row for the row's variety, and some far from them, so a
@@ -124,6 +148,8 @@ for d in $DATES; do curl -s "$API/v1/spaces/$SPACE/collections?date=$d" -H "$AUT
 # And two more of the first, to see the same day twice.
 curl -s "$API/v1/spaces/$SPACE/collections?date=2026-11-24" -H "$AUTH" > "$ROOT/pages/again-2026-11-24.json"
 curl -s "$API/v1/spaces/$SPACE/collections?date=2026-12-03" -H "$AUTH" > "$ROOT/pages/again-2026-12-03.json"
+# The album list as the Albums page asks for it, outside pages/: it isn't one.
+curl -s "$API/v1/albums?shared=true&people=true" -H "$AUTH" > "$ROOT/albums.json"
 
 cat > "$ROOT/read.py" <<'PY'
 import glob, json, os, sys
@@ -217,6 +243,53 @@ say('a photo never opens it while an album could', '[]', bad['first'])
 say('no two photos sit side by side while albums can go between', '[]', bad['adjacent'])
 say('a featured photo is among them every day', '[]', bad['photo'])
 say('and never from a day an album in the row already holds', '[]', bad['inside'])
+
+# Every cover beside its thumbnail's version, as this suite's database has it:
+# each section's cards (featured photos too, and by their names on the wire),
+# each tradition, its years and its naming card; then the album list's albums
+# and shared libraries. Ids come back upper case and Postgres's are lower.
+versions = {}
+for line in open(root + '/versions.txt'):
+    if line.strip():
+        asset, version = line.split()
+        versions[asset.lower()] = int(version)
+WIRE = ['featured', 'hero', 'trips', 'days', 'revisits', 'mediaTypes', 'allTrips', 'allOccasions',
+        'wideTrips', 'wideDays', 'recentlyAdded', 'favourites', 'recentlyDeleted']
+def holders(page):
+    for sec in WIRE:
+        v = page.get(sec)
+        for c in ([v] if isinstance(v, dict) else v or []):
+            yield f"{sec} {c['kind']}:{c['key']}", c
+    for t in page.get('traditions') or []:
+        yield f"tradition {t['id']}", t
+        for y in t.get('years') or []:
+            yield f"tradition {t['id']} year {y['key']}", y
+        if t.get('naming'):
+            yield f"tradition {t['id']} naming", t['naming']
+uneven, wrong, kinds, covers = [], [], set(), 0
+for d in dates:
+    for where, c in holders(pages[d]):
+        ids, vs = c.get('coverAssetIDs') or [], c.get('coverVersions')
+        if vs is None or len(vs) != len(ids):
+            uneven.append(f'{d} {where}: {len(ids)} covers, versions {vs}')
+            continue
+        for asset, v in zip(ids, vs):
+            covers += 1
+            kinds.add(v)
+            if versions.get(asset.lower()) != v:
+                wrong.append(f'{d} {where}: {asset} at {v}, its photo at {versions.get(asset.lower())}')
+say('the page has versioned covers to check, at more than one version', 'True', covers > 200 and len(kinds) > 1)
+say('every card has as many cover versions as covers', '[]', uneven[:3])
+say("and each is its photo's thumbnail version", '[]', wrong[:3])
+
+listing = json.load(open(root + '/albums.json'))
+def listed(cards):
+    return [(c['name'], c.get('coverVersion'), versions.get(c['coverAssetID'].lower()))
+            for c in cards or [] if c.get('coverAssetID')]
+made, shelves = listed(listing.get('albums')), listed(listing.get('libraries'))
+say('the album list has an album and a library with versioned covers', 'True', bool(made and shelves))
+say("an album's cover carries its photo's thumbnail version", '[]', [a for a in made if a[1] != a[2]])
+say("and a shared library's cover its version too", '[]', [a for a in shelves if a[1] != a[2]])
 for d in (row_dates[0], row_dates[6], row_dates[13]):
     print('row ' + d + ': ' + ' | '.join(rowkeys(d)), file=sys.stderr)
 for n, e, a in out: print(f'{n}\t{e}\t{a}')
@@ -233,7 +306,11 @@ done < "$ROOT/results.tsv"
 echo "The row the page opens on"
 while IFS=$'\t' read -r name expected actual; do
   case "$name" in
-    "a card keeps"*|"and its cards"*) ;; *) check "$name" "$expected" "$actual";; esac
+    "a card keeps"*|"and its cards"*|*version*) ;; *) check "$name" "$expected" "$actual";; esac
+done < "$ROOT/results.tsv"
+echo "Covers carry their thumbnail's version"
+while IFS=$'\t' read -r name expected actual; do
+  case "$name" in *version*) check "$name" "$expected" "$actual";; esac
 done < "$ROOT/results.tsv"
 
 echo
