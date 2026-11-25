@@ -97,6 +97,7 @@ GRAND_CANYON="36.0544 -112.1401"
 KAANAPALI="20.9256 -156.6950"; WAILEA="20.6873 -156.4416"; HANA="20.7575 -155.9884"
 LAS_VEGAS="36.1147 -115.1728"; YOSEMITE="37.7456 -119.5936"
 LAKE_LURE="35.4279 -82.2048"
+BOZEMAN="45.6797 -111.0386"; MISSOULA="46.8722 -113.9940"
 
 # shoot <prefix> <day> <hour before the first> <count> <place>
 shoot(){
@@ -121,6 +122,12 @@ shoot b14c 2025-07-14 15 2 COROLLA
 for d in 03 04 05 06 07; do shoot "mx$d-" "2022-11-$d" 9 2 CULPEPER; shoot "mv$d-" "2022-11-$d" 14 2 LAS_VEGAS; done
 # Las Vegas, the Grand Canyon and Yosemite, a day each: a road trip.
 shoot rt1 2021-08-02 9 7 LAS_VEGAS; shoot rt2 2021-08-03 9 7 GRAND_CANYON; shoot rt3 2021-08-04 9 7 YOSEMITE
+# Two days in Montana, a town each, so no town holds the trip and the state
+# names it. Bulgaria has a province called Montana too, and the first of a
+# name in the region list used to win, so this was "Bulgaria Trip 2019", as
+# a Clearwater and Orlando trip was "Puerto Rico Beach Trip 2012" in his
+# library (2026-11-25).
+shoot mt1 2019-06-10 9 6 BOZEMAN; shoot mt2 2019-06-11 9 6 MISSOULA
 # Two days of a few photos from four states: photos from all over, not a trip.
 shoot sc1v 2020-02-10 9 2 LAS_VEGAS; shoot sc1y 2020-02-10 13 2 YOSEMITE
 shoot sc2g 2020-02-11 9 2 GRAND_CANYON; shoot sc2z 2020-02-11 13 2 ZION_CANYON
@@ -165,7 +172,7 @@ shoot o09 2023-03-09 9 4 WAILEA; shoot o10 2023-03-10 9 4 WAILEA; shoot o11 2023
 shoot o12 2023-03-12 9 2 WAILEA
 # A week at the lake house, in a town named for its lake.
 for d in 05 06 07 08 09; do shoot "w$d-" "2024-08-$d" 9 2 LAKE_LURE; done
-check "every photo arrived" "369" "$(q "SELECT count(*) FROM assets")"
+check "every photo arrived" "381" "$(q "SELECT count(*) FROM assets")"
 
 DISNEY=39; OBX=45; ORLANDO=60   # Photos at Disney World, on the Outer Banks, around Orlando
 
@@ -226,6 +233,9 @@ lacks "no trip is named for a region nobody says" "Île-de-France" "$T"
 lacks "nor for a neighborhood" "Passy" "$T"
 lacks "no trip is named for a state it was more particular than" "Florida" "$T"
 lacks "nor for a suburb" "Celebration" "$T"
+has "two Montana towns are a Montana trip, at home" "Montana Trip 2019" "$T"
+lacks "not Bulgaria's province of the same name" "Bulgaria" "$T"
+lacks "and no Florida trip is in Puerto Rico" "Puerto Rico" "$T"
 check "a year on, the trip comes back" "A year ago you were at Walt Disney World" "$(hero 2026-03-13)"
 check "a beach week every July is one of the family's traditions" "OBX Beach Week · Every July · 3 years · 2023–2025" \
   "$(curl -s "$API/v1/spaces/$SPACE/collections?date=2026-10-12" -H "$AUTH" | python3 -c "
@@ -318,7 +328,7 @@ check "a restart files the Outer Banks again" "$OBX" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Outer Banks, North Carolina'")"
 check "and Walt Disney World" "$DISNEY" \
   "$(q "SELECT count(*) FROM assets WHERE destination = 'Walt Disney World, Florida'")"
-has "and says so" "places: named 369 photos again" "$(cat "$ROOT/server.log")"
+has "and says so" "places: named 381 photos again" "$(cat "$ROOT/server.log")"
 
 echo
 echo "$PASS passed, $FAIL failed"

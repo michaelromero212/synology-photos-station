@@ -72,10 +72,16 @@ final class Geocoder: @unchecked Sendable {
 
     /// ISO code → the country's name and its continent's code.
     private var countries: [String: (name: String, continent: String)] = [:]
-    /// Region name → the country it is in, for telling a trip abroad.
+    /// Region name → the country it is in, for telling a trip abroad. Where
+    /// several countries have a region by one name, the one most people live
+    /// in. See `load(directory:)`.
     private var countryOfRegion: [String: String] = [:]
     /// Labels with no region to say where they are (`Tokyo`) → their country.
     private var countryOfLabel: [String: String] = [:]
+    /// Whole labels from a region whose name several countries share
+    /// (`Clearwater, Florida`) → the country the town is in. See
+    /// `country(ofLabel:)`.
+    private var countryOfSharedRegionLabel: [String: String] = [:]
     /// A country's name, as a label ends with it → its code.
     private var countryOfName: [String: String] = [:]
 
@@ -112,15 +118,20 @@ final class Geocoder: @unchecked Sendable {
         // "US" -> "VA" -> "Virginia", two levels so a place's region is found
         // without building "US.VA" for each of 170,000 places.
         var regions: [String: [String: String]] = [:]
-        var countryOfRegion: [String: String] = [:]
+        // Every country with a region by each name, in the file's order. See
+        // `countryOfRegion` below for why it's a list.
+        var countriesOfRegion: [String: [String]] = [:]
         if let adminText = try? String(contentsOf: adminURL, encoding: .utf8) {
             for line in adminText.split(separator: "\n", omittingEmptySubsequences: true) {
                 let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
                 let code = parts.first?.split(separator: ".", maxSplits: 1) ?? []
                 guard parts.count >= 2, code.count == 2 else { continue }
                 let name = String(parts[1])
-                regions[String(code[0]), default: [:]][String(code[1])] = name
-                if countryOfRegion[name] == nil { countryOfRegion[name] = String(code[0]) }
+                let country = String(code[0])
+                regions[country, default: [:]][String(code[1])] = name
+                if !(countriesOfRegion[name]?.contains(country) ?? false) {
+                    countriesOfRegion[name, default: []].append(country)
+                }
             }
         }
 
@@ -185,8 +196,46 @@ final class Geocoder: @unchecked Sendable {
         }
         let folded = foldNeighborhoods()
 
+        // Which country a region's name means. It used to be whichever came
+        // first in the file, and "PR.054 Florida", a municipality of Puerto
+        // Rico, comes before "US.FL". Every "…, Florida" counted as Puerto
+        // Rico, so a trip split between Clearwater and Orlando was abroad and
+        // came out "Puerto Rico Beach Trip 2012" (his catch, 2026-11-25), and
+        // Montana went to Bulgaria the same way. 53 names are shared like
+        // this, Punjab and Sofia among them.
+        //
+        // A label this geocoder wrote is matched whole first, town and all:
+        // only the US has a Clearwater in its Florida, and only India an
+        // Amritsar in its Punjab. That's every place in a shared region, about
+        // 4,200 of them. A label it can't match, a destination's ("Walt Disney
+        // World, Florida") or one from an older dataset, goes by the region's
+        // name, and that means the country whose region of the name most
+        // people live in, by the dataset's populations; the file's order
+        // settles a tie.
+        var people: [String: [String: Int]] = [:]
+        var labelPeople: [String: Int] = [:]
+        var countryOfSharedRegionLabel: [String: String] = [:]
+        for place in places {
+            guard let region = place.region, (countriesOfRegion[region]?.count ?? 0) > 1 else { continue }
+            people[region, default: [:]][place.country, default: 0] += place.population
+            let label = place.label
+            if place.population >= labelPeople[label, default: -1] {
+                labelPeople[label] = place.population
+                countryOfSharedRegionLabel[label] = place.country
+            }
+        }
+        var countryOfRegion: [String: String] = [:]
+        for (name, codes) in countriesOfRegion {
+            let ranked = codes.enumerated().max { a, b in
+                let lhs = people[name]?[a.element] ?? 0, rhs = people[name]?[b.element] ?? 0
+                return lhs != rhs ? lhs < rhs : a.offset > b.offset
+            }
+            countryOfRegion[name] = ranked?.element
+        }
+
         self.countries = countries
         self.countryOfRegion = countryOfRegion
+        self.countryOfSharedRegionLabel = countryOfSharedRegionLabel
         countryOfName = Dictionary(
             countries.map { ($0.value.name, $0.key) }, uniquingKeysWith: { first, _ in first }
         )
@@ -429,6 +478,7 @@ final class Geocoder: @unchecked Sendable {
     func country(ofLabel label: String) -> String? {
         let parts = label.split(separator: ",", maxSplits: 1)
         guard parts.count == 2 else { return countryOfLabel[label] }
+        if let country = countryOfSharedRegionLabel[label] { return country }
         let after = parts[1].trimmingCharacters(in: .whitespaces)
         if let country = countryOfRegion[after] { return country }
         if countries[after] != nil { return after }
