@@ -1568,9 +1568,13 @@ struct RecentlyDeletedCard: View {
     }
 }
 
-/// What's pinned, as cards, in Photos' order: Favorites, Recently Added,
-/// Videos and Screenshots, Places, and Recently Deleted. The page's row and
-/// Pinned's own screen draw the same cards from here, each at its own size.
+/// What's pinned, as cards, in Photos' order: Recently Deleted, then
+/// Favorites, Recently Added, Videos and Screenshots, and Places. The page's
+/// row and Pinned's own screen draw the same cards from here, each at its own
+/// size.
+///
+/// Recently Deleted first, as Photos puts it, so it's in view without
+/// scrolling the row to its end (his word, 2026-11-26). It was last.
 ///
 /// Recently Deleted is always here, at zero too. The NAS leaves its card out
 /// when nothing is in it, and a card that only appears once you've deleted
@@ -1593,6 +1597,9 @@ struct PinnedCards: View {
     }
 
     var body: some View {
+        RecentlyDeletedCard(
+            session: session, space: space, count: found.recentlyDeleted?.count ?? 0, side: side
+        )
         if let favorites = found.favorites {
             CollectionCard(
                 session: session, space: space, collection: favorites, side: side,
@@ -1616,9 +1623,6 @@ struct PinnedCards: View {
                 session: session, space: space, total: placeTotal, side: side, onPick: onPickPlace
             )
         }
-        RecentlyDeletedCard(
-            session: session, space: space, count: found.recentlyDeleted?.count ?? 0, side: side
-        )
     }
 }
 

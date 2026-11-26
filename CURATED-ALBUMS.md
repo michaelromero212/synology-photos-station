@@ -89,7 +89,7 @@ migration is deferred.
 
 **The Albums page today.** One page on iPhone, iPad, Mac and Apple TV, in
 Photos' Collections order: Memories (the row the page opens on), Pinned
-(Favorites, Recently Added, Videos, Screenshots, Places, Recently Deleted),
+(Recently Deleted, Favorites, Recently Added, Videos, Screenshots, Places),
 People, the person's own Albums, Shared Albums, Trips, Holidays & Occasions,
 Over the Years, Media Types and Utilities. Each section folds away (except on
 Apple TV), and its title opens the rest where there's more.
